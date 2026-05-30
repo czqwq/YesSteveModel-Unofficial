@@ -1,0 +1,18 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/resource/YSMClientMapper.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/resource/YSMClientMapper.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.resource;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.elfmcys.yesstevemodel.audio.AudioCodec;
+ import com.elfmcys.yesstevemodel.audio.AudioTrackData;
+ import com.elfmcys.yesstevemodel.client.ClientModelInfo;
+@@ -102,7 +103,7 @@
+                 return baos.toByteArray();
+             }
+         } catch (Exception e) {
+-            e.printStackTrace();
++            YesSteveModel.LOGGER.warn("Failed to process texture image", e);
+         }
+ 
+         return data;

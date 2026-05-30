@@ -1,0 +1,18 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/resource/YSMBinarySerializer.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/resource/YSMBinarySerializer.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.resource;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.elfmcys.yesstevemodel.resource.pojo.RawYsmModel;
+ import rip.ysm.security.YSMByteBuf;
+ import io.netty.buffer.Unpooled;
+@@ -569,7 +570,7 @@
+             ImageIO.write(img, "PNG", baos);
+             return baos.toByteArray();
+         } catch (IOException e) {
+-            e.printStackTrace();
++            YesSteveModel.LOGGER.warn("Failed to serialize image to PNG", e);
+             return rgbaData;
+         }
+     }

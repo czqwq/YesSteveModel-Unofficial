@@ -1,0 +1,18 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/client/entity/GeoEntity.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/client/entity/GeoEntity.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.client.entity;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.elfmcys.yesstevemodel.client.ClientModelManager;
+ import com.elfmcys.yesstevemodel.audio.*;
+ import com.elfmcys.yesstevemodel.geckolib3.geo.render.built.GeoModel;
+@@ -240,7 +241,7 @@
+                 UnsafeUtil.getUnsafe().loadFence();
+             } catch (InterruptedException e) {
+             } catch (Throwable th) {
+-                th.printStackTrace();
++                YesSteveModel.LOGGER.debug("Animation async processing failed", th);
+             }
+             this.modelFuture = null;
+             return event;

@@ -1,0 +1,18 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/client/texture/OuterFileTexture.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/client/texture/OuterFileTexture.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.client.texture;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.mojang.blaze3d.platform.NativeImage;
+ import com.mojang.blaze3d.platform.TextureUtil;
+ import com.mojang.blaze3d.systems.RenderSystem;
+@@ -39,7 +40,7 @@
+             TextureUtil.prepareImage(this.getId(), 0, width, height);
+             imageIn.upload(0, 0, 0, 0, 0, width, height, false, false, false, true);
+         } catch (IOException e) {
+-            e.printStackTrace();
++            YesSteveModel.LOGGER.warn("Failed to load texture", e);
+         }
+     }
+ 
