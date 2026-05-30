@@ -1,5 +1,6 @@
 package com.gts.ysmu.resource;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.resource.pojo.RawYsmModel;
 import rip.ysm.security.YSMByteBuf;
 import io.netty.buffer.Unpooled;
@@ -569,7 +570,7 @@ public class YSMBinarySerializer {
             ImageIO.write(img, "PNG", baos);
             return baos.toByteArray();
         } catch (IOException e) {
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to serialize image to PNG", e);
             return rgbaData;
         }
     }

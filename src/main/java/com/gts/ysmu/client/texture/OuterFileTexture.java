@@ -1,5 +1,6 @@
 package com.gts.ysmu.client.texture;
 
+import com.gts.ysmu.YesSteveModel;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.platform.TextureUtil;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -39,7 +40,7 @@ public class OuterFileTexture extends AbstractTexture implements ITextureMap {
             TextureUtil.prepareImage(this.getId(), 0, width, height);
             imageIn.upload(0, 0, 0, 0, 0, width, height, false, false, false, true);
         } catch (IOException e) {
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to load texture", e);
         }
     }
 

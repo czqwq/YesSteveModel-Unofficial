@@ -1,5 +1,6 @@
 package com.gts.ysmu.client.entity;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.client.ClientModelManager;
 import com.gts.ysmu.audio.*;
 import com.gts.ysmu.geckolib3.geo.render.built.GeoModel;
@@ -240,7 +241,7 @@ public abstract class GeoEntity<T extends Entity> extends AnimatableEntity<T> {
                 UnsafeUtil.getUnsafe().loadFence();
             } catch (InterruptedException e) {
             } catch (Throwable th) {
-                th.printStackTrace();
+                YesSteveModel.LOGGER.debug("Animation async processing failed", th);
             }
             this.modelFuture = null;
             return event;

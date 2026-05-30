@@ -320,7 +320,7 @@ public final class ServerModelManager {
             try {
                 Files.createDirectories(folder.toPath());
             } catch (Exception e) {
-                e.printStackTrace();
+                YesSteveModel.LOGGER.warn("Failed to create model directory", e);
             }
         }
     }
@@ -985,7 +985,7 @@ public final class ServerModelManager {
                     }
                     atomicInteger.set(0);
                 } catch (Throwable th) {
-                    th.printStackTrace();
+                    YesSteveModel.LOGGER.warn("Model reload failed", th);
                     return false;
                 }
             }

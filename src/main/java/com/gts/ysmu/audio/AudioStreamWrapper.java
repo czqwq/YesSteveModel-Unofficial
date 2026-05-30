@@ -1,5 +1,6 @@
 package com.gts.ysmu.audio;
 
+import com.gts.ysmu.YesSteveModel;
 import net.minecraft.client.sounds.AudioStream;
 import org.jetbrains.annotations.NotNull;
 import org.lwjgl.BufferUtils;
@@ -27,7 +28,7 @@ public class AudioStreamWrapper implements IAudioStreamSupport {
             this.currentStream = streamFactory2.openStream();
             this.audioFormat = this.currentStream.getFormat();
         } catch (IOException | UnsupportedAudioFileException e) {
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to open audio stream", e);
             throw e;
         }
     }
@@ -52,7 +53,7 @@ public class AudioStreamWrapper implements IAudioStreamSupport {
                         return EMPTY_BUFFER;
                     }
                 } catch (Throwable th) {
-                    th.printStackTrace();
+                    YesSteveModel.LOGGER.warn("Failed to reset audio stream", th);
                     return EMPTY_BUFFER;
                 }
             }

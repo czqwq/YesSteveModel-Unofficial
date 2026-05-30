@@ -1,5 +1,6 @@
 package rip.ysm.legacy;
 
+import com.gts.ysmu.YesSteveModel;
 import com.google.common.collect.Maps;
 import it.unimi.dsi.fastutil.Pair;
 import it.unimi.dsi.fastutil.bytes.ByteArrays;
@@ -70,7 +71,7 @@ public final class YesModelUtils {
                 }
                 outputs.put(ysmFileData.left(), ysmFileData.right());
             } catch (GeneralSecurityException | DataFormatException | IOException e) {
-                e.printStackTrace();
+                YesSteveModel.LOGGER.warn("Failed to convert YSM file", e);
             }
         }
         return outputs;

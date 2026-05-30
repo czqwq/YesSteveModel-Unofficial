@@ -1,5 +1,6 @@
 package com.gts.ysmu.client.entity;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.config.GeneralConfig;
 import it.unimi.dsi.fastutil.objects.ObjectListIterator;
 import it.unimi.dsi.fastutil.objects.ReferenceArrayList;
@@ -66,7 +67,7 @@ public class EntityRenderCache {
             try {
                 it.next().awaitAsyncResult();
             } catch (Throwable th) {
-                th.printStackTrace();
+                YesSteveModel.LOGGER.debug("Failed to await async result", th);
             }
         }
         strongRefs.clear();
