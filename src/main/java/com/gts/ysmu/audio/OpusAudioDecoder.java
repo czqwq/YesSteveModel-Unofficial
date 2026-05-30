@@ -1,5 +1,6 @@
 package com.gts.ysmu.audio;
 
+import com.gts.ysmu.YesSteveModel;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.Unpooled;
 import org.gagravarr.ogg.OggFile;
@@ -56,7 +57,7 @@ public class OpusAudioDecoder {
 
         } catch (Exception e) {
             destroyEngines();
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to open audio stream", e);
             return false;
         }
     }
@@ -117,7 +118,7 @@ public class OpusAudioDecoder {
             return monoSamplesGenerated * 2;
 
         } catch (Exception e) {
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to decode audio frame", e);
             return -100;
         }
     }
@@ -136,7 +137,9 @@ public class OpusAudioDecoder {
         try {
             if (this.opusFile != null) this.opusFile.close();
             if (this.oggFile != null) this.oggFile.close();
-        } catch (Throwable ex) {ex.printStackTrace();}
+        } catch (Throwable ex) {
+            YesSteveModel.LOGGER.debug("Failed to destroy audio engines", ex);
+        }
         this.opusDecoder = null;
         this.opusFile = null;
         this.oggFile = null;

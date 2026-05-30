@@ -1,0 +1,18 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/client/entity/EntityRenderCache.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/client/entity/EntityRenderCache.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.client.entity;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.elfmcys.yesstevemodel.config.GeneralConfig;
+ import it.unimi.dsi.fastutil.objects.ObjectListIterator;
+ import it.unimi.dsi.fastutil.objects.ReferenceArrayList;
+@@ -66,7 +67,7 @@
+             try {
+                 it.next().awaitAsyncResult();
+             } catch (Throwable th) {
+-                th.printStackTrace();
++                YesSteveModel.LOGGER.debug("Failed to await async result", th);
+             }
+         }
+         strongRefs.clear();

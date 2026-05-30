@@ -1,5 +1,6 @@
 package com.gts.ysmu.resource;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.resource.pojo.RawYsmModel;
 import com.google.gson.*;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -1047,7 +1048,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
                     pngFiles.add(fileName);
                 }
             });
-        } catch (IOException e) { e.printStackTrace(); }
+        } catch (IOException e) { YesSteveModel.LOGGER.warn("Failed to list texture files", e); }
 
         boolean hasMainTexture = false;
         for (String texName : pngFiles) {
@@ -1093,8 +1094,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
                     }
                 }
             } catch (Exception e) {
-                System.err.println("Failed to parse info.json");
-                e.printStackTrace();;
+                YesSteveModel.LOGGER.warn("Failed to parse info.json", e);
             }
         }
 

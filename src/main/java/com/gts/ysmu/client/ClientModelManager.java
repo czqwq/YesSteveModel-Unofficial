@@ -482,7 +482,7 @@ public class ClientModelManager {
 
         forEachGuiWidget(l -> {
             try { l.onSyncBegin(); }
-            catch (Throwable t) { t.printStackTrace(); }
+            catch (Throwable t) { YesSteveModel.LOGGER.warn("GUI widget error during sync begin", t); }
         });
     }
 
@@ -550,7 +550,7 @@ public class ClientModelManager {
             try {
                 consumer.accept(it.next());
             } catch (Throwable th) {
-                th.printStackTrace();
+                YesSteveModel.LOGGER.warn("GUI widget error", th);
             }
         }
     }
@@ -568,7 +568,7 @@ public class ClientModelManager {
                 NetworkHandler.CHANNEL.sendToServer(new C2SModelSyncPayload(byteBuffer));
                 return;
             } catch (Exception e) {
-                e.printStackTrace();
+                YesSteveModel.LOGGER.warn("Failed to send model file to server", e);
                 return;
             }
         }
@@ -579,7 +579,7 @@ public class ClientModelManager {
         try {
             connection.send(NetworkHandler.CHANNEL.toVanillaPacket(new C2SModelSyncPayload(byteBuffer), NetworkDirection.PLAY_TO_SERVER));
         } catch (Exception e2) {
-            e2.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to send model file via connection", e2);
         }
     }
 

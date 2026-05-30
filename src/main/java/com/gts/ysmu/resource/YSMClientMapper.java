@@ -1,5 +1,6 @@
 package com.gts.ysmu.resource;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.audio.AudioCodec;
 import com.gts.ysmu.audio.AudioTrackData;
 import com.gts.ysmu.client.ClientModelInfo;
@@ -102,7 +103,7 @@ public class YSMClientMapper {
                 return baos.toByteArray();
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            YesSteveModel.LOGGER.warn("Failed to process texture image", e);
         }
 
         return data;

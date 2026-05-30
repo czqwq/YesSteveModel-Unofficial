@@ -1,0 +1,18 @@
+--- a/src/main/java/rip/ysm/security/YSMClientCache.java
++++ b/src/main/java/rip/ysm/security/YSMClientCache.java
+@@ -1,5 +1,6 @@
+ package rip.ysm.security;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import rip.ysm.algorithms.CityHash;
+ import rip.ysm.algorithms.MT19937;
+ 
+@@ -57,7 +58,7 @@
+             long verif = calculatedHash ^ hash1 ^ hash2;
+             return verif == realHash;
+         } catch (Exception e) {
+-            e.printStackTrace();
++            YesSteveModel.LOGGER.warn("Failed to verify cache file", e);
+             return false;
+         }
+     }

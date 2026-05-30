@@ -1,0 +1,28 @@
+--- a/src/main/java/com/elfmcys/yesstevemodel/resource/YSMFolderDeserializer.java
++++ b/src/main/java/com/elfmcys/yesstevemodel/resource/YSMFolderDeserializer.java
+@@ -1,5 +1,6 @@
+ package com.elfmcys.yesstevemodel.resource;
+ 
++import com.elfmcys.yesstevemodel.YesSteveModel;
+ import com.elfmcys.yesstevemodel.resource.pojo.RawYsmModel;
+ import com.google.gson.*;
+ import org.apache.commons.codec.digest.DigestUtils;
+@@ -1047,7 +1048,7 @@
+                     pngFiles.add(fileName);
+                 }
+             });
+-        } catch (IOException e) { e.printStackTrace(); }
++        } catch (IOException e) { YesSteveModel.LOGGER.warn("Failed to list texture files", e); }
+ 
+         boolean hasMainTexture = false;
+         for (String texName : pngFiles) {
+@@ -1093,8 +1094,7 @@
+                     }
+                 }
+             } catch (Exception e) {
+-                System.err.println("Failed to parse info.json");
+-                e.printStackTrace();;
++                YesSteveModel.LOGGER.warn("Failed to parse info.json", e);
+             }
+         }
+ 

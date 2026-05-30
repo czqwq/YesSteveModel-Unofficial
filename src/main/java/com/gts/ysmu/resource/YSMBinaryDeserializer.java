@@ -1,5 +1,6 @@
 package com.gts.ysmu.resource;
 
+import com.gts.ysmu.YesSteveModel;
 import com.gts.ysmu.resource.pojo.RawYsmModel;
 import rip.ysm.security.YSMByteBuf;
 import io.netty.buffer.Unpooled;
@@ -77,8 +78,7 @@ public class YSMBinaryDeserializer implements AutoCloseable{
             }
 
         } catch (Throwable t) {
-            System.out.println("ERROR");
-            t.printStackTrace(System.out);
+            YesSteveModel.LOGGER.warn("Failed to deserialize binary model", t);
         }
     }
 
