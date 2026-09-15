@@ -29,6 +29,16 @@ When writing complex features or significant refactors, use an ExecPlan (as desc
 - `src/main/resources/META-INF/*_at.cfg`: access transformers for Minecraft/GeckoLib internals.
 - `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
 
+## Minecraft and Forge Sources
+
+RetroFuturaGradle already decompiles the patched game sources into the workspace. Read them in place with the file tools instead of opening the jars:
+
+- `build/rfg/minecraft-src/java`: decompiled Minecraft + Forge 1.7.10 sources (stable-12 names, Forge patches applied).
+- `build/rfg/minecraft-src/resources`: the matching resources.
+- `build/rfg/launcher-src`: the bundled launcher sources.
+
+Do not extract or decompile the jars in `build/rfg` (`mcp_patched_minecraft-sources.jar`, `srg_patched_minecraft-sources.jar`, `recompiled_minecraft-1.7.10.jar`, `srg_merged_minecraft.jar`). They contain the same sources as `minecraft-src`, so unpacking them only wastes time and litters the workspace. Check vanilla/Forge behavior first - dimension travel, respawn, `IExtendedEntityProperties` cloning, event firing order, render and texture reload hooks - directly under `build/rfg/minecraft-src/java`, and only fall back to the jars when that directory is missing. `build/` is generated output: never commit it, and never add workspace files to it.
+
 ## Runtime Flow
 
 Startup begins in `ysmu.java`. `CommonProxy.preInit` loads `Config`, calls `ServerModelManager.reloadPacks()`, and logs the version. `CommonProxy.init` registers network packets through `NetworkHandler.init()`. `ClientProxy.init` additionally registers animation states/Molang variables, the custom player renderer, and key bindings.
