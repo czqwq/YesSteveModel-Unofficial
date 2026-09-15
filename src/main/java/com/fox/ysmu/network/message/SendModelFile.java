@@ -1,0 +1,64 @@
+package com.fox.ysmu.network.message;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Locale;
+
+import org.apache.commons.io.FileUtils;
+
+import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.util.Md5Utils;
+import com.fox.ysmu.ysmu;
+
+import cpw.mods.fml.common.network.simpleimpl.IMessage;
+import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
+import cpw.mods.fml.common.network.simpleimpl.MessageContext;
+import io.netty.buffer.ByteBuf;
+
+public class SendModelFile implements IMessage {
+
+    private byte[] data;
+
+    public SendModelFile() {}
+
+    public SendModelFile(byte[] data) {
+        this.data = data;
+    }
+
+    @Override
+    public void fromBytes(ByteBuf buf) {
+        this.data = new byte[buf.readInt()];
+        buf.readBytes(this.data);
+    }
+
+    @Override
+    public void toBytes(ByteBuf buf) {
+        buf.writeInt(this.data.length);
+        buf.writeBytes(this.data);
+    }
+
+    public static class Handler implements IMessageHandler<SendModelFile, IMessage> {
+
+        @Override
+        public IMessage onMessage(SendModelFile message, MessageContext ctx) {
+            // Legacy password packets used this length; current sync uses SendModelPassword.
+            if (message.data.length == 48) {
+                ClientModelManager.PASSWORD = message.data;
+            } else {
+                String fileName = Md5Utils.md5Hex(message.data)
+                    .toUpperCase(Locale.US);
+                File file = ServerModelManager.CACHE_CLIENT.resolve(fileName)
+                    .toFile();
+                try {
+                    FileUtils.writeByteArrayToFile(file, message.data);
+                    ClientModelManager.rememberCachedModel(fileName);
+                    RequestLoadModel.loadModel(fileName);
+                } catch (IOException e) {
+                    ysmu.LOG.warn("Failed to save YSM model cache file " + fileName, e);
+                }
+            }
+            return null;
+        }
+    }
+}
