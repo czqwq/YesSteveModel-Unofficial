@@ -1,6 +1,4 @@
-// Add any additional repositories for your dependencies here.
-
-repositories {
+repositories { handler ->
     maven { url 'https://maven.cloudsmith.io/geckolib3/geckolib/' }
     maven { url 'https://maven.enginehub.org/repo/' }
     maven { url 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/' }
@@ -12,6 +10,18 @@ repositories {
         url 'https://jitpack.io'
         content {
             includeGroup 'com.github.OpenYSM'
+        }
+    }
+
+    exclusiveContent {
+        forRepository {
+            handler.maven {
+                name = 'glease'
+                url = 'https://maven.glease.net/repos/releases/'
+            }
+        }
+        filter {
+            includeGroup('net.glease')
         }
     }
 }

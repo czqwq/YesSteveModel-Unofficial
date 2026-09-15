@@ -1,4 +1,3 @@
-
 pluginManagement {
     repositories {
         maven {
@@ -10,12 +9,23 @@ pluginManagement {
                 includeGroupByRegex("com\\.gtnewhorizons\\..+")
             }
         }
+        maven {
+            name = "reposiliteRepositoryGtnhPublic"
+            url = uri("https://maven.gaytnh.com/gtnh-public")
+        }
         gradlePluginPortal()
         mavenCentral()
+        maven {
+            name = "JitPack"
+            url = uri("https://jitpack.io")
+            mavenContent {
+                includeGroupByRegex("com\\.github\\..+")
+            }
+        }
         mavenLocal()
     }
 }
 
 plugins {
-    id("com.gtnewhorizons.gtnhsettingsconvention") version("1.0.43")
+    id("com.gtnewhorizons.gtnhsettingsconvention") version("2.0.29")
 }
