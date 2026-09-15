@@ -90,4 +90,4 @@ Useful commands for the user to run from the repository root:
 - `.\gradlew.bat runClient`
 - `.\gradlew.bat runServer`
 
-There are currently no `src/test` Java test sources, although JUnit 5 dependencies are configured. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.
+`src/test` holds the JUnit 5 sources that cover resource formats, sync packets, security helpers, and Molang physics. Because Gradle 9 no longer injects test-framework implementation dependencies, `testRuntimeClasspath` must keep the explicit `junit-platform-launcher` entry, and `fastutil` (used by mod code and pulled in transitively only for compilation) must stay declared for tests. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.

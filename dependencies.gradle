@@ -18,9 +18,14 @@ dependencies {
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     // Do not shadow OpenYSM ImageStream until decoder calls are wired directly; its ImageIO SPI files crash if minimized away.
+    // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.6.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.6.2")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.6.2")
+    // fastutil only reaches the compile classpath transitively through the GTNHLib dev jar,
+    // so the test runtime classpath needs it declared explicitly (mod code uses it at runtime).
+    testImplementation("it.unimi.dsi:fastutil:8.5.18")
 
     test {
         useJUnitPlatform()
