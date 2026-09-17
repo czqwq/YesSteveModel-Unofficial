@@ -1,12 +1,7 @@
 package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.ysmu;
-import com.fox.ysmu.eep.ExtendedModelInfo;
-import com.fox.ysmu.eep.ExtendedStarModels;
-import com.fox.ysmu.network.NetworkHandler;
-import com.fox.ysmu.network.message.OpenModelGuiMessage;
-import com.fox.ysmu.network.message.SetModelAndTexture;
-import com.fox.ysmu.network.message.SetNpcModelAndTexture;
+import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.Minecraft;
@@ -15,7 +10,6 @@ import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.util.IChatComponent;
 import net.minecraft.util.ResourceLocation;
-import net.minecraft.entity.player.EntityPlayer;
 import org.apache.commons.lang3.tuple.Pair;
 import org.lwjgl.opengl.GL11;
 
@@ -26,28 +20,20 @@ public class ModelButton extends GuiButton {
     private final Pair<ResourceLocation, List<ResourceLocation>> modelInfo;
     private final int color;
     public final List<IChatComponent> tooltips;
-    private final EntityPlayer player;
+    private final ModelSelectionTarget target;
 
     public ModelButton(int id, int pX, int pY, Pair<ResourceLocation, List<ResourceLocation>> modelInfo,
-                       List<IChatComponent> tooltips, EntityPlayer player) {
+                       List<IChatComponent> tooltips, ModelSelectionTarget target) {
         super(id, pX, pY, 52, 90, "");
         this.modelInfo = modelInfo;
         this.color = 0xFF_434242;
         this.tooltips = tooltips;
-        this.player = player;
+        this.target = target;
         this.displayString = ModelIdUtil.getModelDisplayName(modelInfo.getLeft());
     }
 
     public void doPress() {
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep != null) {
-            eep.setModelAndTexture(modelInfo.getLeft(), modelInfo.getRight().get(0));
-        }
-        if (player.equals(Minecraft.getMinecraft().thePlayer)) {
-            NetworkHandler.CHANNEL.sendToServer(new SetModelAndTexture(modelInfo.getLeft(), modelInfo.getRight().get(0)));
-        } else {
-            NetworkHandler.CHANNEL.sendToServer(new SetNpcModelAndTexture(modelInfo.getLeft(), modelInfo.getRight().get(0), OpenModelGuiMessage.CURRENT_NPC_ID));
-        }
+        target.apply(modelInfo.getLeft(), modelInfo.getRight().get(0));
     }
 
     @Override
@@ -58,7 +44,7 @@ public class ModelButton extends GuiButton {
         FontRenderer font = mc.fontRenderer;
         // Hover状态
         this.field_146123_n = mouseX >= this.xPosition && mouseY >= this.yPosition && mouseX < this.xPosition + this.width && mouseY < this.yPosition + this.height;
-        // 绘制背景(原graphics.fillGradient)
+        // 绘制背景（原graphics.fillGradient）
         this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, this.color, this.color);
         // 剪裁测试（缩放）
         int scale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
@@ -90,8 +76,7 @@ public class ModelButton extends GuiButton {
             this.drawGradientRect(this.xPosition, this.yPosition + this.height - 1, this.xPosition + this.width, this.yPosition + this.height, 0xff_F3EFE0, 0xff_F3EFE0);
         }
         // 收藏图标
-        ExtendedStarModels eep = ExtendedStarModels.get(player);
-        if (eep != null && eep.containModel(modelInfo.getLeft())) {
+        if (target.isStarred(modelInfo.getLeft())) {
             // graphics.blit
             mc.getTextureManager().bindTexture(ICON);
             GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);

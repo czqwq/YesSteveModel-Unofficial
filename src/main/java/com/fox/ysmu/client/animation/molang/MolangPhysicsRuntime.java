@@ -4,7 +4,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -25,11 +25,24 @@ public final class MolangPhysicsRuntime {
             CURRENT.remove();
             return;
         }
-        EntityPlayer player = animatable.getPlayer();
-        ScopeKey key = ScopeKey.from(player, animatable.getMainModel(), animatable.getAnimation());
+        EntityLivingBase entity = animatable.getEntity();
+        ScopeKey key = ScopeKey.from(entity, animatable.getMainModel(), animatable.getAnimation());
         ScopeState state = STATES.computeIfAbsent(key, ignored -> new ScopeState());
         state.physics.update(renderTicks);
+        applyRemoteVariables(entity, state);
         CURRENT.set(new FrameContext(state, processor));
+    }
+
+    /**
+     * Seeds the scope with the entity's remote animation variables before the animation is evaluated, so a
+     * model can read {@code v.roaming.<name>} even when the animation file never assigns it.
+     */
+    private static void applyRemoteVariables(EntityLivingBase entity, ScopeState state) {
+        Map<String, Double> remote = RemoteAnimationVariables.get(entity);
+        if (remote == null || remote.isEmpty()) {
+            return;
+        }
+        state.variables.putAll(remote);
     }
 
     public static void end() {
@@ -148,24 +161,25 @@ public final class MolangPhysicsRuntime {
     }
 
     private static final class ScopeKey {
-        private final UUID playerId;
+        private final UUID entityId;
         private final ResourceLocation modelId;
         private final ResourceLocation animationId;
         private final int fallbackIdentity;
 
-        private ScopeKey(UUID playerId, ResourceLocation modelId, ResourceLocation animationId, int fallbackIdentity) {
-            this.playerId = playerId;
+        private ScopeKey(UUID entityId, ResourceLocation modelId, ResourceLocation animationId, int fallbackIdentity) {
+            this.entityId = entityId;
             this.modelId = modelId;
             this.animationId = animationId;
             this.fallbackIdentity = fallbackIdentity;
         }
 
-        private static ScopeKey from(EntityPlayer player, ResourceLocation modelId, ResourceLocation animationId) {
-            UUID playerId = player == null ? null : player.getUniqueID();
-            int fallbackIdentity = playerId == null
+        private static ScopeKey from(EntityLivingBase entity, ResourceLocation modelId,
+            ResourceLocation animationId) {
+            UUID entityId = entity == null ? null : entity.getUniqueID();
+            int fallbackIdentity = entityId == null
                 ? 31 * System.identityHashCode(modelId) + System.identityHashCode(animationId)
                 : 0;
-            return new ScopeKey(playerId, modelId, animationId, fallbackIdentity);
+            return new ScopeKey(entityId, modelId, animationId, fallbackIdentity);
         }
 
         @Override
@@ -180,7 +194,7 @@ public final class MolangPhysicsRuntime {
             if (fallbackIdentity != other.fallbackIdentity) {
                 return false;
             }
-            if (playerId == null ? other.playerId != null : !playerId.equals(other.playerId)) {
+            if (entityId == null ? other.entityId != null : !entityId.equals(other.entityId)) {
                 return false;
             }
             if (modelId == null ? other.modelId != null : !modelId.equals(other.modelId)) {
@@ -191,7 +205,7 @@ public final class MolangPhysicsRuntime {
 
         @Override
         public int hashCode() {
-            int result = playerId == null ? 0 : playerId.hashCode();
+            int result = entityId == null ? 0 : entityId.hashCode();
             result = 31 * result + (modelId == null ? 0 : modelId.hashCode());
             result = 31 * result + (animationId == null ? 0 : animationId.hashCode());
             result = 31 * result + fallbackIdentity;

@@ -2,11 +2,13 @@ package com.fox.ysmu.client.entity;
 
 import static com.fox.ysmu.util.ControllerUtils.*;
 
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationManager;
@@ -31,7 +33,7 @@ public class CustomPlayerEntity implements IAnimatable {
     private ResourceLocation mainModel = CustomPlayerModel.DEFAULT_MAIN_MODEL;
     private ResourceLocation texture = CustomPlayerModel.DEFAULT_TEXTURE;
     private String previewAnimation = "";
-    private EntityPlayer player = null;
+    private EntityLivingBase entity = null;
 
     @NotNull
     private static <P extends IAnimatable> PlayState playLoopAnimation(AnimationEvent<P> event, String animationName) {
@@ -138,12 +140,27 @@ public class CustomPlayerEntity implements IAnimatable {
         return 0.7f;
     }
 
+    /** The rendered entity, player or not. */
+    public EntityLivingBase getEntity() {
+        return entity;
+    }
+
+    public void setEntity(EntityLivingBase entity) {
+        this.entity = entity;
+    }
+
+    /**
+     * The rendered entity when it is a player.
+     *
+     * @return the player, or {@code null} for a non-player entity.
+     */
+    @Nullable
     public EntityPlayer getPlayer() {
-        return player;
+        return entity instanceof EntityPlayer ? (EntityPlayer) entity : null;
     }
 
     public void setPlayer(EntityPlayer player) {
-        this.player = player;
+        this.entity = player;
     }
 
     @Override

@@ -19,12 +19,15 @@ import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
+import com.fox.ysmu.client.animation.molang.RemoteAnimationVariables;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
+import com.fox.ysmu.event.api.UpdateRemoteStructEvent;
 import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.HandshakeMessage;
 import com.fox.ysmu.network.message.RequestLoadModel;
 import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -72,6 +75,8 @@ public class ClientEventHandler {
             return;
         }
         RemotePlayerAnimationQueries.clear();
+        // Tell the server which wire format we speak; a mismatch disconnects instead of mis-decoding packets.
+        NetworkHandler.CHANNEL.sendToServer(new HandshakeMessage(NetworkHandler.NETWORK_PROTOCOL));
         if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
             ClientModelManager.sendSyncModelMessage();
         }
@@ -79,14 +84,46 @@ public class ClientEventHandler {
 
     @SubscribeEvent
     public static void onRenderPlayer(SpecialPlayerRenderEvent event) {
-        EntityPlayer player = event.getPlayer();
         CustomPlayerEntity animatable = event.getCustomPlayer();
-        if (isVanillaPlayer(event.getModelId()) && player instanceof AbstractClientPlayer clientPlayer) {
-            animatable.setPlayer(player);
+        if (isVanillaPlayer(event.getModelId()) && event.getEntity() instanceof AbstractClientPlayer clientPlayer) {
+            animatable.setEntity(clientPlayer);
             animatable.setMainModel(ModelIdUtil.getMainId(event.getModelId()));
             ResourceLocation location = clientPlayer.getLocationSkin();
             animatable.setTexture(location);
         }
+    }
+
+    /**
+     * Non-player render entry: a registered living entity is rendered through YSM's replacement renderer.
+     * <p>
+     * Renderers that override {@code RendererLivingEntity#doRender} without calling {@code super} (several
+     * GeckoLib-based mods do) never reach this event; those mods call
+     * {@code com.fox.ysmu.client.renderer.EntityModelRenderApi#render} directly instead.
+     */
+    @SubscribeEvent
+    public static void onRenderLiving(RenderLivingEvent.Pre event) {
+        if (event.entity instanceof EntityPlayer || !NPCData.contains(event.entity)) {
+            return;
+        }
+        CustomPlayerRenderer renderer = ClientProxy.getInstance();
+        if (renderer == null || !renderer.hasModelFor(event.entity)) {
+            // No YSM model for this client: leave the frame to the entity's own renderer rather than hiding it.
+            return;
+        }
+        event.setCanceled(true);
+        renderer.doRender(
+            event.entity,
+            event.x,
+            event.y - event.entity.yOffset,
+            event.z,
+            event.entity.rotationYaw,
+            Minecraft.getMinecraft().timer.renderPartialTicks);
+    }
+
+    /** Feeds remote animation variables into the entity's Molang scope. */
+    @SubscribeEvent
+    public static void onUpdateRemoteStruct(UpdateRemoteStructEvent event) {
+        RemoteAnimationVariables.put(event.getEntity(), event.getRoamingVars());
     }
 
     @SubscribeEvent
@@ -186,6 +223,7 @@ public class ClientEventHandler {
         ClientModelManager.clearConnectionState();
         RemotePlayerAnimationQueries.clear();
         RemotePlayerMotionStates.clear();
+        RemoteAnimationVariables.clear();
         NPCData.clear();
     }
 

@@ -1,8 +1,6 @@
 package com.fox.ysmu.client.gui;
 
 import com.fox.ysmu.Tags;
-import com.fox.ysmu.eep.ExtendedModelInfo;
-import com.fox.ysmu.eep.ExtendedStarModels;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.gui.button.*;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -26,7 +24,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class PlayerModelScreen extends GuiScreen {
-    protected final EntityPlayer player;
+    private final ModelSelectionTarget target;
     private Map<ResourceLocation, List<ResourceLocation>> models = Maps.newHashMap();
     private List<ResourceLocation> modelOrderList;
     private int maxPage;
@@ -40,12 +38,22 @@ public class PlayerModelScreen extends GuiScreen {
 
     public PlayerModelScreen() {
         this.category = Category.ALL;
-        this.player = Minecraft.getMinecraft().thePlayer;
+        this.target = ModelSelectionTarget.of(Minecraft.getMinecraft().thePlayer);
     }
 
     public PlayerModelScreen(EntityPlayer player) {
         this.category = Category.ALL;
-        this.player = player;
+        this.target = ModelSelectionTarget.of(player);
+    }
+
+    /** Opens the same screen for a non-player entity, for example a companion handed over by another mod. */
+    public PlayerModelScreen(ModelSelectionTarget target) {
+        this.category = Category.ALL;
+        this.target = target;
+    }
+
+    public ModelSelectionTarget getTarget() {
+        return target;
     }
 
     private void calculateModelList() {
@@ -53,13 +61,10 @@ public class PlayerModelScreen extends GuiScreen {
         if (this.category == Category.ALL) {
             this.models.putAll(ClientModelManager.MODELS);
         }
-        if (this.category == Category.STAR) {
-            ExtendedStarModels eep = ExtendedStarModels.get(this.player);
-            if (eep != null) {
-                for (ResourceLocation modelId : ClientModelManager.MODELS.keySet()) {
-                    if (eep.containModel(modelId)) {
-                        this.models.put(modelId, ClientModelManager.MODELS.get(modelId));
-                    }
+        if (this.category == Category.STAR && this.target.supportsStars()) {
+            for (ResourceLocation modelId : ClientModelManager.MODELS.keySet()) {
+                if (this.target.isStarred(modelId)) {
+                    this.models.put(modelId, ClientModelManager.MODELS.get(modelId));
                 }
             }
         }
@@ -106,9 +111,13 @@ public class PlayerModelScreen extends GuiScreen {
         // addRenderableWidget -> this.buttonList.add
         this.buttonList.add(new TextureCountButton(0, x + 5, y + 5));
         this.buttonList.add(new FlatIconButton(1, x + 28, y + 5, 79, 20, 32, 16).setTooltips("gui.yes_steve_model.model.texture"));
-        this.buttonList.add(new StarButton(2, x + 110, y + 5));
+        if (this.target.supportsStars()) {
+            this.buttonList.add(new StarButton(2, x + 110, y + 5));
+        }
         this.buttonList.add(new FlatIconButton(3, x + 328, y + 5, 18, 18, 32, 0).setTooltips("gui.yes_steve_model.all_models"));
-        this.buttonList.add(new FlatIconButton(5, x + 308, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
+        if (this.target.supportsStars()) {
+            this.buttonList.add(new FlatIconButton(5, x + 308, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
+        }
         this.buttonList.add(new FlatIconButton(6, x + 397, y + 5, 18, 18, 16, 16).setTooltips("gui.yes_steve_model.config"));
         this.buttonList.add(new FlatIconButton(8, x + 377, y + 5, 18, 18, 80, 0).setTooltips("gui.yes_steve_model.open_model_folder.open"));
         this.buttonList.add(new FlatColorButton(9, x + 198, y + 215, 52, 14, I18n.format("gui.yes_steve_model.pre_page")));
@@ -126,7 +135,7 @@ public class PlayerModelScreen extends GuiScreen {
             ResourceLocation id = modelOrderList.get(modelIndex);
             int xStart = x + 143 + 55 * (i % 5);
             int yStart = y + 28 + 93 * (i / 5);
-            this.buttonList.add(new ModelButton(buttonId++, xStart, yStart, Pair.of(id, models.get(id)), ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(id)), player));
+            this.buttonList.add(new ModelButton(buttonId++, xStart, yStart, Pair.of(id, models.get(id)), ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(id)), target));
         }
     }
 
@@ -136,12 +145,12 @@ public class PlayerModelScreen extends GuiScreen {
             case 0:
                 break;
             case 1:
-                ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-                if (eep != null) {
-                    List<ResourceLocation> textures = ClientModelManager.MODELS.get(eep.getModelId());
+                ResourceLocation currentModel = this.target.getModelId();
+                if (currentModel != null) {
+                    List<ResourceLocation> textures = ClientModelManager.MODELS.get(currentModel);
                     if (textures != null) {
                         // setScreen -> displayGuiScreen
-                        this.mc.displayGuiScreen(new PlayerTextureScreen(this, eep.getModelId(), textures));
+                        this.mc.displayGuiScreen(new PlayerTextureScreen(this, currentModel, textures));
                     }
                 }
                 break;
@@ -209,12 +218,12 @@ public class PlayerModelScreen extends GuiScreen {
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
         GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
         // func_147046_a(x,y,scale,toMouseX,toMouseY,entity)
-        GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, player);
+        GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, target.getPreviewEntity());
         GL11.glDisable(GL11.GL_SCISSOR_TEST);
 
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep != null) {
-            String modelName = ModelIdUtil.getModelDisplayName(eep.getModelId());
+        ResourceLocation selectedModel = this.target.getModelId();
+        if (selectedModel != null) {
+            String modelName = ModelIdUtil.getModelDisplayName(selectedModel);
             // font -> fontRendererObj
             List<String> modelNameSplit = fontRendererObj.listFormattedStringToWidth(modelName, 125);
             int lineY = y + 205;

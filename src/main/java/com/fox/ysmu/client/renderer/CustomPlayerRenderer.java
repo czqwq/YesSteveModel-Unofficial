@@ -1,5 +1,8 @@
 package com.fox.ysmu.client.renderer;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.scoreboard.Score;
@@ -13,12 +16,13 @@ import org.jetbrains.annotations.Nullable;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerItemInHandLayer;
+import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.ModelIdUtil;
+import com.fox.ysmu.ysmu;
 
-import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -26,6 +30,7 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
 public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayerEntity> {
 
     private GeoModel geoModel;
+    private final Set<ResourceLocation> warnedMissingModels = ConcurrentHashMap.newKeySet();
 
     @SuppressWarnings("all")
     public CustomPlayerRenderer() {
@@ -36,34 +41,128 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     @Override
     public void doRender(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
         float partialTicks) {
-        if (this.animatable != null && entityObj instanceof EntityPlayer player) {
-            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-            if (eep != null) {
-                this.animatable.setPlayer(player);
-                if (NPCData.contains(player.getUniqueID())) {
-                    Pair<ResourceLocation, ResourceLocation> data = NPCData.getData(player.getUniqueID());
-                    this.animatable.setMainModel(ModelIdUtil.getMainId(data.left()));
-                    this.animatable.setTexture(data.right());
-                } else {
-                    this.animatable.setMainModel(ModelIdUtil.getMainId(eep.getModelId()));
-                    this.animatable.setTexture(eep.getSelectTexture());
-                }
+        // Replacement-renderer path (players, and the RenderLivingEvent bridge): a selected model this
+        // client does not have still falls back to the default, so the entity is never hidden. The verdict
+        // is intentionally ignored here.
+        doRenderModel(entityObj, x, y, z, entityYaw, partialTicks, true);
+    }
+
+    /**
+     * Renders the entity through YSM and reports whether this renderer produced a frame.
+     * <p>
+     * A caller that owns its own fallback renderer (for example a GeckoLib companion renderer) uses the
+     * return value to decide whether to draw instead: {@code false} means the model the entity actually
+     * asked for is not loaded on this client, so falling through keeps the entity visible with its own
+     * renderer instead of drawing YSM's generic default model over it.
+     * <p>
+     * This is why the default substitution is not applied here: if a missing model resolved to
+     * {@code ysmu:default/main} (which is loaded on every client), the model lookup below could never be
+     * null and this method could never report {@code false} for the case it exists to report.
+     *
+     * @return {@code true} when a model was drawn or another listener claimed the frame; {@code false} when
+     *         the requested model is unavailable to this client.
+     */
+    public boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
+        float partialTicks) {
+        return doRenderModel(entityObj, x, y, z, entityYaw, partialTicks, false);
+    }
+
+    private boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
+        float partialTicks, boolean fallBackToDefault) {
+        ResourceLocation requested = applyEntityModel(entityObj);
+        ResourceLocation location;
+        if (requested == null) {
+            if (!fallBackToDefault) {
+                // No override at all, so there is no YSM model for an external renderer to claim.
+                return false;
             }
-            if (MinecraftForge.EVENT_BUS.post(
-                new SpecialPlayerRenderEvent(
-                    player,
-                    this.animatable,
-                    ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel())))) {
-                return;
-            }
+            location = this.modelProvider.getModelLocation(this.animatable);
+        } else if (isModelAvailable(requested)) {
+            location = requested;
+        } else if (fallBackToDefault) {
+            warnMissingModel(requested, entityObj);
+            location = CustomPlayerModel.DEFAULT_MAIN_MODEL;
+        } else {
+            warnMissingModel(requested, entityObj);
+            return false;
         }
-        ResourceLocation location = this.modelProvider.getModelLocation(animatable);
+        if (MinecraftForge.EVENT_BUS.post(
+            new SpecialPlayerRenderEvent(
+                entityObj,
+                this.animatable,
+                ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel())))) {
+            // The render event was cancelled, so another listener owns this entity's frame.
+            return true;
+        }
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
             .get(location);
-        if (geoModel != null) {
-            this.geoModel = geoModel;
-            super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+        if (geoModel == null) {
+            warnMissingModel(location, entityObj);
+            return false;
+        }
+        this.geoModel = geoModel;
+        super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+        return true;
+    }
+
+    /**
+     * Whether this client currently has a drawable YSM model for the entity's override.
+     * <p>
+     * This asks about the model the entity actually requested, not the default model that
+     * {@link CustomPlayerEntity#getMainModel()} substitutes for a missing one. Asking about the substituted
+     * location would always answer {@code true} on a client that has the default model and so would never
+     * reveal that the entity's own model is absent.
+     */
+    public boolean hasModelFor(EntityLivingBase entityObj) {
+        return isModelAvailable(applyEntityModel(entityObj));
+    }
+
+    /**
+     * Applies the entity's model/texture to the shared animatable and returns the main model id it actually
+     * requested, before any default substitution.
+     *
+     * @return the requested main model id, or {@code null} when the entity has no override and the default
+     *         model is intended.
+     */
+    @Nullable
+    private ResourceLocation applyEntityModel(EntityLivingBase entityObj) {
+        if (this.animatable == null) {
+            return null;
+        }
+        this.animatable.setEntity(entityObj);
+        EntityModelData override = NPCData.getData(entityObj);
+        if (override != null) {
+            // NPC / non-player override, looked up by entity rather than by UUID.
+            ResourceLocation main = ModelIdUtil.getMainId(override.getModelId());
+            this.animatable.setMainModel(main);
+            this.animatable.setTexture(override.getTextureId());
+            return main;
+        }
+        if (entityObj instanceof EntityPlayer player) {
+            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
+            if (eep != null && eep.getModelId() != null) {
+                ResourceLocation main = ModelIdUtil.getMainId(eep.getModelId());
+                this.animatable.setMainModel(main);
+                this.animatable.setTexture(eep.getSelectTexture());
+                return main;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isModelAvailable(ResourceLocation main) {
+        return main != null && GeckoLibCache.getInstance()
+            .getGeoModels()
+            .containsKey(main);
+    }
+
+    private void warnMissingModel(ResourceLocation location, EntityLivingBase entityObj) {
+        if (warnedMissingModels.add(location)) {
+            ysmu.LOG.warn(
+                "YSM model {} is not loaded on this client; entity {} keeps its own renderer",
+                location,
+                entityObj);
         }
     }
 
