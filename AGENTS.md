@@ -93,13 +93,21 @@ When adding model animation states, register names and priorities through `Anima
 
 ## Gradle and Verification
 
-Do not run Gradle commands from the sandbox. This environment cannot reliably execute the wrapper because Gradle needs host cache/network access outside the workspace. When a change needs build, test, or run verification, ask the user to execute the exact command and paste the output.
+Gradle may be run directly, but a running build occupies the project: the daemon holds the build
+outputs and the source tree, so editing while it runs can conflict with it or lose work. Start a build
+only as the **final confirmation**, once every change is finished and no other agent or subagent is
+still working in this workspace. Never start a build in the middle of a task.
 
-Useful commands for the user to run from the repository root:
+Run the narrowest task that answers the question, from the repository root:
 
-- `.\gradlew.bat build`
-- `.\gradlew.bat test`
+- `.\gradlew.bat compileJava` - fastest "does it still compile" check
+- `.\gradlew.bat test` - unit tests
+- `.\gradlew.bat build` - final confirmation only, when all work is done and nothing else is holding the tree
 - `.\gradlew.bat runClient`
 - `.\gradlew.bat runServer`
+
+Do not assemble a classpath by scanning the Gradle cache to typecheck a change. It is slow and it
+produces misleading errors, because several versions of the same jar end up on that classpath. Run the
+Gradle task instead.
 
 `src/test` holds the JUnit 5 sources that cover resource formats, sync packets, security helpers, and Molang physics. Because Gradle 9 no longer injects test-framework implementation dependencies, `testRuntimeClasspath` must keep the explicit `junit-platform-launcher` entry, and `fastutil` (used by mod code and pulled in transitively only for compilation) must stay declared for tests. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.
