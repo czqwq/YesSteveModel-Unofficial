@@ -19,7 +19,6 @@ import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
-import com.fox.ysmu.client.animation.molang.RemoteAnimationVariables;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.data.NPCData;
@@ -30,6 +29,7 @@ import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.HandshakeMessage;
 import com.fox.ysmu.network.message.RequestLoadModel;
 import com.fox.ysmu.network.message.SetPlayAnimation;
+import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
 

@@ -24,10 +24,11 @@ import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.manager.AnimationData;
 import software.bernie.geckolib3.core.manager.AnimationFactory;
+import software.bernie.geckolib3.core.molang.IMolangPhysicsScope;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.util.GeckoLibUtil;
 
-public class CustomPlayerEntity implements IAnimatable {
+public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this, true);
     private ResourceLocation mainModel = CustomPlayerModel.DEFAULT_MAIN_MODEL;
@@ -161,6 +162,24 @@ public class CustomPlayerEntity implements IAnimatable {
 
     public void setPlayer(EntityPlayer player) {
         this.entity = player;
+    }
+
+    // IMolangPhysicsScope: lets the GeckoLib engine key its per-frame MoLang scope on this animatable.
+
+    @Override
+    @Nullable
+    public EntityLivingBase getMolangEntity() {
+        return entity;
+    }
+
+    @Override
+    public ResourceLocation getMolangModelId() {
+        return getMainModel();
+    }
+
+    @Override
+    public ResourceLocation getMolangAnimationId() {
+        return getAnimation();
     }
 
     @Override

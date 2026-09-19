@@ -3,6 +3,7 @@ package com.fox.ysmu.api;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.NetworkHandler;
@@ -52,6 +53,21 @@ public final class EntityModelApi {
         NPCData.put(entity.getEntityId(), modelId, textureId);
         NetworkHandler.broadcastNpcData(entity, entity.getEntityId(), modelId, textureId);
         return true;
+    }
+
+    /**
+     * The model and texture an entity is currently wearing, or {@code null} when it wears none.
+     * <p>
+     * The read half of {@link #setEntityModel}, and the one a companion mod needs in order to notice a selection
+     * the player made in YSMU's own picker: that screen writes straight through to this registry, so polling this
+     * is how the mod that opened the picker learns what was picked. Unlike the writes it is safe on either side,
+     * because a client holds the same registry through the sync message.
+     *
+     * @param entity the entity to ask about; {@code null} answers {@code null}.
+     * @return what it wears, or {@code null}.
+     */
+    public static EntityModelData getEntityModel(Entity entity) {
+        return entity == null ? null : NPCData.getData(entity);
     }
 
     /** Removes an entity's override on the logical server and broadcasts the removal. */
