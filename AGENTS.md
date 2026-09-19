@@ -4,7 +4,7 @@
 
 YSMU is a Minecraft Forge 1.7.10 mod that ports Yes Steve Model/OpenYSM-style player models back to 1.7.10. The mod id is `ysmu`, the root package is `com.fox.ysmu`, and the Forge entry point is `src/main/java/com/fox/ysmu/ysmu.java`.
 
-The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, enables Jabel modern Java syntax while still targeting JVM 8, and shades/relocates Jackson. Runtime/development dependencies are declared in `dependencies.gradle`.
+The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, and enables Jabel modern Java syntax while still targeting JVM 8. Runtime/development dependencies are declared in `dependencies.gradle`; the GeckoLib engine is consumed from `libs/` as a separate mod.
 
 The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
 
@@ -22,11 +22,11 @@ When writing complex features or significant refactors, use an ExecPlan (as desc
 - `src/main/java/com/fox/ysmu/event`: GTNHLib event subscribers for common player sync and client rendering events.
 - `src/main/java/com/fox/ysmu/compat`: optional-mod compatibility wrappers. Keep Backhand and similar direct calls behind these wrappers.
 - `src/main/java/com/fox/ysmu/mixin`: Mixins only. `gradle.properties` restricts Mixins to package `com.fox.ysmu.mixin`.
-- `src/main/java/software/bernie`, `src/main/java/com/eliotlash`, and `src/main/java/net/geckominecraft`: vendored/ported GeckoLib, Molang/math, and legacy adapter code. Treat these as third-party compatibility code and keep edits narrow.
+- `libs/geckolib-5.09.52.417-dev.jar`: the GeckoLib 3 engine for 1.7.10, consumed as a separate mod (mod id `geckolib`) instead of being vendored. FML has a single class loader, so two copies of `software.bernie.geckolib3` would silently shadow each other. `dependencies.gradle` puts this jar on the compile, test and dev-runtime classpaths; players install GeckoLib's reobfuscated release jar next to YSMU.
 - `src/main/resources/assets/ysmu/custom`: built-in model assets copied into `config/ysmu/custom` during reload.
 - `src/main/resources/assets/ysmu/lang`: `en_US.lang` and `zh_CN.lang`. Keep new translation keys in sync.
 - `src/main/resources/mixins.ysmu.json`: Mixin config. Currently only `MixinItemRenderer` is listed as a client Mixin.
-- `src/main/resources/META-INF/*_at.cfg`: access transformers for Minecraft/GeckoLib internals.
+- `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). GeckoLib ships its own jar's ATs.
 - `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
 
 ## Minecraft and Forge Sources
@@ -49,6 +49,8 @@ Model sync starts with the server sending `RequestSyncModel`. The client replies
 
 Client rendering cancels vanilla `RenderPlayerEvent.Pre` in `ClientEventHandler` and delegates to `CustomPlayerRenderer`. `CustomPlayerRenderer` chooses model/texture state from `ExtendedModelInfo` or NPC overrides, posts `SpecialPlayerRenderEvent`, then renders through the GeckoLib replacement renderer. First-person hand rendering is split between `RenderHandEvent` and the Angelica-specific `MixinItemRenderer` path.
 
+GeckoLib is a required separate mod (`dependencies = "required-after:geckolib"`). Where the engine needs host knowledge it goes through an interface, and YSMU implements it: `CustomPlayerEntity` implements `IMolangPhysicsScope` so `software.bernie.geckolib3.core.molang.MolangPhysicsRuntime` can key its per-frame MoLang scope, and `ClientEventHandler` pushes remote animation variables into the engine's `core.molang.RemoteAnimationVariables`. YSMU no longer ships a Molang physics runtime of its own.
+
 ## Model and Resource Rules
 
 Folder models live under `config/ysmu/custom/<model name>` and must include `main.json`, `arm.json`, and at least one `.png`. Optional animation files are `main.animation.json`, `arm.animation.json`, and `extra.animation.json`; missing animation files fall back to the built-in default animations.
@@ -69,7 +71,7 @@ The model password must be available before cached model files can decrypt. Pres
 
 ## Compatibility Notes
 
-Runtime prerequisites from the README are UniMixins and GTNHLib. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand, Jackson, and JUnit as declared in `dependencies.gradle`.
+Runtime prerequisites are UniMixins, GTNHLib and the separate `geckolib` mod. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
 
 Use `@EventBusSubscriber` from GTNHLib for event subscribers following the existing pattern. Client-only subscribers should specify `side = Side.CLIENT`.
 
@@ -83,7 +85,7 @@ On Windows PowerShell, read UTF-8 files with `-Encoding UTF8`; otherwise Chinese
 
 Modern Java syntax is enabled by Jabel, and the code already uses pattern variables. The produced mod still targets JVM 8, so avoid Java 9+ library APIs unless the project already provides or shades them.
 
-Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. Avoid broad rewrites in vendored GeckoLib/Molang code unless the task specifically requires it.
+Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. The GeckoLib animation engine lives in its own repository now, so engine fixes belong there rather than here.
 
 When adding user-facing text, update both `en_US.lang` and `zh_CN.lang`. When adding config fields, update `Config`, the relevant GUI screen if applicable, and translation keys.
 
@@ -91,13 +93,21 @@ When adding model animation states, register names and priorities through `Anima
 
 ## Gradle and Verification
 
-Do not run Gradle commands from the sandbox. This environment cannot reliably execute the wrapper because Gradle needs host cache/network access outside the workspace. When a change needs build, test, or run verification, ask the user to execute the exact command and paste the output.
+Gradle may be run directly, but a running build occupies the project: the daemon holds the build
+outputs and the source tree, so editing while it runs can conflict with it or lose work. Start a build
+only as the **final confirmation**, once every change is finished and no other agent or subagent is
+still working in this workspace. Never start a build in the middle of a task.
 
-Useful commands for the user to run from the repository root:
+Run the narrowest task that answers the question, from the repository root:
 
-- `.\gradlew.bat build`
-- `.\gradlew.bat test`
+- `.\gradlew.bat compileJava` - fastest "does it still compile" check
+- `.\gradlew.bat test` - unit tests
+- `.\gradlew.bat build` - final confirmation only, when all work is done and nothing else is holding the tree
 - `.\gradlew.bat runClient`
 - `.\gradlew.bat runServer`
+
+Do not assemble a classpath by scanning the Gradle cache to typecheck a change. It is slow and it
+produces misleading errors, because several versions of the same jar end up on that classpath. Run the
+Gradle task instead.
 
 `src/test` holds the JUnit 5 sources that cover resource formats, sync packets, security helpers, and Molang physics. Because Gradle 9 no longer injects test-framework implementation dependencies, `testRuntimeClasspath` must keep the explicit `junit-platform-launcher` entry, and `fastutil` (used by mod code and pulled in transitively only for compilation) must stay declared for tests. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.

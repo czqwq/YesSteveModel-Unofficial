@@ -13,10 +13,14 @@ dependencies {
     compileOnly("org.jetbrains:annotations:26.0.2")
     devOnlyNonPublishable("com.github.GTNewHorizons:Backhand:1.8.0:dev")
     devOnlyNonPublishable("com.github.GTNewHorizons:GTNHLib:0.6.40:dev")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
-    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
-    shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
-    shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
+    // GeckoLib 3 for 1.7.10 ships as its own mod (mod id `geckolib`). FML loads every mod into one class
+    // loader, so a vendored copy here would silently shadow the installed mod; the engine now lives in that
+    // jar instead. `libs/` carries the engine's `dev` jar (MCP names) used for compilation and the dev
+    // runtime; players install the reobfuscated release jar next to YSMU. Jackson is shaded and relocated
+    // inside that jar (software.bernie.geckolib3.shadow.*), so YSMU no longer depends on it.
+    compileOnly files("libs/geckolib-5.09.52.417-dev.jar")
+    testImplementation files("libs/geckolib-5.09.52.417-dev.jar")
+    devOnlyNonPublishable files("libs/geckolib-5.09.52.417-dev.jar")
     // Do not shadow OpenYSM ImageStream until decoder calls are wired directly; its ImageIO SPI files crash if minimized away.
     // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")

@@ -6,6 +6,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
@@ -26,6 +27,7 @@ import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class AnimationManager {
@@ -116,7 +118,11 @@ public final class AnimationManager {
         EntityPlayer player = event.getAnimatable()
             .getPlayer();
         if (player == null) {
-            return PlayState.STOP;
+            // Non-player animatables (NPCs and companions handed to YSM by another mod) have no player
+            // state, so the player-typed state machine below can never match and the main controller would
+            // stop outright - meaning such an entity never played walk/idle at all. Drive the same
+            // locomotion states from the animatable's own entity instead.
+            return predicateEntityLocomotion(event);
         }
         PlayState controllerState = OpenYsmPlayerControllerRuntime.tryApply(event);
         if (controllerState != null) {
@@ -136,6 +142,38 @@ public final class AnimationManager {
             }
         }
         return PlayState.STOP;
+    }
+
+    /**
+     * Locomotion for a non-player animatable.
+     * <p>
+     * Only states the model actually defines are selected, so a model without {@code run}/{@code walk}/
+     * {@code idle} keeps the controller stopped instead of being handed a missing animation.
+     */
+    @NotNull
+    private PlayState predicateEntityLocomotion(AnimationEvent<CustomPlayerEntity> event) {
+        EntityLivingBase entity = event.getAnimatable()
+            .getEntity();
+        if (entity == null) {
+            return PlayState.STOP;
+        }
+        if (entity.onGround) {
+            if (entity.isSprinting() && hasAnimation(event, "run")) {
+                return playLoopAnimation(event, "run");
+            }
+            if (Math.abs(event.getLimbSwingAmount()) > 0.05F && hasAnimation(event, "walk")) {
+                return playLoopAnimation(event, "walk");
+            }
+        }
+        return hasAnimation(event, "idle") ? playLoopAnimation(event, "idle") : PlayState.STOP;
+    }
+
+    /** Whether the model backing this animation event actually defines the named animation. */
+    private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        AnimationFile file = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(getAnimationId(event));
+        return file != null && file.animations.containsKey(animationName);
     }
 
     public PlayState predicateOffhandHold(AnimationEvent<CustomPlayerEntity> event) {

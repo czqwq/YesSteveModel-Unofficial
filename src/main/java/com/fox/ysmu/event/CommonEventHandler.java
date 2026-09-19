@@ -8,15 +8,23 @@ import cpw.mods.fml.common.gameevent.TickEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.WorldServer;
 import net.minecraftforge.event.entity.EntityEvent;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
+import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.world.WorldEvent;
+import com.fox.ysmu.api.ModelGuiApi;
+import com.fox.ysmu.data.EntityModelData;
+import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.data.PlayerMotionState;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.eep.ExtendedStarModels;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelInfo;
+import com.fox.ysmu.network.message.SyncNpcDataMessage;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
 import com.fox.ysmu.network.message.SyncStarModels;
 import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
@@ -33,6 +41,23 @@ public class CommonEventHandler {
     public static void onPlayerLoggedIn(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedInEvent event) {
         if (event.player != null) {
             requestModelSync(event.player);
+            syncNpcModels(event.player);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onLivingDeath(LivingDeathEvent event) {
+        if (event.entity != null && event.entity.worldObj != null && !event.entity.worldObj.isRemote) {
+            NPCData.remove(event.entity);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onWorldUnload(WorldEvent.Unload event) {
+        // The overworld unload marks leaving a save, so this is the point to drop transient NPC overrides.
+        if (event.world != null && event.world.provider != null && event.world.provider.dimensionId == 0) {
+            NPCData.clear();
+            ModelGuiApi.clearAllSelectionGrants();
         }
     }
 
@@ -41,6 +66,7 @@ public class CommonEventHandler {
         if (event.player instanceof EntityPlayerMP) {
             LAST_MOTION_STATES.remove(event.player.getUniqueID());
             OpenYsmModelSyncServer.clear(event.player.getUniqueID());
+            ModelGuiApi.clearSelectionGrants(event.player);
         }
     }
 
@@ -63,6 +89,17 @@ public class CommonEventHandler {
         if (event.target instanceof EntityPlayer trackPlayer) {
             syncTrackedPlayerModelInfo(event.entityPlayer, trackPlayer);
             syncTrackedPlayerMotionState(event.entityPlayer, trackPlayer);
+        } else if (event.entityPlayer instanceof EntityPlayerMP viewer && NPCData.contains(event.target)) {
+            // A player who was out of range when the override was broadcast still needs it when their client
+            // starts tracking the entity, otherwise it only applies on the next login.
+            EntityModelData data = NPCData.getData(event.target);
+            if (data != null) {
+                NetworkHandler.sendNpcData(
+                    viewer,
+                    event.target.getEntityId(),
+                    data.getModelId(),
+                    data.getTextureId());
+            }
         }
     }
 
@@ -71,6 +108,34 @@ public class CommonEventHandler {
         if (event.entity instanceof EntityPlayer player) {
             syncJoinedPlayerState(player);
         }
+    }
+
+    private static int npcPruneTicker;
+
+    @SubscribeEvent
+    public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || ++npcPruneTicker < 1200) {
+            return;
+        }
+        npcPruneTicker = 0;
+        long now = System.currentTimeMillis();
+        // Entity ids are never reused, so a missing entry is only wasted memory; the grace keeps a
+        // temporarily chunk-unloaded entity's override from being pruned.
+        NPCData.retainAll(now, id -> {
+            WorldServer[] worlds = server.worldServers;
+            if (worlds != null) {
+                for (WorldServer world : worlds) {
+                    if (world != null && world.getEntityByID(id) != null) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }, 10L * 60L * 1000L);
     }
 
     @SubscribeEvent
@@ -83,6 +148,12 @@ public class CommonEventHandler {
 
     private static void requestModelSync(EntityPlayer player) {
         ServerModelManager.sendRequestSyncModelMessage(player);
+    }
+
+    private static void syncNpcModels(EntityPlayer player) {
+        if (player instanceof EntityPlayerMP && !NPCData.isEmpty()) {
+            NetworkHandler.sendToClientPlayer(new SyncNpcDataMessage(NPCData.snapshot()), player);
+        }
     }
 
     private static void registerPlayerProperties(EntityPlayer player) {
