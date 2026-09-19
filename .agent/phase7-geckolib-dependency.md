@@ -60,6 +60,51 @@ host copies.
 - At runtime the GeckoLib mod supplies the engine; YSMU's Molang variables, bone queries and
   first/second order physics still resolve.
 
+## Audit: vendored engine vs standalone engine
+
+Re-diffed the deleted tree (recovered from `master` via `git archive`) against `tmp/Geckolib/src`:
+
+- 156 vendored files, **0 exist only in the vendored tree**.
+- 149 byte-identical.
+- 7 differ, all by imports only: six MoLang physics call sites
+  (`ScopedMolangVariable`, `functions/{BonePosition,BoneRotation,BoneScale,FirstOrder,SecondOrder}`)
+  pointing at the engine's own `MolangPhysicsRuntime`, and `util/RenderUtils` pointing at the engine's
+  relocated `compat/Axis`/`compat/Utils`.
+- 161 files exist only in the standalone engine: the ported modern MoLang package (~154), the host
+  contract (`IMolangPhysicsScope`, `MolangPhysicsRuntime`, `MolangPhysicsState`,
+  `RemoteAnimationVariables`), `compat/{Axis,Utils}` and the `GeckoLib` mod entry.
+
+Conclusion: the swap is semantically equivalent at the source level; nothing was lost.
+
+Known defects worth fixing in the engine repository (not in YSMU):
+
+- The jar ships `META-INF/services/com.fasterxml.jackson.core.{ObjectCodec,JsonFactory}` pointing at
+  `com.fasterxml.jackson.*`, but Jackson is relocated to `software.bernie.geckolib3.shadow.*`; those
+  names do not exist in the jar, so any `ServiceLoader` lookup against real Jackson names throws.
+- `software/bernie/example/config/ConfigHandler` lives in an `example` package and now actually runs
+  (`GeckoLib.preInit` creates `config/geckolib.cfg`). While the engine was vendored, `init()` was never
+  called, so `debugPrintStacktraces` was permanently `false`.
+- `required-after:geckolib` carries no version bound, so an older engine fails with a raw
+  `NoClassDefFoundError` instead of a clear dependency error.
+
+## Fix: locomotion for non-player animatables
+
+`AnimationManager.predicateMain` is player-typed and returned `PlayState.STOP` whenever the shared
+animatable had no `EntityPlayer` (`getPlayer() == null`). Every entity rendered through
+`EntityModelRenderApi`/`RenderLivingEvent.Pre` - the NPC/companion path this engine split exists for -
+therefore never played walk/idle at all: the main controller was stopped outright.
+
+`predicateEntityLocomotion` now drives `run`/`walk`/`idle` from the animatable's own
+`EntityLivingBase` (`onGround`, `isSprinting()`, `event.getLimbSwingAmount()`), and only selects an
+animation the model actually defines, so a model without those states keeps the controller stopped rather
+than being handed a missing animation.
+
+`CustomPlayerRenderer.hasModelFor` was a query with a side effect: it called `applyEntityModel`, which
+mutates the shared animatable's entity/model/texture. `ClientEventHandler.onRenderLiving` calls it
+*before* deciding whether to take over the frame, so merely asking could change what the next entity
+rendered with. The override lookup is now split into a pure `resolveOverride`/`requestedModel` pair,
+and only the render path applies it.
+
 ## Interfaces and Dependencies
 
     libs/geckolib-5.09.52.417-dev.jar                        the shared engine (mod id `geckolib`)

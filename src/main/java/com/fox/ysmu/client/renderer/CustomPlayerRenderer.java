@@ -115,12 +115,46 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * reveal that the entity's own model is absent.
      */
     public boolean hasModelFor(EntityLivingBase entityObj) {
-        return isModelAvailable(applyEntityModel(entityObj));
+        // Pure query: must not touch the shared animatable, or asking whether an entity can be drawn would
+        // itself change what the next entity renders with.
+        return isModelAvailable(requestedModel(entityObj));
     }
 
     /**
-     * Applies the entity's model/texture to the shared animatable and returns the main model id it actually
-     * requested, before any default substitution.
+     * Resolves the override an entity asks for, without touching the shared animatable.
+     *
+     * @return the override, or {@code null} when the entity has none.
+     */
+    @Nullable
+    private static EntityModelData resolveOverride(EntityLivingBase entityObj) {
+        EntityModelData override = NPCData.getData(entityObj);
+        if (override != null) {
+            // NPC / non-player override, looked up by entity rather than by UUID.
+            return override;
+        }
+        if (entityObj instanceof EntityPlayer player) {
+            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
+            if (eep != null && eep.getModelId() != null) {
+                return new EntityModelData(eep.getModelId(), eep.getSelectTexture());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The main model id the entity asks for, before any default substitution.
+     *
+     * @return the requested main model id, or {@code null} when the entity has no override.
+     */
+    @Nullable
+    private static ResourceLocation requestedModel(EntityLivingBase entityObj) {
+        EntityModelData override = resolveOverride(entityObj);
+        return override == null ? null : ModelIdUtil.getMainId(override.getModelId());
+    }
+
+    /**
+     * Applies the entity's model/texture to the shared animatable; render path only. Returns the main model
+     * id the entity actually requested, before any default substitution.
      *
      * @return the requested main model id, or {@code null} when the entity has no override and the default
      *         model is intended.
@@ -131,24 +165,14 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             return null;
         }
         this.animatable.setEntity(entityObj);
-        EntityModelData override = NPCData.getData(entityObj);
-        if (override != null) {
-            // NPC / non-player override, looked up by entity rather than by UUID.
-            ResourceLocation main = ModelIdUtil.getMainId(override.getModelId());
-            this.animatable.setMainModel(main);
-            this.animatable.setTexture(override.getTextureId());
-            return main;
+        EntityModelData override = resolveOverride(entityObj);
+        if (override == null) {
+            return null;
         }
-        if (entityObj instanceof EntityPlayer player) {
-            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-            if (eep != null && eep.getModelId() != null) {
-                ResourceLocation main = ModelIdUtil.getMainId(eep.getModelId());
-                this.animatable.setMainModel(main);
-                this.animatable.setTexture(eep.getSelectTexture());
-                return main;
-            }
-        }
-        return null;
+        ResourceLocation main = ModelIdUtil.getMainId(override.getModelId());
+        this.animatable.setMainModel(main);
+        this.animatable.setTexture(override.getTextureId());
+        return main;
     }
 
     private static boolean isModelAvailable(ResourceLocation main) {
