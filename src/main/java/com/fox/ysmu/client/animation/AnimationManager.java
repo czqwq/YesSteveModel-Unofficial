@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.passive.EntityTameable;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
 
@@ -169,6 +170,14 @@ public final class AnimationManager {
         EntityClips.Clip pushed = EntityClips.get(entity);
         if (pushed != null && hasAnimation(event, pushed.getName())) {
             return playAnimation(event, pushed.getName(), pushed.getLoopType());
+        }
+        // What she is holding, before what she is doing. The condition names are the same ones the player path asks
+        // through ConditionalHold (hold_mainhand$<registry name>), but that helper takes an EntityPlayer and the entity
+        // path below never asked anything like it - which is why a maid holding a sword fell back to walk or idle
+        // instead of playing the model's own held-item animation.
+        String heldAnimation = findEntityHoldAnimation(event, entity);
+        if (heldAnimation != null) {
+            return playLoopAnimation(event, heldAnimation);
         }
         // A sitting tameable - a vanilla cat or wolf, or a companion another mod hands us - is neither walking nor
         // idle, so it plays the model's own seat animation while the flag is set. The ending holds the last frame
@@ -367,6 +376,27 @@ public final class AnimationManager {
             return playAnimation(event, animationName);
         }
         return PlayState.STOP;
+    }
+
+    /**
+     * The held-item animation for an entity that is not a player, or null when the model has none for what she holds.
+     * <p>
+     * The id form is the one that answers "a sword in her hand": the same {@code hold_mainhand$<registry name>} shape
+     * {@code ConditionalHold} tests, and it is only answered when the model has that clip, so a model that does not
+     * name its items by registry id simply says nothing here. The ore-dictionary and "kind" forms the player path also
+     * tries are not consulted on this path yet.
+     */
+    private static String findEntityHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityLivingBase entity) {
+        ItemStack stack = entity.getHeldItem();
+        if (stack == null || stack.getItem() == null) {
+            return null;
+        }
+        Object name = Item.itemRegistry.getNameForObject(stack.getItem());
+        if (name == null) {
+            return null;
+        }
+        String byId = "hold_mainhand$" + name;
+        return hasAnimation(event, byId) ? byId : null;
     }
 
     private static String findHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
