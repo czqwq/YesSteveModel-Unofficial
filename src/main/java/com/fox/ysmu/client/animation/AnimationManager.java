@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.passive.EntityTameable;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
@@ -18,6 +19,7 @@ import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
+import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.google.common.collect.Lists;
 
@@ -145,10 +147,16 @@ public final class AnimationManager {
     }
 
     /**
-     * Locomotion for a non-player animatable.
+     * Animation for a non-player animatable, in the order the answers are trusted.
      * <p>
-     * Only states the model actually defines are selected, so a model without {@code run}/{@code walk}/
-     * {@code idle} keeps the controller stopped instead of being handed a missing animation.
+     * A host mod that owns the animation logic for the entity - Touhou Little Maid decides a maid's clip from
+     * its own priority table, {@code sit} included - pushes the single resulting clip through
+     * {@code EntityAnimationApi}. That clip wins outright: the host has already resolved every rule this
+     * method could re-derive, and the clip is replayed with the loop mode the host asked for.
+     * <p>
+     * Otherwise the model's own seat and locomotion states are used, and only states the model actually
+     * defines are selected, so a model without {@code run}/{@code walk}/{@code idle} keeps the controller
+     * stopped instead of being handed a missing animation.
      */
     @NotNull
     private PlayState predicateEntityLocomotion(AnimationEvent<CustomPlayerEntity> event) {
@@ -156,6 +164,19 @@ public final class AnimationManager {
             .getEntity();
         if (entity == null) {
             return PlayState.STOP;
+        }
+        // Already resolved by whoever owns the animation logic for this entity; replay it verbatim.
+        EntityClips.Clip pushed = EntityClips.get(entity);
+        if (pushed != null && hasAnimation(event, pushed.getName())) {
+            return playAnimation(event, pushed.getName(), pushed.getLoopType());
+        }
+        // A sitting tameable - a vanilla cat or wolf, or a companion another mod hands us - is neither walking nor
+        // idle, so it plays the model's own seat animation while the flag is set. The ending holds the last frame
+        // rather than looping, because a seat animation is usually a transition into a pose and looping that
+        // transition stands the entity up and sits it back down again every cycle. The flag is read through vanilla's
+        // EntityTameable API, so this stays a general rule rather than knowledge of one mod's entity.
+        if (entity instanceof EntityTameable && ((EntityTameable) entity).isSitting() && hasAnimation(event, "sit")) {
+            return playAnimation(event, "sit", ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME);
         }
         if (entity.onGround) {
             if (entity.isSprinting() && hasAnimation(event, "run")) {

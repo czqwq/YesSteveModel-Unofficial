@@ -8,6 +8,29 @@ The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` a
 
 The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
 
+## Cross-Project Ownership
+
+GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:
+
+- **GeckoLib** (mod id `geckolib`): `E:\IDEA\Geckolib`, symlinked into this workspace as `tmp/Geckolib`.
+- **YSMU**: this repository.
+- **Touhou Little Maid**: `E:\IDEA\TouhouLittleMaid`, with its 1.20 reference source under `tmp/TouhouLittleMaid-1.20`.
+
+Any of the three may be changed at any time. A feature must never be blocked, simplified, half-done or
+duplicated merely because the code that would implement it lives in another of the three repositories. If the
+cleanest implementation belongs there, change it there and say so in the ExecPlan.
+
+The rule that must survive is a **runtime** property, not an editing restriction:
+
+- Each mod must still load and run without the others installed. `geckolib` is the exception: it is YSMU's
+  engine and YSMU declares `required-after:geckolib`.
+- YSMU and Touhou Little Maid stay optional to each other at runtime, and both already degrade cleanly when
+  the other is absent (a mod-id probe plus a reflective bridge). That is one way to keep the property, not a
+  ban on the two being compiled against each other. When a feature is genuinely better served by a
+  compile-time coupling, propose it explicitly instead of contorting the design around it.
+- Prefer one implementation to two. The same table, clip list or rule set existing in two of these
+  repositories is a defect: a rename lands in only one of them and the wrong half is silent.
+
 ## ExecPlans
 
 When writing complex features or significant refactors, use an ExecPlan (as described in .agent/PLANS.md) from design to implementation.

@@ -21,6 +21,7 @@ import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
+import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
@@ -225,6 +226,7 @@ public class ClientEventHandler {
         RemotePlayerMotionStates.clear();
         RemoteAnimationVariables.clear();
         NPCData.clear();
+        EntityClips.clear();
     }
 
     private static boolean isVanillaPlayer(ResourceLocation modelId) {

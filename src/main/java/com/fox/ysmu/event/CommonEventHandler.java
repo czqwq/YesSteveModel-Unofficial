@@ -16,6 +16,7 @@ import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import com.fox.ysmu.api.ModelGuiApi;
+import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.data.PlayerMotionState;
@@ -54,9 +55,11 @@ public class CommonEventHandler {
 
     @SubscribeEvent
     public static void onWorldUnload(WorldEvent.Unload event) {
-        // The overworld unload marks leaving a save, so this is the point to drop transient NPC overrides.
+        // The overworld unload marks leaving a save, so this is the point to drop transient per-entity state:
+        // NPC model overrides, the animation clips a host mod pushed for them, and picker grants.
         if (event.world != null && event.world.provider != null && event.world.provider.dimensionId == 0) {
             NPCData.clear();
+            EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
         }
     }
