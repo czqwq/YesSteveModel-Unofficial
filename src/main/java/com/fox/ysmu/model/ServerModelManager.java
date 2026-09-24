@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 
@@ -68,6 +69,18 @@ public final class ServerModelManager {
     public static final Map<String, RawYsmModel> RAW_MODEL_INFO = Maps.newHashMap();
     public static final Map<String, OpenYsmSyncInfo> OPEN_YSM_SYNC_INFO = Maps.newHashMap();
     public static volatile byte[] OPEN_YSM_SERVER_KEY;
+
+    /**
+     * Whether the server has a renderable model under this id, used to reject model overrides that no client
+     * could draw.
+     */
+    public static boolean hasModel(ResourceLocation modelId) {
+        if (modelId == null) {
+            return false;
+        }
+        return CACHE_NAME_INFO.containsKey(modelId.getResourcePath())
+            || CACHE_NAME_INFO.containsKey(modelId.toString());
+    }
 
     /**
      * 特定文件名

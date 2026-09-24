@@ -6,7 +6,6 @@ import net.minecraft.client.audio.PositionedSoundRecord;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
-import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 import org.lwjgl.input.Mouse;
 
@@ -22,7 +21,7 @@ public class PlayerTextureScreen extends GuiScreen {
     private final PlayerModelScreen parent;
     private final ResourceLocation modelId;
     private final List<ResourceLocation> textures;
-    private final EntityPlayer player;
+    private final ModelSelectionTarget target;
     private int maxTexturePage;
     private int texturePage;
     private int x;
@@ -33,7 +32,7 @@ public class PlayerTextureScreen extends GuiScreen {
         this.modelId = modelId;
         this.textures = textures;
         this.textures.sort(Comparator.comparing(ResourceLocation::toString));
-        this.player = parent.player;
+        this.target = parent.getTarget();
     }
 
     @Override
@@ -58,7 +57,7 @@ public class PlayerTextureScreen extends GuiScreen {
             }
             int xStart = x + 5 + TEXTURE_X_STEP * (i % TEXTURE_COLUMNS);
             int yStart = y + 28 + TEXTURE_Y_STEP * (i / TEXTURE_COLUMNS);
-            this.buttonList.add(new TextureButton(b++, xStart, yStart, modelId, textures.get(modelIndex), player));
+            this.buttonList.add(new TextureButton(b++, xStart, yStart, modelId, textures.get(modelIndex), target));
         }
     }
 

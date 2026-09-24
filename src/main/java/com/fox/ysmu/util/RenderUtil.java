@@ -36,6 +36,10 @@ public final class RenderUtil {
 
     private static final float GUI_LIGHTMAP_BRIGHTNESS = 240.0F;
 
+    /**
+     * Whether the diagnostic below reports. {@code -Dtlmd.gl.diag=true}, the same switch the port's own diagnostic
+     * uses, so one run answers for both sides.
+     */
     public static void withGuiEntityLighting(Runnable renderAction) {
         GuiEntityLightingState state = GuiEntityLightingState.capture();
         try {

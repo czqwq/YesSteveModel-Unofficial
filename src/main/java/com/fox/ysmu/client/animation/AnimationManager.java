@@ -6,7 +6,10 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.passive.EntityTameable;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
 
@@ -17,6 +20,7 @@ import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
+import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.google.common.collect.Lists;
 
@@ -26,6 +30,7 @@ import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class AnimationManager {
@@ -116,7 +121,11 @@ public final class AnimationManager {
         EntityPlayer player = event.getAnimatable()
             .getPlayer();
         if (player == null) {
-            return PlayState.STOP;
+            // Non-player animatables (NPCs and companions handed to YSM by another mod) have no player
+            // state, so the player-typed state machine below can never match and the main controller would
+            // stop outright - meaning such an entity never played walk/idle at all. Drive the same
+            // locomotion states from the animatable's own entity instead.
+            return predicateEntityLocomotion(event);
         }
         PlayState controllerState = OpenYsmPlayerControllerRuntime.tryApply(event);
         if (controllerState != null) {
@@ -136,6 +145,65 @@ public final class AnimationManager {
             }
         }
         return PlayState.STOP;
+    }
+
+    /**
+     * Animation for a non-player animatable, in the order the answers are trusted.
+     * <p>
+     * A host mod that owns the animation logic for the entity - Touhou Little Maid decides a maid's clip from
+     * its own priority table, {@code sit} included - pushes the single resulting clip through
+     * {@code EntityAnimationApi}. That clip wins outright: the host has already resolved every rule this
+     * method could re-derive, and the clip is replayed with the loop mode the host asked for.
+     * <p>
+     * Otherwise the model's own seat and locomotion states are used, and only states the model actually
+     * defines are selected, so a model without {@code run}/{@code walk}/{@code idle} keeps the controller
+     * stopped instead of being handed a missing animation.
+     */
+    @NotNull
+    private PlayState predicateEntityLocomotion(AnimationEvent<CustomPlayerEntity> event) {
+        EntityLivingBase entity = event.getAnimatable()
+            .getEntity();
+        if (entity == null) {
+            return PlayState.STOP;
+        }
+        // Already resolved by whoever owns the animation logic for this entity; replay it verbatim.
+        EntityClips.Clip pushed = EntityClips.get(entity);
+        if (pushed != null && hasAnimation(event, pushed.getName())) {
+            return playAnimation(event, pushed.getName(), pushed.getLoopType());
+        }
+        // What she is holding, before what she is doing. The condition names are the same ones the player path asks
+        // through ConditionalHold (hold_mainhand$<registry name>), but that helper takes an EntityPlayer and the entity
+        // path below never asked anything like it - which is why a maid holding a sword fell back to walk or idle
+        // instead of playing the model's own held-item animation.
+        String heldAnimation = findEntityHoldAnimation(event, entity);
+        if (heldAnimation != null) {
+            return playLoopAnimation(event, heldAnimation);
+        }
+        // A sitting tameable - a vanilla cat or wolf, or a companion another mod hands us - is neither walking nor
+        // idle, so it plays the model's own seat animation while the flag is set. The ending holds the last frame
+        // rather than looping, because a seat animation is usually a transition into a pose and looping that
+        // transition stands the entity up and sits it back down again every cycle. The flag is read through vanilla's
+        // EntityTameable API, so this stays a general rule rather than knowledge of one mod's entity.
+        if (entity instanceof EntityTameable && ((EntityTameable) entity).isSitting() && hasAnimation(event, "sit")) {
+            return playAnimation(event, "sit", ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME);
+        }
+        if (entity.onGround) {
+            if (entity.isSprinting() && hasAnimation(event, "run")) {
+                return playLoopAnimation(event, "run");
+            }
+            if (Math.abs(event.getLimbSwingAmount()) > 0.05F && hasAnimation(event, "walk")) {
+                return playLoopAnimation(event, "walk");
+            }
+        }
+        return hasAnimation(event, "idle") ? playLoopAnimation(event, "idle") : PlayState.STOP;
+    }
+
+    /** Whether the model backing this animation event actually defines the named animation. */
+    private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        AnimationFile file = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(getAnimationId(event));
+        return file != null && file.animations.containsKey(animationName);
     }
 
     public PlayState predicateOffhandHold(AnimationEvent<CustomPlayerEntity> event) {
@@ -308,6 +376,27 @@ public final class AnimationManager {
             return playAnimation(event, animationName);
         }
         return PlayState.STOP;
+    }
+
+    /**
+     * The held-item animation for an entity that is not a player, or null when the model has none for what she holds.
+     * <p>
+     * The id form is the one that answers "a sword in her hand": the same {@code hold_mainhand$<registry name>} shape
+     * {@code ConditionalHold} tests, and it is only answered when the model has that clip, so a model that does not
+     * name its items by registry id simply says nothing here. The ore-dictionary and "kind" forms the player path also
+     * tries are not consulted on this path yet.
+     */
+    private static String findEntityHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityLivingBase entity) {
+        ItemStack stack = entity.getHeldItem();
+        if (stack == null || stack.getItem() == null) {
+            return null;
+        }
+        Object name = Item.itemRegistry.getNameForObject(stack.getItem());
+        if (name == null) {
+            return null;
+        }
+        String byId = "hold_mainhand$" + name;
+        return hasAnimation(event, byId) ? byId : null;
     }
 
     private static String findHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,

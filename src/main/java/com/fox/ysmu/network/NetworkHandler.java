@@ -1,7 +1,9 @@
 package com.fox.ysmu.network;
 
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.network.message.*;
@@ -14,6 +16,14 @@ import cpw.mods.fml.relauncher.Side;
 public final class NetworkHandler {
 
     public static final String PROTOCOL_VERSION = Tags.VERSION;
+
+    /**
+     * Wire format version, exchanged by {@link com.fox.ysmu.network.message.HandshakeMessage}. Bump it
+     * whenever an existing packet's layout changes; 1.7.10's SimpleNetworkWrapper does no negotiation of its
+     * own, so a mismatched client would otherwise decode packets with the wrong layout.
+     */
+    public static final int NETWORK_PROTOCOL = 1;
+
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
     // Packet ids are part of the wire protocol. Add new ids; do not renumber existing ones.
@@ -24,6 +34,7 @@ public final class NetworkHandler {
     private static final int SERVERBOUND_OPENYSM_MODEL_SYNC_PAYLOAD_17 = 14;
     private static final int SERVERBOUND_OPENYSM_VERSION_CHECK_17 = 15;
     private static final int SERVERBOUND_OPENYSM_COMPLETE_FEEDBACK_17 = 16;
+    private static final int SERVERBOUND_HANDSHAKE = 97;
 
     private static final int CLIENTBOUND_SEND_MODEL_FILE = 1;
     private static final int CLIENTBOUND_REQUEST_SYNC_MODEL = 2;
@@ -84,6 +95,11 @@ public final class NetworkHandler {
             C2SCompleteFeedback17.Handler.class,
             C2SCompleteFeedback17.class,
             SERVERBOUND_OPENYSM_COMPLETE_FEEDBACK_17,
+            Side.SERVER);
+        CHANNEL.registerMessage(
+            HandshakeMessage.Handler.class,
+            HandshakeMessage.class,
+            SERVERBOUND_HANDSHAKE,
             Side.SERVER);
     }
 
@@ -177,5 +193,50 @@ public final class NetworkHandler {
         if (player instanceof EntityPlayerMP) {
             CHANNEL.sendTo(message, (EntityPlayerMP) player);
         }
+    }
+
+    /** Server-side send entry: tells nearby clients that an entity's model override changed. */
+    public static void broadcastNpcData(Entity entity, int entityId, ResourceLocation modelId,
+        ResourceLocation textureId) {
+        broadcastNpcData(new UpdateNpcDataMessage(entityId, modelId, textureId), entity);
+    }
+
+    /** Server-side send entry: tells nearby clients to drop an entity's model override. */
+    public static void broadcastNpcDataRemoval(Entity entity, int entityId) {
+        broadcastNpcData(UpdateNpcDataMessage.removal(entityId), entity);
+    }
+
+    /** Sends a single entity override to one player, for example after a login or dimension change. */
+    public static void sendNpcData(EntityPlayerMP player, int entityId, ResourceLocation modelId,
+        ResourceLocation textureId) {
+        if (player != null) {
+            CHANNEL.sendTo(new UpdateNpcDataMessage(entityId, modelId, textureId), player);
+        }
+    }
+
+    /**
+     * Asks a player's client to open the model selection GUI for an entity. Both ids are the entity's tracked id:
+     * the client resolves {@code entityId} to preview it and the server resolves {@code npcId} when the selection
+     * comes back.
+     */
+    public static void sendOpenModelGui(EntityPlayerMP player, Entity target) {
+        if (player != null && target != null) {
+            CHANNEL.sendTo(new OpenModelGuiMessage(target.getEntityId(), target.getEntityId()), player);
+        }
+    }
+
+    private static void broadcastNpcData(IMessage message, Entity entity) {
+        if (entity != null && entity.worldObj != null) {
+            CHANNEL.sendToAllAround(
+                message,
+                new NetworkRegistry.TargetPoint(
+                    entity.dimension,
+                    entity.posX,
+                    entity.posY,
+                    entity.posZ,
+                    128.0D));
+            return;
+        }
+        CHANNEL.sendToAll(message);
     }
 }

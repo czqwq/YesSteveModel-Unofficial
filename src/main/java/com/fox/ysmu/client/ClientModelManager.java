@@ -24,7 +24,6 @@ import org.apache.commons.lang3.StringUtils;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
-import com.fox.ysmu.client.animation.molang.MolangPhysicsRuntime;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.client.texture.OuterFileTexture;
 import com.fox.ysmu.data.ModelData;
@@ -45,6 +44,7 @@ import com.google.gson.JsonObject;
 import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.raw.pojo.Converter;
 import software.bernie.geckolib3.geo.raw.pojo.ExtraInfo;
@@ -66,6 +66,8 @@ public class ClientModelManager {
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
+    /** Layout versions already reported, so an unsupported geometry format is logged once instead of 150 times. */
+    private static final Map<String, Boolean> WARNED_UNSUPPORTED_LAYOUTS = Maps.newConcurrentMap();
 
     public static void registerAll(ModelData data) {
         ResourceLocation modelId = getModelId(data);
@@ -120,7 +122,8 @@ public class ClientModelManager {
             String modelJson = new String(data, StandardCharsets.UTF_8);
             RawGeoModel rawModel = Converter.fromJsonString(modelJson);
 
-            if (rawModel.getFormatVersion() == FormatVersion.VERSION_1_12_0) {
+            FormatVersion formatVersion = rawModel.getFormatVersion();
+            if (isSupportedLayout(formatVersion)) {
                 RawGeometryTree rawGeometryTree = RawGeometryTree.parseHierarchy(rawModel);
                 GeoModel geoModel = GeoBuilder.getGeoBuilder(id.getResourceDomain())
                     .constructGeoModel(rawGeometryTree);
@@ -143,10 +146,51 @@ public class ClientModelManager {
                     extraInfo != null && extraInfo.getExtraAnimationNames() != null
                         ? extraInfo.getExtraAnimationNames().length
                         : 0);
+            } else {
+                warnUnsupportedLayout(id, formatVersion);
             }
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to register geometry " + id, e);
             e.printStackTrace();
+        }
+    }
+
+    /**
+     * Whether YSM's geometry tree builder understands this layout.
+     * <p>
+     * Bedrock 1.8.0, 1.10.0 and 1.12.0 share the same geometry tree, so all three go through the same
+     * {@link RawGeometryTree}/{@link GeoBuilder} path. 1.14.0 is a different layout and deliberately stays
+     * skipped, matching the behaviour this code has always had.
+     * <p>
+     * These are enum constants, so this is a compile-time contract: the engine jar pinned in `libs/`
+     * declares all three, and dropping back to an engine that does not should fail the build instead of
+     * silently skipping those models. The previous exact `== VERSION_1_12_0` check is what made every
+     * 1.8.0/1.10.0 model disappear (1.14.0 still is skipped, now with a warning).
+     * <p>
+     * `FormatVersion.isSupportedLayout()` exists in the engine but returns true for 1.14.0 as well, so it is
+     * deliberately not used here: switching to it would start building 1.14.0 geometry, which nobody has
+     * verified yet.
+     * <p>
+     * Without this, switching to an engine that parses 1.8.0/1.10.0 changes the symptom from a logged skip to
+     * a silent one, and those models still never load.
+     */
+    private static boolean isSupportedLayout(FormatVersion version) {
+        return version == FormatVersion.VERSION_1_8_0
+            || version == FormatVersion.VERSION_1_10_0
+            || version == FormatVersion.VERSION_1_12_0;
+    }
+
+    /**
+     * Reports a parsed-but-unbuildable layout once per version. 1.14.0 has always taken this path with no log
+     * at all, which made those models look like they were never installed.
+     */
+    private static void warnUnsupportedLayout(ResourceLocation id, FormatVersion version) {
+        String key = String.valueOf(version);
+        if (WARNED_UNSUPPORTED_LAYOUTS.putIfAbsent(key, Boolean.TRUE) == null) {
+            ysmu.LOG.warn(
+                "YSM client cannot build geometry layout {} (first seen on {}); the model is skipped",
+                version,
+                id);
         }
     }
 

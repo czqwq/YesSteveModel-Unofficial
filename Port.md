@@ -47,7 +47,7 @@
 | `rip.ysm.security`、`rip.ysm.algorithms`、`rip.ysm.zstd` | 新增 vendored 包或迁移到 `com.fox.ysmu.vendor` | 作为格式/缓存基础，先单元测试 varint、zstd、hash、加解密，再接入网络。 |
 | `client/ClientModelManager` | `client/ClientModelManager` | 先做新版模型到当前 GeckoLibCache 的桥接；后续再引入 ModelAssembly。 |
 | `client/model/*` | `client/model` | 与当前 `CustomPlayerModel` 并行，不一次性替换。Binary `.ysm` 的 baked geometry 需要单独桥接或移植 OpenYSM mesh renderer。 |
-| `geckolib3/*` | `software/bernie/geckolib3` | 当前已有 1.7.10 移植版；只窄幅补齐动画控制器/Molang/mesh 能力，避免整包覆盖。 |
+| `geckolib3/*` | `libs/geckolib-5.09.52.417-dev.jar`（独立 mod `geckolib`） | 引擎已抽成独立 Mod，不在本仓库 vendor；宿主侧通过 `IMolangPhysicsScope` 等接口接入。 |
 | `capability/*` | `eep/*`、必要时实体 ID 映射 | 玩家模型和收藏用 EEP；载具/投射物可先用客户端映射，成熟后再按实体扩展属性落地。 |
 | `network/message/*` | `network/message/*` | 把现代 payload 编码拆成 1.7.10 `IMessage`；大文件分块、重试和握手状态写成独立类。 |
 | `client/renderer/*`、`client/event/*` | `client/renderer`、`ClientEventHandler`、`mixin` | 玩家主渲染先复用现有取消原版事件方式；第一人称和特殊层按 1.7.10 渲染 API 重写。 |
@@ -119,7 +119,7 @@
 
 - 先补齐当前 `AnimationRegister` 的状态名和 1.7.10 映射：`climb/climbing` 映射到 1.7.10 ladder 行为；双持依赖 Backhand；1.7.10 无对应原版能力的现代状态保持不可触发。
 - 移植 `AnimationControllerFile`、controller state、blend transition、on_entry/on_exit、sound_effects 的数据结构，但先只在玩家主模型路径启用。
-- 选择一个 Molang 运行时策略：要么扩展当前 `software.bernie.geckolib3.core.molang`，要么并行移植 OpenYSM 的 `molang/runtime` 和 `geckolib3/core/molang`。不要在同一阶段同时替换解析器和渲染器。
+- Molang 运行时随 GeckoLib 独立 Mod 提供：`software.bernie.geckolib3.core.molang` 是引擎在用的旧解析器，`software.bernie.geckolib3.molang` 是 1.20.1 移植的现代引擎。本仓库只保留宿主侧接线，不再 vendor 引擎。
 - 将 OpenYSM 的 query/ysm/ctrl/fn 函数按 1.7.10 能力分级：基础玩家/世界/物品 query 优先，方块标签、附魔等级、相对方块、天气、维度名、输入检测、物理函数后置。
 - 用 `ConditionManager` 继续分类 `hold_*`、`swing_*`、`use_*`、armor 条件动画，新增 `vehicle`、`passenger` 分类时必须有 1.7.10 行为验收。
 
@@ -174,7 +174,7 @@
 
 ## 关键风险与处理
 
-- **不要整包覆盖 GeckoLib。** 当前 `software/bernie/geckolib3` 已为 1.7.10 做了大量适配；OpenYSM 的 GeckoLib 管线依赖现代渲染 API。应以补丁方式移植缺失能力。
+- **GeckoLib 已独立成 Mod，不要在本仓库重新 vendor。** 引擎位于独立仓库（mod id `geckolib`），通过 `libs/geckolib-5.09.52.417-dev.jar` 依赖；本仓库只保留 `com.fox.ysmu` 侧的宿主实现。引擎内部的改动应提交到那个仓库。
 - **新版 binary `.ysm` 几何不是简单旧 JSON。** OpenYSM 反序列化后得到 baked face 数据。若不能无损转换为当前 GeoModel，就必须单独移植 OpenYSM mesh renderer 的核心，而不是继续堆转换脚本。
 - **Capabilities 必须重写。** 1.7.10 不存在现代 Capability 生命周期；玩家持久状态用 EEP，客户端临时状态用 manager/map，实体扩展按需求拆分。
 - **Java 17 语法和 Java 9+ API 要分开处理。** Jabel 可以保留部分现代语法，但不能在 JVM 8 上调用不存在的标准库方法。

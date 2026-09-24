@@ -1,10 +1,6 @@
 package com.fox.ysmu.client.gui.button;
 
-import com.fox.ysmu.eep.ExtendedModelInfo;
-import com.fox.ysmu.network.NetworkHandler;
-import com.fox.ysmu.network.message.OpenModelGuiMessage;
-import com.fox.ysmu.network.message.SetModelAndTexture;
-import com.fox.ysmu.network.message.SetNpcModelAndTexture;
+import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.Minecraft;
@@ -12,7 +8,6 @@ import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.util.ResourceLocation;
-import net.minecraft.entity.player.EntityPlayer;
 import org.lwjgl.opengl.GL11;
 
 import java.util.List;
@@ -21,26 +16,18 @@ public class TextureButton extends GuiButton {
     private final ResourceLocation modelId;
     private final ResourceLocation textureId;
     private final String name;
-    private final EntityPlayer player;
+    private final ModelSelectionTarget target;
 
-    public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, EntityPlayer player) {
+    public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, ModelSelectionTarget target) {
         super(id, pX, pY, 54, 102, "");
         this.modelId = modelId;
         this.textureId = textureId;
         this.name = ModelIdUtil.getSubNameFromId(textureId);
-        this.player = player;
+        this.target = target;
     }
 
     public void doPress() {
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep != null) {
-            eep.setModelAndTexture(modelId, textureId);
-        }
-        if (player.equals(Minecraft.getMinecraft().thePlayer)) {
-            NetworkHandler.CHANNEL.sendToServer(new SetModelAndTexture(modelId, textureId));
-        } else {
-            NetworkHandler.CHANNEL.sendToServer(new SetNpcModelAndTexture(modelId, textureId, OpenModelGuiMessage.CURRENT_NPC_ID));
-        }
+        target.apply(modelId, textureId);
     }
 
     @Override
@@ -66,8 +53,7 @@ public class TextureButton extends GuiButton {
         } else {
             this.drawCenteredString(font, name, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
         }
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        boolean selected = eep != null && textureId.equals(eep.getSelectTexture());
+        boolean selected = textureId.equals(target.getTextureId());
         if (selected || this.field_146123_n) {
             drawBorder(selected ? 0xff_82C56A : 0xff_F3EFE0);
         }

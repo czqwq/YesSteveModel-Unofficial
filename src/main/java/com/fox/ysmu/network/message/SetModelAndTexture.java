@@ -3,7 +3,10 @@ package com.fox.ysmu.network.message;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.util.DeferredWork;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -40,19 +43,27 @@ public class SetModelAndTexture implements IMessage {
         @Override
         public IMessage onMessage(SetModelAndTexture message, MessageContext ctx) {
             EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender != null) {
-                handleEEP(message, sender);
+            if (sender == null) {
+                return null;
             }
+            String model = message.modelId;
+            String texture = message.selectTexture;
+            DeferredWork.server(() -> handleEEP(sender, model, texture));
             return null;
         }
 
-        private void handleEEP(SetModelAndTexture message, EntityPlayerMP sender) {
+        private static void handleEEP(EntityPlayerMP sender, String model, String texture) {
             ExtendedModelInfo modelInfo = ExtendedModelInfo.get(sender);
             if (modelInfo != null) {
-                ResourceLocation modelLoc = message.modelId.isEmpty() ? null : new ResourceLocation(message.modelId);
-                ResourceLocation textureLoc = message.selectTexture.isEmpty() ? null
-                    : new ResourceLocation(message.selectTexture);
+                ResourceLocation modelLoc = model.isEmpty() ? null : new ResourceLocation(model);
+                ResourceLocation textureLoc = texture.isEmpty() ? null : new ResourceLocation(texture);
                 modelInfo.setModelAndTexture(modelLoc, textureLoc);
+            }
+            // The renderer lets an NPC override win over the player's own selection, so an explicit self
+            // selection must drop any stale override for the same player or the picker looks broken.
+            if (NPCData.contains(sender)) {
+                NPCData.remove(sender);
+                NetworkHandler.broadcastNpcDataRemoval(sender, sender.getEntityId());
             }
         }
     }
