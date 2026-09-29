@@ -14,6 +14,7 @@ import net.minecraftforge.common.MinecraftForge;
 import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerItemInHandLayer;
 import com.fox.ysmu.data.EntityModelData;
@@ -31,6 +32,15 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
 
     private GeoModel geoModel;
     private final Set<ResourceLocation> warnedMissingModels = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Non-zero while a preview render (model GUI, model information screen or the HUD overlay) is in progress.
+     * <p>
+     * A preview plays an animation of its own and writes it into the shared {@code GeoModel}, so the world would
+     * inherit that pose afterwards; the preview paths therefore bracket themselves with
+     * {@link #beginPreviewRender()}/{@link #endPreviewRender()} and this renderer restores the pose in between.
+     */
+    private static int previewRenderDepth;
 
     @SuppressWarnings("all")
     public CustomPlayerRenderer() {
@@ -102,8 +112,33 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             return false;
         }
         this.geoModel = geoModel;
-        super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+        // A preview may pose the model however its own animation wants; the world must not inherit that pose.
+        ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
+        try {
+            super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+        } finally {
+            if (pose != null) {
+                pose.restore();
+            }
+        }
         return true;
+    }
+
+    /** Marks the start of a preview render (model GUI, information screen, HUD overlay). */
+    public static void beginPreviewRender() {
+        previewRenderDepth++;
+    }
+
+    /** Marks the end of a preview render; safe with nesting and in a {@code finally}. */
+    public static void endPreviewRender() {
+        if (previewRenderDepth > 0) {
+            previewRenderDepth--;
+        }
+    }
+
+    /** Whether a preview render is currently in progress. */
+    public static boolean isPreviewRendering() {
+        return previewRenderDepth > 0;
     }
 
     /**

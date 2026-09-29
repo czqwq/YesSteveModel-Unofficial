@@ -17,6 +17,7 @@
 /logs/
 options.txt
 /saves/
+/.dsh-vision-router/
 usernamecache.json
 banned-ips.json
 banned-players.json

@@ -94,6 +94,8 @@ Do not perform heavy file IO, encryption/decryption, or model parsing directly o
 
 The model password must be available before cached model files can decrypt. Preserve the `SendModelPassword` before `RequestLoadModel` relationship and the retry behavior in `RequestLoadModel`.
 
+The OpenYSM sync cache is named from the model's own sha256 plus `ModelCacheWriter.OPEN_YSM_BAKE_VERSION`, never from the payload bytes, and its signature check only proves the file belongs to that hash. Bump that constant whenever the baked payload changes meaning - the serializer, `RawYsmModelAdapter`, or which parts of a model the deserializer bakes - because otherwise a payload written by an older build (for example one with no geometry, from before cubes were baked into faces) keeps being served to clients whose cache hashes match as well. That is how ten models stayed invisible across reloads and restarts while a fresh bake and every local test looked correct.
+
 ## Compatibility Notes
 
 Runtime prerequisites are UniMixins, GTNHLib and the separate `geckolib` mod. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
@@ -115,6 +117,8 @@ Preserve existing public names and legacy casing, including the lowercase `ysmu`
 When adding user-facing text, update both `en_US.lang` and `zh_CN.lang`. When adding config fields, update `Config`, the relevant GUI screen if applicable, and translation keys.
 
 When adding model animation states, register names and priorities through `AnimationRegister`/`AnimationManager`, and ensure `ConditionManager.addTest` can classify conditional animation names.
+
+Animation-file expressions are evaluated by the legacy `software.bernie.geckolib3.core.molang.MolangParser` (a `MathBuilder` subclass in `com.eliotlash.mclib.math`), not by the engine's newer MoLang VM, so a Bedrock operator missing from `Operation` breaks a whole channel instead of raising anything visible: `"scale": "v.player_size??1"` failed to tokenise, the channel evaluated to 0 and ten model packs rendered as nothing. Add pack-facing operators to `com.eliotlash.mclib.math.Operation` (the lookup is table-driven) and cover them in `MolangParserCompatibilityTest`.
 
 ## Gradle and Verification
 

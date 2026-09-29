@@ -28,6 +28,18 @@ public final class ModelCacheWriter {
     private static final int OPEN_YSM_SYNC_FORMAT = 32;
 
     /**
+     * Bump this whenever the baked payload changes meaning - the serializer, {@code RawYsmModelAdapter}, or which
+     * parts of a model the deserializer bakes.
+     * <p>
+     * The sync cache file name is derived from the model's own sha256 (see {@link #hashSourceFor}), which says
+     * nothing about the code that baked it. Without this salt a payload written by an older build keeps passing
+     * {@link #isStoredOpenYsmCacheValid} - the signature still matches - and is served to every client whose cache
+     * hashes match as well, so a model can stay invisible across reloads and restarts even after the bug that baked
+     * it was fixed. Bumping the value changes every hash, which re-bakes the payload and makes the client miss.
+     */
+    static final int OPEN_YSM_BAKE_VERSION = 2;
+
+    /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。
      * 短于它的"缓存"一定是坏文件,不允许写盘。
      */
@@ -70,7 +82,7 @@ public final class ModelCacheWriter {
             throw new IllegalStateException("OpenYSM server key is not initialized");
         }
 
-        String hashSource = getHashSource(raw, modelId);
+        String hashSource = hashSourceFor(raw, modelId);
         long[] hashes = YsmCrypt.calculateModelHashes(hashSource, OPEN_YSM_SERVER_KEY);
         String cacheFileName = String.format(Locale.US, "%016x%016x", hashes[0], hashes[1]);
         File target = CACHE_SERVER.resolve(cacheFileName)
@@ -171,15 +183,24 @@ public final class ModelCacheWriter {
         return copy;
     }
 
-    private static String getHashSource(RawYsmModel raw, String modelId) {
+    /**
+     * The content the sync cache hash is derived from.
+     * <p>
+     * The baked payload is identified by the model's own sha256, plus the {@link #OPEN_YSM_BAKE_VERSION}/
+     * {@link #OPEN_YSM_SYNC_FORMAT} pair, so a build that bakes differently produces different hashes for the same
+     * model instead of reusing the older payload.
+     */
+    static String hashSourceFor(RawYsmModel raw, String modelId) {
+        String content;
         if (raw != null && raw.properties != null && raw.properties.sha256 != null
             && !raw.properties.sha256.isEmpty()) {
-            return raw.properties.sha256;
+            content = raw.properties.sha256;
+        } else if (raw != null && raw.modelId != null && !raw.modelId.isEmpty()) {
+            content = raw.modelId;
+        } else {
+            content = modelId;
         }
-        if (raw != null && raw.modelId != null && !raw.modelId.isEmpty()) {
-            return raw.modelId;
-        }
-        return modelId;
+        return OPEN_YSM_BAKE_VERSION + "|" + OPEN_YSM_SYNC_FORMAT + "|" + content;
     }
 
     /** M-09:供 {@code ServerModelManager.reloadPacks()} 判断某个缓存文件本次是否仍被登记。 */

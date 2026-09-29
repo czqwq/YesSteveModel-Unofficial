@@ -170,6 +170,9 @@ public class ClientEventHandler {
 
     private static void renderSelfGuiPlayer(CustomPlayerRenderer renderer, EntityPlayer player) {
         PlayerPreviousRotationSnapshot snapshot = PlayerPreviousRotationSnapshot.capture(player);
+        // This is a preview render, not the world: it plays the pack's preview animation, whose pose must not leak
+        // into the world's own animation state (upstream keeps a separate entity for exactly this reason).
+        CustomPlayerRenderer.beginPreviewRender();
         try {
             syncPreviousRotationsToPreview(player);
             RenderUtil.withGuiEntityLighting(() -> renderer.doRender(
@@ -180,6 +183,7 @@ public class ClientEventHandler {
                 player.rotationYaw,
                 1.0F));
         } finally {
+            CustomPlayerRenderer.endPreviewRender();
             snapshot.restore(player);
         }
     }

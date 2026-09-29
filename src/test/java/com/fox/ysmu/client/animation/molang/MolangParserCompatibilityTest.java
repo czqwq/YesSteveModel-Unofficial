@@ -110,6 +110,34 @@ class MolangParserCompatibilityTest {
     }
 
     @Test
+    void nullCoalescingOperatorParses() throws Exception {
+        // Pack animation channels use Bedrock's `??`: `"scale": "v.player_size??1"` must scale by 1 until the player
+        // picks a size. Without the operator the two '?' characters stayed in the token buffer, parseSymbols saw an
+        // empty symbol ("Index -1 out of bounds for length 0"), the channel evaluated to 0 and the whole model
+        // collapsed to a point - invisible in game while its geometry, texture and registration were all fine.
+        MolangParser parser = new MolangParser();
+
+        assertEquals(1.0D, parser.parseExpression("1??2")
+            .get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("0??2")
+            .get(), 0.0D);
+        // An unset v.* variable reads 0, so the fallback applies.
+        assertEquals(1.0D, parser.parseExpression("v.player_size??1")
+            .get(), 0.0D);
+        // Once the model's own config form sets it, the variable wins.
+        parser.parseExpression("v.player_size=2.5")
+            .get();
+        assertEquals(2.5D, parser.parseExpression("v.player_size??1")
+            .get(), 0.0D);
+        // The same expression through the animation-file entry point.
+        assertEquals(
+            1.0D,
+            parser.parseJson(new com.google.gson.JsonPrimitive("v.never_set_size??1"))
+                .get(),
+            0.0D);
+    }
+
+    @Test
     void booleanLiteralsBehaveAsOneAndZero() throws Exception {
         // AnimationRegister registers them in the client; the raw parser answering 0 for `true` is what made
         // `v.north=true` assign 0.

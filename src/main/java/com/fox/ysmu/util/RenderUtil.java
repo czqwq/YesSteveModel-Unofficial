@@ -319,7 +319,22 @@ public final class RenderUtil {
             IAnimatable animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(modelId, CustomPlayerEntity::new);
             if (animatable instanceof CustomPlayerEntity entity) {
                 consumer.accept(entity);
-                renderModel((double) pPosX, (double) pPosY, (float) pScale, player, modelId, textureId, renderer, entity);
+                // A GUI preview poses the shared model with the pack's preview animation; restore it afterwards so the
+                // world never renders that pose (the port shares one model where upstream has a separate GUI entity).
+                CustomPlayerRenderer.beginPreviewRender();
+                try {
+                    renderModel(
+                        (double) pPosX,
+                        (double) pPosY,
+                        (float) pScale,
+                        player,
+                        modelId,
+                        textureId,
+                        renderer,
+                        entity);
+                } finally {
+                    CustomPlayerRenderer.endPreviewRender();
+                }
             }
         } catch (ExecutionException e) {
             ysmu.LOG.warn("Failed to render the YSM player model in the inventory GUI", e);
