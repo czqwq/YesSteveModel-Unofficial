@@ -54,6 +54,12 @@ public final class FolderFormat {
                     if (dir.equals(rootPath)) {
                         return FileVisitResult.CONTINUE;
                     }
+                    if (isPackRoot(dir)) {
+                        // 包根只是容器：继续下钻去登记包里的模型，但绝不把包根自身登记成模型，否则
+                        // config/ysmu/custom/wine_fox（包根 + 内置写入的 main.json/arm.json/skin.png）
+                        // 会变成一个和包同名的模型，并把包封面 ysm-pack.png 当贴图收进去。
+                        return FileVisitResult.CONTINUE;
+                    }
                     if (Files.isRegularFile(dir.resolve("ysm.json")) && hasOpenYsmRegistration(rootPath, dir)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -129,6 +135,10 @@ public final class FolderFormat {
         Collection<File> textures = FileUtils.listFiles(modelPath.toFile(), new String[] { "png" }, false);
         for (File png : textures) {
             String fileName = png.getName();
+            if (PACK_ICON_FILE_NAME.equals(fileName)) {
+                // 包封面是包自己的资源，不是模型贴图；把它当贴图会让模型默认皮肤变成那张封面。
+                continue;
+            }
             texture.put(fileName, getBytes(modelPath, fileName));
         }
 

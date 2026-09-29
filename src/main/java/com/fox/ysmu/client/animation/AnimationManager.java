@@ -18,6 +18,7 @@ import org.jetbrains.annotations.NotNull;
 import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.data.EntityClips;
@@ -197,6 +198,9 @@ public final class AnimationManager {
         // is published. The player branch publishes the same context in setParserValue, which runs before any
         // controller is evaluated.
         MolangFrameContext.begin(entity);
+        // The pack's own scripts resolve fn.<name> against the frame's model; a non-player animatable never reaches
+        // AnimationRegister#setParserValue, so this is its publish point.
+        PackUserFunctions.begin(event.getAnimatable() == null ? null : event.getAnimatable().getMainModel());
         // Already resolved by whoever owns the animation logic for this entity; replay it verbatim.
         EntityClips.Clip pushed = EntityClips.get(entity);
         if (pushed != null && hasAnimation(event, pushed.getName())) {

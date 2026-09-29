@@ -15,6 +15,7 @@ import org.apache.commons.io.FileUtils;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.OpenYsmSyncInfo;
+import com.fox.ysmu.model.format.ServerPackData;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.C2SCompleteFeedback17;
 import com.fox.ysmu.network.message.S2CModelSyncPayload17;
@@ -37,6 +38,12 @@ public final class OpenYsmModelSyncServer {
      * {@link Config#PLAYER_SYNC_TIMEOUT} to expire.
      */
     static final int SKIP_LENGTH = -1;
+    /**
+     * Cover images inside the packet-03 index share this budget. S3F custom payloads are capped at 32 KB, and the
+     * model index plus ciphertext overhead already use part of it; covers beyond the budget are omitted (the client
+     * falls back to its generic folder tile) instead of producing a packet the client cannot receive.
+     */
+    private static final int PACK_ICON_BUDGET_BYTES = 8 * 1024;
     private static final Map<UUID, PlayerSyncState> SYNC_STATES = Maps.newConcurrentMap();
 
     private OpenYsmModelSyncServer() {}
@@ -272,7 +279,8 @@ public final class OpenYsmModelSyncServer {
                     out.writeVarInt(model.getFormat());
                 }
 
-                out.writeVarInt(0);
+                writePackData(out);
+                // Reserved trailing varint (always 0); see OpenYsmModelSyncClient.readPackData.
                 out.writeVarInt(0);
 
                 YsmCrypt.EncryptedPacket encrypted = YsmCrypt.encrypt(out.toArray(), state.clientNextKey, false);
@@ -282,6 +290,63 @@ public final class OpenYsmModelSyncServer {
             // The model index never reached the client; this 17 round is dead, so drop it.
             clear(playerId);
             ysmu.LOG.warn("Failed to send OpenYSM packet 03 to " + state.playerName, e);
+        }
+    }
+
+    /**
+     * Writes the model pack list that follows the model index in packet 03, in the layout the client already parses
+     * (it used to skip it): folder hierarchy, optional cover, optional name/description, then the locale table.
+     * <p>
+     * Upstream inlines the cover image in this packet. 1.7.10's {@code S3FPacketCustomPayload} only carries 32 KB, so
+     * the covers share a budget and the ones that do not fit are sent without an image (the client then falls back to
+     * its generic folder tile): a server with dozens of packs must not produce a packet the client will drop.
+     */
+    private static void writePackData(YSMByteBuf out) {
+        List<ServerPackData> packs = new ArrayList<>(ServerModelManager.PACKS.values());
+        out.writeVarInt(packs.size());
+        int iconBudget = PACK_ICON_BUDGET_BYTES;
+        boolean droppedIcon = false;
+        for (ServerPackData pack : packs) {
+            out.writeString(pack.hierarchy);
+
+            byte[] icon = pack.icon;
+            if (icon != null && icon.length <= iconBudget) {
+                iconBudget -= icon.length;
+                out.writeVarInt(1);
+                out.writeByteArray(icon);
+                out.writeVarInt(pack.iconWidth);
+                out.writeVarInt(pack.iconHeight);
+                out.writeVarInt(pack.iconFormat);
+                out.writeVarInt(1);
+            } else {
+                droppedIcon |= icon != null;
+                out.writeVarInt(0);
+            }
+
+            if (!pack.name.isEmpty() || !pack.description.isEmpty()) {
+                out.writeVarInt(1);
+                out.writeString(pack.name);
+                out.writeString(pack.description);
+            } else {
+                out.writeVarInt(0);
+            }
+
+            out.writeVarInt(pack.lang.size());
+            for (Map.Entry<String, Map<String, String>> locale : pack.lang.entrySet()) {
+                out.writeString(locale.getKey());
+                Map<String, String> translations = locale.getValue();
+                out.writeVarInt(translations.size());
+                for (Map.Entry<String, String> translation : translations.entrySet()) {
+                    out.writeString(translation.getKey());
+                    out.writeString(translation.getValue());
+                }
+            }
+        }
+        if (droppedIcon) {
+            ysmu.LOG.info(
+                "OpenYSM sync index carries {} pack(s) but only {} bytes of cover images; the rest are sent without a cover",
+                packs.size(),
+                PACK_ICON_BUDGET_BYTES - iconBudget);
         }
     }
 

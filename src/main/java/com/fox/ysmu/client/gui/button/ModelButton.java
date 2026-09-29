@@ -33,7 +33,7 @@ public class ModelButton extends GuiButton {
         this.color = 0xFF_434242;
         this.tooltips = tooltips;
         this.target = target;
-        this.displayString = ModelIdUtil.getModelDisplayName(modelInfo.getLeft());
+        this.displayString = ModelIdUtil.getModelFileName(modelInfo.getLeft());
 
         Minecraft mc = Minecraft.getMinecraft();
         this.guiScale = mc == null ? 1 : new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();

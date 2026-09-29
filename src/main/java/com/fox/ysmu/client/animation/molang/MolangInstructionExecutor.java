@@ -86,7 +86,7 @@ public final class MolangInstructionExecutor {
             ysmu.LOG.warn(
                 "OpenYSM Molang function '{}' is not registered in the 1.7.10 runtime, so instruction '{}' is ignored"
                     + " (function not ported; registered functions are math.*, ysm.first_order, ysm.second_order,"
-                    + " ysm.bone_*, query.position_delta and ctrl.hold)",
+                    + " ysm.bone_*, query.position, query.position_delta and ctrl.hold)",
                 name,
                 statement);
         }

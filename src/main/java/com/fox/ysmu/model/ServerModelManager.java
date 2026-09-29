@@ -25,7 +25,9 @@ import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ModelCacheWriter;
 import com.fox.ysmu.model.format.OpenYsmFormat;
 import com.fox.ysmu.model.format.OpenYsmSyncInfo;
+import com.fox.ysmu.model.format.PackFormat;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.model.format.ServerPackData;
 import com.fox.ysmu.model.format.YsmFormat;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.RequestSyncModel;
@@ -76,6 +78,12 @@ public final class ServerModelManager {
      */
     public static final Map<String, ServerModelInfo> CACHE_NAME_INFO = new ConcurrentHashMap<>();
     public static final Map<String, OpenYsmSyncInfo> OPEN_YSM_SYNC_INFO = new ConcurrentHashMap<>();
+    /**
+     * 包根（含 {@code ysm-pack.json} 的目录）的清单与封面，键是带尾斜杠的层级（例如 {@code wine_fox/}）。
+     * 它让客户端的文件夹格子能显示包自己的名字、描述和封面，而不是目录名 + 通用图标；和
+     * {@link #CACHE_NAME_INFO} 一样在 reload 期间重建、被网络线程读取，所以用并发容器。
+     */
+    public static final Map<String, ServerPackData> PACKS = new ConcurrentHashMap<>();
     public static volatile byte[] OPEN_YSM_SERVER_KEY;
 
     /**
@@ -109,6 +117,19 @@ public final class ServerModelManager {
     public static final String MAIN_ANIMATION_FILE_NAME = "main.animation.json";
     public static final String ARM_ANIMATION_FILE_NAME = "arm.animation.json";
     public static final String EXTRA_ANIMATION_FILE_NAME = "extra.animation.json";
+    /**
+     * OpenYSM 模型包（pack）清单。带有它的目录是一个**包根目录**，里面放的是若干模型目录，
+     * 它自己不是模型 —— 否则 {@code wine_fox/} 这种"包根 + 残留 main.json/arm.json"的目录会被
+     * 注册成一个和包同名的模型，并把包封面 {@link #PACK_ICON_FILE_NAME} 当成模型贴图。
+     */
+    public static final String PACK_INFO_FILE_NAME = "ysm-pack.json";
+    /** 包封面图，和清单同级；它永远不是模型贴图。 */
+    public static final String PACK_ICON_FILE_NAME = "ysm-pack.png";
+
+    /** 该目录是否是 OpenYSM 包根（含 {@code ysm-pack.json}），即"装模型的文件夹"而不是模型本身。 */
+    public static boolean isPackRoot(Path dir) {
+        return dir != null && Files.isRegularFile(dir.resolve(PACK_INFO_FILE_NAME));
+    }
 
     public static void sendRequestSyncModelMessage(List<EntityPlayer> playerList) {
         for (EntityPlayer player : playerList) {
@@ -170,6 +191,7 @@ public final class ServerModelManager {
     private static void clearModelCaches() {
         CACHE_NAME_INFO.clear();
         OPEN_YSM_SYNC_INFO.clear();
+        PACKS.clear();
     }
 
     private static void createConfigDirectories() {
@@ -248,6 +270,10 @@ public final class ServerModelManager {
 
     private static void rebuildModelCaches() {
         // M-18:单个模型/单个扫描器失败不得让整次 reload 中断；每一步单独兜底。
+        // 包清单先扫：它只读 ysm-pack.json/png，既不影响下面的模型登记，也让 GUI 的文件夹格子在模型到达前
+        // 就已有名字与封面。
+        runCacheStep("packs (built)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+        runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
         runCacheStep("OpenYSM (built)", () -> OpenYsmFormat.cacheAllModels(BUILT));
         runCacheStep("OpenYSM (custom)", () -> OpenYsmFormat.cacheAllModels(CUSTOM));
         runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
@@ -263,9 +289,31 @@ public final class ServerModelManager {
         }
     }
 
+    /**
+     * 内置模型解压的目标目录。当用户把同名目录换成 OpenYSM 包（含 {@link #PACK_INFO_FILE_NAME}）时返回
+     * {@code null}，表示本次不要写内置文件：包根本身不是模型，往里面塞 {@code main.json}/{@code arm.json}
+     * 只会在用户的包目录里留下一个和包同名的旧模型残骸（这正是 {@code custom/wine_fox} 出现
+     * "文件夹格 + 同名模型格"的原因）。
+     */
+    private static Path builtInModelTarget(String modelDirectory) {
+        Path target = CUSTOM.resolve(modelDirectory);
+        if (isPackRoot(target)) {
+            ysmu.LOG.info(
+                "Skipping built-in model {}: {} is an OpenYSM pack root ({} present), so the pack owns this directory",
+                modelDirectory,
+                target,
+                PACK_INFO_FILE_NAME);
+            return null;
+        }
+        createFolder(target);
+        return target;
+    }
+
     private static void copyDefaultModel(List<Pattern> blacklist) {
-        Path defaultPath = CUSTOM.resolve("default");
-        createFolder(defaultPath);
+        Path defaultPath = builtInModelTarget("default");
+        if (defaultPath == null) {
+            return;
+        }
 
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/default/main.json"), defaultPath, MAIN_MODEL_FILE_NAME);
@@ -289,8 +337,10 @@ public final class ServerModelManager {
         if (isBlacklisted(blacklist, "default_boy")) {
             return;
         }
-        Path defaultBoyPath = CUSTOM.resolve("default_boy");
-        createFolder(defaultBoyPath);
+        Path defaultBoyPath = builtInModelTarget("default_boy");
+        if (defaultBoyPath == null) {
+            return;
+        }
 
         GetJarResources.copyYesSteveModelFile(
             getCustomFiles("custom/default_boy/main.json"),
@@ -317,8 +367,10 @@ public final class ServerModelManager {
         if (isBlacklisted(blacklist, "steve")) {
             return;
         }
-        Path stevePath = CUSTOM.resolve("steve");
-        createFolder(stevePath);
+        Path stevePath = builtInModelTarget("steve");
+        if (stevePath == null) {
+            return;
+        }
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/steve/main.json"), stevePath, MAIN_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/steve/arm.json"), stevePath, ARM_MODEL_FILE_NAME);
@@ -334,8 +386,10 @@ public final class ServerModelManager {
         if (isBlacklisted(blacklist, "alex")) {
             return;
         }
-        Path alexPath = CUSTOM.resolve("alex");
-        createFolder(alexPath);
+        Path alexPath = builtInModelTarget("alex");
+        if (alexPath == null) {
+            return;
+        }
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/main.json"), alexPath, MAIN_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/arm.json"), alexPath, ARM_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/gsl.png"), alexPath, "gsl.png");
@@ -349,8 +403,10 @@ public final class ServerModelManager {
         if (isBlacklisted(blacklist, "qingluka")) {
             return;
         }
-        Path qinglukaPath = CUSTOM.resolve("qingluka");
-        createFolder(qinglukaPath);
+        Path qinglukaPath = builtInModelTarget("qingluka");
+        if (qinglukaPath == null) {
+            return;
+        }
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/qingluka/main.json"), qinglukaPath, MAIN_MODEL_FILE_NAME);
         GetJarResources
@@ -363,8 +419,10 @@ public final class ServerModelManager {
         if (isBlacklisted(blacklist, "wine_fox")) {
             return;
         }
-        Path wineFoxPath = CUSTOM.resolve("wine_fox");
-        createFolder(wineFoxPath);
+        Path wineFoxPath = builtInModelTarget("wine_fox");
+        if (wineFoxPath == null) {
+            return;
+        }
 
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/wine_fox/main.json"), wineFoxPath, MAIN_MODEL_FILE_NAME);

@@ -4,15 +4,21 @@ import java.io.File;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientModelMetadataRegistry;
+import com.fox.ysmu.client.ClientPackInfo;
+import com.fox.ysmu.client.ClientPackRegistry;
+import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
@@ -45,6 +51,12 @@ public final class OpenYsmModelSyncClient {
     private static final int MAX_MODEL_CACHE_BYTES = 64 * 1024 * 1024;
     /** N-06: sane upper bound for the model count advertised in the server index. */
     private static final int MAX_SERVER_MODELS = 100_000;
+    /** N-06: sane upper bound for the pack count advertised in the server index. */
+    private static final int MAX_SERVER_PACKS = 4096;
+    /** N-06: a pack cover is a tile image; anything far larger than a texture atlas is not one. */
+    private static final int MAX_PACK_ICON_BYTES = 1024 * 1024;
+    private static final int MAX_PACK_LANGUAGES = 64;
+    private static final int MAX_PACK_TRANSLATIONS = 512;
 
     private static final Map<UUID, ServerModelContext> SERVER_MODELS = Maps.newConcurrentMap();
 
@@ -213,8 +225,12 @@ public final class OpenYsmModelSyncClient {
             }
         }
 
-        skipPackData(buf);
+        List<ClientPackInfo> packs = readPackData(buf);
         sendPacket04(modelsToRequest);
+        // Pack covers become GL textures, so publishing the packs has to happen on the client thread. Sending the
+        // model requests first keeps the download going while that is queued.
+        Minecraft.getMinecraft()
+            .func_152344_a(() -> ClientPackRegistry.accept(packs));
     }
 
     private static void handlePacket05(YSMByteBuf buf) throws Exception {
@@ -362,8 +378,19 @@ public final class OpenYsmModelSyncClient {
                 return false;
             }
             ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, context.modelId);
+            // The information screen's author avatars are part of this payload; hand them over together with the
+            // model so the screen has them as soon as the model itself is selectable.
+            ResourceLocation modelId = new ResourceLocation(ysmu.MODID, context.modelId);
+            List<RawYsmModel.RawMetadata.Author> authors = raw.metadata == null
+                ? Collections.emptyList() : new ArrayList<>(raw.metadata.authors);
             Minecraft.getMinecraft()
-                .func_152344_a(() -> ClientModelManager.registerAll(data));
+                .func_152344_a(() -> {
+                    ClientModelManager.registerAll(data);
+                    ClientModelMetadataRegistry.acceptStructuredAuthors(modelId, authors);
+                    // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
+                    // own scripts (fn.<name>) can be evaluated while it renders.
+                    PackUserFunctions.register(modelId, raw.functionFiles);
+                });
             return true;
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to parse OpenYSM synced model " + context.modelId, e);
@@ -371,30 +398,64 @@ public final class OpenYsmModelSyncClient {
         }
     }
 
-    private static void skipPackData(YSMByteBuf buf) {
+    /**
+     * Parses the model pack list that follows the model index: folder hierarchy, optional cover, optional
+     * name/description, then the locale table. The layout is the one upstream's {@code ModelPackData} uses; the port
+     * used to skip these bytes, which is why folder tiles could only show their directory name.
+     * <p>
+     * The peer's sizes are treated as untrusted (N-06): the pack count is bounded, and a cover larger than any
+     * sensible tile is dropped rather than allocated.
+     */
+    private static List<ClientPackInfo> readPackData(YSMByteBuf buf) {
         int packCount = buf.readVarInt();
+        if (packCount < 0 || packCount > MAX_SERVER_PACKS) {
+            throw new IllegalStateException("Invalid OpenYSM pack index size: " + packCount);
+        }
+        List<ClientPackInfo> packs = new ArrayList<>(packCount);
         for (int i = 0; i < packCount; i++) {
-            buf.readString();
+            String hierarchy = buf.readString();
+
+            byte[] icon = null;
             if (buf.readVarInt() != 0) {
-                buf.readByteArray();
+                byte[] iconBytes = buf.readByteArray();
+                // width, height, image format and one unknown flag; the client only needs the bytes.
                 buf.readVarInt();
                 buf.readVarInt();
                 buf.readVarInt();
                 buf.readVarInt();
-            }
-            if (buf.readVarInt() != 0) {
-                buf.readString();
-                buf.readString();
-            }
-            int languageCount = buf.readVarInt();
-            for (int lang = 0; lang < languageCount; lang++) {
-                buf.readString();
-                int translationCount = buf.readVarInt();
-                for (int entry = 0; entry < translationCount; entry++) {
-                    buf.readString();
-                    buf.readString();
+                if (iconBytes != null && iconBytes.length <= MAX_PACK_ICON_BYTES) {
+                    icon = iconBytes;
+                } else {
+                    ysmu.LOG.warn("Ignoring oversized cover of model pack {} ({} bytes)", hierarchy,
+                        iconBytes == null ? -1 : iconBytes.length);
                 }
             }
+
+            String name = "";
+            String description = "";
+            if (buf.readVarInt() != 0) {
+                name = buf.readString();
+                description = buf.readString();
+            }
+
+            Map<String, Map<String, String>> lang = Maps.newHashMap();
+            int languageCount = buf.readVarInt();
+            if (languageCount < 0 || languageCount > MAX_PACK_LANGUAGES) {
+                throw new IllegalStateException("Invalid OpenYSM pack language count: " + languageCount);
+            }
+            for (int language = 0; language < languageCount; language++) {
+                String locale = buf.readString();
+                int translationCount = buf.readVarInt();
+                if (translationCount < 0 || translationCount > MAX_PACK_TRANSLATIONS) {
+                    throw new IllegalStateException("Invalid OpenYSM pack translation count: " + translationCount);
+                }
+                Map<String, String> translations = Maps.newHashMap();
+                for (int entry = 0; entry < translationCount; entry++) {
+                    translations.put(buf.readString(), buf.readString());
+                }
+                lang.put(locale, translations);
+            }
+            packs.add(new ClientPackInfo(hierarchy, name, description, lang, icon));
         }
         if (buf.getRawBuf()
             .readableBytes() > 0) {
@@ -402,6 +463,7 @@ public final class OpenYsmModelSyncClient {
             // signalled through it: ServerModelManager sends the legacy request unconditionally.
             buf.readVarInt();
         }
+        return packs;
     }
 
     private static File getCacheDir() {

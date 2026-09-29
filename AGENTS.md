@@ -80,9 +80,11 @@ Folder models live under `config/ysmu/custom/<model name>` and must include `mai
 
 `.ysm` files in `config/ysmu/custom` are also scanned. Only files containing `main.json`, `arm.json`, and at least one `.png` are cached.
 
+Model images are normalised to PNG while a model is parsed. `ModelImageConverter` decodes BMP/JPEG/WebP/AVIF with the decoders vendored in `libs/ImageStream--SNAPSHOT.jar` (the library upstream OpenYSM declares as `com.github.OpenYSM:ImageStream`) and re-encodes them as PNG, mirroring upstream's `YSMClientMapper`; PNG is passed through untouched and an undecodable image is kept as-is with one warning per format. Clients therefore only ever receive PNG, and `ClientModelMetadataRegistry` keeps its own format guard for older caches. That jar is embedded into the mod jar unrelocated by the block at the end of `dependencies.gradle`, because the GTNH convention relocates `shadowImplementation` dependencies to `com/fox/ysmu/shadow/...`, which would break both the direct decoder calls and the `META-INF/services/javax.imageio.spi.*` names.
+
 `ModelIdUtil` normalizes model names for `ResourceLocation`. Safe ids match `[a-z0-9._-]+`; unsafe names are encoded as `_name_` plus UTF-8 hex. Use `ModelIdUtil` helpers instead of hand-building model, main, arm, or texture ids.
 
-Built-in model assets in `src/main/resources/assets/ysmu/custom` are copied into the runtime config directory on reload. Be careful when changing these assets because the runtime reload path intentionally overwrites the built-in copies.
+Built-in model assets in `src/main/resources/assets/ysmu/custom` are copied into the runtime config directory on reload. Be careful when changing these assets because the runtime reload path intentionally overwrites the built-in copies. The one exception is a directory the user replaced with an OpenYSM model pack: when `config/ysmu/custom/<name>/ysm-pack.json` exists, the built-in copy for that name is skipped and logged (`ServerModelManager.builtInModelTarget`) and the directory counts as a pack root, not a model (`ServerModelManager.isPackRoot`). A pack root holds model directories, its `ysm-pack.png` is a cover and never a model texture, and its `ysm-pack.json` (name/description/lang) travels to clients in the OpenYSM sync index so the model selection GUI can label the folder with the pack's own name and cover.
 
 ## Network and Threading Rules
 

@@ -15,6 +15,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.data.ModelData;
+import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
 import com.fox.ysmu.model.resource.YSMBinaryDeserializer;
 import com.fox.ysmu.model.resource.YSMFolderDeserializer;
@@ -40,6 +41,10 @@ public final class OpenYsmFormat {
                 @Override
                 public FileVisitResult preVisitDirectory(@NotNull Path dir, @NotNull BasicFileAttributes attrs) {
                     if (dir.equals(rootPath)) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                    if (ServerModelManager.isPackRoot(dir)) {
+                        // 包根本身不是模型（即使里面还残留 ysm.json）；继续下钻登记包内模型。
                         return FileVisitResult.CONTINUE;
                     }
                     if (!Files.isRegularFile(dir.resolve("ysm.json")) || !YSMFolderDeserializer.isModelFolder(dir)) {

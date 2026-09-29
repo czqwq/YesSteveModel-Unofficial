@@ -15,7 +15,12 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.animation.molang.QueryIsItemNameAnyFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
+import com.fox.ysmu.client.animation.molang.QueryPositionFunction;
+import com.fox.ysmu.client.animation.molang.YsmParticleFunction;
+import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
@@ -97,7 +102,18 @@ public class AnimationRegister {
         molangVariablesRegistered = true;
         MolangParser parser = GeckoLibCache.getInstance().parser;
         parser.functions.put("query.position_delta", QueryPositionDeltaFunction.class);
+        parser.functions.put("query.position", QueryPositionFunction.class);
+        parser.functions.put("query.is_item_name_any", QueryIsItemNameAnyFunction.class);
+        parser.functions.put("ysm.particle", YsmParticleFunction.class);
+        parser.functions.put("ysm.relative_block_name", YsmRelativeBlockNameFunction.class);
+        parser.functions.put("ysm.relative_block_name_any", YsmRelativeBlockNameFunction.class);
         parser.functions.put("ctrl.hold", CtrlHoldFunction.class);
+        // fn.<name> 的函数体随模型而定（pack 的 functions/*.molang），无法静态注册一个类，交给动态解析。
+        PackUserFunctions.installResolver(parser);
+        // Bedrock 的布尔字面量：OpenYSM 的 pack 脚本会写 v.x=true / false，而本解析器把它们当普通变量（默认 0）。
+        // 注册成 1/0 之后，赋值与判断才和上游一致。
+        parser.register(new LazyVariable("true", 1));
+        parser.register(new LazyVariable("false", 0));
         registerQueryVariables(parser);
         registerYsmVariables(parser);
     }
@@ -212,6 +228,10 @@ public class AnimationRegister {
         // scope in CustomPlayerModel#setMolangQueries, but it exposes no accessor for the animatable, so
         // query.position_delta(axis) and the animation-file ctrl.hold read the entity from here.
         MolangFrameContext.begin(player);
+        // Same reason, for the pack's own scripts: fn.<name> resolves against the model being rendered.
+        PackUserFunctions.begin(
+            animationEvent.getAnimatable() == null ? null : animationEvent.getAnimatable()
+                .getMainModel());
         RemotePlayerAnimationQueries.QueryValues queryValues = RemotePlayerAnimationQueries
             .get(animationEvent, player, data.netHeadYaw);
         setEntityQueryValues(parser, data, player, mc, queryValues);

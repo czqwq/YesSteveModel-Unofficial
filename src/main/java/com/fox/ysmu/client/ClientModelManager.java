@@ -29,6 +29,7 @@ import org.apache.commons.lang3.StringUtils;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
+import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.client.texture.OuterFileTexture;
 import com.fox.ysmu.data.ModelData;
@@ -224,6 +225,9 @@ public class ClientModelManager {
                     Pair.of(rawGeometryTree.properties.getHeightScale(), rawGeometryTree.properties.getWidthScale()));
                 ExtraInfo extraInfo = rawGeometryTree.properties.getExtraInfo();
                 EXTRA_INFO.put(id, handleExtraInfo(id, extraInfo));
+                // The information screen wants the same block, keyed by the model rather than by its main/arm
+                // sub-model. The richer author list (with avatars) arrives separately over the OpenYSM channel.
+                ClientModelMetadataRegistry.acceptExtraInfo(ModelIdUtil.getParentModelId(id), extraInfo);
                 if (extraInfo != null && extraInfo.getExtraAnimationNames() != null
                     && extraInfo.getExtraAnimationNames().length > 0) {
                     EXTRA_ANIMATION_NAME.put(id, extraInfo.getExtraAnimationNames());
@@ -622,6 +626,11 @@ public class ClientModelManager {
         // The content signatures describe exactly the models being dropped here, so they go with them; otherwise a
         // model that is still identical to the previous server's copy would be skipped into an empty cache.
         REGISTERED_MODEL_CONTENT.clear();
+        // The pack table belongs to the server whose models are being dropped; keeping it would label the next
+        // server's folders with the previous server's names and cover art.
+        ClientPackRegistry.clear();
+        ClientModelMetadataRegistry.clear();
+        PackUserFunctions.clear();
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();
         MolangPhysicsRuntime.clear();

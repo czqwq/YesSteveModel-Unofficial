@@ -1,7 +1,5 @@
 package com.fox.ysmu.model.resource;
 
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -17,9 +15,8 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Stream;
 
-import javax.imageio.ImageIO;
-
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.ysmu;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -348,28 +345,28 @@ public class YSMFolderDeserializer implements AutoCloseable {
         if (data == null) {
             return;
         }
-        ImageMeta meta = parseImageMeta(data);
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, path);
         RawYsmModel.RawTexture.SubTexture subTexture = new RawYsmModel.RawTexture.SubTexture();
         subTexture.specularType = specularType;
-        subTexture.hash = sha256Hex(data);
-        subTexture.width = meta.width;
-        subTexture.height = meta.height;
-        subTexture.imageFormat = meta.format;
-        subTexture.data = data;
+        subTexture.hash = sha256Hex(converted.data);
+        subTexture.width = converted.width;
+        subTexture.height = converted.height;
+        subTexture.imageFormat = converted.format;
+        subTexture.data = converted.data;
         subTexture.unknownFlag = 1;
         texture.subTextures.add(subTexture);
     }
 
     private RawYsmModel.RawTexture parseTexture(String path, byte[] data) throws IOException {
-        ImageMeta meta = parseImageMeta(data);
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, path);
         RawYsmModel.RawTexture texture = new RawYsmModel.RawTexture();
         texture.name = extractFileName(path);
         texture.sourceFileName = extractFileNameWithExtension(path);
-        texture.hash = sha256Hex(data);
-        texture.width = meta.width;
-        texture.height = meta.height;
-        texture.imageFormat = meta.format;
-        texture.data = data;
+        texture.hash = sha256Hex(converted.data);
+        texture.width = converted.width;
+        texture.height = converted.height;
+        texture.imageFormat = converted.format;
+        texture.data = converted.data;
         texture.unknownFlag = 1;
         return texture;
     }
@@ -401,37 +398,44 @@ public class YSMFolderDeserializer implements AutoCloseable {
 
         int index = 0;
         for (JsonObject item : items) {
-            RawYsmModel.RawSubEntity sub = new RawYsmModel.RawSubEntity();
-            sub.identifier = getStr(item, "__temp_identifier", defaultIdentifier + "_" + index);
-            if (item.has("match")) {
-                sub.matchIds = readStringArray(item.get("match"));
-            }
-            if (item.has("model")) {
-                byte[] modelData = readResource(item.get("model").getAsString());
-                if (modelData != null) {
-                    sub.model = parseGeometry(modelData, 0, item.get("model").getAsString());
+            // 单个子实体（载具/投掷物）失败不得拖垮整个玩家模型：01_taisho_maid 的 models/foxcar.json 声明
+            // format_version 1.21.0，以前会让整只"酒狐"从模型列表里消失；现在只丢这一个子实体。
+            String identifier = getStr(item, "__temp_identifier", defaultIdentifier + "_" + index);
+            try {
+                RawYsmModel.RawSubEntity sub = new RawYsmModel.RawSubEntity();
+                sub.identifier = identifier;
+                if (item.has("match")) {
+                    sub.matchIds = readStringArray(item.get("match"));
                 }
-            }
-            if (item.has("texture")) {
-                for (JsonElement textureElem : asIterable(item.get("texture"))) {
-                    parseTextureReference(textureElem, sub.textures);
-                }
-            }
-            if (item.has("animation")) {
-                for (JsonElement animElem : asIterable(item.get("animation"))) {
-                    if (!animElem.isJsonPrimitive()) {
-                        continue;
-                    }
-                    byte[] animData = readResource(animElem.getAsString());
-                    if (animData != null) {
-                        RawYsmModel.RawAnimationFile animationFile = parseAnimations(animData);
-                        animationFile.sourceJson = animData;
-                        animationFile.fileHash = sha256Hex(animData);
-                        sub.animationFiles.put(extractFileName(animElem.getAsString()), animationFile);
+                if (item.has("model")) {
+                    byte[] modelData = readResource(item.get("model").getAsString());
+                    if (modelData != null) {
+                        sub.model = parseGeometry(modelData, 0, item.get("model").getAsString());
                     }
                 }
+                if (item.has("texture")) {
+                    for (JsonElement textureElem : asIterable(item.get("texture"))) {
+                        parseTextureReference(textureElem, sub.textures);
+                    }
+                }
+                if (item.has("animation")) {
+                    for (JsonElement animElem : asIterable(item.get("animation"))) {
+                        if (!animElem.isJsonPrimitive()) {
+                            continue;
+                        }
+                        byte[] animData = readResource(animElem.getAsString());
+                        if (animData != null) {
+                            RawYsmModel.RawAnimationFile animationFile = parseAnimations(animData);
+                            animationFile.sourceJson = animData;
+                            animationFile.fileHash = sha256Hex(animData);
+                            sub.animationFiles.put(extractFileName(animElem.getAsString()), animationFile);
+                        }
+                    }
+                }
+                targetMap.put(sub.identifier, sub);
+            } catch (Exception e) {
+                ysmu.LOG.warn("Skipping {} '{}' of model {}: it cannot be parsed", defaultIdentifier, identifier, e);
             }
-            targetMap.put(sub.identifier, sub);
             index++;
         }
     }
@@ -1060,32 +1064,18 @@ public class YSMFolderDeserializer implements AutoCloseable {
     }
 
     private RawYsmModel.RawImage parseImage(String name, byte[] data) throws IOException {
-        ImageMeta meta = parseImageMeta(data);
+        // Normalise to PNG here, where every image of an OpenYSM model is read, so both sync channels and the
+        // server cache only ever carry PNG (upstream does the same when it maps a model for the client).
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, name);
         RawYsmModel.RawImage image = new RawYsmModel.RawImage();
         image.name = name;
-        image.data = data;
-        image.width = meta.width;
-        image.height = meta.height;
-        image.format = meta.format;
+        image.data = converted.data;
+        image.width = converted.width;
+        image.height = converted.height;
+        image.format = converted.format;
         image.unknownFlag = 1;
-        image.isPng = meta.format == 2;
+        image.isPng = converted.isPng();
         return image;
-    }
-
-    private static ImageMeta parseImageMeta(byte[] data) throws IOException {
-        int format = detectFormat(data);
-        if (format == 2 && data.length >= 24) {
-            int width = ((data[16] & 0xFF) << 24) | ((data[17] & 0xFF) << 16) | ((data[18] & 0xFF) << 8)
-                | (data[19] & 0xFF);
-            int height = ((data[20] & 0xFF) << 24) | ((data[21] & 0xFF) << 16) | ((data[22] & 0xFF) << 8)
-                | (data[23] & 0xFF);
-            return new ImageMeta(width, height, format);
-        }
-        BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
-        if (image != null) {
-            return new ImageMeta(image.getWidth(), image.getHeight(), format);
-        }
-        return new ImageMeta(0, 0, format);
     }
 
     public static int detectFormat(byte[] data) {
@@ -1428,18 +1418,6 @@ public class YSMFolderDeserializer implements AutoCloseable {
             out[0] = x;
             out[1] = rotatedY;
             out[2] = z;
-        }
-    }
-
-    private static final class ImageMeta {
-        private final int width;
-        private final int height;
-        private final int format;
-
-        private ImageMeta(int width, int height, int format) {
-            this.width = width;
-            this.height = height;
-            this.format = format;
         }
     }
 }
