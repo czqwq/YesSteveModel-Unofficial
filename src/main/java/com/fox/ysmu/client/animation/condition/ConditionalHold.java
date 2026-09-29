@@ -11,11 +11,10 @@ import net.minecraftforge.oredict.OreDictionary;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.google.common.collect.Lists;
 
-import cpw.mods.fml.common.registry.GameRegistry;
-
 public class ConditionalHold {
 
-    // TODO 矿辞测试
+    // S-03: the old "ore-dictionary still to be tested" marker is resolved - the ore-dictionary path below is
+    // implemented (`doOreDictTest`, using OreDictionary instead of the 1.20.1 item tags).
     // 在 YesSteveModel 项目中，这些 Minecraft 标签文件（swords.json, axes.json, pickaxes.json, shovels.json, hoes.json,
     // tools.json）主要用于动画系统的条件判断。
     // 1.动画条件系统：
@@ -30,6 +29,12 @@ public class ConditionalHold {
     // ·当玩家手持任何类型的镐（通过 pickaxes.json 标签定义）时，可能会触发特定的挖掘动画。
     // ·通过使用这些标签，项目可以更灵活地管理动画系统，而不需要为每种具体物品单独编写代码。当 Minecraft 添加新物品或模组添加新物品时，只要它们正确地添加到相应的标签中，动画系统就会自动支持它们。
     private static final String EMPTY = "";
+    // A-01: 1.20.1's ConditionHold answers these two names for an empty hand (EMPTY_MAINHAND/EMPTY_OFFHAND there);
+    // the 1.7.10 port returned "" instead, which is why `hold_mainhand:empty` / `hold_offhand:empty` - names the
+    // shipped and third-party packs do use - were unreachable.
+    private static final String EMPTY_MAINHAND = "hold_mainhand:empty";
+    private static final String EMPTY_OFFHAND = "hold_offhand:empty";
+    private final String emptyName;
     private final int preSize;
     private final String idPre;
     private final String oreDictPre; // 在1.7.10中，我们用它来表示矿物词典的前缀
@@ -46,11 +51,13 @@ public class ConditionalHold {
             idPre = "hold_mainhand$";
             oreDictPre = "hold_mainhand#";
             extraPre = "hold_mainhand:";
+            emptyName = EMPTY_MAINHAND;
             preSize = 14;
         } else {
             idPre = "hold_offhand$";
             oreDictPre = "hold_offhand#";
             extraPre = "hold_offhand:";
+            emptyName = EMPTY_OFFHAND;
             preSize = 13;
         }
     }
@@ -62,8 +69,9 @@ public class ConditionalHold {
         String substring = name.substring(preSize);
         if (name.startsWith(idPre)) {
             // 1.7.10: 简单验证格式即可，不再有 isValidResourceLocation 方法
+            // D-A3: normalised to the same lower-case form InnerClassify.registryId returns
             if (substring.contains(":")) {
-                idTest.add(substring);
+                idTest.add(substring.toLowerCase(Locale.ROOT));
             }
         }
         if (name.startsWith(oreDictPre)) {
@@ -90,7 +98,10 @@ public class ConditionalHold {
 
     public String doTest(EntityPlayer player, boolean isMainHand) {
         if (BackhandCompat.getItemInHand(player, isMainHand) == null) {
-            return EMPTY;
+            // A-01: an empty hand answers `hold_mainhand:empty` / `hold_offhand:empty`, matching 1.20.1.
+            // AnimationManager#playIfPresent (D-A5) only plays it when the model actually defines it, so models
+            // without the clip simply stop instead of driving AnimationController into its missing-animation branch.
+            return emptyName;
         }
         String result = doIdTest(player, isMainHand);
         if (result.isEmpty()) {
@@ -107,13 +118,10 @@ public class ConditionalHold {
             return EMPTY;
         }
         ItemStack itemInHand = BackhandCompat.getItemInHand(player, isMainHand);
-        // 1.7.10: 使用 GameRegistry 获取物品的唯一标识符
-        GameRegistry.UniqueIdentifier uid = GameRegistry.findUniqueIdentifierFor(itemInHand.getItem());
-        if (uid == null) {
-            return EMPTY;
-        }
-        String registryName = uid.toString(); // 格式为 "modid:name"
-        if (idTest.contains(registryName)) {
+        // D-A3: the single shared "item -> registry id" lookup (lower-case "modid:name"); addTest stores the
+        // same normalised form, so the comparison no longer depends on the two sides agreeing on casing.
+        String registryName = InnerClassify.registryId(itemInHand);
+        if (!registryName.isEmpty() && idTest.contains(registryName)) {
             return idPre + registryName;
         }
         return EMPTY;

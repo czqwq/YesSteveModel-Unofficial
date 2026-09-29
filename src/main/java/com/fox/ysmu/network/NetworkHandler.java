@@ -3,6 +3,8 @@ package com.fox.ysmu.network;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.network.NetHandlerPlayServer;
+import net.minecraft.network.NetworkManager;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Tags;
@@ -21,12 +23,33 @@ public final class NetworkHandler {
      * Wire format version, exchanged by {@link com.fox.ysmu.network.message.HandshakeMessage}. Bump it
      * whenever an existing packet's layout changes; 1.7.10's SimpleNetworkWrapper does no negotiation of its
      * own, so a mismatched client would otherwise decode packets with the wrong layout.
+     * <p>
+     * History:
+     * <ul>
+     * <li>1: initial wire layout.</li>
+     * <li>2: the OpenYSM 17-protocol envelope ({@code C2S/S2CModelSyncPayload17}) and its feedback
+     * ({@code C2SCompleteFeedback17}) gained a leading {@code int sessionId} (N-11), and the trailing varint of
+     * packet 03 now carries the legacy model count. An old peer would decode those packets at the wrong offsets,
+     * so the handshake has to reject the pair. Version 2 also introduces the new serverbound id 98
+     * ({@code RevokeModelGuiGrant}, NF-01), which only exists in this build.</li>
+     * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 1;
+    public static final int NETWORK_PROTOCOL = 2;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
     // Packet ids are part of the wire protocol. Add new ids; do not renumber existing ones.
+    //
+    // N-10 note (read before touching any packet):
+    //  * A packet whose fromBytes()/onMessage() throws is NOT ignored. FMLProxyPacket.processPacket catches
+    //    Throwable and calls NetworkDispatcher.rejectHandshake -> kickWithMessage, so a malformed payload or an
+    //    unknown discriminator disconnects the player. Every decoder therefore validates lengths against
+    //    readableBytes() and soft-fails (drop the packet + warn) instead of throwing, and every handler body is
+    //    wrapped in try/catch. SimpleNetworkWrapper does no version negotiation (see NETWORK_PROTOCOL above).
+    //  * DeferredWork only protects the body of a handler that explicitly hops to the game thread
+    //    (HandshakeMessage / OpenModelGuiMessage / SetModelAndTexture / SetNpcModelAndTexture); it does not cover
+    //    fromBytes() and it does not cover handlers that run inline, so it is not a substitute for the soft-fail
+    //    and try/catch rules.
     private static final int SERVERBOUND_SYNC_MODEL_FILES = 0;
     private static final int SERVERBOUND_SET_MODEL_AND_TEXTURE = 5;
     private static final int SERVERBOUND_SET_PLAY_ANIMATION = 7;
@@ -35,14 +58,31 @@ public final class NetworkHandler {
     private static final int SERVERBOUND_OPENYSM_VERSION_CHECK_17 = 15;
     private static final int SERVERBOUND_OPENYSM_COMPLETE_FEEDBACK_17 = 16;
     private static final int SERVERBOUND_HANDSHAKE = 97;
+    /**
+     * NF-01: client to server, drop the model-selection grant the server handed out for one entity. The client
+     * hook exists ({@code PlayerModelScreen.onGuiClosed} reads {@code ModelSelectionTarget.getGrantId()}) but does
+     * not send anything yet, because the send line lives in {@code client/gui/**}, outside this task's inScope.
+     * The id is appended after 97; nothing existing is renumbered.
+     */
+    private static final int SERVERBOUND_REVOKE_MODEL_GUI_GRANT = 98;
 
     private static final int CLIENTBOUND_SEND_MODEL_FILE = 1;
     private static final int CLIENTBOUND_REQUEST_SYNC_MODEL = 2;
     private static final int CLIENTBOUND_REQUEST_LOAD_MODEL = 3;
     private static final int CLIENTBOUND_SYNC_MODEL_INFO = 4;
     private static final int CLIENTBOUND_SYNC_STAR_MODELS = 8;
+    /**
+     * N-09 (deprecated): id 10 has no sender anywhere in this repository (the model-management GUI it belonged
+     * to was never wired on 1.7.10). The id stays reserved and must NOT be renumbered or reused; the handler is a
+     * documented no-op. Re-wiring it needs a sender plus a client screen, which is a new feature, not a fix.
+     */
     private static final int CLIENTBOUND_REQUEST_SERVER_MODEL_INFO = 10;
     private static final int CLIENTBOUND_SYNC_PLAYER_MOTION_STATE = 11;
+    /**
+     * N-09 (deprecated): id 12 has no sender either; {@code UploadManager} is an unwired placeholder for
+     * OpenYSM's upload feature. Keep the id reserved, do NOT renumber or reuse it, and do not grow the handler
+     * into a real upload path here (see the ExecPlan's Decision Log).
+     */
     private static final int CLIENTBOUND_COMPLETE_FEEDBACK = 12;
     private static final int CLIENTBOUND_SEND_MODEL_PASSWORD = 13;
     private static final int CLIENTBOUND_OPENYSM_MODEL_SYNC_PAYLOAD_17 = 17;
@@ -101,6 +141,12 @@ public final class NetworkHandler {
             HandshakeMessage.class,
             SERVERBOUND_HANDSHAKE,
             Side.SERVER);
+        // NF-01: the server-side half of the revoke channel. See SERVERBOUND_REVOKE_MODEL_GUI_GRANT above.
+        CHANNEL.registerMessage(
+            RevokeModelGuiGrant.Handler.class,
+            RevokeModelGuiGrant.class,
+            SERVERBOUND_REVOKE_MODEL_GUI_GRANT,
+            Side.SERVER);
     }
 
     private static void registerClientboundMessages() {
@@ -129,16 +175,17 @@ public final class NetworkHandler {
             SyncStarModels.class,
             CLIENTBOUND_SYNC_STAR_MODELS,
             Side.CLIENT);
-        CHANNEL.registerMessage(
-            RequestServerModelInfo.Handler.class,
-            RequestServerModelInfo.class,
-            CLIENTBOUND_REQUEST_SERVER_MODEL_INFO,
-            Side.CLIENT);
+        // CU-19 (network half): RequestServerModelInfo (id 10) is unregistered here on purpose. It had no sender
+        // anywhere in the repository (its model-management GUI was never wired on 1.7.10) and t29 removed the last
+        // trace on the client (ModelInfoButton). The id constant above stays reserved with its deprecation note:
+        // ids are part of the wire protocol and must never be renumbered or reused.
         CHANNEL.registerMessage(
             SyncPlayerMotionState.Handler.class,
             SyncPlayerMotionState.class,
             CLIENTBOUND_SYNC_PLAYER_MOTION_STATE,
             Side.CLIENT);
+        // N-09 (deprecated, id 12 kept as-is): registered for wire compatibility but never sent - see the id
+        // constant above. UploadManager stays an unwired placeholder.
         CHANNEL.registerMessage(
             CompleteFeedback.Handler.class,
             CompleteFeedback.class,
@@ -238,5 +285,39 @@ public final class NetworkHandler {
             return;
         }
         CHANNEL.sendToAll(message);
+    }
+
+    /**
+     * N-08: whether the player's outbound buffer accepts another write. The legacy model download path sends
+     * one 1.9 MB packet or many 512 KB chunks per model and {@code SimpleNetworkWrapper.sendTo} uses
+     * {@code writeAndFlush} without checking writability, so a slow client would otherwise let the server pile
+     * every chunk into the channel's outbound buffer.
+     * <p>
+     * A memory connection (single player / integrated server) has no real bandwidth limit and is always treated
+     * as writable so the sender never spins on a local world.
+     */
+    public static boolean isChannelWritable(EntityPlayer player) {
+        NetworkManager manager = getNetManager(player);
+        if (manager == null || !manager.isChannelOpen()) {
+            return false;
+        }
+        if (manager.isLocalChannel()) {
+            return true;
+        }
+        return manager.channel() != null && manager.channel().isWritable();
+    }
+
+    /** N-08: whether the connection is still open, used to tell "buffer full" from "player gone". */
+    public static boolean isChannelOpen(EntityPlayer player) {
+        NetworkManager manager = getNetManager(player);
+        return manager != null && manager.isChannelOpen();
+    }
+
+    private static NetworkManager getNetManager(EntityPlayer player) {
+        if (!(player instanceof EntityPlayerMP)) {
+            return null;
+        }
+        NetHandlerPlayServer handler = ((EntityPlayerMP) player).playerNetServerHandler;
+        return handler == null ? null : handler.netManager;
     }
 }

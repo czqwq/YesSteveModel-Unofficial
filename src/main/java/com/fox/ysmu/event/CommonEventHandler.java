@@ -36,6 +36,12 @@ import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 @EventBusSubscriber
 public class CommonEventHandler {
 
+    /**
+     * CU-07: 1.7.10 对玩家实体的追踪半径固定为 512 格（EntityTracker.java:73），
+     * 模型变更广播必须用同一半径，否则 64~512 格之间的观察者收不到更新。
+     */
+    private static final double PLAYER_TRACKING_RANGE = 512.0D;
+
     private static final Map<UUID, Byte> LAST_MOTION_STATES = new HashMap<>();
 
     @SubscribeEvent
@@ -55,9 +61,10 @@ public class CommonEventHandler {
 
     @SubscribeEvent
     public static void onWorldUnload(WorldEvent.Unload event) {
-        // The overworld unload marks leaving a save, so this is the point to drop transient per-entity state:
-        // NPC model overrides, the animation clips a host mod pushed for them, and picker grants.
-        if (event.world != null && event.world.provider != null && event.world.provider.dimensionId == 0) {
+        // CU-10: 任何维度的世界卸载都清理这些按实体挂着的瞬时状态：NPC 模型覆盖、宿主推送的动画剪辑、
+        // 拾取器授权。原来只处理 dimensionId == 0，于是"在下界/末地退出服务器或存档"不会清理，
+        // 而 1.7.10 的 entityId 跨服务器可复现，旧条目可能套到新会话里 id 相同的实体上。
+        if (event.world != null && event.world.provider != null) {
             NPCData.clear();
             EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
@@ -199,12 +206,12 @@ public class CommonEventHandler {
     }
 
     private static void syncJoinedPlayerState(EntityPlayer player) {
-        ExtendedModelInfo modelInfo = ExtendedModelInfo.get(player);
-        if (modelInfo != null) {
-            if (player instanceof EntityPlayerMP serverPlayer) {
+        // CU-12: 只在服务端发送同步包。客户端的 ExtendedModelInfo.dirty 只写不读
+        // （唯一读取点 broadcastDirtyModelInfo 已被 event.side.isServer() 限住），因此客户端不再 markDirty。
+        if (player instanceof EntityPlayerMP serverPlayer) {
+            ExtendedModelInfo modelInfo = ExtendedModelInfo.get(serverPlayer);
+            if (modelInfo != null) {
                 NetworkHandler.sendToClientPlayer(new SyncModelInfo(serverPlayer.getEntityId(), modelInfo), serverPlayer);
-            } else {
-                modelInfo.markDirty();
             }
         }
         syncStarModels(player);
@@ -236,7 +243,9 @@ public class CommonEventHandler {
             player.posX,
             player.posY,
             player.posZ,
-            64.0D // 64个方块的范围，这是一个常用值
+            // CU-07: 必须与 1.7.10 的玩家实体追踪半径一致（EntityTracker.java:73 用 512），
+            // 原值 64 会让 64~512 格之间的观察者一直显示旧模型（StartTracking 只在进入追踪范围时补发一次）。
+            PLAYER_TRACKING_RANGE
         );
     }
 

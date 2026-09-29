@@ -11,8 +11,6 @@ import net.minecraftforge.oredict.OreDictionary;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.google.common.collect.Lists;
 
-import cpw.mods.fml.common.registry.GameRegistry;
-
 public class ConditionalUse {
 
     private static final String EMPTY = "";
@@ -49,8 +47,9 @@ public class ConditionalUse {
         String substring = name.substring(preSize);
         if (name.startsWith(idPre)) {
             // 1.7.10: 简单验证格式即可，不再有 isValidResourceLocation 方法
+            // D-A3: normalised to the same lower-case form InnerClassify.registryId returns
             if (substring.contains(":")) {
-                idTest.add(substring);
+                idTest.add(substring.toLowerCase(Locale.ROOT));
             }
         }
         if (name.startsWith(oreDictPre)) {
@@ -96,13 +95,10 @@ public class ConditionalUse {
             return EMPTY;
         }
         ItemStack itemInHand = BackhandCompat.getItemInHand(player, isMainHand);
-        // 1.7.10: 使用 GameRegistry 获取物品的唯一标识符
-        GameRegistry.UniqueIdentifier uid = GameRegistry.findUniqueIdentifierFor(itemInHand.getItem());
-        if (uid == null) {
-            return EMPTY;
-        }
-        String registryName = uid.toString(); // 格式为 "modid:name"
-        if (idTest.contains(registryName)) {
+        // D-A3: shared lower-case "modid:name" lookup (the same helper the hold/swing classifiers and the
+        // non-player held-item path use)
+        String registryName = InnerClassify.registryId(itemInHand);
+        if (!registryName.isEmpty() && idTest.contains(registryName)) {
             return idPre + registryName;
         }
         return EMPTY;

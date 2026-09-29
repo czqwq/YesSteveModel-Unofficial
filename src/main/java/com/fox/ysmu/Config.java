@@ -77,7 +77,7 @@ public class Config {
 
         // OpenYSM model sync config values
         ENABLE_OPEN_YSM_SYNC_PROTOCOL = syncBoolean("EnableOpenYsmSyncProtocol", "openysm_sync", ENABLE_OPEN_YSM_SYNC_PROTOCOL, "Whether to use the appended OpenYSM hash/cache/chunk sync path before legacy fallback", load);
-        THREAD_COUNT = syncInt("ThreadCount", "openysm_sync", THREAD_COUNT, "Target worker count for OpenYSM model sync tasks", 1, 32, load);
+        THREAD_COUNT = syncInt("ThreadCount", "openysm_sync", THREAD_COUNT, "Target worker count for the shared model sync thread pool (read by util/ThreadTools, core/max worker count; clamped to 1..32)", 1, 32, load);
         BANDWIDTH_LIMIT = syncInt("BandwidthLimit", "openysm_sync", BANDWIDTH_LIMIT, "OpenYSM model sync bandwidth limit in bytes per second. 0 means unlimited", 0, Integer.MAX_VALUE, load);
         PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "openysm_sync", PLAYER_SYNC_TIMEOUT, "OpenYSM model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
         LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "openysm_sync", LOW_BANDWIDTH_USAGE, "Whether OpenYSM sync should use smaller chunks and conservative throttling", load);
@@ -112,20 +112,23 @@ public class Config {
     private static int syncInt(String name, String category, int currentValue, String comment, int min, int max, boolean load) {
         Property prop = configuration.get(category, name, currentValue, comment, min, max);
         if (load) {
-            return prop.getInt(currentValue);
+            // CU-09: Forge 1.7.10 的 Property.getInt(int)/getDouble(double) 不做 clamp（min/max 只写进注释，
+            // 见 Property.java:691-701/792-820），手改配置文件即可得到越界值；这里自行钳制。
+            return clamp(prop.getInt(currentValue), min, max);
         } else {
-            prop.set(currentValue);
-            return currentValue;
+            prop.set(clamp(currentValue, min, max));
+            return clamp(currentValue, min, max);
         }
     }
 
     private static double syncDouble(String name, String category, double currentValue, String comment, double min, double max, boolean load) {
         Property prop = configuration.get(category, name, currentValue, comment, min, max);
         if (load) {
-            return prop.getDouble(currentValue);
+            // CU-09: 同上，越界的 PlayerScale（例如手改成 1000）必须被钳制回 8..360。
+            return clamp(prop.getDouble(currentValue), min, max);
         } else {
-            prop.set(currentValue);
-            return currentValue;
+            prop.set(clamp(currentValue, min, max));
+            return clamp(currentValue, min, max);
         }
     }
 
@@ -137,5 +140,21 @@ public class Config {
             prop.set(currentValue);
             return currentValue;
         }
+    }
+
+    /** CU-09: 通用钳制，避免配置/GUI 写入越界值。 */
+    private static int clamp(int value, int min, int max) {
+        if (value < min) {
+            return min;
+        }
+        return value > max ? max : value;
+    }
+
+    /** CU-09: 通用钳制，避免配置/GUI 写入越界值。 */
+    private static double clamp(double value, double min, double max) {
+        if (value < min) {
+            return min;
+        }
+        return value > max ? max : value;
     }
 }

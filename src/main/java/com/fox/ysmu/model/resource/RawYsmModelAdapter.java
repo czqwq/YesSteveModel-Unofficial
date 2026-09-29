@@ -59,6 +59,64 @@ public final class RawYsmModelAdapter {
         return false;
     }
 
+    /**
+     * M-01:"能否产出可用的 OpenYSM 二进制载荷"的独立判定。
+     * OpenYSM 二进制只序列化 bones/cubes/faces 与关键帧(见
+     * {@link YSMBinarySerializer#writeGeometry}),不写 {@code geometry.sourceJson},
+     * 所以这里必须忽略 sourceJson、只认已烘焙的面。对 dev 基线的散件模型
+     * ({@code YSMFolderDeserializer.parseGeometry} 只填 bones、不填 cubes)它返回 false,
+     * 从而跳过 {@code ModelCacheWriter.writeOpenYsm},不再下发一个几何为空的缓存。
+     */
+    public static boolean isBinaryPayloadBridgeable(RawYsmModel raw) {
+        if (raw == null || raw.mainEntity == null) {
+            return false;
+        }
+        if (countBakedFaces(raw.mainEntity.mainModel) <= 0 || countBakedFaces(raw.mainEntity.armModel) <= 0) {
+            return false;
+        }
+        for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
+            if (hasLegacyTextureData(texture)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 已烘焙(可直接序列化)的面数;只看 bones/cubes/faces,与 sourceJson 无关。 */
+    public static int countBakedFaces(RawYsmModel.RawGeometry geometry) {
+        if (geometry == null) {
+            return 0;
+        }
+        int faces = 0;
+        for (RawYsmModel.RawBone bone : geometry.bones) {
+            for (RawYsmModel.RawCube cube : bone.cubes) {
+                faces += cube.faces.size();
+            }
+        }
+        return faces;
+    }
+
+    /**
+     * M-22 / E-10(跨仓):把模型自带的 {@code sound_effects} 音频资源交付给调用方
+     * (引擎的声音管理器,或宿主侧的注册点)。交付内容与二进制载荷里
+     * {@code YSMBinarySerializer.writeSoundFiles} 写出的一致:文件名 -> OGG 字节。
+     * 关键帧侧的 {@code sound_effects} 由 {@code YSMFolderDeserializer.parseSoundEffects} 负责,
+     * 两边合起来才能让 sound_effects 关键帧真的出声;引擎侧的播放器是 E-10 的对端。
+     */
+    public static Map<String, byte[]> getSoundFileData(RawYsmModel raw) {
+        Map<String, byte[]> sounds = new LinkedHashMap<>();
+        if (raw == null || raw.soundFiles == null) {
+            return sounds;
+        }
+        for (Map.Entry<String, RawYsmModel.RawDataFile> entry : raw.soundFiles.entrySet()) {
+            RawYsmModel.RawDataFile file = entry.getValue();
+            if (file != null && file.data != null && file.data.length > 0) {
+                sounds.put(entry.getKey(), file.data);
+            }
+        }
+        return sounds;
+    }
+
     public static ModelData toLegacyModelData(RawYsmModel raw, String modelId) throws IOException {
         if (!isBridgeable(raw)) {
             throw new IOException("RawYsmModel cannot be bridged to legacy ModelData");
@@ -347,13 +405,21 @@ public final class RawYsmModelAdapter {
         if (raw.properties.extraAnimations.isEmpty()) {
             return new String[0];
         }
-        String[] names = new String[EXTRA_ANIMATION_SLOT_COUNT];
-        boolean hasAny = false;
+        // M-14:只回填到最后一个已定义的槽位。dev 基线固定返回 8 个元素,未定义槽位是 null,
+        // 会写进引擎的 extra_animation_names 数组里(消费端按槽位下标取值,所以不能重排,
+        // 但可以把尾部未定义的槽裁掉)。
+        int lastDefined = -1;
         for (int i = 0; i < EXTRA_ANIMATION_SLOT_COUNT; i++) {
-            String key = "extra" + i;
-            if (!raw.properties.extraAnimations.containsKey(key)) {
-                continue;
+            if (raw.properties.extraAnimations.containsKey("extra" + i)) {
+                lastDefined = i;
             }
+        }
+        if (lastDefined < 0) {
+            return new String[0];
+        }
+        String[] names = new String[lastDefined + 1];
+        for (int i = 0; i <= lastDefined; i++) {
+            String key = "extra" + i;
             String label = getLocalizedValue(raw, "properties.extra_animation." + key);
             if (StringUtils.isBlank(label)) {
                 String configured = raw.properties.extraAnimations.get(key);
@@ -365,9 +431,8 @@ public final class RawYsmModelAdapter {
                 label = key;
             }
             names[i] = label;
-            hasAny = true;
         }
-        return hasAny ? names : new String[0];
+        return names;
     }
 
     private static String getLocalizedValue(RawYsmModel raw, String key) {
@@ -508,6 +573,11 @@ public final class RawYsmModelAdapter {
         return json;
     }
 
+    /**
+     * M-17:内部 loopMode 到 JSON 的映射。1 = LOOP、3 = HOLD_ON_LAST_FRAME、0 = PLAY_ONCE;
+     * 2 不写 loop 字段(交给引擎默认值)。散件解析侧必须产出同一套编号,否则
+     * hold_on_last_frame 会被降级成"引擎默认"。
+     */
     private static void putLoopMode(JsonObject json, int loopMode) {
         if (loopMode == 1) {
             json.addProperty("loop", true);

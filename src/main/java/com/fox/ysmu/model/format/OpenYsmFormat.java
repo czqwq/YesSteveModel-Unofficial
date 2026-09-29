@@ -2,7 +2,6 @@ package com.fox.ysmu.model.format;
 
 import static com.fox.ysmu.model.ServerModelManager.CACHE_NAME_INFO;
 import static com.fox.ysmu.model.ServerModelManager.OPEN_YSM_SYNC_INFO;
-import static com.fox.ysmu.model.ServerModelManager.RAW_MODEL_INFO;
 import static com.fox.ysmu.model.ServerModelManager.removeExtension;
 
 import java.io.File;
@@ -70,7 +69,6 @@ public final class OpenYsmFormat {
         try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(dir)) {
             RawYsmModel raw = deserializer.deserialize();
             raw.modelId = modelId;
-            RAW_MODEL_INFO.put(modelId, raw);
             if (!RawYsmModelAdapter.isBridgeable(raw)) {
                 ysmu.LOG.warn("OpenYSM folder model {} parsed but cannot be bridged to legacy ModelData", dir);
                 return;
@@ -80,9 +78,20 @@ public final class OpenYsmFormat {
             if (info != null) {
                 CACHE_NAME_INFO.put(modelId, info);
             }
+            // M-01:二进制同步缓存只序列化已烘焙的 bones/cubes/faces,不能用 isBridgeable 做门控
+            // ——它对散件模型因 sourceJson != null 恒 true,会写出一个几何为空的缓存。
+            if (!RawYsmModelAdapter.isBinaryPayloadBridgeable(raw)) {
+                ysmu.LOG.warn(
+                    "Skipping OpenYSM binary sync cache for folder model {}: baked geometry is empty (main faces={}, arm faces={})",
+                    dir,
+                    RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
+                    RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
+                return;
+            }
             OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
             OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            // S-02:类加载/链接期错误(缺类、版本不匹配)也应按"跳过并 warn"处理,而不是中断整次扫描。
             ysmu.LOG.warn("Failed to load OpenYSM folder model {}", dir, e);
         }
     }
@@ -99,7 +108,6 @@ public final class OpenYsmFormat {
                 deserializer.parseYSMFooter(raw);
                 String modelId = ModelIdUtil.getInternalModelId(removeExtension(toModelName(rootPath, file)));
                 raw.modelId = modelId;
-                RAW_MODEL_INFO.put(modelId, raw);
                 if (!RawYsmModelAdapter.isBridgeable(raw)) {
                     ysmu.LOG.info("OpenYSM binary model {} parsed but cannot be bridged to legacy ModelData", file);
                     return;
@@ -109,12 +117,20 @@ public final class OpenYsmFormat {
                 if (info != null) {
                     CACHE_NAME_INFO.put(modelId, info);
                 }
+                if (!RawYsmModelAdapter.isBinaryPayloadBridgeable(raw)) {
+                    ysmu.LOG.warn(
+                        "Skipping OpenYSM sync cache for binary model {}: baked geometry is empty (main faces={}, arm faces={})",
+                        file,
+                        RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
+                        RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
+                    return;
+                }
                 OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
                 OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
             }
         } catch (UnsupportedOperationException e) {
-            ysmu.LOG.warn("Unsupported OpenYSM binary model {}", file, e);
-        } catch (Exception e) {
+            ysmu.LOG.warn("Unsupported OpenYSM binary model {}: {}", file, e.getMessage(), e);
+        } catch (Exception | LinkageError e) {
             ysmu.LOG.warn("Failed to load OpenYSM binary model {}", file, e);
         }
     }
@@ -131,7 +147,13 @@ public final class OpenYsmFormat {
         return true;
     }
 
-    private static String toModelName(Path rootPath, Path path) {
-        return rootPath.relativize(path).toString().replace('\\', '/');
+    /**
+     * M-12:三个扫描器(OpenYsmFormat/FolderFormat/YsmFormat)统一的"磁盘模型名"口径
+     * —— 相对 root 的路径 + 正斜杠。分散实现会让嵌套目录的模型在三个扫描器里得到不同的 id。
+     */
+    public static String toModelName(Path rootPath, Path path) {
+        return rootPath.relativize(path)
+            .toString()
+            .replace('\\', '/');
     }
 }

@@ -45,6 +45,11 @@ public final class EncryptTools {
     private static final int PASSWORD_SIZE = 40;
 
     /**
+     * 加密后模型载荷的最小长度：AES 至少一个分组，用来挡住"空载荷"被当成合法缓存写盘。
+     */
+    private static final int MIN_ENCRYPTED_MODEL_BYTES = 16;
+
+    /**
      * 模型包密码
      */
     private static SecretKey SECRET_KEY;
@@ -102,6 +107,11 @@ public final class EncryptTools {
         stream.write(ByteInteger.int2Bytes(HEAD));
         stream.write(ByteInteger.int2Bytes(VERSION));
         byte[] encryptModelBytes = encryptModel(data);
+        // M-19:空/过短的载荷不再被写进缓存文件,否则客户端只会拿到一个解不开的 24 字节壳。
+        if (encryptModelBytes.length < MIN_ENCRYPTED_MODEL_BYTES) {
+            throw new IOException(
+                "Encrypted model payload for " + data.getModelId() + " is too short: " + encryptModelBytes.length);
+        }
         byte[] md5 = Md5Utils.md5(encryptModelBytes);
         stream.write(md5);
         stream.write(encryptModelBytes);
@@ -128,7 +138,7 @@ public final class EncryptTools {
      * 进行一次 tar.gz 压缩
      * 进行一次 AES 加密
      */
-    private static byte[] encryptModel(ModelData data) {
+    private static byte[] encryptModel(ModelData data) throws IOException {
         try {
             ByteArrayOutputStream tmp = new ByteArrayOutputStream();
 
@@ -146,9 +156,10 @@ public final class EncryptTools {
             return AESUtil.encrypt(SECRET_KEY, IV, output)
                 .toByteArray();
         } catch (Exception e) {
-            e.printStackTrace();
+            // M-19:失败必须冒泡。dev 基线在这里返回 EMPTY_ARRAY,调用方照样写出一个
+            // "头部合法、载荷为空"的缓存文件,客户端拿到后无法解密。
+            throw new IOException("Failed to encrypt model " + data.getModelId(), e);
         }
-        return ByteArrays.EMPTY_ARRAY;
     }
 
     private static void writeString(ByteArrayOutputStream stream, String string) throws IOException {
@@ -214,8 +225,14 @@ public final class EncryptTools {
             byte[] encryptModelData = ByteArrays.copy(modelRawData, 24, modelRawData.length - 24);
             String dataMd5 = Md5Utils.md5Hex(encryptModelData);
             if (!md5.equals(dataMd5)) {
-                // TODO: 2023/7/11 很奇怪，这一块会出现不一致的问题
-                ysmu.LOG.warn("Check values are not equal {} / {}", md5, dataMd5);
+                // M-08:头部记录的 MD5 与实际载荷不一致 => 文件已损坏或被篡改,直接失败。
+                // (dev 基线这里只 warn 然后继续解密,配合 M-07 的共享 MessageDigest 会掩盖真正的问题;
+                //  M-07 修好后两边都是 per-call MD5,不一致只可能来自坏文件。)
+                ysmu.LOG.warn(
+                    "Refusing to decrypt model cache: header MD5 {} does not match payload MD5 {}",
+                    md5,
+                    dataMd5);
+                return null;
             }
 
             byte[] passwordBytes = ByteArrays.copy(rawPassword, 8, 16);
@@ -242,7 +259,8 @@ public final class EncryptTools {
 
             return new ModelData(modelId, Type.UNKNOWN, modelMapData, textureMapData, animationMapData);
         } catch (Exception e) {
-            e.printStackTrace();
+            // M-16:统一走日志,不再 printStackTrace。
+            ysmu.LOG.warn("Failed to decrypt model cache payload", e);
         }
         return null;
     }

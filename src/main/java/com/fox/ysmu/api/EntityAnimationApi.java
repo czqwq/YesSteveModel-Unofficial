@@ -8,6 +8,7 @@ import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
@@ -34,19 +35,39 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * <p>
  * Everything in this class is common-side safe, so a host may resolve it on either side; the calls
  * themselves only have meaning on the client that renders the entity.
+ * <p>
+ * D-A6: these entry points are effective on the client only, and a server-side call is silently ineffective -
+ * it never throws. Nothing here sends a packet and every registry the clip methods touch is a client-side
+ * structure ({@code EntityClips}, plus the engine's {@code GeckoLibCache}), so on a dedicated server a pushed
+ * clip is stored but no renderer reads it, the read-backs ({@link #getEntityClip(EntityLivingBase)} and
+ * {@link #getEntityClipLoop(EntityLivingBase)}) answer from that same server-side map, and
+ * {@link #modelHasClip(EntityLivingBase, String)} answers {@code false} from the engine's empty animation cache
+ * (the engine constructs that cache lazily, so it does not throw). {@link #parseLoop(String)} is the exception:
+ * it only maps a name onto an engine enum and touches no client state, so it works on either side. In single
+ * player the integrated server and the client share one JVM, which is why a common-side call from a host there
+ * does take effect locally - push clips from the client that renders the entity.
  */
 public final class EntityAnimationApi {
-
-    /** The built-in default animation file, mirrored from {@code CustomPlayerModel} to keep this class client-free. */
-    private static final ResourceLocation DEFAULT_ANIMATION = ModelIdUtil
-        .getMainId(new ResourceLocation(ysmu.MODID, "default"));
 
     private static boolean unknownLoopModeLogged = false;
 
     private EntityAnimationApi() {}
 
     /**
+     * D-03 / M-13:默认动画文件跟随 {@code Config.DEFAULT_MODEL_ID},不再硬编码 {@code "default"};
+     * 模型名先经 {@link ModelIdUtil#getInternalModelId},否则非安全字符的配置值会让
+     * {@link ResourceLocation} 的构造抛异常。每次调用都重算,避免静态常量把 preInit 之前的值固化下来。
+     */
+    private static ResourceLocation defaultAnimationId() {
+        return ModelIdUtil.getMainId(
+            new ResourceLocation(ysmu.MODID, ModelIdUtil.getInternalModelId(Config.DEFAULT_MODEL_ID)));
+    }
+
+    /**
      * Publishes the clip an entity should play.
+     * <p>
+     * D-A6: client-effective only. Called on a dedicated server it still stores the clip and returns
+     * {@code true}, but no renderer reads that push, so it is silently ineffective - it never throws.
      *
      * @param entity   the entity YSMU is rendering; client side only in practice
      * @param clip     the clip name, as it appears in the model's animation file
@@ -77,6 +98,10 @@ public final class EntityAnimationApi {
 
     /**
      * Drops an entity's pushed clip, so it falls back to YSMU's own locomotion.
+     * <p>
+     * D-A6: same client-only effectiveness as {@link #setEntityClip(EntityLivingBase, String, String)}; the
+     * registry it clears is the one on the calling side, and a server-side clear is never seen by a renderer.
+     * It returns {@code false} rather than throwing when nothing was pushed.
      *
      * @return whether a clip was actually published for the entity
      */
@@ -111,6 +136,9 @@ public final class EntityAnimationApi {
      * the same question asked of the model YSMU will actually play. Pushing a clip the model does not define
      * is not an error - YSMU falls back to locomotion - but asking first keeps the two renderers agreeing on
      * which clip is showing.
+     * <p>
+     * D-A6: client-effective only. The animation files live in the engine's {@code GeckoLibCache} on the client,
+     * and the engine builds that cache lazily, so a server-side call answers {@code false} instead of throwing.
      */
     public static boolean modelHasClip(EntityLivingBase entity, String clip) {
         if (entity == null || clip == null || clip.isEmpty()) {
@@ -127,6 +155,9 @@ public final class EntityAnimationApi {
      * <p>
      * The names are the engine's own on purpose: two vocabularies for one idea is how a mapping ends up
      * half-applied, and the half that is wrong plays a clip that never finishes.
+     * <p>
+     * D-A6: unlike the clip methods above, this one is side-independent - it only maps a name onto an engine
+     * enum and reads no client state, so a server-side call behaves exactly like a client-side one.
      */
     @Nullable
     public static ILoopType parseLoop(String loopMode) {
@@ -166,6 +197,6 @@ public final class EntityAnimationApi {
             .containsKey(main)) {
             return main;
         }
-        return DEFAULT_ANIMATION;
+        return defaultAnimationId();
     }
 }

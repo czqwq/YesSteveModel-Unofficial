@@ -69,6 +69,7 @@ public final class NPCData {
 
     public static void put(int entityId, ResourceLocation modelId, ResourceLocation textureId) {
         if (modelId == null || textureId == null) {
+            // N-6:null 分量直接拒绝,不写入注册表。
             return;
         }
         DATA.put(entityId, new EntityModelData(modelId, textureId));
@@ -76,7 +77,9 @@ public final class NPCData {
     }
 
     public static void put(int entityId, EntityModelData data) {
-        if (data == null) {
+        // N-6:拒绝 null 条目与带 null 分量的条目(EntityModelData 的构造器也会拒绝,这里是第二道防线,
+        // 覆盖未来可能出现的反射/反序列化构造路径)。
+        if (data == null || data.getModelId() == null || data.getTextureId() == null) {
             return;
         }
         DATA.put(entityId, data);

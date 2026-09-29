@@ -22,6 +22,7 @@ import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
+import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
 import software.bernie.geckolib3.model.provider.data.EntityModelData;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -34,6 +35,10 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     public static final ResourceLocation DEFAULT_MAIN_ANIMATION = ModelIdUtil
         .getMainId(new ResourceLocation(ysmu.MODID, "default"));
     public static final ResourceLocation DEFAULT_TEXTURE = new ResourceLocation(ysmu.MODID, "default/default.png");
+    /**
+     * 首人称相机高度/头部偏移的移植锚点(R-10):**目前只写不读**,保留字段是为了将来接线;
+     * 不要在没有消费方时依赖它的值。相机高度接线本身属非目标。
+     */
     public static float FIRST_PERSON_HEAD_POS;
     private final Map<IBone, HeadPoseOffset> headPoseOffsets = new IdentityHashMap<>();
 
@@ -50,7 +55,10 @@ public class CustomPlayerModel extends AnimatedGeoModel {
 
     public ResourceLocation getTextureLocation(Object object) {
         if (object instanceof CustomPlayerEntity customPlayer) {
-            return customPlayer.getTexture();
+            // N-1: the engine passes this result straight to TextureManager.bindTexture, so a null must
+            // never escape. getTexture() already falls back, this is the model-provider-side guarantee.
+            ResourceLocation texture = customPlayer.getTexture();
+            return texture == null ? DEFAULT_TEXTURE : texture;
         }
         return DEFAULT_TEXTURE;
     }
@@ -106,9 +114,12 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             FIRST_PERSON_HEAD_POS = head.getPivotY()
                 * ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
         }
-        if (getCurrentModel().firstPersonViewLocator != null) {
+        // R-10: getCurrentModel() is a plain field read and can be null when super.setLivingAnimations never
+        // ran (no model resolved yet), so it is resolved once and guarded here.
+        GeoModel currentModel = getCurrentModel();
+        GeoBone locator = currentModel == null ? null : currentModel.firstPersonViewLocator;
+        if (locator != null) {
             float heightScale = ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
-            GeoBone locator = getCurrentModel().firstPersonViewLocator;
             FIRST_PERSON_HEAD_POS = locator.getPivotY() * heightScale;
         }
     }

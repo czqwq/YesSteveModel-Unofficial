@@ -24,6 +24,7 @@ import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.compat.Axis;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.Utils;
+import com.fox.ysmu.ysmu;
 import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.IAnimatableModel;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
@@ -217,7 +218,7 @@ public final class RenderUtil {
                 }
             }
         } catch (ExecutionException e) {
-            e.printStackTrace();
+            ysmu.LOG.warn("Failed to render the YSM player preview entity", e);
         }
     }
 
@@ -321,7 +322,7 @@ public final class RenderUtil {
                 renderModel((double) pPosX, (double) pPosY, (float) pScale, player, modelId, textureId, renderer, entity);
             }
         } catch (ExecutionException e) {
-            e.printStackTrace();
+            ysmu.LOG.warn("Failed to render the YSM player model in the inventory GUI", e);
         }
     }
 
@@ -363,24 +364,26 @@ public final class RenderUtil {
         itemStacks[3] = player.inventory.armorItemInSlot(0);
         itemStacks[4] = player.inventory.getCurrentItem();
         itemStacks[5] = BackhandCompat.getOffhandItem(player);
-        // 清空玩家物品以避免在模型上渲染
-        player.inventory.mainInventory[player.inventory.currentItem] = null;
-        BackhandCompat.setOffhandItem(player, null);
-        for (int i = 0; i < 4; i++) {
-            player.inventory.armorInventory[i] = null;
-        }
-
-        // 设置渲染状态
-        player.renderYawOffset = 200;
-        player.rotationYaw = 180;
-        player.rotationPitch = 0;
-        player.rotationYawHead = player.rotationYaw;
-        player.prevRotationYawHead = player.rotationYaw;
-
-        GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
-        RenderHelper.enableStandardItemLighting();
-        GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
+        // S-05:所有会改动玩家/GL 状态的步骤都放进 try,保证任何异常(包括光照与矩阵
+        // 调用抛出的异常)都不会把玩家物品栏、旋转角度或 GL 矩阵栈留在被污染的状态。
         try {
+            // 清空玩家物品以避免在模型上渲染
+            player.inventory.mainInventory[player.inventory.currentItem] = null;
+            BackhandCompat.setOffhandItem(player, null);
+            for (int i = 0; i < 4; i++) {
+                player.inventory.armorInventory[i] = null;
+            }
+
+            // 设置渲染状态
+            player.renderYawOffset = 200;
+            player.rotationYaw = 180;
+            player.rotationPitch = 0;
+            player.rotationYawHead = player.rotationYaw;
+            player.prevRotationYawHead = player.rotationYaw;
+
+            GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
+            RenderHelper.enableStandardItemLighting();
+            GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
             withGuiEntityLighting(() -> {
                 AnimatedGeoModel provider = renderer.getGeoModelProvider();
                 ResourceLocation modelLocation = provider.getModelLocation(entity);

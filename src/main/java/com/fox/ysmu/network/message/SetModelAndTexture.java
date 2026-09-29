@@ -7,6 +7,7 @@ import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.util.DeferredWork;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -42,13 +43,19 @@ public class SetModelAndTexture implements IMessage {
 
         @Override
         public IMessage onMessage(SetModelAndTexture message, MessageContext ctx) {
-            EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender == null) {
-                return null;
+            // N-10: the body itself runs through DeferredWork (whose drain catches Throwable), but the onMessage
+            // part is still guarded so nothing can escape into FML's catch(Throwable) -> rejectHandshake.
+            try {
+                EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
+                if (sender == null) {
+                    return null;
+                }
+                String model = message.modelId;
+                String texture = message.selectTexture;
+                DeferredWork.server(() -> handleEEP(sender, model, texture));
+            } catch (Exception e) {
+                ysmu.LOG.warn("Ignoring malformed YSM set-model packet", e);
             }
-            String model = message.modelId;
-            String texture = message.selectTexture;
-            DeferredWork.server(() -> handleEEP(sender, model, texture));
             return null;
         }
 

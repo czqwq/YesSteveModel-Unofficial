@@ -3,6 +3,7 @@ package com.fox.ysmu.network.message;
 import net.minecraft.entity.player.EntityPlayerMP;
 
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
@@ -38,9 +39,14 @@ public class SetPlayAnimation implements IMessage {
 
         @Override
         public IMessage onMessage(SetPlayAnimation message, MessageContext ctx) {
-            EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender != null && STOP <= message.extraAnimationId && message.extraAnimationId < 8) {
-                handleEEP(message, sender);
+            // N-10: guard the handler body; an exception here would be turned into a disconnect by FML.
+            try {
+                EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
+                if (sender != null && STOP <= message.extraAnimationId && message.extraAnimationId < 8) {
+                    handleEEP(message, sender);
+                }
+            } catch (Exception e) {
+                ysmu.LOG.warn("Ignoring malformed YSM play-animation packet", e);
             }
             return null;
         }

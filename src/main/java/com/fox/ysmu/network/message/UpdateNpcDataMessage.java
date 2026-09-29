@@ -3,6 +3,7 @@ package com.fox.ysmu.network.message;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.data.NPCData;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -56,10 +57,15 @@ public class UpdateNpcDataMessage implements IMessage {
 
         @Override
         public IMessage onMessage(UpdateNpcDataMessage message, MessageContext ctx) {
-            if (message.modelId == null || message.textureId == null) {
-                NPCData.remove(message.entityId);
-            } else {
-                NPCData.put(message.entityId, message.modelId, message.textureId);
+            // N-10: never let a handler body escape into FML's catch(Throwable) -> rejectHandshake.
+            try {
+                if (message.modelId == null || message.textureId == null) {
+                    NPCData.remove(message.entityId);
+                } else {
+                    NPCData.put(message.entityId, message.modelId, message.textureId);
+                }
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to apply synced YSM NPC data update", e);
             }
             return null;
         }

@@ -121,43 +121,41 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     }
 
     /**
-     * Resolves the override an entity asks for, without touching the shared animatable.
+     * The main model id the entity asks for, before any default substitution.
+     * <p>
+     * Pure query: it must not touch the shared animatable (see {@link #hasModelFor}), and it must not
+     * allocate - it reads the stored override or the EEP fields directly (N-7).
      *
-     * @return the override, or {@code null} when the entity has none.
+     * @return the requested main model id, or {@code null} when the entity has no usable override.
      */
     @Nullable
-    private static EntityModelData resolveOverride(EntityLivingBase entityObj) {
-        EntityModelData override = NPCData.getData(entityObj);
-        if (override != null) {
-            // NPC / non-player override, looked up by entity rather than by UUID.
-            return override;
+    private static ResourceLocation requestedModel(EntityLivingBase entityObj) {
+        EntityModelData npcOverride = NPCData.getData(entityObj);
+        if (isComplete(npcOverride)) {
+            return ModelIdUtil.getMainId(npcOverride.getModelId());
         }
-        if (entityObj instanceof EntityPlayer player) {
-            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-            if (eep != null && eep.getModelId() != null) {
-                return new EntityModelData(eep.getModelId(), eep.getSelectTexture());
-            }
+        ExtendedModelInfo eep = playerModelInfo(entityObj);
+        if (isComplete(eep)) {
+            return ModelIdUtil.getMainId(eep.getModelId());
         }
         return null;
     }
 
     /**
-     * The main model id the entity asks for, before any default substitution.
-     *
-     * @return the requested main model id, or {@code null} when the entity has no override.
-     */
-    @Nullable
-    private static ResourceLocation requestedModel(EntityLivingBase entityObj) {
-        EntityModelData override = resolveOverride(entityObj);
-        return override == null ? null : ModelIdUtil.getMainId(override.getModelId());
-    }
-
-    /**
      * Applies the entity's model/texture to the shared animatable; render path only. Returns the main model
      * id the entity actually requested, before any default substitution.
+     * <p>
+     * R-05: when the entity has no usable override the shared animatable is reset to the built-in default
+     * instead of keeping what the previously rendered entity left there, so one entity can never be drawn
+     * with another entity's model or skin.
+     * <p>
+     * N-1: a half-filled override (a model without a texture) is treated as "no override" as well - the
+     * {@code null} texture would otherwise reach {@code TextureManager.bindTexture(null)} through
+     * {@link CustomPlayerModel#getTextureLocation(Object)} and crash the client. The reset below also
+     * re-establishes "texture is never null" before anything else runs.
      *
-     * @return the requested main model id, or {@code null} when the entity has no override and the default
-     *         model is intended.
+     * @return the requested main model id, or {@code null} when the entity has no usable override and the
+     *         default model is intended.
      */
     @Nullable
     private ResourceLocation applyEntityModel(EntityLivingBase entityObj) {
@@ -165,14 +163,52 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             return null;
         }
         this.animatable.setEntity(entityObj);
-        EntityModelData override = resolveOverride(entityObj);
-        if (override == null) {
-            return null;
+
+        EntityModelData npcOverride = NPCData.getData(entityObj);
+        if (isComplete(npcOverride)) {
+            return applyOverride(npcOverride.getModelId(), npcOverride.getTextureId());
         }
-        ResourceLocation main = ModelIdUtil.getMainId(override.getModelId());
+
+        ExtendedModelInfo eep = playerModelInfo(entityObj);
+        if (isComplete(eep)) {
+            return applyOverride(eep.getModelId(), eep.getSelectTexture());
+        }
+
+        // No usable override: never fall through to the previous entity's state (R-05).
+        this.animatable.setMainModel(CustomPlayerModel.DEFAULT_MAIN_MODEL);
+        this.animatable.setTexture(CustomPlayerModel.DEFAULT_TEXTURE);
+        return null;
+    }
+
+    private ResourceLocation applyOverride(ResourceLocation modelId, ResourceLocation textureId) {
+        ResourceLocation main = ModelIdUtil.getMainId(modelId);
         this.animatable.setMainModel(main);
-        this.animatable.setTexture(override.getTextureId());
+        this.animatable.setTexture(textureId);
         return main;
+    }
+
+    /**
+     * The player's own selection, or {@code null} for a non-player entity.
+     * <p>
+     * Pure accessor; it exists so the two callers above can read the EEP fields without building an
+     * {@link EntityModelData} just to read them back (N-7).
+     */
+    @Nullable
+    private static ExtendedModelInfo playerModelInfo(EntityLivingBase entityObj) {
+        return entityObj instanceof EntityPlayer player ? ExtendedModelInfo.get(player) : null;
+    }
+
+    /**
+     * Whether an override carries both halves. N-1: the NPC path can only be null-free because
+     * {@code NPCData} rejects nulls, and a half-filled EEP can still exist (the client's own selection
+     * packet maps an empty texture string to {@code null}), so both are validated here as well.
+     */
+    private static boolean isComplete(@Nullable EntityModelData override) {
+        return override != null && override.getModelId() != null && override.getTextureId() != null;
+    }
+
+    private static boolean isComplete(@Nullable ExtendedModelInfo eep) {
+        return eep != null && eep.getModelId() != null && eep.getSelectTexture() != null;
     }
 
     private static boolean isModelAvailable(ResourceLocation main) {

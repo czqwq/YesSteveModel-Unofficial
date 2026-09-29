@@ -16,9 +16,14 @@ public final class EntityModelData {
     private final ResourceLocation modelId;
     private final ResourceLocation textureId;
 
+    /**
+     * N-6:两个分量都拒绝 {@code null}。dev 基线允许构造 {@code (null, texture)} / {@code (model, null)},
+     * 之后 {@code CustomPlayerRenderer}/{@code CustomPlayerEntity} 会在渲染路径上解引用它们。
+     * 宁可在这里立刻失败,也不要让空分量流进渲染。
+     */
     public EntityModelData(ResourceLocation modelId, ResourceLocation textureId) {
-        this.modelId = modelId;
-        this.textureId = textureId;
+        this.modelId = Objects.requireNonNull(modelId, "modelId");
+        this.textureId = Objects.requireNonNull(textureId, "textureId");
     }
 
     /** Model id in the YSM namespace (for example {@code ysmu:example}). Never {@code null}. */

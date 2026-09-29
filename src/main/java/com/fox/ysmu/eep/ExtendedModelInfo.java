@@ -18,8 +18,11 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     // 1. 唯一的标识符
     public final static String EXT_PROP_NAME = "ysmu_ModelInfo";
 
-    // 用于网络同步和服务器端逻辑
-    private final EntityPlayer player;
+    // 用于网络同步和服务器端逻辑。
+    // CU-12: End 门重生时 Forge 会直接复用同一个 EEP 实例（EntityPlayer.java:2274-2277），
+    // 因此该引用必须在 init(Entity, World) 里重新绑定，否则会悬空指向旧玩家对象。
+    // 注意：全类没有其它地方读取 player，保留它是为了保持 EEP 的既有形状。
+    private EntityPlayer player;
 
     // 2. 将原 ModelInfoCapability 的字段和方法直接移到这里
     private ResourceLocation modelId = new ResourceLocation(
@@ -35,14 +38,30 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     }
 
     public void setModelAndTexture(ResourceLocation modelId, ResourceLocation selectTexture) {
+        // N-1（EEP 半边）：拒绝 null，而不是把它存进 EEP。调用方 network/message/SetModelAndTexture.java:65-66
+        // 会把空串映射成 null 再传进来；存 null 会让 saveNBTData 的 toString() 在下次存档/登出时 NPE
+        // （该异常只能在本文件关闭），也会让渲染与贴图查找拿到 null。语义：整次调用被忽略，
+        // 保留上一次的有效选择（而不是把玩家的模型/贴图置空）。
+        if (modelId == null || selectTexture == null) {
+            ysmu.LOG.warn(
+                "Ignoring YSM model selection with a null id (model={}, texture={}); keeping the previous selection",
+                modelId,
+                selectTexture);
+            return;
+        }
         this.modelId = modelId;
         this.selectTexture = selectTexture;
         markDirty();
     }
 
     public void copyFrom(ExtendedModelInfo source) {
-        this.modelId = source.modelId;
-        this.selectTexture = source.selectTexture;
+        // N-1：防御性拷贝 —— 即使 source 来自旧实例/异常路径，也不把 null 带进本实例。
+        if (source.modelId != null) {
+            this.modelId = source.modelId;
+        }
+        if (source.selectTexture != null) {
+            this.selectTexture = source.selectTexture;
+        }
         this.animation = source.animation;
         this.playAnimation = source.playAnimation;
         markDirty();
@@ -57,6 +76,11 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     }
 
     public void setSelectTexture(ResourceLocation selectTexture) {
+        // N-1：同 setModelAndTexture，拒绝 null 并保留上一次的有效贴图。
+        if (selectTexture == null) {
+            ysmu.LOG.warn("Ignoring YSM texture selection with a null id; keeping the previous texture");
+            return;
+        }
         this.selectTexture = selectTexture;
         markDirty();
     }
@@ -116,8 +140,10 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     @Override
     public void saveNBTData(NBTTagCompound compound) {
         NBTTagCompound properties = new NBTTagCompound();
-        properties.setString("model_id", this.modelId.toString());
-        properties.setString("select_texture", this.selectTexture.toString());
+        // N-1：即使将来有绕过两个 setter 的路径让字段为 null（旧实例、反射、未来的新调用方），
+        // 存档也不能 NPE —— 空串会被 loadNBTData 读成空 ResourceLocation，而不是抛异常。
+        properties.setString("model_id", this.modelId == null ? "" : this.modelId.toString());
+        properties.setString("select_texture", this.selectTexture == null ? "" : this.selectTexture.toString());
         properties.setString("animation", this.animation);
         properties.setBoolean("play_animation", this.playAnimation);
 
@@ -140,6 +166,11 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
 
     @Override
     public void init(Entity entity, World world) {
-        // 初始化时调用
+        // CU-12: 重新绑定玩家引用。End 门重生时 Forge 直接复用同一实例
+        // （EntityPlayer.java:2274-2277 的 this.extendedProperties = p_71049_1_.extendedProperties 后逐个 init），
+        // 若不在此更新，#player 会一直指向旧玩家对象。
+        if (entity instanceof EntityPlayer) {
+            this.player = (EntityPlayer) entity;
+        }
     }
 }

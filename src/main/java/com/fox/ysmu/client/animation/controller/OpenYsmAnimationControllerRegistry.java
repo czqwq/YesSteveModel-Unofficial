@@ -41,7 +41,7 @@ public final class OpenYsmAnimationControllerRegistry {
             }
             fileCount++;
             try {
-                parseControllerFile(set, bytes);
+                parseControllerFile(animationId, set, bytes);
             } catch (Exception e) {
                 ysmu.LOG.warn("Failed to parse OpenYSM animation controller for {}", animationId, e);
             }
@@ -74,7 +74,7 @@ public final class OpenYsmAnimationControllerRegistry {
         }
     }
 
-    private static void parseControllerFile(ControllerSet set, byte[] bytes) {
+    private static void parseControllerFile(ResourceLocation animationId, ControllerSet set, byte[] bytes) {
         JsonElement element = new JsonParser().parse(new String(bytes, StandardCharsets.UTF_8));
         if (element == null || !element.isJsonObject()) {
             return;
@@ -89,9 +89,20 @@ public final class OpenYsmAnimationControllerRegistry {
                 continue;
             }
             Controller controller = parseController(entry.getKey(), entry.getValue().getAsJsonObject());
-            if (!controller.states.isEmpty()) {
-                set.controllers.put(controller.name, controller);
+            if (controller.states.isEmpty()) {
+                continue;
             }
+            if (set.controllers.containsKey(controller.name)) {
+                // S-04: the main/arm/extra controller files of one model are merged into a single ControllerSet, and a
+                // repeated controller name used to be overwritten silently (1.20.1 merges by name as well).
+                warnOnce(
+                    "duplicate-controller:" + animationId + ":" + controller.name,
+                    "Duplicate OpenYSM animation controller '" + controller.name
+                        + "' for model "
+                        + animationId
+                        + ": the later definition overrides the earlier one");
+            }
+            set.controllers.put(controller.name, controller);
         }
     }
 

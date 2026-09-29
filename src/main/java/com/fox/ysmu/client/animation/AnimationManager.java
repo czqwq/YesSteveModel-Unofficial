@@ -9,7 +9,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.passive.EntityTameable;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
 
@@ -18,6 +17,7 @@ import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
+import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.data.EntityClips;
@@ -45,6 +45,32 @@ public final class AnimationManager {
             MANAGER = new AnimationManager();
         }
         return MANAGER;
+    }
+
+    /**
+     * Idempotent "client disconnected / switched server" cleanup, the entry point `fix-core-ui`'s `CU-10` calls
+     * (returned to `[animation]` by the phase 7 plan as `A-11`).
+     *
+     * <p>
+     * Clears every per-player state this package keeps and never releases on its own:
+     * <ul>
+     * <li>{@code swingProgressByPlayer} / {@code useDurationByPlayer} (this class's two progress tables, A-11)</li>
+     * <li>{@link RemotePlayerAnimationQueries} (remote-player interpolation state)</li>
+     * <li>{@link RemotePlayerMotionStates} (remote-player onGround/isFlying flags)</li>
+     * </ul>
+     * Idempotence: the body only empties concurrent maps
+     * ({@code ConcurrentHashMap.clear()} and the two {@code RemotePlayer*}.clear() calls), it does not depend on
+     * call order, and repeating it has no effect. When {@link #MANAGER} has not been created yet the two local
+     * tables are simply skipped and the rest is still cleared.
+     */
+    public static void clearPlayerState() {
+        AnimationManager manager = MANAGER;
+        if (manager != null) {
+            manager.swingProgressByPlayer.clear();
+            manager.useDurationByPlayer.clear();
+        }
+        RemotePlayerAnimationQueries.clear();
+        RemotePlayerMotionStates.clear();
     }
 
     @NotNull
@@ -166,15 +192,20 @@ public final class AnimationManager {
         if (entity == null) {
             return PlayState.STOP;
         }
+        // A-05 / A-06③: a non-player animatable never reaches AnimationRegister#setParserValue (it takes an
+        // EntityPlayer), so this is where the per-frame MoLang context - current entity plus per-axis movement -
+        // is published. The player branch publishes the same context in setParserValue, which runs before any
+        // controller is evaluated.
+        MolangFrameContext.begin(entity);
         // Already resolved by whoever owns the animation logic for this entity; replay it verbatim.
         EntityClips.Clip pushed = EntityClips.get(entity);
         if (pushed != null && hasAnimation(event, pushed.getName())) {
             return playAnimation(event, pushed.getName(), pushed.getLoopType());
         }
-        // What she is holding, before what she is doing. The condition names are the same ones the player path asks
-        // through ConditionalHold (hold_mainhand$<registry name>), but that helper takes an EntityPlayer and the entity
-        // path below never asked anything like it - which is why a maid holding a sword fell back to walk or idle
-        // instead of playing the model's own held-item animation.
+        // What she is holding, before what she is doing. The condition names are the ones the player path asks
+        // through ConditionalHold (hold_mainhand$<registry name>), and both paths now build them with the shared
+        // InnerClassify#holdConditionName helper (D-A3) - before that, a maid holding a sword fell back to walk or
+        // idle instead of playing the model's own held-item animation.
         String heldAnimation = findEntityHoldAnimation(event, entity);
         if (heldAnimation != null) {
             return playLoopAnimation(event, heldAnimation);
@@ -217,9 +248,10 @@ public final class AnimationManager {
             return controllerState;
         }
 
-        // 修改为使用BackhandCompat兼容层
-        ItemStack offhandItem = BackhandCompat.getOffhandItem(player);
-        if (offhandItem != null && checkSwingAndUse(player, false)) {
+        // A-01: 1.7.10 has no vanilla offhand slot (Backhand provides it). With Backhand present an *empty*
+        // offhand must still reach ConditionalHold#doTest so it can answer `hold_offhand:empty`, so the
+        // "offhand must hold something" precondition is gone; the slot's existence is what is checked now.
+        if (BackhandCompat.isBackhandLoaded() && checkSwingAndUse(player, false)) {
             return playIfPresent(event, findHoldAnimation(event, player, false));
         }
         return PlayState.STOP;
@@ -236,6 +268,9 @@ public final class AnimationManager {
             return controllerState;
         }
         if (!player.isSwingInProgress && !player.isUsingItem()) {
+            // 1.7.10 has no crossbow (Items.CROSSBOW / CrossbowItem.isCharged do not exist), so the charged
+            // branches stay commented out: hold_mainhand:charged_crossbow / hold_offhand:charged_crossbow are
+            // unreachable here and ConditionNameDiagnostics reports them once per model.
             // ItemStack mainHandItem = player.getHeldItem();
             // if (mainHandItem.is(Items.CROSSBOW) && CrossbowItem.isCharged(mainHandItem)) {
             // return playAnimation(event, "hold_mainhand:charged_crossbow", ILoopType.EDefaultLoopTypes.LOOP);
@@ -245,11 +280,15 @@ public final class AnimationManager {
             // return playAnimation(event, "hold_offhand:charged_crossbow", ILoopType.EDefaultLoopTypes.LOOP);
             // }
             if (player.fishEntity != null) {
-                return playAnimation(event, "hold_mainhand:fishing", ILoopType.EDefaultLoopTypes.LOOP);
+                // D-A5: exist-checked, so a model without `hold_mainhand:fishing` gets STOP instead of driving
+                // AnimationController#setAnimation into its "Could not load animation" branch every frame.
+                return playIfPresent(event, "hold_mainhand:fishing", ILoopType.EDefaultLoopTypes.LOOP);
             }
         }
 
-        if (player.getHeldItem() != null && checkSwingAndUse(player, true)) {
+        // A-01: the "main hand must hold something" precondition is gone - an empty hand now reaches
+        // ConditionalHold#doTest, which answers `hold_mainhand:empty` (1.20.1 MainHandHoldPredicate does the same).
+        if (checkSwingAndUse(player, true)) {
             return playIfPresent(event, findHoldAnimation(event, player, true));
         }
         return PlayState.STOP;
@@ -276,11 +315,17 @@ public final class AnimationManager {
                 event.getController()
                     .adjustTick(0);
             }
-            String conditionalAnimation = findSwingAnimation(event, player);
+            boolean isMainHand = BackhandCompat.swingingArm(player);
+            String conditionalAnimation = findSwingAnimation(event, player, isMainHand);
             if (StringUtils.isNoneBlank(conditionalAnimation)) {
                 return playAnimation(event, conditionalAnimation, ILoopType.EDefaultLoopTypes.PLAY_ONCE);
             }
-            return playAnimation(event, "swing_hand", ILoopType.EDefaultLoopTypes.PLAY_ONCE);
+            // A-02: the offhand fallback name is `swing_offhand` (1.20.1 ItemHoldAnimationPredicate), and both
+            // fallbacks go through the exist-check so a model without them stops instead of spamming the log.
+            return playIfPresent(
+                event,
+                isMainHand ? "swing_hand" : "swing_offhand",
+                ILoopType.EDefaultLoopTypes.PLAY_ONCE);
         }
         return PlayState.STOP;
     }
@@ -372,31 +417,42 @@ public final class AnimationManager {
     }
 
     private static PlayState playIfPresent(AnimationEvent<CustomPlayerEntity> event, String animationName) {
-        if (StringUtils.isNoneBlank(animationName)) {
-            return playAnimation(event, animationName);
+        return playIfPresent(event, animationName, null);
+    }
+
+    /**
+     * Plays the name only when the model actually defines it (D-A5).
+     *
+     * <p>
+     * Conditional names (`hold_mainhand:empty`, `swing_offhand`, the `held-item` fallbacks) are not part of every
+     * model; calling {@code playAnimation} for a missing one drives {@code AnimationController#setAnimation} into
+     * its "Could not load animation: ... Is it missing?" branch, which prints to stdout and leaves the controller
+     * without a fallback. 1.20.1 guards the same calls with {@code playAnimationWithValid}. A {@code null}
+     * loop type keeps the animation file's own loop setting, exactly like the previous behaviour.
+     */
+    private static PlayState playIfPresent(AnimationEvent<CustomPlayerEntity> event, String animationName,
+        ILoopType loopType) {
+        if (StringUtils.isBlank(animationName) || !hasAnimation(event, animationName)) {
+            return PlayState.STOP;
         }
-        return PlayState.STOP;
+        return loopType == null ? playAnimation(event, animationName) : playAnimation(event, animationName, loopType);
     }
 
     /**
      * The held-item animation for an entity that is not a player, or null when the model has none for what she holds.
      * <p>
-     * The id form is the one that answers "a sword in her hand": the same {@code hold_mainhand$<registry name>} shape
-     * {@code ConditionalHold} tests, and it is only answered when the model has that clip, so a model that does not
-     * name its items by registry id simply says nothing here. The ore-dictionary and "kind" forms the player path also
-     * tries are not consulted on this path yet.
+     * The id form is the one that answers "a sword in her hand": the same
+     * {@code hold_mainhand$<registry name>} shape {@code ConditionalHold} tests, built by the single shared helper
+     * {@link InnerClassify#holdConditionName} (D-A3), and it is only answered when the model has that clip, so a
+     * model that does not name its items by registry id simply says nothing here. The ore-dictionary and "kind"
+     * forms the player path also tries are not consulted on this path yet.
      */
     private static String findEntityHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityLivingBase entity) {
-        ItemStack stack = entity.getHeldItem();
-        if (stack == null || stack.getItem() == null) {
+        String byId = InnerClassify.holdConditionName(entity.getHeldItem(), true);
+        if (StringUtils.isBlank(byId) || !hasAnimation(event, byId)) {
             return null;
         }
-        Object name = Item.itemRegistry.getNameForObject(stack.getItem());
-        if (name == null) {
-            return null;
-        }
-        String byId = "hold_mainhand$" + name;
-        return hasAnimation(event, byId) ? byId : null;
+        return byId;
     }
 
     private static String findHoldAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
@@ -407,9 +463,12 @@ public final class AnimationManager {
         return conditionalHold == null ? null : conditionalHold.doTest(player, isMainHand);
     }
 
-    private static String findSwingAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player) {
-        ConditionalSwing conditionalSwing = ConditionManager.getSwing(getAnimationId(event));
-        return conditionalSwing == null ? null : conditionalSwing.doTest(player, BackhandCompat.swingingArm(player));
+    private static String findSwingAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
+        boolean isMainHand) {
+        // A-02: main hand and off hand have separate prefix sets (swing_offhand$/#/: on the off hand), so the
+        // table is chosen by which arm is swinging rather than by handing both cases the main-hand table.
+        ConditionalSwing conditionalSwing = ConditionManager.getSwing(getAnimationId(event), isMainHand);
+        return conditionalSwing == null ? null : conditionalSwing.doTest(player, isMainHand);
     }
 
     private static String findUseAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,

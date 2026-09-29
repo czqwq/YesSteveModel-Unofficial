@@ -29,6 +29,7 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
@@ -215,8 +216,10 @@ public final class OpenYsmPlayerControllerRuntime {
                     "ctrl.swing('mainhand', ':sword')||ctrl.swing('offhand', ':sword')",
                     context);
                 if (swordSwing) {
-                    state.variables.put("swing_sword", 1.0d);
-                    state.variables.put(
+                    // A-03: written through the shared variable entry so the value lands in the same store the
+                    // animation file and its timeline instructions use (see RuntimeState#setVariable).
+                    state.setVariable("swing_sword", 1.0d);
+                    state.setVariable(
                         "jump",
                         OpenYsmControllerExpressionEvaluator.evaluateBoolean(
                             "q.is_jumping&&(q.vertical_speed<0)",
@@ -310,6 +313,9 @@ public final class OpenYsmPlayerControllerRuntime {
         }
     }
 
+    /** The prefix the engine registers scoped variables under (`ScopedMolangVariable#getName`). */
+    private static final String VARIABLE_PREFIX = "v.";
+
     static final class RuntimeState {
         String currentState = "";
         String lastAnimation = "";
@@ -318,7 +324,33 @@ public final class OpenYsmPlayerControllerRuntime {
         double enteredTick;
         boolean lastSwingActive;
         int lastSwingProgress = -1;
+        /**
+         * Fallback store used only while no engine frame scope is open. Normally {@code v.*} reads and writes go to
+         * the engine's per-frame scope ({@link MolangPhysicsRuntime}), which is the same store the animation file's
+         * MoLang and its timeline instructions use - that is the A-03 fix: one store for a name, shared between the
+         * controllers and the animation, instead of one map per (player, model, controller).
+         */
         final Map<String, Double> variables = new ConcurrentHashMap<>();
+
+        /**
+         * Writes {@code v.<name>} (name without the {@code v.} prefix). Prefers the engine scope; falls back to the
+         * local map when no scope is open, so a controller that writes in one evaluation can still read it in the
+         * next.
+         */
+        void setVariable(String name, double value) {
+            if (!MolangPhysicsRuntime.setVariable(VARIABLE_PREFIX + name, value)) {
+                variables.put(name, value);
+            }
+        }
+
+        /**
+         * Reads {@code v.<name>} (name without the {@code v.} prefix). The engine scope wins over the local
+         * fallback, and when neither has the name {@code fallback} is returned.
+         */
+        double getVariable(String name, double fallback) {
+            Double local = variables.get(name);
+            return MolangPhysicsRuntime.getVariable(VARIABLE_PREFIX + name, local == null ? fallback : local);
+        }
     }
 
     private static final class ControllerMatch {

@@ -188,12 +188,26 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         return this.factory;
     }
 
+    /**
+     * The texture to draw. N-1: never returns {@code null} - the engine hands this straight to
+     * {@code TextureManager.bindTexture(ResourceLocation)}, and a {@code null} there ends in a
+     * {@code ReportedException("Registering texture")} crash. The field starts at the built-in default and
+     * {@link #setTexture(ResourceLocation)} ignores {@code null}, so this is a second line of defence for
+     * an override that was stored half-filled (for example a player selection whose texture string was
+     * empty, which {@code SetModelAndTexture} decodes as {@code null}).
+     */
     public ResourceLocation getTexture() {
-        return texture;
+        return texture == null ? CustomPlayerModel.DEFAULT_TEXTURE : texture;
     }
 
+    /**
+     * Sets the texture. A {@code null} argument is ignored rather than stored: the previous (non-null)
+     * texture is kept, so the animatable can never hold a value that would crash the render path (N-1).
+     */
     public void setTexture(ResourceLocation texture) {
-        this.texture = texture;
+        if (texture != null) {
+            this.texture = texture;
+        }
     }
 
     public String getPreviewAnimation() {

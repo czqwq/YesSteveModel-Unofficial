@@ -6,6 +6,7 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
+import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
@@ -68,7 +69,12 @@ public class SyncNpcDataMessage implements IMessage {
         public IMessage onMessage(SyncNpcDataMessage message, MessageContext ctx) {
             // The registry is independent of the local player, so it can be applied before the world is ready;
             // entities that have not spawned yet simply pick up their entry when they render.
-            NPCData.addAll(message.data);
+            // N-10: never let a handler body escape into FML's catch(Throwable) -> rejectHandshake.
+            try {
+                NPCData.addAll(message.data);
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to apply synced YSM NPC data", e);
+            }
             return null;
         }
     }

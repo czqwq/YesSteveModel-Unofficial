@@ -31,32 +31,77 @@ public final class OpenYsmModelSyncServer {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int DEFAULT_CHUNK_SIZE = 32000;
     private static final int LOW_BANDWIDTH_CHUNK_SIZE = 8192;
+    /**
+     * N-11: packet 05 "the server has no cache file for this model" marker. The client decrements its pending
+     * counter without counting the model as loaded or downloaded, so the round can finish instead of waiting for
+     * {@link Config#PLAYER_SYNC_TIMEOUT} to expire.
+     */
+    static final int SKIP_LENGTH = -1;
     private static final Map<UUID, PlayerSyncState> SYNC_STATES = Maps.newConcurrentMap();
 
     private OpenYsmModelSyncServer() {}
 
-    public static void startSync(EntityPlayerMP player) {
+    /**
+     * Starts one 17-protocol round for this player.
+     *
+     * @return {@code true} when the round was actually started. {@code false} means nothing was sent, so the
+     *         caller must report the failure to the N-02 gate
+     *         ({@link ServerModelManager#onOpenYsmSyncFailed}) and let the legacy channel take over.
+     */
+    public static boolean startSync(EntityPlayerMP player) {
         if (player == null || !Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
-            return;
+            return false;
         }
         byte[] serverKey = ServerModelManager.OPEN_YSM_SERVER_KEY;
         if (serverKey == null || serverKey.length != 56) {
             ysmu.LOG.warn("Skipping OpenYSM model sync because server_index key is not initialized");
-            return;
+            return false;
         }
 
         UUID playerId = player.getUniqueID();
-        PlayerSyncState state = new PlayerSyncState(player, createClientCacheKey(serverKey));
-        state.allowedModels.addAll(ServerModelManager.OPEN_YSM_SYNC_INFO.values());
+        // N-11: one fresh session id per attempt. The client learns it from the S2C payload and echoes it in the
+        // feedback, so a late payload or a late FAILED feedback from the previous attempt can no longer disturb
+        // the attempt that is currently running.
+        int sessionId = 1 + RANDOM.nextInt(Integer.MAX_VALUE);
+        PlayerSyncState state = new PlayerSyncState(player, sessionId, createClientCacheKey(serverKey));
+        state.allowedModels.addAll(snapshotAllowedModels());
         SYNC_STATES.put(playerId, state);
         ysmu.LOG.info(
-            "Starting OpenYSM model sync for {}: models={}",
+            "Starting OpenYSM model sync for {}: models={}, session={}",
             player.getCommandSenderName(),
-            state.allowedModels.size());
+            state.allowedModels.size(),
+            state.sessionId);
         ThreadTools.THREAD_POOL.submit(() -> sendPacket01(playerId, state));
+        return true;
     }
 
-    public static void handlePayload(UUID playerId, byte[] data) {
+    /**
+     * N-02: the 17 round for this player is being abandoned server side (a send blew up, the round timed out or a
+     * payload was unusable) - drop the state and tell the gate so it can start the legacy sync. Without this the
+     * gate would keep believing the handshake took over and never fall back, leaving the player with no models.
+     */
+    private static void abortSync(UUID playerId, PlayerSyncState state) {
+        clear(playerId);
+        if (state != null) {
+            ServerModelManager.onOpenYsmSyncFailed(state.player);
+        }
+    }
+
+    /**
+     * Snapshot of the model index. {@code OPEN_YSM_SYNC_INFO} is a plain HashMap that {@code /ysm reload} clears and
+     * rebuilds, and an exception thrown while iterating it would reach FML's packet handling and disconnect the
+     * player, so the copy is defensive: on a concurrent reload this round simply syncs nothing.
+     */
+    private static List<OpenYsmSyncInfo> snapshotAllowedModels() {
+        try {
+            return new ArrayList<>(ServerModelManager.OPEN_YSM_SYNC_INFO.values());
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Skipping OpenYSM model sync because the server model index is being reloaded", e);
+            return new ArrayList<>();
+        }
+    }
+
+    public static void handlePayload(int sessionId, UUID playerId, byte[] data) {
         if (playerId == null) {
             return;
         }
@@ -64,29 +109,51 @@ public final class OpenYsmModelSyncServer {
             clear(playerId);
             return;
         }
-        ThreadTools.THREAD_POOL.submit(() -> handlePayloadAsync(playerId, data));
+        ThreadTools.THREAD_POOL.submit(() -> handlePayloadAsync(sessionId, playerId, data));
     }
 
-    public static void complete(UUID playerId, int status, int loaded, int downloaded, int cacheHits, String message) {
-        PlayerSyncState state = playerId == null ? null : SYNC_STATES.remove(playerId);
+    public static void complete(int sessionId, UUID playerId, int status, int loaded, int downloaded, int cacheHits,
+        String message) {
+        PlayerSyncState state = playerId == null ? null : SYNC_STATES.get(playerId);
         if (state == null) {
+            return;
+        }
+        if (sessionId != 0 && sessionId != state.sessionId) {
+            // N-11: stale feedback belongs to a previous attempt; it must not clear the current state.
+            ysmu.LOG.info(
+                "Ignoring stale OpenYSM sync feedback for {} (session {} != current {})",
+                state.playerName,
+                sessionId,
+                state.sessionId);
+            return;
+        }
+        // Two-argument remove: never delete a state that was replaced in the meantime.
+        if (!SYNC_STATES.remove(playerId, state)) {
             return;
         }
         if (status == C2SCompleteFeedback17.STATUS_SUCCESS) {
             ysmu.LOG.info(
-                "OpenYSM model sync completed for {}: loaded={}, downloaded={}, cacheHits={}",
-                state.playerName,
-                loaded,
-                downloaded,
-                cacheHits);
-        } else {
-            ysmu.LOG.warn(
-                "OpenYSM model sync failed for {}: loaded={}, downloaded={}, cacheHits={}, message={}",
+                "OpenYSM model sync completed for {}: loaded={}, downloaded={}, cacheHits={}, session={}",
                 state.playerName,
                 loaded,
                 downloaded,
                 cacheHits,
-                message);
+                sessionId);
+            // N-02 (wiring ③): the 17 round delivered everything, so the gate must drop its pending legacy
+            // fallback for this player. Without this call a healthy session would still get a second, legacy
+            // sync after the handshake grace period.
+            ServerModelManager.onOpenYsmSyncSucceeded(state.player);
+        } else {
+            ysmu.LOG.warn(
+                "OpenYSM model sync failed for {}: loaded={}, downloaded={}, cacheHits={}, message={}, session={}",
+                state.playerName,
+                loaded,
+                downloaded,
+                cacheHits,
+                message,
+                sessionId);
+            // N-02 (wiring ③): an explicit FAILED feedback means the 17 round is dead - hand over to legacy.
+            ServerModelManager.onOpenYsmSyncFailed(state.player);
         }
     }
 
@@ -104,10 +171,18 @@ public final class OpenYsmModelSyncServer {
         return key;
     }
 
-    private static void handlePayloadAsync(UUID playerId, byte[] packetBytes) {
+    private static void handlePayloadAsync(int sessionId, UUID playerId, byte[] packetBytes) {
         PlayerSyncState state = SYNC_STATES.get(playerId);
-        if (state == null || isTimedOut(state)) {
-            clear(playerId);
+        if (state == null) {
+            return;
+        }
+        if (isTimedOut(state)) {
+            // N-02: the round died on the server side; let the gate fall back instead of leaving it "in progress".
+            abortSync(playerId, state);
+            return;
+        }
+        if (sessionId != 0 && sessionId != state.sessionId) {
+            // N-11: a payload from a previous attempt; drop it without touching the current state.
             return;
         }
 
@@ -115,11 +190,14 @@ public final class OpenYsmModelSyncServer {
             state.touch();
             if (state.step == 1) {
                 handlePacket02(playerId, state, packetBytes);
-            } else if (state.step == 2) {
+            } else if (state.step == 2 || state.step == 3) {
+                // N-05: the request list can be split over several packet-04 messages when it does not fit the C2S
+                // payload budget, so keep accepting them after the first one moved the state to step 3.
                 handlePacket04(playerId, state, packetBytes);
             }
         } catch (Exception e) {
-            clear(playerId);
+            // N-02: this round can no longer finish; drop it and hand the player to the legacy channel.
+            abortSync(playerId, state);
             ysmu.LOG.warn("OpenYSM server sync error for " + state.playerName, e);
         }
     }
@@ -182,7 +260,8 @@ public final class OpenYsmModelSyncServer {
                 sendPayload(playerId, state, encrypted.data());
             }
         } catch (Exception e) {
-            clear(playerId);
+            // N-02: the very first packet never made it, so the 17 round cannot start; fall back to legacy.
+            abortSync(playerId, state);
             ysmu.LOG.warn("Failed to send OpenYSM packet 01 to " + state.playerName, e);
         }
     }
@@ -210,14 +289,27 @@ public final class OpenYsmModelSyncServer {
                 }
 
                 out.writeVarInt(0);
-                out.writeVarInt(0);
+                // The trailing varint used to be ignored by the client; it now carries how many models the legacy
+                // channel would deliver. When the 17-protocol index is trimmed (models that cannot be bridged) the
+                // client sees the mismatch and falls back to the legacy channel instead of silently missing them.
+                out.writeVarInt(countLegacyModels());
 
                 YsmCrypt.EncryptedPacket encrypted = YsmCrypt.encrypt(out.toArray(), state.clientNextKey, false);
                 sendPayload(playerId, state, encrypted.data());
             }
         } catch (Exception e) {
-            clear(playerId);
+            // N-02: the model index never reached the client; the 17 round is dead, so hand over to legacy.
+            abortSync(playerId, state);
             ysmu.LOG.warn("Failed to send OpenYSM packet 03 to " + state.playerName, e);
+        }
+    }
+
+    /** Number of models the legacy channel (SyncModelFiles/SendModelFile) would send; 0 on a concurrent reload. */
+    private static int countLegacyModels() {
+        try {
+            return ServerModelManager.CACHE_NAME_INFO.size();
+        } catch (RuntimeException e) {
+            return 0;
         }
     }
 
@@ -230,9 +322,13 @@ public final class OpenYsmModelSyncServer {
                     if (!isActive(playerId, state)) {
                         return;
                     }
-                    File cacheFile = ServerModelManager.CACHE_SERVER.resolve(model.getCacheFileName()).toFile();
+                    File cacheFile = ServerModelManager.CACHE_SERVER.resolve(model.getCacheFileName())
+                        .toFile();
                     if (!cacheFile.isFile()) {
                         ysmu.LOG.warn("Missing OpenYSM server cache file {}", cacheFile);
+                        // N-11: tell the client this model is skipped, otherwise its pending counter never reaches
+                        // zero and both sides just wait for the sync timeout.
+                        sendPayload(playerId, state, createPacket05Skipped(state, model));
                         continue;
                     }
                     byte[] fileData = FileUtils.readFileToByteArray(cacheFile);
@@ -254,7 +350,8 @@ public final class OpenYsmModelSyncServer {
                     sentModels,
                     state.playerName);
             } catch (Exception e) {
-                clear(playerId);
+                // N-02: chunk delivery blew up; the round cannot complete, so fall back to the legacy channel.
+                abortSync(playerId, state);
                 ysmu.LOG.warn("Failed to send OpenYSM model chunks to " + state.playerName, e);
             }
         });
@@ -276,9 +373,24 @@ public final class OpenYsmModelSyncServer {
         }
     }
 
+    /** N-11: packet 05 with {@link #SKIP_LENGTH} as the chunk length; no payload bytes follow. */
+    private static byte[] createPacket05Skipped(PlayerSyncState state, OpenYsmSyncInfo model) throws Exception {
+        byte[] garbage = randomGarbage();
+        try (YSMByteBuf out = new YSMByteBuf(Unpooled.buffer())) {
+            out.writeGarbageHeader(garbage.length, garbage);
+            out.writeVarInt(5);
+            out.writeVarLong(model.getHash1());
+            out.writeVarLong(model.getHash2());
+            out.writeVarInt(0);
+            out.writeVarInt(0);
+            out.writeVarInt(SKIP_LENGTH);
+            return YsmCrypt.encrypt(out.toArray(), state.key1, false).data();
+        }
+    }
+
     private static void sendPayload(UUID playerId, PlayerSyncState state, byte[] payload) {
         if (isActive(playerId, state)) {
-            NetworkHandler.sendToClientPlayer(new S2CModelSyncPayload17(payload), state.player);
+            NetworkHandler.sendToClientPlayer(new S2CModelSyncPayload17(state.sessionId, payload), state.player);
         }
     }
 
@@ -326,6 +438,7 @@ public final class OpenYsmModelSyncServer {
 
         private final EntityPlayerMP player;
         private final String playerName;
+        private final int sessionId;
         private final byte[] clientCacheKey;
         private final List<OpenYsmSyncInfo> allowedModels = new ArrayList<>();
         private byte[] key1;
@@ -333,9 +446,10 @@ public final class OpenYsmModelSyncServer {
         private int step = 1;
         private long lastTouched = System.currentTimeMillis();
 
-        private PlayerSyncState(EntityPlayerMP player, byte[] clientCacheKey) {
+        private PlayerSyncState(EntityPlayerMP player, int sessionId, byte[] clientCacheKey) {
             this.player = player;
             this.playerName = player.getCommandSenderName();
+            this.sessionId = sessionId;
             this.clientCacheKey = clientCacheKey;
         }
 

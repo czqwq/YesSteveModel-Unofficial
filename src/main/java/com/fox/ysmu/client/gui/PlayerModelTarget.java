@@ -15,6 +15,10 @@ import com.fox.ysmu.network.message.SetNpcModelAndTexture;
  * Player target: state lives in {@link ExtendedModelInfo}. The local player updates itself; another player
  * reached through a companion mod's picker is updated as an NPC keyed by the granted entity id, which is held
  * on this instance rather than in a static field.
+ * <p>
+ * CU-03: the player reference may be {@code null} — {@code PlayerModelScreen} has a legacy no-argument
+ * constructor that resolves {@code Minecraft.thePlayer} before a world is joined. Every exit therefore returns
+ * a safe value instead of dereferencing it, so the screen can still be opened (empty preview) without an NPE.
  */
 final class PlayerModelTarget implements ModelSelectionTarget {
 
@@ -28,17 +32,24 @@ final class PlayerModelTarget implements ModelSelectionTarget {
 
     @Override
     public EntityLivingBase getPreviewEntity() {
+        // 安全值：null 表示没有可绘制的实体，调用方（PlayerModelScreen.drawScreen）会跳过纸娃娃。
         return player;
     }
 
     @Override
     public ResourceLocation getModelId() {
+        if (player == null) {
+            return null;
+        }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         return eep == null ? null : eep.getModelId();
     }
 
     @Override
     public ResourceLocation getTextureId() {
+        if (player == null) {
+            return null;
+        }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         return eep == null ? null : eep.getSelectTexture();
     }
@@ -50,6 +61,9 @@ final class PlayerModelTarget implements ModelSelectionTarget {
 
     @Override
     public boolean isStarred(ResourceLocation modelId) {
+        if (player == null) {
+            return false;
+        }
         ExtendedStarModels stars = ExtendedStarModels.get(player);
         return stars != null && modelId != null && stars.containModel(modelId);
     }
@@ -61,6 +75,9 @@ final class PlayerModelTarget implements ModelSelectionTarget {
 
     @Override
     public void apply(ResourceLocation modelId, ResourceLocation textureId) {
+        if (player == null) {
+            return;
+        }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         if (eep != null) {
             eep.setModelAndTexture(modelId, textureId);
@@ -73,6 +90,6 @@ final class PlayerModelTarget implements ModelSelectionTarget {
     }
 
     private boolean isLocalPlayer() {
-        return player.equals(Minecraft.getMinecraft().thePlayer);
+        return player != null && player.equals(Minecraft.getMinecraft().thePlayer);
     }
 }

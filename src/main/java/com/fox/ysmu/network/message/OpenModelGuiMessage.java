@@ -3,6 +3,7 @@ package com.fox.ysmu.network.message;
 import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.fox.ysmu.util.DeferredWork;
+import com.fox.ysmu.ysmu;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
 import cpw.mods.fml.common.network.simpleimpl.MessageContext;
@@ -50,10 +51,16 @@ public class OpenModelGuiMessage implements IMessage {
     public static class Handler implements IMessageHandler<OpenModelGuiMessage, IMessage> {
         @Override
         public IMessage onMessage(OpenModelGuiMessage message, MessageContext ctx) {
-            if (ctx.side == Side.CLIENT) {
-                int entityId = message.entityId;
-                int npcId = message.npcId;
-                DeferredWork.client(() -> handleMessage(entityId, npcId));
+            // N-10: the GUI itself is opened from DeferredWork (whose drain catches Throwable); guarding here keeps
+            // the onMessage part from escaping into FML's catch(Throwable) -> rejectHandshake.
+            try {
+                if (ctx.side == Side.CLIENT) {
+                    int entityId = message.entityId;
+                    int npcId = message.npcId;
+                    DeferredWork.client(() -> handleMessage(entityId, npcId));
+                }
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to open the YSM model selection screen", e);
             }
             return null;
         }

@@ -36,6 +36,16 @@ import rip.ysm.security.YsmCrypt;
 public final class OpenYsmModelSyncClient {
 
     private static final SecureRandom RANDOM = new SecureRandom();
+
+    /** N-11: matches {@code OpenYsmModelSyncServer.SKIP_LENGTH}: "the server has no cache file for this model". */
+    private static final int SKIP_LENGTH = -1;
+    /** N-05: packet-04 header budget: garbage header (<=65) + type byte + count varInt + session id + slack. */
+    private static final int PACKET04_HEADER_BUDGET = 96;
+    /** N-06: sane upper bound for one model cache file, so a bogus declared size cannot exhaust the heap. */
+    private static final int MAX_MODEL_CACHE_BYTES = 64 * 1024 * 1024;
+    /** N-06: sane upper bound for the model count advertised in the server index. */
+    private static final int MAX_SERVER_MODELS = 100_000;
+
     private static final Map<UUID, ServerModelContext> SERVER_MODELS = Maps.newConcurrentMap();
 
     private static volatile int syncStep = 1;
@@ -43,6 +53,10 @@ public final class OpenYsmModelSyncClient {
     private static volatile int loadedModelsCount;
     private static volatile int downloadedModelsCount;
     private static volatile int cacheHitCount;
+    /** N-11: session of the round in progress, learned from the server payload. */
+    private static volatile int currentSessionId;
+    /** N-11: session that already ended, used to drop payloads that arrive after the round finished. */
+    private static volatile int lastCompletedSessionId;
     private static byte[] key1;
     private static byte[] lastKey;
     private static byte[] serverKey;
@@ -51,8 +65,8 @@ public final class OpenYsmModelSyncClient {
 
     private OpenYsmModelSyncClient() {}
 
-    public static void handlePayload(byte[] data) {
-        ThreadTools.THREAD_POOL.submit(() -> processServerData(data));
+    public static void handlePayload(int sessionId, byte[] data) {
+        ThreadTools.THREAD_POOL.submit(() -> processServerData(sessionId, data));
     }
 
     public static synchronized void resetConnectionState() {
@@ -61,6 +75,7 @@ public final class OpenYsmModelSyncClient {
         loadedModelsCount = 0;
         downloadedModelsCount = 0;
         cacheHitCount = 0;
+        currentSessionId = 0;
         key1 = null;
         lastKey = null;
         serverKey = null;
@@ -73,9 +88,15 @@ public final class OpenYsmModelSyncClient {
         resetConnectionState();
     }
 
-    private static synchronized void processServerData(byte[] packetBytes) {
+    private static synchronized void processServerData(int sessionId, byte[] packetBytes) {
         if (packetBytes == null || packetBytes.length == 0) {
             resetConnectionState();
+            return;
+        }
+        if (isStaleSession(sessionId)) {
+            // N-11: a payload that belongs to a session which already ended (or to a different, still running one)
+            // is dropped before decryption. Decrypting it would fail with the wrong key and the failure handler
+            // would send a FAILED feedback that tears down the round that is actually in progress.
             return;
         }
 
@@ -84,6 +105,7 @@ public final class OpenYsmModelSyncClient {
                 byte[] decrypted = YsmCrypt.decrypt(packetBytes, YsmCrypt.publicKey);
                 if (decrypted != null) {
                     handlePacket01(decrypted);
+                    currentSessionId = sessionId;
                 }
             } else if (syncStep == 2) {
                 byte[] decrypted = YsmCrypt.decrypt(packetBytes, lastKey);
@@ -104,6 +126,17 @@ public final class OpenYsmModelSyncClient {
             sendComplete(C2SCompleteFeedback17.STATUS_FAILED, e.getClass().getSimpleName() + ": " + e.getMessage());
             ysmu.LOG.warn("OpenYSM client sync error at step " + syncStep, e);
         }
+    }
+
+    private static boolean isStaleSession(int sessionId) {
+        if (sessionId == 0) {
+            // 0 means "unknown" (a peer that does not stamp its payloads); accept it rather than dropping data.
+            return false;
+        }
+        if (sessionId == lastCompletedSessionId) {
+            return true;
+        }
+        return currentSessionId != 0 && sessionId != currentSessionId;
     }
 
     private static void handlePacket01(byte[] decryptedBuffer) throws Exception {
@@ -135,9 +168,11 @@ public final class OpenYsmModelSyncClient {
         long folderHash = buf.readVarLong();
         currentCacheFolderName = Long.toHexString(folderHash);
         serverKey = new byte[56];
-        buf.getRawBuf().readBytes(serverKey);
+        buf.getRawBuf()
+            .readBytes(serverKey);
         clientKey = new byte[56];
-        buf.getRawBuf().readBytes(clientKey);
+        buf.getRawBuf()
+            .readBytes(clientKey);
 
         SERVER_MODELS.clear();
         File cacheDir = getCacheDir();
@@ -148,6 +183,10 @@ public final class OpenYsmModelSyncClient {
         Map<UUID, File> localCacheMap = YSMClientCache.buildCacheIndex(cacheDir, clientKey);
         List<ModelHash> modelsToRequest = new ArrayList<>();
         int serverModelCount = buf.readVarInt();
+        // N-06: the advertised count comes from the peer; bound it before allocating or looping.
+        if (serverModelCount < 0 || serverModelCount > MAX_SERVER_MODELS) {
+            throw new IllegalStateException("Invalid OpenYSM model index size: " + serverModelCount);
+        }
         ysmu.LOG.info("OpenYSM client received sync index: models={}", serverModelCount);
 
         for (int i = 0; i < serverModelCount; i++) {
@@ -197,12 +236,38 @@ public final class OpenYsmModelSyncClient {
         int totalSize = buf.readVarInt();
         int chunkOffset = buf.readVarInt();
         int chunkLength = buf.readVarInt();
+        if (chunkLength == SKIP_LENGTH) {
+            // N-11: the server has no cache file for this model. It counts as neither loaded nor downloaded, but
+            // the pending counter has to move so the round can finish.
+            ysmu.LOG.warn("OpenYSM server skipped model {} ({})", context.modelId, uuid);
+            pendingModelsCount--;
+            if (pendingModelsCount <= 0) {
+                sendComplete(C2SCompleteFeedback17.STATUS_SUCCESS, "");
+            }
+            return;
+        }
+        // N-06: validate the peer-supplied sizes before allocating or seeking; a malformed chunk is dropped
+        // instead of throwing (the round is not aborted because of one bad packet).
+        if (totalSize < 0 || chunkOffset < 0 || chunkLength < 0
+            || totalSize > MAX_MODEL_CACHE_BYTES
+            || chunkOffset > totalSize - chunkLength
+            || chunkLength > buf.getRawBuf()
+                .readableBytes()) {
+            ysmu.LOG.warn(
+                "Ignoring malformed OpenYSM model chunk for {}: total={}, offset={}, length={}",
+                context.modelId,
+                totalSize,
+                chunkOffset,
+                chunkLength);
+            return;
+        }
         if (context.fileBuffer == null) {
             context.fileBuffer = new byte[totalSize];
             context.totalSize = totalSize;
             context.bytesReceived = 0;
         }
-        buf.getRawBuf().readBytes(context.fileBuffer, chunkOffset, chunkLength);
+        buf.getRawBuf()
+            .readBytes(context.fileBuffer, chunkOffset, chunkLength);
         context.bytesReceived += chunkLength;
 
         if (context.bytesReceived >= context.totalSize) {
@@ -225,24 +290,65 @@ public final class OpenYsmModelSyncClient {
         }
     }
 
+    /**
+     * N-05: the request list grows by two var-longs per model and one packet may not exceed the C2S budget
+     * ({@link C2SModelSyncPayload17#MAX_SYNC_PAYLOAD_BYTES}), so it is split into as many packet-04 messages as
+     * needed. The server accepts every one of them (see {@code handlePayloadAsync}).
+     */
+    private static List<List<ModelHash>> splitRequests(List<ModelHash> modelsToRequest) {
+        List<List<ModelHash>> batches = new ArrayList<>();
+        List<ModelHash> current = new ArrayList<>();
+        int size = PACKET04_HEADER_BUDGET;
+        for (ModelHash hash : modelsToRequest) {
+            int entrySize = varLongSize(hash.hash1) + varLongSize(hash.hash2);
+            if (!current.isEmpty() && size + entrySize > C2SModelSyncPayload17.MAX_SYNC_PAYLOAD_BYTES) {
+                batches.add(current);
+                current = new ArrayList<>();
+                size = PACKET04_HEADER_BUDGET;
+            }
+            current.add(hash);
+            size += entrySize;
+        }
+        if (!current.isEmpty()) {
+            batches.add(current);
+        }
+        return batches;
+    }
+
+    private static int varLongSize(long value) {
+        int size = 1;
+        while ((value & -128L) != 0L) {
+            value >>>= 7;
+            size++;
+        }
+        return size;
+    }
+
     private static void sendPacket04(List<ModelHash> modelsToRequest) throws Exception {
         syncStep = 3;
         pendingModelsCount = modelsToRequest.size();
-
-        byte[] garbage = randomGarbage();
-        try (YSMByteBuf out = new YSMByteBuf(Unpooled.buffer())) {
-            out.writeGarbageHeader(garbage.length, garbage);
-            out.writeByte((byte) 0x04);
-            out.writeVarInt(modelsToRequest.size());
-            for (ModelHash hash : modelsToRequest) {
-                out.writeVarLong(hash.hash1);
-                out.writeVarLong(hash.hash2);
-            }
-            sendPayload(YsmCrypt.encrypt(out.toArray(), key1, false).data());
+        for (List<ModelHash> batch : splitRequests(modelsToRequest)) {
+            sendPacket04Batch(batch);
         }
 
         if (pendingModelsCount == 0) {
             sendComplete(C2SCompleteFeedback17.STATUS_SUCCESS, "");
+        }
+    }
+
+    private static void sendPacket04Batch(List<ModelHash> batch) throws Exception {
+        byte[] garbage = randomGarbage();
+        try (YSMByteBuf out = new YSMByteBuf(Unpooled.buffer())) {
+            out.writeGarbageHeader(garbage.length, garbage);
+            out.writeByte((byte) 0x04);
+            out.writeVarInt(batch.size());
+            for (ModelHash hash : batch) {
+                out.writeVarLong(hash.hash1);
+                out.writeVarLong(hash.hash2);
+            }
+            sendPayload(
+                YsmCrypt.encrypt(out.toArray(), key1, false)
+                    .data());
         }
     }
 
@@ -256,7 +362,8 @@ public final class OpenYsmModelSyncClient {
                 return false;
             }
             ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, context.modelId);
-            Minecraft.getMinecraft().func_152344_a(() -> ClientModelManager.registerAll(data));
+            Minecraft.getMinecraft()
+                .func_152344_a(() -> ClientModelManager.registerAll(data));
             return true;
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to parse OpenYSM synced model " + context.modelId, e);
@@ -289,30 +396,43 @@ public final class OpenYsmModelSyncClient {
                 }
             }
         }
-        if (buf.getRawBuf().readableBytes() > 0) {
+        if (buf.getRawBuf()
+            .readableBytes() > 0) {
+            // Trailing varint written by the server: the number of models the legacy channel would deliver.
             buf.readVarInt();
         }
     }
 
     private static File getCacheDir() {
         String folder = currentCacheFolderName == null ? "0" : currentCacheFolderName;
-        return ServerModelManager.CACHE_CLIENT.resolve(folder).toFile();
+        return ServerModelManager.CACHE_CLIENT.resolve(folder)
+            .toFile();
     }
 
     private static void sendPayload(byte[] payload) {
-        NetworkHandler.CHANNEL.sendToServer(new C2SModelSyncPayload17(payload));
+        NetworkHandler.CHANNEL.sendToServer(new C2SModelSyncPayload17(currentSessionId, payload));
     }
 
     private static void sendComplete(int status, String message) {
+        int finishedSession = currentSessionId;
         NetworkHandler.CHANNEL.sendToServer(
-            new C2SCompleteFeedback17(status, loadedModelsCount, downloadedModelsCount, cacheHitCount, message));
-        if (status == C2SCompleteFeedback17.STATUS_SUCCESS) {
-            ysmu.LOG.info(
-                "OpenYSM client sync complete: loaded={}, downloaded={}, cacheHits={}",
+            new C2SCompleteFeedback17(
+                finishedSession,
+                status,
                 loadedModelsCount,
                 downloadedModelsCount,
-                cacheHitCount);
+                cacheHitCount,
+                message));
+        if (status == C2SCompleteFeedback17.STATUS_SUCCESS) {
+            ysmu.LOG.info(
+                "OpenYSM client sync complete: loaded={}, downloaded={}, cacheHits={}, session={}",
+                loadedModelsCount,
+                downloadedModelsCount,
+                cacheHitCount,
+                finishedSession);
         }
+        // Any payload of this session that is still in flight is stale from now on.
+        lastCompletedSessionId = finishedSession;
         resetConnectionState();
     }
 

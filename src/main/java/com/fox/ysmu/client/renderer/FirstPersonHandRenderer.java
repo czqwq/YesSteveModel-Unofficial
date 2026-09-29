@@ -71,6 +71,10 @@ public final class FirstPersonHandRenderer {
             && itemRenderer.itemToRender == null;
     }
 
+    /**
+     * 便捷查询：模型是否存在可渲染的右臂骨骼。渲染路径不再调用它（R-09：骨骼只在
+     * {@link #getCustomHandRenderContext} 里解析一次并随 context 复用），保留为公开辅助方法。
+     */
     public static boolean hasRenderableRightArm(GeoModel geoModel) {
         return findRightArmBone(geoModel).isPresent();
     }
@@ -83,7 +87,7 @@ public final class FirstPersonHandRenderer {
         }
 
         event.setCanceled(true);
-        render(event, mc, player, itemRenderer, context.renderer, context.geoModel, context.customPlayer);
+        render(event, mc, player, itemRenderer, context.renderer, context.customPlayer, context.rightArm);
         return true;
     }
 
@@ -100,15 +104,15 @@ public final class FirstPersonHandRenderer {
             player,
             itemRenderer,
             context.renderer,
-            context.geoModel,
             context.customPlayer,
+            context.rightArm,
             partialTicks,
             renderOffhand);
         return true;
     }
 
     public static void render(RenderHandEvent event, Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, GeoModel geoModel, CustomPlayerEntity customPlayer) {
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm) {
         float partialTicks = event.partialTicks;
         EntityRenderer entityRenderer = mc.entityRenderer;
 
@@ -124,7 +128,15 @@ public final class FirstPersonHandRenderer {
 
             entityRenderer.enableLightmap((double) partialTicks);
             try {
-                renderFirstPersonItems(mc, player, itemRenderer, renderer, geoModel, customPlayer, partialTicks, true);
+                renderFirstPersonItems(
+                    mc,
+                    player,
+                    itemRenderer,
+                    renderer,
+                    customPlayer,
+                    rightArm,
+                    partialTicks,
+                    true);
             } finally {
                 entityRenderer.disableLightmap((double) partialTicks);
             }
@@ -171,7 +183,7 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void renderFirstPersonItems(Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, GeoModel geoModel, CustomPlayerEntity customPlayer, float partialTicks,
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, float partialTicks,
         boolean renderOffhand) {
         applyVanillaHandLighting(player, partialTicks);
         applyVanillaArmViewSmoothing(player, partialTicks);
@@ -179,7 +191,7 @@ public final class FirstPersonHandRenderer {
         GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
 
         try {
-            renderCustomEmptyMainHand(mc, player, itemRenderer, renderer, geoModel, customPlayer, partialTicks);
+            renderCustomEmptyMainHand(mc, player, itemRenderer, renderer, customPlayer, rightArm, partialTicks);
             if (renderOffhand) {
                 BackhandCompat.renderOffhand(partialTicks);
             }
@@ -225,21 +237,19 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void renderCustomEmptyMainHand(Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, GeoModel geoModel, CustomPlayerEntity customPlayer, float partialTicks) {
-        Optional<GeoBone> rightArm = findRightArmBone(geoModel);
-        if (!rightArm.isPresent()) {
-            return;
-        }
-
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, float partialTicks) {
         GL11.glPushMatrix();
         try {
             applyVanillaEmptyHandTransform(player, itemRenderer, partialTicks);
+            // R-04 契约：这里刻意不恢复纹理绑定——shouldRenderCustomHand 要求 thirdPersonView == 0 且未睡觉，
+            // 因此本路径收尾的 renderVanillaOverlays 必然走到 itemRenderer.renderOverlays(partialTicks)
+            // 并自行改绑纹理。若将来在两者之间插入绘制代码，必须先自行绑定纹理。
             mc.getTextureManager()
                 .bindTexture(customPlayer.getTexture());
             prepareCustomArmState();
             try {
-                alignGeckoArmToVanillaBipedArm(rightArm.get());
-                renderRightArmBone(renderer, rightArm.get(), customPlayer);
+                alignGeckoArmToVanillaBipedArm(rightArm);
+                renderRightArmBone(renderer, rightArm, customPlayer);
             } finally {
                 restoreCustomArmState();
             }
@@ -401,7 +411,10 @@ public final class FirstPersonHandRenderer {
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
             .get(ModelIdUtil.getArmId(modelId));
-        if (!hasRenderableRightArm(geoModel)) {
+        // R-09: resolve the right-arm bone once here and reuse it for the whole frame (the render path no
+        // longer calls hasRenderableRightArm/findRightArmBone a second time).
+        Optional<GeoBone> rightArm = findRightArmBone(geoModel);
+        if (!rightArm.isPresent()) {
             return null;
         }
         CustomPlayerRenderer renderer = ClientProxy.getInstance();
@@ -415,7 +428,7 @@ public final class FirstPersonHandRenderer {
         if (MinecraftForge.EVENT_BUS.post(new SpecialPlayerRenderEvent(player, customPlayer, modelId))) {
             return null;
         }
-        return new CustomHandRenderContext(renderer, geoModel, customPlayer);
+        return new CustomHandRenderContext(renderer, customPlayer, rightArm.get());
     }
 
     private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ExtendedModelInfo eep,
@@ -441,14 +454,15 @@ public final class FirstPersonHandRenderer {
 
     private static final class CustomHandRenderContext {
         private final CustomPlayerRenderer renderer;
-        private final GeoModel geoModel;
         private final CustomPlayerEntity customPlayer;
+        /** R-09: the right-arm bone resolved once for this frame. */
+        private final GeoBone rightArm;
 
-        private CustomHandRenderContext(CustomPlayerRenderer renderer, GeoModel geoModel,
-            CustomPlayerEntity customPlayer) {
+        private CustomHandRenderContext(CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer,
+            GeoBone rightArm) {
             this.renderer = renderer;
-            this.geoModel = geoModel;
             this.customPlayer = customPlayer;
+            this.rightArm = rightArm;
         }
     }
 }

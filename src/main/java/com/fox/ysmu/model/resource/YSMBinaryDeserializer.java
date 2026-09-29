@@ -1,6 +1,7 @@
 package com.fox.ysmu.model.resource;
 
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.ysmu;
 import rip.ysm.security.YSMByteBuf;
 import io.netty.buffer.Unpooled;
 
@@ -38,7 +39,13 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         } else if (format <= 32) {
             deserializeModern();
         } else {
-            throw new UnsupportedOperationException("Unsupported OpenYSM binary format: " + format);
+            // M-24:dev 基线对 format > 32 直接抛 UnsupportedOperationException,新版本模型会被整包跳过且
+            // 只剩一句没有版本号的警告。参考实现(OpenYSM 的 YSMBinaryDeserializer:35-41)对
+            // 16 以上一律按 modern 布局解析,这里跟随该宽容策略,并把版本号写进日志。
+            ysmu.LOG.warn(
+                "OpenYSM binary format {} is newer than the supported 32; parsing it with the format-32 layout on a best-effort basis",
+                format);
+            deserializeModern();
         }
         if (closeOnExit) {
             this.reader.close();

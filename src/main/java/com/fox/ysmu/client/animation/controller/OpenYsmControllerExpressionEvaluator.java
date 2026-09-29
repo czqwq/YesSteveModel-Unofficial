@@ -2,15 +2,12 @@ package com.fox.ysmu.client.animation.controller;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.entity.item.EntityBoat;
 import net.minecraft.entity.passive.EntityPig;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.EnumAction;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
 import net.minecraft.util.MathHelper;
 
 import org.apache.commons.lang3.StringUtils;
@@ -79,7 +76,9 @@ final class OpenYsmControllerExpressionEvaluator {
             String target = normalizeVariableName(trimmed.substring(0, equals).trim());
             String valueExpression = trimmed.substring(equals + 1).trim();
             if (target.startsWith("v.")) {
-                context.state.variables.put(target.substring(2), evaluateNumber(valueExpression, context));
+                // A-03: on_entry/on_exit assignments go through the shared variable entry, i.e. into the engine's
+                // per-frame scope, the same store the animation file and its timeline instructions use.
+                context.state.setVariable(target.substring(2), evaluateNumber(valueExpression, context));
             }
         }
     }
@@ -423,10 +422,17 @@ final class OpenYsmControllerExpressionEvaluator {
 
         private double localVariableValue(String name) {
             if ("jump".equals(name)) {
-                return isJumping() ? TRUE : FALSE;
+                // A-04 (implemented after A-03 unified the store): an explicitly written v.jump - by a timeline
+                // instruction, an on_entry/on_exit statement or prepareFrameVariables - wins over the live
+                // `q.is_jumping && q.vertical_speed < 0` latch. Only when nothing ever wrote it does the live
+                // value answer, which keeps a model that never sets v.jump behaving as before.
+                double stored = state.getVariable(name, Double.NaN);
+                if (Double.isNaN(stored)) {
+                    return isJumping() ? TRUE : FALSE;
+                }
+                return stored;
             }
-            Double value = state.variables.get(name);
-            return value == null ? FALSE : value;
+            return state.getVariable(name, FALSE);
         }
 
         private double queryValue(String name) {
@@ -651,76 +657,10 @@ final class OpenYsmControllerExpressionEvaluator {
         private double handMatch(List<Argument> arguments, boolean requireUse, boolean requireSwing) {
             String hand = arguments.size() > 0 ? arguments.get(0).asString() : "mainhand";
             String matcher = arguments.size() > 1 ? arguments.get(1).asString() : "";
-            boolean mainHand = !"offhand".equals(hand);
-            if (!mainHand && !BackhandCompat.isBackhandLoaded()) {
-                return FALSE;
-            }
-            if (requireUse && (!player.isUsingItem() || BackhandCompat.getUsedItemHand(player) != mainHand)) {
-                return FALSE;
-            }
-            if (requireSwing && (!player.isSwingInProgress || BackhandCompat.swingingArm(player) != mainHand)) {
-                return FALSE;
-            }
-            ItemStack stack = BackhandCompat.getItemInHand(player, mainHand);
-            return itemMatches(stack, matcher) ? TRUE : FALSE;
-        }
-
-        private boolean itemMatches(ItemStack stack, String matcher) {
-            if (StringUtils.isBlank(matcher)) {
-                return stack != null;
-            }
-            if ("empty".equals(matcher)) {
-                return stack == null;
-            }
-            if (stack == null || stack.getItem() == null) {
-                return false;
-            }
-            String id = itemId(stack);
-            if (matcher.startsWith("$")) {
-                return id.equals(matcher.substring(1).toLowerCase(Locale.ROOT));
-            }
-            if (matcher.startsWith("#")) {
-                return false;
-            }
-            String category = matcher.startsWith(":") ? matcher.substring(1) : matcher;
-            return itemCategoryMatches(stack, id, category.toLowerCase(Locale.ROOT));
-        }
-
-        private String itemId(ItemStack stack) {
-            Object rawName = Item.itemRegistry.getNameForObject(stack.getItem());
-            return rawName == null ? "" : rawName.toString().toLowerCase(Locale.ROOT);
-        }
-
-        private boolean itemCategoryMatches(ItemStack stack, String id, String category) {
-            String itemType = InnerClassify.getItemType(stack);
-            if (category.equals(itemType)) {
-                return true;
-            }
-            if ("trident".equals(category) && "spear".equals(itemType)) {
-                return true;
-            }
-            if ("spear".equals(category) || "trident".equals(category)) {
-                return id.contains("spear") || id.contains("trident");
-            }
-            if (isKnownItemCategory(category)) {
-                return false;
-            }
-            return id.contains(category);
-        }
-
-        private boolean isKnownItemCategory(String category) {
-            return "sword".equals(category)
-                || "axe".equals(category)
-                || "pickaxe".equals(category)
-                || "shovel".equals(category)
-                || "hoe".equals(category)
-                || "bow".equals(category)
-                || "crossbow".equals(category)
-                || "shield".equals(category)
-                || "spear".equals(category)
-                || "trident".equals(category)
-                || "fishing_rod".equals(category)
-                || "throwable_potion".equals(category);
+            // A-06③ / A-07: the animation-file `ctrl.hold` function calls the very same method, so the two paths
+            // cannot disagree about hands, `$id` / `#ore-dictionary` / `:kind` / `empty`, or the aliases
+            // (trident/spear, fishingrod/fishing_rod, EnumAction names).
+            return InnerClassify.matchesHandCondition(player, hand, matcher, requireUse, requireSwing) ? TRUE : FALSE;
         }
 
         private boolean allAnimationsFinished() {

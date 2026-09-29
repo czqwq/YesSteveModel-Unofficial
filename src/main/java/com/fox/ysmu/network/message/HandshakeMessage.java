@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.util.DeferredWork;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
@@ -41,21 +42,26 @@ public class HandshakeMessage implements IMessage {
 
         @Override
         public IMessage onMessage(HandshakeMessage message, MessageContext ctx) {
-            EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender == null) {
-                return null;
-            }
-            int protocol = message.protocol;
-            // Kick from the server thread; disconnect handling touches connection state, not the Netty pipeline.
-            DeferredWork.server(() -> {
-                if (protocol != NetworkHandler.NETWORK_PROTOCOL) {
-                    sender.playerNetServerHandler.kickPlayerFromServer(
-                        "YSMU network protocol mismatch (server " + NetworkHandler.NETWORK_PROTOCOL
-                            + ", client "
-                            + protocol
-                            + "). Install matching Yes Steve Model Unofficial versions.");
+            // N-10: the kick itself runs through DeferredWork (whose drain catches Throwable); guard onMessage too.
+            try {
+                EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
+                if (sender == null) {
+                    return null;
                 }
-            });
+                int protocol = message.protocol;
+                // Kick from the server thread; disconnect handling touches connection state, not the Netty pipeline.
+                DeferredWork.server(() -> {
+                    if (protocol != NetworkHandler.NETWORK_PROTOCOL) {
+                        sender.playerNetServerHandler.kickPlayerFromServer(
+                            "YSMU network protocol mismatch (server " + NetworkHandler.NETWORK_PROTOCOL
+                                + ", client "
+                                + protocol
+                                + "). Install matching Yes Steve Model Unofficial versions.");
+                    }
+                });
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to handle YSMU network handshake", e);
+            }
             return null;
         }
     }

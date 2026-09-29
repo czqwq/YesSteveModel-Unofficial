@@ -17,6 +17,9 @@ public class TextureButton extends GuiButton {
     private final ResourceLocation textureId;
     private final String name;
     private final ModelSelectionTarget target;
+    /** CU-16: 缩放因子与显示高度在构造时缓存（每次 initGui 重建按钮），避免每帧重建 ScaledResolution。 */
+    private final int guiScale;
+    private final int guiDisplayHeight;
 
     public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, ModelSelectionTarget target) {
         super(id, pX, pY, 54, 102, "");
@@ -24,6 +27,10 @@ public class TextureButton extends GuiButton {
         this.textureId = textureId;
         this.name = ModelIdUtil.getSubNameFromId(textureId);
         this.target = target;
+
+        Minecraft mc = Minecraft.getMinecraft();
+        this.guiScale = mc == null ? 1 : new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        this.guiDisplayHeight = mc == null ? 1 : mc.displayHeight;
     }
 
     public void doPress() {
@@ -35,16 +42,20 @@ public class TextureButton extends GuiButton {
         FontRenderer font = mc.fontRenderer;
         this.field_146123_n = mouseX >= this.xPosition && mouseY >= this.yPosition && mouseX < this.xPosition + this.width && mouseY < this.yPosition + this.height;
         this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, 0xFF_434242, 0xFF_434242);
-        int scale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        int scale = this.guiScale;
         int scissorX = this.xPosition * scale;
-        int scissorY = mc.displayHeight - ((this.yPosition + this.height - 20) * scale);
+        int scissorY = this.guiDisplayHeight - ((this.yPosition + this.height - 20) * scale);
         int scissorW = this.width * scale;
         int scissorH = (this.height - 20) * scale;
+        // CU-13: scissor 必须在 finally 里恢复，渲染异常时不能让整个界面被裁剪。
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
-        GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-        RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
-            35, mc.thePlayer, modelId, textureId);
-        GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        try {
+            GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+            RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
+                35, mc.thePlayer, modelId, textureId);
+        } finally {
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        }
 
         List<String> split = font.listFormattedStringToWidth(name, 50);
         if (split.size() > 1) {

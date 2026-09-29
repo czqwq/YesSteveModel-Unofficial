@@ -2,11 +2,13 @@ package com.fox.ysmu.model.format;
 
 import static com.fox.ysmu.model.ServerModelManager.*;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collection;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Map;
 
 import org.apache.commons.io.FileUtils;
@@ -15,6 +17,7 @@ import org.jetbrains.annotations.NotNull;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.YesModelUtils;
+import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
 
 import software.bernie.geckolib3.geo.raw.pojo.Converter;
@@ -22,34 +25,58 @@ import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
 
 public final class YsmFormat {
 
-    public static void cacheAllModels(Path rootPath) {
-        Collection<File> ysmFiles = FileUtils.listFiles(rootPath.toFile(), new String[] { "ysm" }, false);
-        for (File ysmFile : ysmFiles) {
-            String modelId = ModelIdUtil.getInternalModelId(removeExtension(ysmFile.getName()));
-            try {
-                Map<String, byte[]> data = YesModelUtils.input(ysmFile);
-                if (data.isEmpty()) {
-                    continue;
-                }
-                if (!data.containsKey(MAIN_MODEL_FILE_NAME)) {
-                    continue;
-                }
-                if (!data.containsKey(ARM_MODEL_FILE_NAME)) {
-                    continue;
-                }
-                if (data.keySet()
-                    .stream()
-                    .noneMatch(fileName -> fileName.endsWith(".png"))) {
-                    continue;
-                }
+    private YsmFormat() {}
 
-                ServerModelInfo info = cacheModel(data, modelId);
-                if (info != null) {
-                    CACHE_NAME_INFO.put(modelId, info);
+    /**
+     * M-12:与 {@link OpenYsmFormat} / {@link FolderFormat} 统一用 {@code walkFileTree} +
+     * {@link OpenYsmFormat#toModelName} 取模型名(嵌套目录里的 .ysm 也会被登记成 {@code group/model})。
+     * M-18:单个 .ysm 失败(含解压/解析异常与 LinkageError)只 warn,不中断整次扫描。
+     */
+    public static void cacheAllModels(Path rootPath) {
+        if (rootPath == null || !Files.isDirectory(rootPath)) {
+            return;
+        }
+        try {
+            Files.walkFileTree(rootPath, new SimpleFileVisitor<Path>() {
+
+                @Override
+                public FileVisitResult visitFile(@NotNull Path file, @NotNull BasicFileAttributes attrs) {
+                    if (!Files.isRegularFile(file) || !file.getFileName()
+                        .toString()
+                        .endsWith(".ysm")) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                    String modelId = ModelIdUtil.getInternalModelId(
+                        removeExtension(OpenYsmFormat.toModelName(rootPath, file)));
+                    try {
+                        Map<String, byte[]> data = YesModelUtils.input(file.toFile());
+                        if (data.isEmpty()) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                        if (!data.containsKey(MAIN_MODEL_FILE_NAME)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                        if (!data.containsKey(ARM_MODEL_FILE_NAME)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                        if (data.keySet()
+                            .stream()
+                            .noneMatch(fileName -> fileName.endsWith(".png"))) {
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        ServerModelInfo info = cacheModel(data, modelId);
+                        if (info != null) {
+                            CACHE_NAME_INFO.put(modelId, info);
+                        }
+                    } catch (Exception | LinkageError e) {
+                        ysmu.LOG.warn("Failed to cache legacy .ysm model {}", file, e);
+                    }
+                    return FileVisitResult.CONTINUE;
                 }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            });
+        } catch (IOException e) {
+            ysmu.LOG.warn("Failed to scan .ysm models under {}", rootPath, e);
         }
     }
 
@@ -57,8 +84,9 @@ public final class YsmFormat {
         try {
             ModelData data = getModelData(input, modelId);
             return ModelCacheWriter.write(data);
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Exception | LinkageError e) {
+            // M-16/M-18:统一日志,单个模型失败不影响其余模型。
+            ysmu.LOG.warn("Failed to cache .ysm model {}", modelId, e);
         }
         return null;
     }

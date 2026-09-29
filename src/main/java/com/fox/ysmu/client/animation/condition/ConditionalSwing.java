@@ -11,15 +11,22 @@ import net.minecraftforge.oredict.OreDictionary;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.google.common.collect.Lists;
 
-import cpw.mods.fml.common.registry.GameRegistry;
-
 public class ConditionalSwing {
 
-    private static final String ID_PRE = "swing$";
-    private static final String OD_PRE = "swing#";
-    private static final String EXTRA_PRE = "swing:";
+    // A-02: 1.20.1 keeps two prefix sets - swing$/swing#/swing: on the main hand and swing_offhand$/swing_offhand#/
+    // swing_offhand: on the off hand - and ConditionManager keeps two tables. The 1.7.10 port had only the
+    // main-hand set, so every swing_offhand* name was neither registered nor matchable.
+    private static final String MAIN_ID_PRE = "swing$";
+    private static final String MAIN_OD_PRE = "swing#";
+    private static final String MAIN_EXTRA_PRE = "swing:";
+    private static final String OFF_ID_PRE = "swing_offhand$";
+    private static final String OFF_OD_PRE = "swing_offhand#";
+    private static final String OFF_EXTRA_PRE = "swing_offhand:";
     private static final String EMPTY = "";
-    private static final int PRE_SIZE = 6;
+    private final String idPre;
+    private final String odPre;
+    private final String extraPre;
+    private final int preSize;
     // 1.7.10: 使用String存储物品ID ("modid:name")
     private final List<String> idTest = Lists.newArrayList();
     // 1.7.10: 使用String存储矿物词典名称
@@ -27,22 +34,42 @@ public class ConditionalSwing {
     private final List<EnumAction> extraTest = Lists.newArrayList();
     private final List<String> innerTest = Lists.newArrayList();
 
+    /** Main-hand classifier; kept for callers that only ever ask about the main hand. */
+    public ConditionalSwing() {
+        this(true);
+    }
+
+    public ConditionalSwing(boolean isMainHand) {
+        if (isMainHand) {
+            idPre = MAIN_ID_PRE;
+            odPre = MAIN_OD_PRE;
+            extraPre = MAIN_EXTRA_PRE;
+            preSize = MAIN_ID_PRE.length();
+        } else {
+            idPre = OFF_ID_PRE;
+            odPre = OFF_OD_PRE;
+            extraPre = OFF_EXTRA_PRE;
+            preSize = OFF_ID_PRE.length();
+        }
+    }
+
     public void addTest(String name) {
-        if (name.length() <= PRE_SIZE) {
+        if (name.length() <= preSize) {
             return;
         }
-        String substring = name.substring(PRE_SIZE);
-        if (name.startsWith(ID_PRE)) {
+        String substring = name.substring(preSize);
+        if (name.startsWith(idPre)) {
             // 1.7.10: 简单验证格式即可，不再有 isValidResourceLocation 方法
+            // D-A3: normalised to the same lower-case form InnerClassify.registryId returns
             if (substring.contains(":")) {
-                idTest.add(substring);
+                idTest.add(substring.toLowerCase(Locale.ROOT));
             }
         }
-        if (name.startsWith(OD_PRE)) {
+        if (name.startsWith(odPre)) {
             // 1.7.10: 这里处理的是矿物词典名称
             oreDictTest.add(substring);
         }
-        if (name.startsWith(EXTRA_PRE)) {
+        if (name.startsWith(extraPre)) {
             if (substring.equals(
                 EnumAction.none.name()
                     .toLowerCase(Locale.US))) {
@@ -79,14 +106,11 @@ public class ConditionalSwing {
             return EMPTY;
         }
         ItemStack itemInHand = BackhandCompat.getItemInHand(player, isMainHand);
-        // 1.7.10: 使用 GameRegistry 获取物品的唯一标识符
-        GameRegistry.UniqueIdentifier uid = GameRegistry.findUniqueIdentifierFor(itemInHand.getItem());
-        if (uid == null) {
-            return EMPTY;
-        }
-        String registryName = uid.toString(); // 格式为 "modid:name"
-        if (idTest.contains(registryName)) {
-            return ID_PRE + registryName;
+        // D-A3: shared lower-case "modid:name" lookup (the same helper the hold/use classifiers and the
+        // non-player held-item path use)
+        String registryName = InnerClassify.registryId(itemInHand);
+        if (!registryName.isEmpty() && idTest.contains(registryName)) {
+            return idPre + registryName;
         }
         return EMPTY;
     }
@@ -107,7 +131,7 @@ public class ConditionalSwing {
             String oreName = OreDictionary.getOreName(oreID);
             // 检查这个矿辞名称是否在我们需要测试的列表里
             if (oreDictTest.contains(oreName)) {
-                return OD_PRE + oreName; // 找到匹配，返回结果
+                return odPre + oreName; // 找到匹配，返回结果
             }
         }
 
@@ -118,14 +142,14 @@ public class ConditionalSwing {
         if (extraTest.isEmpty() && innerTest.isEmpty()) {
             return EMPTY;
         }
-        String innerName = InnerClassify.doClassifyTest(EXTRA_PRE, player, isMainHand);
+        String innerName = InnerClassify.doClassifyTest(extraPre, player, isMainHand);
         if (!innerName.isEmpty() && innerTest.contains(innerName)) {
             return innerName;
         }
         ItemStack itemInHand = BackhandCompat.getItemInHand(player, isMainHand);
         EnumAction action = itemInHand.getItemUseAction();
         if (extraTest.contains(action)) {
-            return EXTRA_PRE + action.name()
+            return extraPre + action.name()
                 .toLowerCase(Locale.US);
         }
         return EMPTY;

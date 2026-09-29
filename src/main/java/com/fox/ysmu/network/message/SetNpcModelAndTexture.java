@@ -20,13 +20,21 @@ import io.netty.buffer.ByteBuf;
  * <p>
  * {@link #npcId} is the entity id the GUI was opened for. The handler resolves it on the server, applies the
  * registry change and lets the server API broadcast the result; it resolves the entity itself rather than
- * trusting a client-supplied identity. The work is deferred to the server thread because 1.7.10 runs packet
- * handlers on the Netty thread.
+ * trusting a client-supplied identity.
  * <p>
  * A payload with both strings empty is an explicit "clear the override". A payload that is non-empty but
  * malformed is rejected instead of clearing, so a bad picker value cannot silently wipe an entity's model.
+ * <p>
+ * "Malformed" is checked explicitly here (D-04): 1.7.10's {@code ResourceLocation(String)} does not validate its
+ * input at all - it only splits on {@code :} and lowercases the domain, and it throws only for {@code null} - so
+ * {@link #isValidModelString(String)} and {@link #isValidTextureString(String)} reject anything outside the id
+ * shape YSMU itself produces before the value is handed to the API. A model the server does not have is refused by
+ * {@code EntityModelApi} and reported here with a warning (D-03).
  */
 public class SetNpcModelAndTexture implements IMessage {
+
+    /** Longest id YSMU builds: "ysmu:" + an encoded model name + "/" + a texture file name. */
+    private static final int MAX_ID_LENGTH = 256;
 
     private String modelId;
     private String selectTexture;
@@ -89,8 +97,8 @@ public class SetNpcModelAndTexture implements IMessage {
                 EntityModelApi.clearEntityModel(entity);
                 return;
             }
-            ResourceLocation modelId = parse(model);
-            ResourceLocation textureId = parse(texture);
+            ResourceLocation modelId = parse(model, true);
+            ResourceLocation textureId = parse(texture, false);
             if (modelId == null || textureId == null) {
                 ysmu.LOG.warn(
                     "Rejected malformed SetNpcModelAndTexture from {} for entity id {} (model '{}', texture '{}')",
@@ -100,15 +108,32 @@ public class SetNpcModelAndTexture implements IMessage {
                     texture);
                 return;
             }
-            EntityModelApi.setEntityModel(entity, modelId, textureId);
+            // D-03: the API refuses a model the server does not have. Surface that instead of dropping the pick
+            // silently - the picker has no reply channel, so the log is the only feedback we can give without
+            // inventing a new packet and a language key (both owned by other tasks).
+            if (!EntityModelApi.setEntityModel(entity, modelId, textureId)) {
+                ysmu.LOG.warn(
+                    "YSM model {} requested by {} for entity id {} could not be applied (unknown or invalid model)",
+                    modelId,
+                    sender.getCommandSenderName(),
+                    npcId);
+            }
         }
 
         private static boolean isBlank(String value) {
             return value == null || value.isEmpty();
         }
 
-        private static ResourceLocation parse(String value) {
+        /**
+         * D-04: explicit shape check, because 1.7.10's {@code ResourceLocation(String)} accepts anything non-null.
+         * A value is accepted only when it is a {@code namespace:path} pair of a sane length whose characters are
+         * the ones {@code ModelIdUtil} and the GUI produce.
+         */
+        private static ResourceLocation parse(String value, boolean modelId) {
             if (isBlank(value)) {
+                return null;
+            }
+            if (modelId ? !isValidModelString(value) : !isValidTextureString(value)) {
                 return null;
             }
             try {
@@ -116,6 +141,36 @@ public class SetNpcModelAndTexture implements IMessage {
             } catch (RuntimeException e) {
                 return null;
             }
+        }
+
+        /** "ysmu:name" - one colon, lower-case hex-encoded or safe characters, no path components. */
+        private static boolean isValidModelString(String value) {
+            return isWellFormedId(value) && value.indexOf('/') < 0;
+        }
+
+        /** "ysmu:name/texture.png" - same shape, but allow deeper paths so a nested texture id is not rejected. */
+        private static boolean isValidTextureString(String value) {
+            return isWellFormedId(value) && value.indexOf('/') > 0;
+        }
+
+        private static boolean isWellFormedId(String value) {
+            if (value.length() > MAX_ID_LENGTH) {
+                return false;
+            }
+            int colon = value.indexOf(':');
+            if (colon <= 0 || colon != value.lastIndexOf(':') || colon >= value.length() - 1) {
+                return false;
+            }
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                boolean allowed = c == ':' || c == '/' || c == '.' || c == '_' || c == '-'
+                    || c >= '0' && c <= '9'
+                    || c >= 'a' && c <= 'z';
+                if (!allowed) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 }

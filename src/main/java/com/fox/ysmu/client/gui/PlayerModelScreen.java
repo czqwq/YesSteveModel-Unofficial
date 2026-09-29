@@ -1,8 +1,12 @@
 package com.fox.ysmu.client.gui;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
+import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.gui.button.*;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.RevokeModelGuiGrant;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -15,6 +19,7 @@ import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.resources.I18n;
 import net.minecraft.util.*;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import org.apache.commons.lang3.tuple.Pair;
 import org.lwjgl.input.Mouse;
@@ -35,10 +40,16 @@ public class PlayerModelScreen extends GuiScreen {
     private int y;
     private int lastClientModelCount = -1;
     private boolean requestedModelSync;
+    /** CU-16: 缩放因子在 initGui 时缓存，避免每帧重建 ScaledResolution。 */
+    private int scaleFactor = 1;
 
+    /**
+     * CU-03: 该构造器可能在主菜单（{@code thePlayer == null}）被调用 —— 此时 target 持有 null 玩家并返回安全值
+     * （预览实体为 null、型号/贴图为 null、apply 为 no-op），不会 NPE。新代码请优先使用
+     * {@link #PlayerModelScreen(EntityPlayer)} 并显式传玩家，或在入口处就拒绝 null。
+     */
     public PlayerModelScreen() {
-        this.category = Category.ALL;
-        this.target = ModelSelectionTarget.of(Minecraft.getMinecraft().thePlayer);
+        this(Minecraft.getMinecraft().thePlayer);
     }
 
     public PlayerModelScreen(EntityPlayer player) {
@@ -85,7 +96,10 @@ public class PlayerModelScreen extends GuiScreen {
     public void initGui() {
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
-        if (ClientModelManager.MODELS.isEmpty() && !this.requestedModelSync) {
+        // N-02（收敛）：只在 17 协议关闭时才用这条 legacy 恢复入口。协议打开时模型列表为空意味着服务端
+        // 没有模型（或 17 通道已完成），再发一次 legacy 同步会让同一批模型经第二条通道再走一遍
+        // （ClientModelManager.registerAll 的内容签名去重只是兜底，不该被当成正常路径）。
+        if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL && ClientModelManager.MODELS.isEmpty() && !this.requestedModelSync) {
             this.requestedModelSync = true;
             ClientModelManager.sendSyncModelMessage();
         }
@@ -94,6 +108,8 @@ public class PlayerModelScreen extends GuiScreen {
 
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;
+        // CU-16: 缓存缩放因子（initGui 在 setWorldAndResolution 之后调用，屏幕尺寸变化会重新 initGui）。
+        this.scaleFactor = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
 
         String perText = "";
         boolean focus = false;
@@ -109,10 +125,11 @@ public class PlayerModelScreen extends GuiScreen {
 
         // 按钮创建和点击逻辑分离 使用唯一的 ID 来标识按钮
         // addRenderableWidget -> this.buttonList.add
-        this.buttonList.add(new TextureCountButton(0, x + 5, y + 5));
+        // CU-05: 贴图数量/收藏按钮与 ModelButton、STAR 过滤使用同一个 ModelSelectionTarget 主体。
+        this.buttonList.add(new TextureCountButton(0, x + 5, y + 5, this.target));
         this.buttonList.add(new FlatIconButton(1, x + 28, y + 5, 79, 20, 32, 16).setTooltips("gui.yes_steve_model.model.texture"));
         if (this.target.supportsStars()) {
-            this.buttonList.add(new StarButton(2, x + 110, y + 5));
+            this.buttonList.add(new StarButton(2, x + 110, y + 5, this.target));
         }
         this.buttonList.add(new FlatIconButton(3, x + 328, y + 5, 18, 18, 32, 0).setTooltips("gui.yes_steve_model.all_models"));
         if (this.target.supportsStars()) {
@@ -210,16 +227,26 @@ public class PlayerModelScreen extends GuiScreen {
         // textField.render -> textField.drawTextBox
         textField.drawTextBox();
 
-        int scale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        // CU-16: 使用 initGui 缓存的缩放因子。
+        int scale = this.scaleFactor;
         int scissorX = (this.x + 5) * scale;
         int scissorY = mc.displayHeight - ((this.y + 200) * scale);
         int scissorW = 125 * scale;
         int scissorH = 171 * scale;
+        // CU-13: scissor 必须在 finally 里恢复，否则纸娃娃渲染一旦抛异常，整个界面都会被裁剪。
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
-        GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-        // func_147046_a(x,y,scale,toMouseX,toMouseY,entity)
-        GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, target.getPreviewEntity());
-        GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        try {
+            GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+            // func_147046_a(x,y,scale,toMouseX,toMouseY,entity)
+            // CU-03: 预览实体为 null（主菜单打开的界面 / target 持有 null 玩家）时跳过纸娃娃，
+            // 否则 GuiInventory.func_147046_a 会在 GuiInventory.java:96 解引用 null 而 NPE。
+            EntityLivingBase preview = this.target.getPreviewEntity();
+            if (preview != null) {
+                GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, preview);
+            }
+        } finally {
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        }
 
         ResourceLocation selectedModel = this.target.getModelId();
         if (selectedModel != null) {
@@ -236,6 +263,17 @@ public class PlayerModelScreen extends GuiScreen {
 
         if (textField.getText().isEmpty() && !textField.isFocused()) {
             this.drawString(fontRendererObj, EnumChatFormatting.ITALIC + I18n.format("gui.yes_steve_model.search"), x + 148, y + 10, 0x777777);
+        }
+
+        // CU-18: 空模型列表时给出空态提示（此前只显示"1/1"，属误导性 UI）。
+        if (models.isEmpty()) {
+            String emptyText = I18n.format("gui.yes_steve_model.empty_models");
+            this.drawString(
+                fontRendererObj,
+                emptyText,
+                x + 138 + (282 - fontRendererObj.getStringWidth(emptyText)) / 2,
+                y + 120,
+                0x777777);
         }
 
         String pageInfo = String.format("%d/%d", page + 1, this.maxPage + 1);
@@ -330,6 +368,27 @@ public class PlayerModelScreen extends GuiScreen {
     @Override
     public boolean doesGuiPauseGame() {
         return false;
+    }
+
+    /**
+     * NF-01: 关闭界面时撤销 {@code api/ModelGuiApi} 发放的实体选择授权。
+     * <p>
+     * 包由 fix-network 交付（{@code network/message/RevokeModelGuiGrant}，packet id 98；
+     * {@code NETWORK_PROTOCOL} 已随之 bump 到 2）。服务端 handler 只回收**发送者自己**的授权：
+     * {@code RevokeModelGuiGrant.Handler}（{@code network/message/RevokeModelGuiGrant.java:51-68}）调用
+     * {@code ModelGuiApi.revokeSelectionGrant(sender, entityId)}，而 ModelGuiApi 的授权表按发送者 UUID 归档，
+     * 因此客户端即使伪造别人的 entity id 也撤不掉别人的授权。
+     * <p>
+     * {@code getGrantId() == -1} 表示"该 target 不需要授权"（本地玩家改自己，见
+     * {@link ModelSelectionTarget#getGrantId()}），此时不发送。
+     */
+    @Override
+    public void onGuiClosed() {
+        int grantId = this.target.getGrantId();
+        if (grantId != -1) {
+            ysmu.LOG.debug("Model selection GUI closed, revoking grant for entity {}", grantId);
+            NetworkHandler.CHANNEL.sendToServer(new RevokeModelGuiGrant(grantId));
+        }
     }
 
     private enum Category {

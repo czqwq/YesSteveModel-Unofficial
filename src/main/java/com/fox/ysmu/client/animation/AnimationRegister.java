@@ -13,8 +13,10 @@ import net.minecraft.util.MathHelper;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
-import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
+import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
+import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
@@ -27,8 +29,19 @@ import software.bernie.geckolib3.util.MolangUtils;
 public class AnimationRegister {
 
     private static final double MIN_SPEED = 0.05;
+    // S-05: registration is per-JVM state (AnimationManager's tables and the parser's function/variable maps), and
+    // a second call would append every AnimationState again - the same state would then be tested twice per frame.
+    // ClientProxy#init is the only caller today; the guard keeps a future resource-reload path from duplicating.
+    private static boolean animationStatesRegistered;
+    private static boolean molangVariablesRegistered;
+    private static boolean repeatRegistrationWarned;
 
     public static void registerAnimationState() {
+        if (animationStatesRegistered) {
+            warnRepeatedRegistration("registerAnimationState");
+            return;
+        }
+        animationStatesRegistered = true;
         registerHighPriorityStates();
         registerRidingFlyingStates();
         registerDamageJumpSneakStates();
@@ -38,7 +51,9 @@ public class AnimationRegister {
 
     private static void registerHighPriorityStates() {
         register("death", ILoopType.EDefaultLoopTypes.PLAY_ONCE, Priority.HIGHEST, (player, event) -> player.isDead);
-        // TODO 睡觉站着睡，爬梯子躺着爬
+        // S-03: 1.7.10 has no `Pose`, so the modern `Pose.SLEEPING` / `Pose.SWIMMING` distinctions (standing sleep,
+        // lying-on-a-ladder climb) cannot be derived from a pose. `sleep` uses the vanilla sleeping flag and
+        // `climb`/`climbing` reuse the ladder states; these are deliberate 1.7.10 mappings, not missing work.
         register("sleep", Priority.HIGHEST, (player, event) -> player.isPlayerSleeping());
         register("swim", Priority.HIGHEST, (player, event) -> player.isInWater() && Math.abs(event.getLimbSwingAmount()) > MIN_SPEED);
         register("climb", Priority.HIGHEST, (player, event) -> player.isOnLadder() && Math.abs(event.getLimbSwingAmount()) > MIN_SPEED);
@@ -75,11 +90,27 @@ public class AnimationRegister {
 
     @SuppressWarnings("deprecation")
     public static void registerVariables() {
+        if (molangVariablesRegistered) {
+            warnRepeatedRegistration("registerVariables");
+            return;
+        }
+        molangVariablesRegistered = true;
         MolangParser parser = GeckoLibCache.getInstance().parser;
         parser.functions.put("query.position_delta", QueryPositionDeltaFunction.class);
         parser.functions.put("ctrl.hold", CtrlHoldFunction.class);
         registerQueryVariables(parser);
         registerYsmVariables(parser);
+    }
+
+    /** One line, not one per repeat, so a caller that re-runs registration cannot spam the log. */
+    private static void warnRepeatedRegistration(String method) {
+        if (repeatRegistrationWarned) {
+            return;
+        }
+        repeatRegistrationWarned = true;
+        ysmu.LOG.warn(
+            "AnimationRegister#{} was called twice; the repeat is ignored (states/variables are registered once per JVM)",
+            method);
     }
 
     private static void registerQueryVariables(MolangParser parser) {
@@ -177,6 +208,10 @@ public class AnimationRegister {
         if (mc.theWorld == null) {
             return;
         }
+        // A-05 / A-06③: publish the frame's subject before anything is evaluated. The engine opens its own MoLang
+        // scope in CustomPlayerModel#setMolangQueries, but it exposes no accessor for the animatable, so
+        // query.position_delta(axis) and the animation-file ctrl.hold read the entity from here.
+        MolangFrameContext.begin(player);
         RemotePlayerAnimationQueries.QueryValues queryValues = RemotePlayerAnimationQueries
             .get(animationEvent, player, data.netHeadYaw);
         setEntityQueryValues(parser, data, player, mc, queryValues);

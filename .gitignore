@@ -10,6 +10,8 @@
 /bin/
 /tmp/
 /tools/
+/.agent-teams/
+/.agent/
 /config/
 /crash-reports/
 /logs/

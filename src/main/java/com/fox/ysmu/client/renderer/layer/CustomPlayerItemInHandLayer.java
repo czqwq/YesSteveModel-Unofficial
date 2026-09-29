@@ -52,7 +52,8 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         // 模型可以没有 extra_info（YSM 自己就容忍 extraInfo == null：ClientModelManager 会打印
         // hasExtraInfo=false 并照常注册几何）。玩家路径上这个 NPE 一直被 Geckolib 的 try/catch 吞掉，
         // 放宽到非玩家后女仆也会走到这里，所以不再靠别人的 catch 兜底。
-        ExtraInfo extraInfo = geoModel.properties.getExtraInfo();
+        // N-4：properties 本身也按可选处理，避免几何构建器未填该字段时在层里 NPE。
+        ExtraInfo extraInfo = geoModel.properties == null ? null : geoModel.properties.getExtraInfo();
         boolean isVanilla = extraInfo != null
             && (Objects.equals(extraInfo.getName(), "Steve") || Objects.equals(extraInfo.getName(), "Alex"));
         // 主手物品统一走 entity.getHeldItem()：玩家的 getHeldItem() 就是主手，玩家路径行为不变；
@@ -62,9 +63,13 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         ItemStack offhandItem = entity instanceof EntityPlayer player ? BackhandCompat.getOffhandItem(player) : null;
         if (mainHandItem != null || offhandItem != null) {
             GlStateManager.pushMatrix();
-            renderArmWithItem(entity, mainHandItem, geoModel.rightHandBones, true, isVanilla);
-            renderArmWithItem(entity, offhandItem, geoModel.leftHandBones, false, isVanilla);
-            GlStateManager.popMatrix();
+            // R-04：矩阵栈与 pop 必须成对——物品渲染抛异常时也要回滚，否则后续整帧的渲染状态会错乱。
+            try {
+                renderArmWithItem(entity, mainHandItem, geoModel.rightHandBones, true, isVanilla);
+                renderArmWithItem(entity, offhandItem, geoModel.leftHandBones, false, isVanilla);
+            } finally {
+                GlStateManager.popMatrix();
+            }
         }
     }
 
@@ -82,25 +87,29 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         if (stack == null || stack.getItem() == null || bones.isEmpty()) return;
 
         GL11.glPushMatrix();
-        GL11.glEnable(GL12.GL_RESCALE_NORMAL);
-        GL11.glDisable(GL11.GL_CULL_FACE);
-        if (!isVanilla) {
-            GL11.glScalef(0.7F, 0.7F, 0.7F);
-        }
-        applyBoneTransform(bones);
-        if (!isMainHand) {
-            GL11.glScalef(-1, 1, 1);
-            GL11.glFrontFace(GL11.GL_CW); // 修正镜像导致的面剔除反转
-        }
+        // R-04：所有状态改动都放进 try/finally——物品渲染（MinecraftForgeClient/RenderBlocks）对畸形物品
+        // 可能抛错，一旦漏掉 pop/回滚会让后续整帧的矩阵与剔除状态错乱。
+        try {
+            GL11.glEnable(GL12.GL_RESCALE_NORMAL);
+            GL11.glDisable(GL11.GL_CULL_FACE);
+            if (!isVanilla) {
+                GL11.glScalef(0.7F, 0.7F, 0.7F);
+            }
+            applyBoneTransform(bones);
+            if (!isMainHand) {
+                GL11.glScalef(-1, 1, 1);
+                GL11.glFrontFace(GL11.GL_CW); // 修正镜像导致的面剔除反转
+            }
 
-        doRenderItem(entity, stack);
-
-        if (!isMainHand) {
-            GL11.glFrontFace(GL11.GL_CCW);
+            doRenderItem(entity, stack);
+        } finally {
+            if (!isMainHand) {
+                GL11.glFrontFace(GL11.GL_CCW);
+            }
+            GL11.glDisable(GL12.GL_RESCALE_NORMAL);
+            GL11.glEnable(GL11.GL_CULL_FACE);
+            GL11.glPopMatrix();
         }
-        GL11.glDisable(GL12.GL_RESCALE_NORMAL);
-        GL11.glEnable(GL11.GL_CULL_FACE);
-        GL11.glPopMatrix();
     }
 
     protected void applyBoneTransform(List<GeoBone> bones) {

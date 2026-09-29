@@ -9,6 +9,7 @@ import net.minecraft.client.resources.I18n;
 import net.minecraft.util.ResourceLocation;
 import org.lwjgl.input.Mouse;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
@@ -30,7 +31,9 @@ public class PlayerTextureScreen extends GuiScreen {
     public PlayerTextureScreen(PlayerModelScreen parent, ResourceLocation modelId, List<ResourceLocation> textures) {
         this.parent = parent;
         this.modelId = modelId;
-        this.textures = textures;
+        // CU-15: 必须拷贝。原来的 sort 直接改的是 ClientModelManager.MODELS 里共享的 List 实例，
+        // 于是"打开过一次贴图页"会永久改变该模型的贴图顺序，进而改变 ModelButton 应用的默认贴图。
+        this.textures = textures == null ? new ArrayList<>() : new ArrayList<>(textures);
         this.textures.sort(Comparator.comparing(ResourceLocation::toString));
         this.target = parent.getTarget();
     }
