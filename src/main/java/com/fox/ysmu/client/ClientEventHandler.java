@@ -83,14 +83,12 @@ public class ClientEventHandler {
         RemotePlayerMotionStates.clear();
         // Tell the server which wire format we speak; a mismatch disconnects instead of mis-decoding packets.
         NetworkHandler.CHANNEL.sendToServer(new HandshakeMessage(NetworkHandler.NETWORK_PROTOCOL));
-        // N-02（收敛）：这里原来的 `if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) ClientModelManager
-        // .sendSyncModelMessage();` 已删除。服务端在玩家登录时**无条件**发 RequestSyncModel
-        // （model/ServerModelManager.java:119-124），而客户端的 RequestSyncModel.Handler 调用的正是同一个
-        // ClientModelManager.sendSyncModelMessage()（network/message/RequestSyncModel.java:29-31），
-        // 所以这里再主动触发一次只会让同一批模型在 legacy 通道上被同步/注册两遍（17 打开时更是两条通道各一遍）。
-        // legacy 入口并未减少：协议关闭时仍由服务端驱动的 RequestSyncModel 触发；
-        // "17 失败才 fallback 到 legacy"的服务端 gate 在 ServerModelManager（model/**，本任务 out of scope）
-        // —— 记为跨任务依赖（fix-network 的 N-02 服务端侧）。
+        // 这里原来有一条 `if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) ClientModelManager
+        // .sendSyncModelMessage();`，已删除：服务端在玩家登录时**无条件**发 RequestSyncModel
+        // （model/ServerModelManager.java 的 sendRequestSyncModelMessage），而客户端的 RequestSyncModel.Handler
+        // 调用的正是同一个 ClientModelManager.sendSyncModelMessage()（network/message/RequestSyncModel.java:29-31），
+        // 所以这里再主动触发一次只会让同一批模型在 legacy 通道上被同步/注册两遍。
+        // 客户端仍保留一条兜底入口：PlayerModelScreen.initGui 在模型列表为空时补发一次（见那里的注释）。
     }
 
     @SubscribeEvent

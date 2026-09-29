@@ -96,10 +96,10 @@ public class PlayerModelScreen extends GuiScreen {
     public void initGui() {
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
-        // N-02（收敛）：只在 17 协议关闭时才用这条 legacy 恢复入口。协议打开时模型列表为空意味着服务端
-        // 没有模型（或 17 通道已完成），再发一次 legacy 同步会让同一批模型经第二条通道再走一遍
-        // （ClientModelManager.registerAll 的内容签名去重只是兜底，不该被当成正常路径）。
-        if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL && ClientModelManager.MODELS.isEmpty() && !this.requestedModelSync) {
+        // 最后一道兜底：列表为空说明两条通道都没把模型送到（例如玩家在服务端 reload 之前就打开了界面）。
+        // 这里无条件再向服务端要一次 legacy 同步 —— 它按客户端自报的 md5 求差集，代价只是真正缺的那几个文件，
+        // 不是整批重传；用 17 协议开关把它关掉，只会让这个界面在模型丢失时永远空着。
+        if (ClientModelManager.MODELS.isEmpty() && !this.requestedModelSync) {
             this.requestedModelSync = true;
             ClientModelManager.sendSyncModelMessage();
         }

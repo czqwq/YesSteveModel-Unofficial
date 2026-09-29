@@ -44,9 +44,10 @@ public final class OpenYsmModelSyncServer {
     /**
      * Starts one 17-protocol round for this player.
      *
-     * @return {@code true} when the round was actually started. {@code false} means nothing was sent, so the
-     *         caller must report the failure to the N-02 gate
-     *         ({@link ServerModelManager#onOpenYsmSyncFailed}) and let the legacy channel take over.
+     * @return {@code true} when the round was actually started, {@code false} when nothing was sent (17 disabled or
+     *         the server_index key is missing). The value is informational only: the legacy channel is driven
+     *         independently by {@link ServerModelManager#sendRequestSyncModelMessage}, so a round that never starts
+     *         or dies midway never costs the player his models.
      */
     public static boolean startSync(EntityPlayerMP player) {
         if (player == null || !Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
@@ -73,18 +74,6 @@ public final class OpenYsmModelSyncServer {
             state.sessionId);
         ThreadTools.THREAD_POOL.submit(() -> sendPacket01(playerId, state));
         return true;
-    }
-
-    /**
-     * N-02: the 17 round for this player is being abandoned server side (a send blew up, the round timed out or a
-     * payload was unusable) - drop the state and tell the gate so it can start the legacy sync. Without this the
-     * gate would keep believing the handshake took over and never fall back, leaving the player with no models.
-     */
-    private static void abortSync(UUID playerId, PlayerSyncState state) {
-        clear(playerId);
-        if (state != null) {
-            ServerModelManager.onOpenYsmSyncFailed(state.player);
-        }
     }
 
     /**
@@ -139,10 +128,6 @@ public final class OpenYsmModelSyncServer {
                 downloaded,
                 cacheHits,
                 sessionId);
-            // N-02 (wiring ③): the 17 round delivered everything, so the gate must drop its pending legacy
-            // fallback for this player. Without this call a healthy session would still get a second, legacy
-            // sync after the handshake grace period.
-            ServerModelManager.onOpenYsmSyncSucceeded(state.player);
         } else {
             ysmu.LOG.warn(
                 "OpenYSM model sync failed for {}: loaded={}, downloaded={}, cacheHits={}, message={}, session={}",
@@ -152,8 +137,6 @@ public final class OpenYsmModelSyncServer {
                 cacheHits,
                 message,
                 sessionId);
-            // N-02 (wiring ③): an explicit FAILED feedback means the 17 round is dead - hand over to legacy.
-            ServerModelManager.onOpenYsmSyncFailed(state.player);
         }
     }
 
@@ -177,8 +160,9 @@ public final class OpenYsmModelSyncServer {
             return;
         }
         if (isTimedOut(state)) {
-            // N-02: the round died on the server side; let the gate fall back instead of leaving it "in progress".
-            abortSync(playerId, state);
+            // The round died on the server side; drop it so a late payload cannot revive it. Delivery does not
+            // depend on this round: the legacy channel runs independently and already carries the model set.
+            clear(playerId);
             return;
         }
         if (sessionId != 0 && sessionId != state.sessionId) {
@@ -196,8 +180,8 @@ public final class OpenYsmModelSyncServer {
                 handlePacket04(playerId, state, packetBytes);
             }
         } catch (Exception e) {
-            // N-02: this round can no longer finish; drop it and hand the player to the legacy channel.
-            abortSync(playerId, state);
+            // This round can no longer finish; drop it. The legacy channel is unaffected.
+            clear(playerId);
             ysmu.LOG.warn("OpenYSM server sync error for " + state.playerName, e);
         }
     }
@@ -260,8 +244,8 @@ public final class OpenYsmModelSyncServer {
                 sendPayload(playerId, state, encrypted.data());
             }
         } catch (Exception e) {
-            // N-02: the very first packet never made it, so the 17 round cannot start; fall back to legacy.
-            abortSync(playerId, state);
+            // The very first packet never made it, so this 17 round cannot start; drop it.
+            clear(playerId);
             ysmu.LOG.warn("Failed to send OpenYSM packet 01 to " + state.playerName, e);
         }
     }
@@ -289,27 +273,15 @@ public final class OpenYsmModelSyncServer {
                 }
 
                 out.writeVarInt(0);
-                // The trailing varint used to be ignored by the client; it now carries how many models the legacy
-                // channel would deliver. When the 17-protocol index is trimmed (models that cannot be bridged) the
-                // client sees the mismatch and falls back to the legacy channel instead of silently missing them.
-                out.writeVarInt(countLegacyModels());
+                out.writeVarInt(0);
 
                 YsmCrypt.EncryptedPacket encrypted = YsmCrypt.encrypt(out.toArray(), state.clientNextKey, false);
                 sendPayload(playerId, state, encrypted.data());
             }
         } catch (Exception e) {
-            // N-02: the model index never reached the client; the 17 round is dead, so hand over to legacy.
-            abortSync(playerId, state);
+            // The model index never reached the client; this 17 round is dead, so drop it.
+            clear(playerId);
             ysmu.LOG.warn("Failed to send OpenYSM packet 03 to " + state.playerName, e);
-        }
-    }
-
-    /** Number of models the legacy channel (SyncModelFiles/SendModelFile) would send; 0 on a concurrent reload. */
-    private static int countLegacyModels() {
-        try {
-            return ServerModelManager.CACHE_NAME_INFO.size();
-        } catch (RuntimeException e) {
-            return 0;
         }
     }
 
@@ -350,8 +322,8 @@ public final class OpenYsmModelSyncServer {
                     sentModels,
                     state.playerName);
             } catch (Exception e) {
-                // N-02: chunk delivery blew up; the round cannot complete, so fall back to the legacy channel.
-                abortSync(playerId, state);
+                // Chunk delivery blew up; this round cannot complete, so drop it.
+                clear(playerId);
                 ysmu.LOG.warn("Failed to send OpenYSM model chunks to " + state.playerName, e);
             }
         });

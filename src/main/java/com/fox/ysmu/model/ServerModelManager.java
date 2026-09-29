@@ -1,7 +1,6 @@
 package com.fox.ysmu.model;
 
 import java.io.File;
-import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,11 +10,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -84,18 +79,6 @@ public final class ServerModelManager {
     public static volatile byte[] OPEN_YSM_SERVER_KEY;
 
     /**
-     * N-02:等待客户端回应 {@code C2SVersionCheck17} 的宽限期(秒)。超过它仍未见 17 通道启动,
-     * 就把客户端当成不支持 17 并补发 legacy 同步;上限受 {@link Config#PLAYER_SYNC_TIMEOUT} 约束。
-     */
-    private static final int HANDSHAKE_REPLY_GRACE_SECONDS = 10;
-
-    /** N-02:玩家 UUID -> 待兜底的 legacy 同步登记。 */
-    private static final Map<UUID, PendingLegacyFallback> PENDING_SYNC_FALLBACKS = new ConcurrentHashMap<>();
-
-    /** N-02:兜底定时器，首次使用时惰性创建（见 {@link #fallbackScheduler()}）。 */
-    private static volatile ScheduledExecutorService fallbackScheduler;
-
-    /**
      * Whether the server has a renderable model under this id, used to reject model overrides that no client
      * could draw.
      *
@@ -134,156 +117,35 @@ public final class ServerModelManager {
     }
 
     /**
-     * N-02 gate:请求一次模型同步。
+     * 请求一次模型同步。
      *
-     * dev 基线（{@code ServerModelManager.java:119-124}）在 17 通道打开时**无条件**同时发送
-     * {@code S2CVersionCheck17} 与 {@code RequestSyncModel}，同一批模型会被两条通道各传一遍。
-     * 现在改为 gate：
+     * 17 通道（{@code S2CVersionCheck17} + hash/cache/chunk）是**附加**的快速路径，legacy
+     * （{@code RequestSyncModel} -> {@code SyncModelFiles} -> {@code SendModelFile}）才是唯一能保证送达的通道，
+     * 所以这里**无条件**发送 legacy 请求：
+     *
      * <ul>
-     * <li>17 关闭 -> 立刻走 legacy（这是唯一通道，语义与 dev 相同）；</li>
-     * <li>17 打开 -> 只发版本校验，并把 legacy 兜底登记为"待命"；只有
-     * {@link #onOpenYsmSyncFailed(EntityPlayer)}（版本不一致/反馈 FAILED/17 无法启动）或
-     * {@link #onOpenYsmSyncStarted(EntityPlayer) 握手回复}在宽限期内始终没到（客户端不支持 17）时才发
-     * {@code RequestSyncModel}。</li>
+     * <li>17 索引（{@link #OPEN_YSM_SYNC_INFO}）只登记 {@code OpenYsmFormat} 能产出二进制负载的模型，内置模型与
+     * 传统 folder 模型**永远**不在其中，因此"17 这一轮成功"绝不等于"模型已送达"；</li>
+     * <li>legacy 这一轮的固定代价只有一次握手，加上客户端缺失清单里真正缺的文件
+     * （{@code SyncModelFiles} 按客户端自报的 md5 求差集），不是整批重传；</li>
+     * <li>两条通道都登记同一模型时，由 {@code ClientModelManager.registerAll} 的内容签名去重兜底。</li>
      * </ul>
-     * legacy 仍是 gate，不是删除：17 失败或超时后照旧可用。
+     *
+     * 因此这里不做"17 成功就抑制 legacy"的门控：任何形如"17 索引已覆盖 legacy 索引（{@link #CACHE_NAME_INFO}）"
+     * 的判据都恒为假（内置模型恒为 legacy 格式且不参与 17 索引），它唯一的效果就是让模型两条通道都收不到。
      */
     public static void sendRequestSyncModelMessage(EntityPlayer player) {
         if (player == null) {
             return;
         }
-        if (!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
-            sendLegacySyncModel(player);
-            return;
+        if (Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
+            NetworkHandler.sendToClientPlayer(new S2CVersionCheck17(NetworkHandler.PROTOCOL_VERSION), player);
         }
-        UUID playerId = player.getUniqueID();
-        long graceMillis = handshakeGraceMillis();
-        pruneStaleFallbacks();
-        PendingLegacyFallback pending = new PendingLegacyFallback(player);
-        // 先登记再发包：客户端的回应可能在同一 tick 内到达。
-        PENDING_SYNC_FALLBACKS.put(playerId, pending);
-        NetworkHandler.sendToClientPlayer(new S2CVersionCheck17(NetworkHandler.PROTOCOL_VERSION), player);
-        fallbackScheduler().schedule(
-            () -> fallbackToLegacySyncIfHandshakeMissing(playerId, pending),
-            graceMillis,
-            TimeUnit.MILLISECONDS);
-    }
-
-    /**
-     * N-02:17 通道已经接管（客户端回应了版本校验、{@code OpenYsmModelSyncServer.startSync} 已开始）。
-     * 调用方：{@code network/message/C2SVersionCheck17.Handler}（**必须接线**，否则健康会话也会在宽限期
-     * 结束后多发一次 legacy 同步）。
-     */
-    public static void onOpenYsmSyncStarted(EntityPlayer player) {
-        if (player == null) {
-            return;
-        }
-        PendingLegacyFallback pending = PENDING_SYNC_FALLBACKS.get(player.getUniqueID());
-        if (pending != null) {
-            pending.handshakeStarted = true;
-        }
-    }
-
-    /**
-     * N-02:17 通道成功结束，释放兜底登记。调用方：{@code OpenYsmModelSyncServer.complete} 的
-     * {@code STATUS_SUCCESS} 分支。
-     */
-    public static void onOpenYsmSyncSucceeded(EntityPlayer player) {
-        if (player != null) {
-            PENDING_SYNC_FALLBACKS.remove(player.getUniqueID());
-        }
-    }
-
-    /**
-     * N-02:17 通道明确失败 -> 立即发 legacy。调用方：{@code C2SVersionCheck17.Handler} 的版本不一致分支与
-     * {@code startSync} 的提前返回分支、{@code OpenYsmModelSyncServer.complete} 的非成功分支。
-     * 只有在"仍在等 17"或"17 已开始但未成功"时才补发一次，避免与超时兜底重复。
-     */
-    public static void onOpenYsmSyncFailed(EntityPlayer player) {
-        if (player == null) {
-            return;
-        }
-        if (PENDING_SYNC_FALLBACKS.remove(player.getUniqueID()) == null) {
-            return;
-        }
-        ysmu.LOG.info(
-            "OpenYSM 17 sync failed for {}; falling back to the legacy model sync",
-            player.getCommandSenderName());
         sendLegacySyncModel(player);
     }
 
     private static void sendLegacySyncModel(EntityPlayer player) {
         NetworkHandler.sendToClientPlayer(new RequestSyncModel(), player);
-    }
-
-    private static void fallbackToLegacySyncIfHandshakeMissing(UUID playerId, PendingLegacyFallback pending) {
-        if (pending.handshakeStarted) {
-            // 17 已接管本回合；后续成功/失败由 onOpenYsmSyncSucceeded/Failed 收口。
-            return;
-        }
-        if (!PENDING_SYNC_FALLBACKS.remove(playerId, pending)) {
-            // 已被更新（例如 /ysm reload 重新登记）或被成功/失败信号处理过。
-            return;
-        }
-        EntityPlayer player = pending.player.get();
-        if (player == null || player.isDead || !NetworkHandler.isChannelOpen(player)) {
-            return;
-        }
-        ysmu.LOG.info(
-            "No OpenYSM 17 handshake from {} within {} ms; falling back to the legacy model sync",
-            player.getCommandSenderName(),
-            handshakeGraceMillis());
-        sendLegacySyncModel(player);
-    }
-
-    private static long handshakeGraceMillis() {
-        long seconds = Math.min(Math.max(1, Config.PLAYER_SYNC_TIMEOUT), HANDSHAKE_REPLY_GRACE_SECONDS);
-        return seconds * 1000L;
-    }
-
-    /**
-     * 回收已下线/已被 GC 的登记。正常路径由 {@link #onOpenYsmSyncSucceeded(EntityPlayer)} 或
-     * {@link #onOpenYsmSyncFailed(EntityPlayer)} 收口；这里只是兜底，防止"没人调用成功回调"时登记表随登录次数增长。
-     */
-    private static void pruneStaleFallbacks() {
-        for (Map.Entry<UUID, PendingLegacyFallback> entry : PENDING_SYNC_FALLBACKS.entrySet()) {
-            EntityPlayer pendingPlayer = entry.getValue().player.get();
-            if (pendingPlayer == null || pendingPlayer.isDead || !NetworkHandler.isChannelOpen(pendingPlayer)) {
-                PENDING_SYNC_FALLBACKS.remove(entry.getKey(), entry.getValue());
-            }
-        }
-    }
-
-    /**
-     * 兜底定时器。这里用独立的单线程 daemon 调度器，而不是往 {@code ThreadTools.THREAD_POOL} 里塞一个
-     * {@code Thread.sleep}（那正是 M-06 记录的缺陷：池内 sleep 会占住 worker）。
-     */
-    private static ScheduledExecutorService fallbackScheduler() {
-        ScheduledExecutorService scheduler = fallbackScheduler;
-        if (scheduler != null) {
-            return scheduler;
-        }
-        synchronized (ServerModelManager.class) {
-            if (fallbackScheduler == null) {
-                fallbackScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-                    Thread thread = new Thread(runnable, "ysmu-legacy-sync-fallback");
-                    thread.setDaemon(true);
-                    return thread;
-                });
-            }
-            return fallbackScheduler;
-        }
-    }
-
-    /** N-02 的待兜底登记：只持玩家的弱引用，避免把实体留在静态表里。 */
-    private static final class PendingLegacyFallback {
-
-        private final WeakReference<EntityPlayer> player;
-        private volatile boolean handshakeStarted;
-
-        private PendingLegacyFallback(EntityPlayer player) {
-            this.player = new WeakReference<>(player);
-        }
     }
 
     public static void reloadPacks() {

@@ -398,7 +398,8 @@ public final class OpenYsmModelSyncClient {
         }
         if (buf.getRawBuf()
             .readableBytes() > 0) {
-            // Trailing varint written by the server: the number of models the legacy channel would deliver.
+            // Reserved trailing varint written by the server (always 0). The legacy channel no longer needs to be
+            // signalled through it: ServerModelManager sends the legacy request unconditionally.
             buf.readVarInt();
         }
     }

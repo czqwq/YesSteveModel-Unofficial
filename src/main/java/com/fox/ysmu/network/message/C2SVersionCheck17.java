@@ -3,7 +3,6 @@ package com.fox.ysmu.network.message;
 import net.minecraft.entity.player.EntityPlayerMP;
 
 import com.fox.ysmu.Config;
-import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
 import com.fox.ysmu.ysmu;
@@ -54,23 +53,13 @@ public class C2SVersionCheck17 implements IMessage {
                         sender.getCommandSenderName(),
                         message.version,
                         NetworkHandler.PROTOCOL_VERSION);
-                    // N-02 wiring ②: the 17 channel is unusable for this client, so release the gate's pending
-                    // registration now and let it send the legacy sync (instead of waiting out the grace period).
-                    ServerModelManager.onOpenYsmSyncFailed(sender);
                     return null;
                 }
-                // N-02 wiring ①: startSync returns false when it refuses to start (17 disabled server side or the
-                // server_index key is missing). Only a started round may tell the gate that the handshake arrived,
-                // otherwise a healthy session would still get a second legacy sync after the grace period.
-                if (OpenYsmModelSyncServer.startSync(sender)) {
-                    ServerModelManager.onOpenYsmSyncStarted(sender);
-                } else {
-                    // N-02 wiring ②: nothing was sent, so fall back immediately.
-                    ServerModelManager.onOpenYsmSyncFailed(sender);
-                }
+                // 17 是附加的快速路径:legacy 请求已由 ServerModelManager.sendRequestSyncModelMessage 无条件发出,
+                // 所以这里不接任何 gate,也不关心 startSync 的返回值 —— 17 起不来时 legacy 那一路照样送达。
+                OpenYsmModelSyncServer.startSync(sender);
             } catch (Exception e) {
-                // No hook here on purpose: if startSync threw before onOpenYsmSyncStarted ran, the gate still has
-                // handshakeStarted == false, so its own grace timer will fall back.
+                // legacy 的送达与 17 是否成功无关(见上),异常只记录,不做通道交接。
                 ysmu.LOG.warn("Failed to start OpenYSM model sync", e);
             }
             return null;

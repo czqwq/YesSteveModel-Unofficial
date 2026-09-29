@@ -74,7 +74,7 @@
 - [x] (2026-09-29 20:05Z) `[model]` `D-02` `hasModel` 与不安全磁盘名规范化
 - [x] (2026-09-29 20:05Z) `[model]` `D-03` 新 API 的默认模型 id 走 `Config`
 - [x] (2026-09-29 20:05Z) `[core-ui]` `[network]` `N-01` 密码包与 `RequestLoadModel` 同线程保序
-- [x] (2026-09-29 20:05Z) `[network]` `N-02` 双通道去重（含 `M-01` 门控后的语义）
+- [x] (2026-09-29 20:05Z) `[network]` `N-02` 双通道去重（含 `M-01` 门控后的语义）—— **该 gate 形态已于同日因用户实战回归被全部回退**（见 Outcomes「回归：只有 `default` 模型」一节）；最终形态是 **17 附加 + legacy 无条件送达**
 - [x] (2026-09-29 20:05Z) `[network]` `N-03` `SyncModelInfo` 应用 NBT 回客户端线程
 - [x] (2026-09-29 20:05Z) `[network]` `N-04` 收包线程磁盘 IO 移到池
 - [x] (2026-09-29 20:05Z) `[network]` `N-05` C2S payload 预算 ≤ 32767（或分片）
@@ -202,6 +202,7 @@
   日期/作者：2026-09-29 / synthesizer
 
 - 决定：**`N-02`（双通道重复传输）不通过"关掉 legacy"来修，改为"17 握手失败才 fallback + 客户端对同一模型幂等去重"**，并保留 legacy 通道。
+- **（2026-09-29 追加更正，上一条决定作废）**：`N-02` 最终**改为"17 附加、legacy 无条件送达"**。原决定的前提（"17 成功 ⇒ 模型已送达"）不成立：17 索引只登记 OpenYSM 格式模型，内置与传统 folder 模型永远不在其中，因此"17 成功才关 legacy"必然掐断送达（用户 `runClient` 实证：列表只剩本地注册的 `default`）。客户端幂等去重（`ClientModelManager.registerAll` 内容签名）保留不变。
   理由：phase6 已裁决过同一取舍，dev 上的证据更强：`M-01` 让 17 通道对文件夹模型不可用（`OpenYsmFormat.java:83` 无条件写出的 format32 缓存 `isBridgeable=false`），legacy 是这类模型唯一可用路径。若把 legacy 当"开关关掉"，`ENABLE_OPEN_YSM_SYNC_PROTOCOL` 默认开启时一旦 17 通道故障（`N-05` 的 C2S 上限、`N-11` 的会话竞争、`M-01`）客户端将失去唯一可用路径。去重落在 `ClientModelManager.registerAll`（两条通道的共同汇合点，dev 上无任何去重）。
   日期/作者：2026-09-29 / synthesizer
 
@@ -226,7 +227,7 @@
 - **崩溃级清零**：`CU-01`(轮盘 `%d` → `%s`，两份 lang + `AnimationRouletteScreen`)、`CU-03`(`thePlayer == null` 三处入口判空 + `PlayerModelTarget` 四个出口安全值)、`N-1`(玩家自选贴图把 null 装进 EEP 的完整链路：入口拒绝 + EEP 拒绝 null + `saveNBTData` 用 `x == null ? "" : x.toString()` + 渲染/实体/模型三处正交兜底 → 引擎 `TextureManager.bindTexture(null)` 不可达)。
 - **静默失效收口**：`M-18` 短 `.ysm` 不再打断 `reloadPacks`；`M-07` 静态共享 `MessageDigest` 改 per-call；`M-19` 加密失败不再产出 24 字节空缓存；`N-07` 分块校验在改名之前 + ACCUMULATORS TTL；`A-06①③` 未注册函数与两侧 `ctrl.hold` 语义统一；`A-07` 条件名诊断 + `InnerClassify` 与求值器收敛为一份。
 - **功能恢复**：`A-01` 空手条件名链路可达(`hold_mainhand:empty` 5 命中)；`A-02` 副手 swing 独立分类 + `swing_offhand` 回退(21 命中)；`CU-04` 五个热键先消费 `isPressed()` 再判界面；`CU-07` 广播半径 512。
-- **协议与同步**：`N-01` 密码包与 `RequestLoadModel` 同线程内联；`NETWORK_PROTOCOL` bump 到 **2**、新增 id **98** `RevokeModelGuiGrant`(NF-01 端到端闭环，服务端按发送者 UUID 授权，伪造 id 撤不掉他人)；`N-02` 收敛为"17 主路径 + 失败才 legacy"的 **gate**(四触发点互斥、健康会话不多发 legacy、调度器为独立单线程 daemon 不占共享池)。
+- **协议与同步**：`N-01` 密码包与 `RequestLoadModel` 同线程内联；`NETWORK_PROTOCOL` bump 到 **2**、新增 id **98** `RevokeModelGuiGrant`(NF-01 端到端闭环，服务端按发送者 UUID 授权，伪造 id 撤不掉他人)。`N-02` 的 gate("17 主路径 + 失败才 legacy"，四触发点 + 独立单线程兜底调度器)曾按 `t31`/`t39` 交付并复核为 verified，但**用户实战 `runClient` 证明它会掐断送达**：17 索引只装 OpenYSM 格式模型，内置与传统 folder 模型永远不在其中，故"17 这一轮成功"不等于"模型已送达"，且空转一轮也会回报 SUCCESS 并注销 legacy 兜底 → 客户端列表只剩本地注册的 `default`。**已按用户裁定由 captain 全部回退**(详见下方"回归：只有 `default` 模型"一节)，`N-02` 最终形态 = **17 附加、legacy 无条件送达**。
 - **版本闸门**：`MON-01` 按用户裁定**接受四版本**，且按 `E-08` 的裁决**删掉宿主本地表、直接调用引擎 `FormatVersion.isSupportedLayout()`**(符合 AGENTS.md 的 *Prefer one implementation to two*)。
 - **引擎侧**：`E-05` GeoCube 空 uv / 缺 description 守卫由 captain 应用成员补丁 → 引擎重建(`BUILD SUCCESSFUL`)→ 新 jar 换入 `libs/`(`GeoCube.class` 11,327 → 11,708 B)。
 
@@ -234,19 +235,42 @@
 
 **引擎侧基线**：`E:\IDEA\Geckolib` @ `5ca328b`(master；`1154d09..5ca328b` 只有一行 `.gitignore` 差异)。`E-05` 的源码改动**目前仍是未提交的工作树修改**，需在引擎仓提交。`tmp/Geckolib` 已恢复为指向该仓的有效符号链接。
 
-**`N-02` 与 `M-01` 的相互作用**：符合预期。`M-01` 的门控用新谓词 `RawYsmModelAdapter.isBinaryPayloadBridgeable`(忽略 `sourceJson`、只看已烘焙 face 数)决定"能否产出可桥接二进制"，从而让 17 协议不再下发坏缓存；`N-02` 的 gate 则保证 17 失败时 legacy 仍然兜住。两者叠加后的语义是"17 只发能用的，legacy 永远可用"。
+**`N-02` 与 `M-01` 的相互作用**：`M-01` 的门控用新谓词 `RawYsmModelAdapter.isBinaryPayloadBridgeable`(忽略 `sourceJson`、只看已烘焙 face 数)决定"能否产出可桥接二进制"，让 17 协议不下发坏缓存 —— 这部分经用户 `runClient` 日志确认**行为正确**(全程 0 次 `Skipping OpenYSM binary sync cache`)。但 `N-02` 的 gate 建立在错误前提上：`M-01` 的谓词**本身**就在缩小 17 索引，gate 又把这个"更小的索引成功送达"当成"可以关掉 legacy"的依据；`CACHE_NAME_INFO`(legacy 索引)恒含 6 个内置模型而 `OPEN_YSM_SYNC_INFO` 恒不含它们(内置模型是 `main.json`/`arm.json` 传统 folder 格式，从不经过 `OpenYsmFormat`)，所以任何形如"17 索引覆盖 legacy 索引"的判据都**恒为假**。两者叠加的真实语义曾是"17 只发能用的 + legacy 被掐断"= **模型全部丢失**。教训：新通道的"成功"不能作为关闭旧通道的依据，除非能证明新通道的集合**覆盖**旧通道的集合。
 
 **六份核验报告里"疑似"的运行期结论**：本轮**全部无法在沙箱内运行期证实/推翻**(subagent 跑不了 Gradle、更没有 runClient)，因此 `S-01`/`S-02`(render)、`A-V-03`、`DCS-09`/`DCS-10` 等仍为**未验证**，已登记进 `tmp/audit-dev/verification-phase7.md` 的残余清单；其中 `A-03`(v.* 跨域读写)需要第三方 `4_default_controllers` 包在 runClient 里观察。
 
-**最终统计与验证证据**：条目复核 **verified 86 / 部分落地 4 / failed 0 / 未确认 0**(`M-14` 经实现者反证 + captain 自查判为**已正确**、`M-21` 由 t43 补齐；`D-A6` 由 t44 以 javadoc 闭环)。编译门槛由 captain 执行三轮后通过(轮 1 `JsonArray.add(float)` ×4、轮 2 缺 `JsonPrimitive` import ×4、**轮 3 `BUILD SUCCESSFUL in 13s`**)，t43/t44 之后再跑两次均通过(15s / **12s，0 错误**)。反例搜索：Java 8 库 API 真实命中 0、版本判定与动画 id 解析各收敛为一份、`NetworkHandler` 既有 id 一行未改。证据落点：`tmp/audit-dev/verification-phase7.md`、`tmp/audit-dev/delta.md`、六份 `tmp/audit-dev/*.md` 核验报告、`tmp/compile-dev{,2,3,4,5}.log`、各任务 output。
+**最终统计与验证证据**：条目复核 **verified 86 / 部分落地 4 / failed 0 / 未确认 0**(`M-14` 经实现者反证 + captain 自查判为**已正确**、`M-21` 由 t43 补齐；`D-A6` 由 t44 以 javadoc 闭环)。编译门槛由 captain 执行三轮后通过(轮 1 `JsonArray.add(float)` ×4、轮 2 缺 `JsonPrimitive` import ×4、**轮 3 `BUILD SUCCESSFUL in 13s`**)，t43/t44 之后再跑两次均通过(15s / **12s，0 错误**)。用户实战回归修复后再跑一次：**`BUILD SUCCESSFUL in 19s`**(exit 0，日志 `tmp/compile-regression-fix.log`)。随后补跑更宽的门槛：`.\gradlew.bat test` 暴露 `src/test` 自 `b395fae` 起编不过(3 处构造器签名未同步) → 同步测试源码后 `test` **`BUILD SUCCESSFUL in 15s`**(`tmp/test-regression-fix2.log`)、`build` **`BUILD SUCCESSFUL in 9s`**(含 `jar`/`shadowJar`/`reobfJar`/`test`/`check`/`assemble`，`tmp/build-regression-fix.log`)。反例搜索：Java 8 库 API 真实命中 0、版本判定与动画 id 解析各收敛为一份、`NetworkHandler` 既有 id 一行未改。证据落点：`tmp/audit-dev/verification-phase7.md`、`tmp/audit-dev/delta.md`、六份 `tmp/audit-dev/*.md` 核验报告、`tmp/compile-dev{,2,3,4,5}.log`、各任务 output。
 
 **交付规模**：98 files changed，+4607 / −1026，另新增 `network/message/RevokeModelGuiGrant.java`；引擎仓 1 文件(GeoCube)已改待提交。
 
-**三条结构性问题（本阶段实际踩到的，建议下一轮在建契约时作为检查项）**
+**回归：只有 `default` 模型出现在列表（用户 `runClient` 实战发现；已由 captain 修复并通过编译门槛）**
+
+- **现象**：用户报告"修复后只有 default 模型出现在列表中"，日志 `run/client/logs/fml-client-latest.log`(9,205 行)。
+- **证据链**（全部来自该日志与磁盘，可复核）：
+  - `Starting OpenYSM model sync for Developer: models=0` / `OpenYSM client received sync index: models=0` / `OpenYSM client sync complete: loaded=0, downloaded=0, cacheHits=0` → 服务端 17 索引为空，且空转一轮被记为**成功**；
+  - 该日志中**完全没有** `YSM client starting model sync` → 服务端从未发出 legacy 的 `RequestSyncModel`；
+  - `YSM client registering model ysmu:default` 出现在 **20:06:38**，早于集成服务器启动的 20:06:43 → 那唯一一个模型是 `ClientEventHandler` → `ClientModelManager.loadDefaultModel()` 的**本地**注册，与同步无关；
+  - `Skipping OpenYSM binary sync cache` 命中 **0** 次 → `M-01` 门控未跳过任何模型，排除"索引被裁掉"这一假设；
+  - `config/ysmu/custom` 下 6 个模型目录齐全，`config/ysmu/cache/server` 下 6 个 md5 命名的加密缓存仍在，而 `ModelCacheWriter.pruneUnregisteredCaches` 会删除任何**未登记**的合法缓存名 → 这 6 个文件当天经历至少两次 `reloadPacks()` 仍未被删，**反证** `CACHE_NAME_INFO` 里确有这 6 条。即 legacy 通道本来有 6 个模型可送，结果一个都没送。
+- **根因**：`t31`/`t39` 的 `N-02` gate 三重压制同一次生效 —— (1) `ServerModelManager.sendRequestSyncModelMessage` 在协议开启时只发 17；(2) `OpenYsmModelSyncServer.complete` 成功分支注销 legacy 兜底，而 `fallbackToLegacySyncIfHandshakeMissing` 又因 `handshakeStarted == true` 提前返回，兜底此后不可能再触发；(3) `t38` 把客户端最后一道入口 `PlayerModelScreen.initGui` 收窄为 `!Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL`，而协议默认开启 → 同样关掉。父提交 `43cc628` 与 `origin/master` 都是"17 预包 + **无条件** `RequestSyncModel`"，与 `Config` 自己的字段注释("appended OpenYSM hash/cache/chunk sync path **before legacy fallback**")一致。
+- **修复**（5 个文件，captain 直接实施，用户已明确授权）：`ServerModelManager` 恢复父版语义(17 可选 + legacy 无条件)并删除整套兜底机制(`PENDING_SYNC_FALLBACKS`/`PendingLegacyFallback`/`fallbackScheduler`/`handshakeGraceMillis`/`pruneStaleFallbacks`/`onOpenYsmSyncStarted`/`Succeeded`/`Failed`，632→494 行)；`C2SVersionCheck17` 去掉 gate 接线与 `ServerModelManager` import；`OpenYsmModelSyncServer` 去掉 gate hook、`abortSync`(5 处调用点改为 `clear(playerId)`)、`countLegacyModels()` 及其**声称客户端会据此回退**的假注释(该尾部 varint 客户端从未读过)，并恢复父版的两个保留 varint；`PlayerModelScreen` 恢复"列表为空即补发一次"的兜底；`ClientEventHandler`/`OpenYsmModelSyncClient` 的注释改写为最终语义。
+- **未消除的代价（诚实记录）**：OpenYSM 格式模型会经两条通道各传一遍。要真正省掉这次重复，必须让 17 送达的模型能在 legacy 的 md5 空间(`CACHE_MD5`/`SyncModelFiles`)里被认领 —— 那是协议改动(需给 `OpenYsmSyncInfo` 加 legacy md5 字段并 bump `NETWORK_PROTOCOL`)，不属于热修。注册侧的重复仍由 `ClientModelManager.registerAll` 的内容签名去重挡住。
+- **验证**：captain `.\gradlew.bat compileJava` → **`BUILD SUCCESSFUL in 19s`**(exit 0，日志 `tmp/compile-regression-fix.log`)；静态核对：gate 符号全树 **0** 残留、`sendLegacySyncModel(player)` 位于 `if (Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL)` **之外**、四个被改文件均无未用 import。**运行期复验仍待用户 `runClient`**(沙箱内跑不了 Gradle/客户端)。
+
+**第二个缺陷：`src/test` 自 `b395fae` 起编不过，用户的 `.\gradlew.bat build` 本来就会失败（captain 跑 `test` 时发现并已修）**
+
+- **发现路径**：修完回归后按"最窄到最宽"继续跑 `.\gradlew.bat test`，`compileTestJava` 直接 FAILED —— `:build → :check → :test → :compileTestJava`(已用 `build --dry-run` 确认任务图)，也就是说**用户侧的验收命令 `build` 在回归修复之前就已经是红的**，与"模型列表为空"无关。
+- **根因**：`b395fae` 给 `C2SModelSyncPayload17`/`S2CModelSyncPayload17`/`C2SCompleteFeedback17` 加了 `sessionId`(`N-11`)并改了构造器签名(+87/−24)，但**没有同步 `src/test`**；而 phase7 自始至终只跑 `.\gradlew.bat compileJava`，该任务**不编译测试源**，所以三次编译门槛全绿也没能暴露它。
+- **修复**：`src/test/java/com/fox/ysmu/network/sync/OpenYsmSyncProtocolTest.java` —— 三处构造器调用改为现行签名(`(int, byte[])` ×2、`(int,int,int,int,int,String)` ×1)，并**顺手让测试真的覆盖 `N-11`**：新增 `TEST_SESSION_ID` 常量，两个方向与反馈包都断言 `getSessionId()` 往返一致(原测试只验证 `data`，等于把 `N-11` 的核心行为漏在覆盖之外)。
+- **验证**：`.\gradlew.bat test` → **`BUILD SUCCESSFUL in 15s`**(exit 0，`tmp/test-regression-fix2.log`)；`.\gradlew.bat build` → **`BUILD SUCCESSFUL in 9s`**(exit 0，含 `jar`/`shadowJar`/`reobfJar`/`test`/`check`/`assemble`，`tmp/build-regression-fix.log`)。
+
+**五条结构性问题（本阶段实际踩到的，建议下一轮在建契约时作为检查项）**
 
 1. **ExecPlan 的"条目清单"与"inScope 表"不同步** → 条目按发现主题归类、inScope 按文件/包划分，两者交叉处产生"主题归 A、文件归 B"的空档，导致条目落在**已完成任务**的文件里而无人承接。本阶段发生 **4 次**：`N-1` 的 EEP 半边、`N-5` 注释、`N-2` 的重复触发点(以上三处补入 `t36`/新建 `t38`)、`N-02` 的服务端 gate(amend 进 `t31` + 新建 `t39`)。
 2. **subagent 无法运行 Gradle** → `GRADLE_USER_HOME=D:\gradle_cache` 在工作区之外，workspace-write 沙箱打不开 `gradle-*.zip.lck`；`t37` 三次尝试(wrapper / 直接 `gradle.bat` / `--no-daemon -Dorg.gradle.native=false`)全部停在 Gradle 启动阶段，javac 一次未运行。**captain 可以(danger-full-access)**。后果：成员的"无 classpath 语法解析"自检抓不到类型错误与缺失 import，本轮因此靠 captain 的编译才发现两个编译阻断。
 3. **验证与在途编辑的竞态** → 复核结论可能对应一个已不存在的工作树状态：`t37` 的 `compileJava` 撞上 `t39` 的在途编辑；`D-A6` 的 "verified" 撞上 `t43` 自行回滚的编辑。缓解方式是"依赖全部实现任务 + 只有所有编辑停止后才跑编译门槛"，但**跨任务的复核仍会撞车**，建议下一轮让验证任务显式依赖它要复核的全部任务。
+4. **"新通道成功 ⇒ 可关闭旧通道"是设计级缺陷，没有任何静态门槛能拦住** → `N-02` 的 gate 在契约层面被判为"验收通过"（四触发点互斥、健康会话不多发 legacy 都是真的），编译门槛、条目复核、独立验证也全部通过，但它建立在一个**不可满足的前提**上（17 索引 ⊂ legacy 索引，因为内置模型恒为 legacy 格式）。**教训**：任何"用新路径抑制旧路径"的改动，契约里必须有一条可验证断言写明"新路径的集合覆盖旧路径的集合"，否则只能让旧路径无条件保留；交付前若无法运行期验证，就应当把"新通道未送达时的可达性"登记为 blocker，而不是 verified。
+5. **验收门槛选窄了：`compileJava` 不编译 `src/test`，于是 `build` 可以长期是红的而无人知道** → `b395fae` 改了三个网络包的构造器签名却没同步测试源，phase7 的三轮 `compileJava` 全绿；直到 captain 补跑 `.\gradlew.bat test` 才发现 `:build → :check → :test → :compileTestJava` 早就编不过。**教训**：契约里的 `verify` 至少要跑到用户实际会跑的那条命令的**直接依赖层**（用户的验收是 `build`，那 `test`/`compileTestJava` 就必须进门槛）；只跑最窄任务时必须显式写明"它覆盖不到什么"（这里是测试源与打包）。
 
 **原占位说明（已被上文取代，保留以便对照）**
 
@@ -320,7 +344,7 @@
 ### t-fix-network（YSMU）
 
 - `N-01`（high）｜`network/message/SyncModelFiles.java:64-72,135-147`、`RequestLoadModel.java:65-77`｜密码包改为**同一线程内联发送**（`sendPassword` 里直接 `NetworkHandler.sendToClientPlayer(new SendModelPassword(...), sender)`）；**禁止**改用 `DeferredWork`（见 Decision Log）；验收：贴出改动后的 `sendPassword`，确认没有 `THREAD_POOL.submit`。
-- `N-02`（high）｜`model/ServerModelManager.java:100-105`、`network/message/RequestSyncModel.java:24-27`、`client/ClientModelManager.java:72-92`、`client/sync/OpenYsmModelSyncClient.java:259`、`RequestLoadModel.java:85-86`、`client/ClientEventHandler.java:81-83`、`client/gui/PlayerModelScreen.java:90`｜17 握手失败才 fallback；`RequestSyncModel` 纳入开关；`ClientModelManager.registerAll` 幂等去重（内容签名相同则跳过）；去掉重复触发点；验收：贴出去重判定代码 + 开关条件，并说明 `registerAll` 的签名从哪来。
+- `N-02`（high）｜`model/ServerModelManager.java:100-105`、`network/message/RequestSyncModel.java:24-27`、`client/ClientModelManager.java:72-92`、`client/sync/OpenYsmModelSyncClient.java:259`、`RequestLoadModel.java:85-86`、`client/ClientEventHandler.java:81-83`、`client/gui/PlayerModelScreen.java:90`｜17 握手失败才 fallback；`RequestSyncModel` 纳入开关；`ClientModelManager.registerAll` 幂等去重（内容签名相同则跳过）；去掉重复触发点；验收：贴出去重判定代码 + 开关条件，并说明 `registerAll` 的签名从哪来。 **〔本行的"17 握手失败才 fallback"部分已作废：最终形态为 17 附加 + legacy 无条件，见 Outcomes「回归」一节；幂等去重部分保留〕**
 - `N-03`｜`network/message/SyncModelInfo.java:54-77`｜应用 NBT 回客户端线程（`Minecraft.getMinecraft().func_152344_a`）；验收：贴出改动。
 - `N-04`｜`SendModelFile.java:44-61`、`SendModelFileChunk.java:77-121,123-131,133-150`｜落盘移到池；验收：贴出改动，确认收包 handler 里不再有 `FileUtils.writeByteArrayToFile`/`RandomAccessFile`。
 - `N-05`｜`C2SModelSyncPayload17.java:14,38-46`、`S2CModelSyncPayload17.java:23,28`、`client/sync/OpenYsmModelSyncClient.java:228-247`｜C2S 预算改 `32767 - 头部`，或请求列表分片；S2C 上限写 `2_097_050`；验收：贴出常量与分片逻辑（若分片，`sendPacket04` 的循环）。
@@ -580,3 +604,5 @@
 
 - 2026-09-29 / synthesizer：创建本 ExecPlan（phase7）。它把 `tmp/audit-dev/delta.md` 的本仓去重条目 91 条与【已转移到 Geckolib 引擎侧】10 条（`E-01`..`E-10`）作为唯一修复清单，并按 dev 的实际文件所有权重新划分归属（phase6 归 `[engine]` 的 `MON-07`/`MON-09`/`MON-10`/`MON-11`/`MON-12` 回到本仓的 `[render]`/`[network]`/`[model]`，引擎格式容忍改由引擎仓库的 `t-fix-engine` 承接）。记录了三处前提修正（`tmp/Geckolib` 不是符号链接；引擎仓库是 `E:\IDEA\Geckolib`；引擎源树与 jar 不同步），并把 `E-09`/`E-10` 从 phase6 的"非目标"升级为本次修复（理由见 Decision Log）。后续任何修改都必须在本节追加说明与理由。
 - 2026-09-29 / synthesizer（据 captain 两条更正）：(1) **引擎侧目标收窄为 `E-05`（`GeoCube` 的 `:104`/`:105` 裸解引用）**——captain 已核实 `E:\IDEA\Geckolib` 在 `master` @ `1154d09` 上可构建（`build --offline` → `BUILD SUCCESSFUL in 38s`），产物 `build/libs/geckolib-5.09.52.417-dev.jar`（2,339,441 B、SHA256 `142DF706…AB56`）与本仓 `libs/` 逐字节相同，故 `E-11` 勾选为已完成、**删除了"先让引擎自洽编译"的里程碑**，`E-02`/`E-04` 降级为"已核实满足，仅记录"，`E-08`（版本判定单一来源）降为可选并给出降级出口，新增 `E-12`（`HostBindingContributor`）为后续项。`t27`/`t26` 里"18 个暂存删除、源树编不过"被标注为过时前提（属分支 `clean-job`）。(2) **`MON-01` 改为【本次修复】：`ClientModelManager` 的版本闸门接受四版本（含 `1.14.0`）**，用户裁定 dev 现有的"故意拒绝 1.14.0"是错的（引擎 `FormatVersion.isSupportedLayout()` 对 1.14.0 返回 true、几何构建器不读版本），归属 `fix-engine`、落点本仓 `src/main/java/com/fox/ysmu/client/ClientModelManager.java`。
+- 2026-09-29 / captain（用户实战回归）：用户 `runClient` 报告"只有 `default` 模型出现在列表中"（日志 `run/client/logs/fml-client-latest.log`）。定位为 `N-02` gate 掐断 legacy 送达 —— 17 索引只装 OpenYSM 格式模型（`models=0`），空转一轮也被记为 SUCCESS 并注销 legacy 兜底，客户端最后一道入口又因 `t38` 收窄而失效。经用户**明确授权**由 captain 直接回退：`ServerModelManager` 恢复"17 附加 + legacy 无条件"并删除整套兜底机制（632→494 行）、`C2SVersionCheck17` 去 gate 接线、`OpenYsmModelSyncServer` 去 gate hook/`abortSync`/`countLegacyModels` 与假注释、`PlayerModelScreen` 恢复空列表兜底、`ClientEventHandler` 与 `OpenYsmModelSyncClient` 注释改为最终语义。captain `.\gradlew.bat compileJava` → `BUILD SUCCESSFUL in 19s`(exit 0)。**本 ExecPlan 中所有把 `N-02` 描述成"gate / 失败才 fallback"的段落自此作废**，以"17 附加、legacy 无条件"为准；相关统计口径由"N-02 verified"改为"曾验收通过、后被实战推翻并回退"。
+- 2026-09-29 / captain（补跑更宽门槛，发现第二个缺陷）：`.\gradlew.bat test` 的 `compileTestJava` 直接 FAILED —— `b395fae` 给三个 17 协议包加了 `sessionId`(`N-11`)却未同步 `src/test`，而 phase7 只跑过 `compileJava`(不编译测试源)，所以 `:build → :check → :test` **一直是红的**。已更新 `OpenYsmSyncProtocolTest`(三处构造器签名 + 新增 `TEST_SESSION_ID` 并断言两个方向与反馈包的 `getSessionId()` 往返)，`test` → `BUILD SUCCESSFUL in 15s`、`build` → `BUILD SUCCESSFUL in 9s`(exit 0)。**修订本节所有"编译门槛已通过"的口径**：真正与用户验收等价的证据是 `build`，不是 `compileJava`。
