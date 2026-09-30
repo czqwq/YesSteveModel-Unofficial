@@ -104,6 +104,12 @@ public class PlayerModelScreen extends GuiScreen {
     public void initGui() {
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
+        // Entering the screen replays every tile's preview animation from its first frame, like re-opening the
+        // upstream catalog: the per-tile hover/focus state is dropped, and so are the cached preview animatables,
+        // whose clocks would otherwise continue from the previous visit.
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.ANIMATABLE_CACHE.invalidateAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
         // 最后一道兜底：列表为空说明两条通道都没把模型送到（例如玩家在服务端 reload 之前就打开了界面）。
         // 这里无条件再向服务端要一次 legacy 同步 —— 它按客户端自报的 md5 求差集，代价只是真正缺的那几个文件，
         // 不是整批重传；用 17 协议开关把它关掉，只会让这个界面在模型丢失时永远空着。

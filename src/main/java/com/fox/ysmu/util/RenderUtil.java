@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.gui.ModelPreviewAnimationState;
 import net.geckominecraft.client.renderer.GlStateManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.OpenGlHelper;
@@ -343,10 +344,24 @@ public final class RenderUtil {
 
     public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
         ResourceLocation modelId, ResourceLocation textureId) {
+        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, false, false);
+    }
+
+    /**
+     * Draws a model preview and drives its GUI animation channels, mirroring upstream's catalog card.
+     * <p>
+     * {@code hovered}/{@code focused} feed {@link ModelPreviewAnimationState}, which decides the preview, hover and
+     * focus animation names the entity's controllers then play. The animatable is also allowed to keep ticking while
+     * the game is paused, because opening a GUI pauses single-player and the engine refuses to advance an animatable
+     * that has not opted in - without it the preview would show a frozen pose.
+     */
+    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
+        ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused) {
         renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, entity -> {
-            if (entity.hasPreviewAnimation()) {
-                entity.clearPreviewAnimation();
-            }
+            ModelPreviewAnimationState.forModel(modelId)
+                .apply(entity.getPreviewInfo(), hovered, focused, Minecraft.getSystemTime());
+            entity.getFactory()
+                .getOrCreateAnimationData(entity.hashCode()).shouldPlayWhilePaused = true;
         });
     }
 
@@ -358,14 +373,31 @@ public final class RenderUtil {
 
         GL11.glEnable(GL11.GL_COLOR_MATERIAL);
         GL11.glEnable(GL11.GL_DEPTH_TEST);
+        // 与上游 RenderUtil:324-334 逐字对齐：位置/缩放/Z 轴翻转 180°；声明 disable_preview_rotation 的模型
+        // 改为不俯仰并上移 5.5，否则俯仰 -10°。本移植原本在这里用的是自加的 -25° 三轴倾斜。
+        boolean disablePreviewRotation = com.fox.ysmu.client.gui.ModelPreviewRegistry
+            .previewRotationDisabled(modelId);
+        // 上游 RenderUtil:360 的 yRotGui 同时喂给两个地方：身体/头部角度，以及
+        // GeoReplacedEntityRenderer:71 的 setupRotations（LivingEntityRenderer 的实体朝向）。
+        // 本项目预览走的是 GeckoLib 的 IGeoRenderer.render，它只遍历 topLevelBones、完全不读实体朝向
+        // （世界路径才会经 doRender:128 调 applyRotations:236），所以 setupRotations 的那层
+        // Ry(180 - yBodyRot) 必须在预览路径上自己补，否则 disable_preview_rotation=false 的模型
+        // 会少掉上游的 -20° 旋转：包的 gui 动画把角色和自带边框一起放到了远离锚点的位置，缺了这
+        // 20° 整组就会在格子里偏心/偏下（=true 的模型 Ry(0)，所以看不出差别）。
+        float yRotGui = disablePreviewRotation ? 180.0F : 200.0F;
         GL11.glPushMatrix();
         GL11.glTranslatef((float) pPosX, (float) pPosY, 100.0F);
+        if (disablePreviewRotation) {
+            GL11.glTranslatef(0.0F, 5.5F, 0.0F);
+        }
         GL11.glScalef(pScale, pScale, -pScale);
         GL11.glRotatef(180.0F, 0.0F, 0.0F, 1.0F); // 将模型从倒置状态翻转过来
-        GL11.glRotatef(-25.0F, 0.4F, 0.8F, -0.08F); // 倾斜一点
+        GL11.glRotatef(disablePreviewRotation ? 0.0F : -10.0F, 1.0F, 0.0F, 0.0F); // 上游的俯仰角
+        GL11.glRotatef(180.0F - yRotGui, 0.0F, 1.0F, 0.0F); // 上游 setupRotations 的实体朝向
 
         // 保存玩家状态
         float yBodyRot = player.renderYawOffset;
+        float yBodyRotO = player.prevRenderYawOffset;
         float yRot = player.rotationYaw;
         float xRot = player.rotationPitch;
         float yHeadRotO = player.prevRotationYawHead;
@@ -389,12 +421,14 @@ public final class RenderUtil {
                 player.inventory.armorInventory[i] = null;
             }
 
-            // 设置渲染状态
-            player.renderYawOffset = 200;
-            player.rotationYaw = 180;
+            // 设置渲染状态：与上游 RenderUtil:360-368 一致——yBodyRot/yBodyRotO 与身体、头部使用同一个
+            // yRotGui（上游把 yRotGui 同时写进 yBodyRot 和 yBodyRotO，供 setupRotations 使用）。
+            player.renderYawOffset = yRotGui;
+            player.prevRenderYawOffset = yRotGui;
+            player.rotationYaw = yRotGui;
             player.rotationPitch = 0;
-            player.rotationYawHead = player.rotationYaw;
-            player.prevRotationYawHead = player.rotationYaw;
+            player.rotationYawHead = yRotGui;
+            player.prevRotationYawHead = yRotGui;
 
             GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
             RenderHelper.enableStandardItemLighting();
@@ -417,6 +451,7 @@ public final class RenderUtil {
 
             // 恢复状态
             player.renderYawOffset = yBodyRot;
+            player.prevRenderYawOffset = yBodyRotO;
             player.rotationYaw = yRot;
             player.rotationPitch = xRot;
             player.prevRotationYawHead = yHeadRotO;

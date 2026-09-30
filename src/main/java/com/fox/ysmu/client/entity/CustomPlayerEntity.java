@@ -33,7 +33,7 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this, true);
     private ResourceLocation mainModel = CustomPlayerModel.DEFAULT_MAIN_MODEL;
     private ResourceLocation texture = CustomPlayerModel.DEFAULT_TEXTURE;
-    private String previewAnimation = "";
+    private final com.fox.ysmu.client.gui.PreviewAnimationInfo previewInfo = new com.fox.ysmu.client.gui.PreviewAnimationInfo();
     private EntityLivingBase entity = null;
 
     @NotNull
@@ -94,6 +94,9 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                 new AnimationController(this, controllerName, 0, e -> manager.predicateArmor(e, finalSlotIndex)));
         }
         data.addAnimationController(new AnimationController(this, CAP_CONTROLLER, 2, manager::predicateCap));
+        // GUI preview channels, after the cap controller so a hover/focus animation wins for the bones they share.
+        data.addAnimationController(new AnimationController(this, HOVER_CONTROLLER, 1, manager::predicateHover));
+        data.addAnimationController(new AnimationController(this, FOCUS_CONTROLLER, 1, manager::predicateFocus));
         data.getAnimationControllers()
             .values()
             .forEach(
@@ -211,22 +214,30 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public String getPreviewAnimation() {
-        return previewAnimation;
+        return previewInfo.getPreview();
     }
 
     public void setPreviewAnimation(String previewAnimation) {
-        this.previewAnimation = previewAnimation;
+        previewInfo.setPreview(previewAnimation);
     }
 
     public void clearPreviewAnimation() {
-        this.previewAnimation = "";
+        previewInfo.clear();
     }
 
     public boolean hasPreviewAnimation() {
-        return StringUtils.isNoneBlank(this.previewAnimation);
+        return previewInfo.hasPreview();
     }
 
     public boolean hasPreviewAnimation(String previewAnimation) {
-        return hasPreviewAnimation() && previewAnimation.equals(this.previewAnimation);
+        return previewInfo.hasPreview(previewAnimation);
+    }
+
+    /**
+     * The preview channels this entity should play, mirroring upstream's {@code PreviewAnimationInfo}: the GUI drives
+     * it (preview/hover/focus) and the cap, hover and focus controllers read it back.
+     */
+    public com.fox.ysmu.client.gui.PreviewAnimationInfo getPreviewInfo() {
+        return previewInfo;
     }
 }

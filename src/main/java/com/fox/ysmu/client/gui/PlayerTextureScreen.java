@@ -41,6 +41,10 @@ public class PlayerTextureScreen extends GuiScreen {
     @Override
     public void initGui() {
         this.buttonList.clear();
+        // Same as the model screen: a fresh visit starts the preview animations over.
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.ANIMATABLE_CACHE.invalidateAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;
         this.maxTexturePage = textures.isEmpty() ? 0 : (textures.size() - 1) / TEXTURES_PER_PAGE;

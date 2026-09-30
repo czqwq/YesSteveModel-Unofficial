@@ -91,9 +91,10 @@ public class ModelButton extends GuiButton {
             GL11.glEnable(GL11.GL_SCISSOR_TEST);
             try {
                 GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-                // 渲染实体
+                // Render实体,同时驱动该 tile 的预览动画通道(悬停/选中),与上游 catalog 卡片一致
                 RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 20, 30,
-                    mc.thePlayer, modelInfo.getLeft(), texture);
+                    mc.thePlayer, modelInfo.getLeft(), texture, this.func_146115_a(),
+                    modelInfo.getLeft().equals(this.target.getModelId()));
             } finally {
                 GL11.glDisable(GL11.GL_SCISSOR_TEST);
             }

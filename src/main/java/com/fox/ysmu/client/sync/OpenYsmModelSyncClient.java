@@ -15,6 +15,7 @@ import net.minecraft.util.ResourceLocation;
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.gui.ModelPreviewRegistry;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
@@ -390,6 +391,13 @@ public final class OpenYsmModelSyncClient {
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
                     // own scripts (fn.<name>) can be evaluated while it renders.
                     PackUserFunctions.register(modelId, raw.functionFiles);
+                    // The model's preview_animation (the animation the selection GUI plays) and its
+                    // disable_preview_rotation flag are in this payload too; without them the GUI could only show a
+                    // frozen pose framed with the wrong transform.
+                    ModelPreviewRegistry.accept(
+                        modelId,
+                        raw.properties == null ? null : raw.properties.previewAnimation,
+                        raw.properties != null && raw.properties.disablePreviewRotation);
                 });
             return true;
         } catch (Exception e) {

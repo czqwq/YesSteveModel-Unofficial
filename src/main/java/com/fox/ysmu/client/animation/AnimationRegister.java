@@ -33,6 +33,15 @@ import software.bernie.geckolib3.util.MolangUtils;
 
 public class AnimationRegister {
 
+    // Reserved preview-animation names (upstream parity). They are *not* registered as world states: only the GUI
+    // preview entity asks for them, and a model enables them simply by defining animations with those names.
+    public static final String IDLE = "idle";
+    public static final String HOVER = "hover";
+    public static final String HOVER_FADEOUT = "hover_fadeout";
+    public static final String FOCUS = "focus";
+    /** Upstream's "play nothing" sentinel for a preview channel. */
+    public static final String EMPTY = "empty";
+
     private static final double MIN_SPEED = 0.05;
     // S-05: registration is per-JVM state (AnimationManager's tables and the parser's function/variable maps), and
     // a second call would append every AnimationState again - the same state would then be tested twice per frame.

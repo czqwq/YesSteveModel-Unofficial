@@ -130,10 +130,9 @@ public final class AnimationManager {
         CustomPlayerEntity animatable = event.getAnimatable();
         EntityPlayer player = animatable.getPlayer();
         if (player == null) {
-            if (animatable.hasPreviewAnimation()) {
-                return playLoopAnimation(event, animatable.getPreviewAnimation());
-            }
-            return PlayState.STOP;
+            // GUI preview entity: upstream's CapPredicate plays the tile's preview channel (see
+            // ModelPreviewAnimationState). Before this, nothing ever set the name and the tile stayed a frozen pose.
+            return playPreviewChannel(event, animatable.getPreviewInfo().getPreview());
         }
 
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
@@ -141,6 +140,34 @@ public final class AnimationManager {
             return playAnimation(event, eep.getAnimation());
         }
         return PlayState.STOP;
+    }
+
+    /** The GUI preview's hover channel (upstream {@code HoverPredicate}). */
+    public PlayState predicateHover(AnimationEvent<CustomPlayerEntity> event) {
+        return playPreviewChannel(event, event.getAnimatable().getPreviewInfo().getHover());
+    }
+
+    /** The GUI preview's focus channel (upstream {@code FocusPredicate}). */
+    public PlayState predicateFocus(AnimationEvent<CustomPlayerEntity> event) {
+        return playPreviewChannel(event, event.getAnimatable().getPreviewInfo().getFocus());
+    }
+
+    /**
+     * Plays one of the three preview channels, but only on a preview entity: a model in the world never gets its
+     * preview channels applied, and a channel that the model does not define (or the {@code empty} sentinel) stops the
+     * controller instead of asking the engine for a missing animation.
+     */
+    private static PlayState playPreviewChannel(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        CustomPlayerEntity animatable = event.getAnimatable();
+        if (animatable.getPlayer() != null || animatable.getMainModel() == null) {
+            return PlayState.STOP;
+        }
+        net.minecraft.util.ResourceLocation modelId = com.fox.ysmu.util.ModelIdUtil
+            .getModelIdFromMainId(animatable.getMainModel());
+        if (!com.fox.ysmu.client.gui.ModelPreviewRegistry.isPlayable(modelId, animationName)) {
+            return PlayState.STOP;
+        }
+        return playLoopAnimation(event, animationName);
     }
 
     @NotNull

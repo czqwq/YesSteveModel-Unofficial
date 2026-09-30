@@ -47,12 +47,14 @@ public class TextureButton extends GuiButton {
         int scissorY = this.guiDisplayHeight - ((this.yPosition + this.height - 20) * scale);
         int scissorW = this.width * scale;
         int scissorH = (this.height - 20) * scale;
+        boolean selected = textureId.equals(target.getTextureId());
         // CU-13: scissor 必须在 finally 里恢复，渲染异常时不能让整个界面被裁剪。
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
         try {
             GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+            // 同时驱动预览动画通道（悬停/已选中），与上游纹理选择界面一致
             RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
-                35, mc.thePlayer, modelId, textureId);
+                35, mc.thePlayer, modelId, textureId, this.func_146115_a(), selected);
         } finally {
             GL11.glDisable(GL11.GL_SCISSOR_TEST);
         }
@@ -64,7 +66,6 @@ public class TextureButton extends GuiButton {
         } else {
             this.drawCenteredString(font, name, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
         }
-        boolean selected = textureId.equals(target.getTextureId());
         if (selected || this.field_146123_n) {
             drawBorder(selected ? 0xff_82C56A : 0xff_F3EFE0);
         }

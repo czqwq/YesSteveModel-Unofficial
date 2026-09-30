@@ -631,6 +631,10 @@ public class ClientModelManager {
         ClientPackRegistry.clear();
         ClientModelMetadataRegistry.clear();
         PackUserFunctions.clear();
+        // The preview animations belong to the models being dropped; keeping them would make the selection GUI ask the
+        // next server's models for animations they never declared.
+        com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();
         MolangPhysicsRuntime.clear();
