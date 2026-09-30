@@ -158,7 +158,7 @@ public class ClientEventHandler {
         event.setCanceled(true);
         CustomPlayerRenderer renderer = ClientProxy.getInstance();
         if ((mc.currentScreen != null || EXTRA_PLAYER) && player.equals(playerSelf)) {
-            renderSelfGuiPlayer(renderer, player);
+            renderSelfGuiPlayer(renderer, player, event.partialRenderTick);
         } else {
             float partialTicks = event.partialRenderTick;
             double ix = player.lastTickPosX + (player.posX - player.lastTickPosX) * partialTicks;
@@ -174,7 +174,14 @@ public class ClientEventHandler {
         }
     }
 
-    private static void renderSelfGuiPlayer(CustomPlayerRenderer renderer, EntityPlayer player) {
+    /**
+     * Renders the local player as a preview (the HUD paper doll, or the world render while a screen is open).
+     * <p>
+     * {@code partialTicks} is forwarded rather than replaced with {@code 1.0F}: it is what makes this pass agree with
+     * the world's own pass about the frame, which the engine's per-frame de-duplication keys on. See
+     * {@code RenderUtil#renderPlayerEntity}.
+     */
+    private static void renderSelfGuiPlayer(CustomPlayerRenderer renderer, EntityPlayer player, float partialTicks) {
         PlayerPreviousRotationSnapshot snapshot = PlayerPreviousRotationSnapshot.capture(player);
         // This is a preview render, not the world: it plays the pack's preview animation, whose pose must not leak
         // into the world's own animation state (upstream keeps a separate entity for exactly this reason).
@@ -187,7 +194,7 @@ public class ClientEventHandler {
                 0 - player.yOffset,
                 0,
                 player.rotationYaw,
-                1.0F));
+                partialTicks));
         } finally {
             CustomPlayerRenderer.endPreviewRender();
             snapshot.restore(player);
@@ -228,7 +235,7 @@ public class ClientEventHandler {
         // 之后世界内的自身渲染也会被当成 GUI 预览（渲染到 0,0,0 并走 GUI 光照）。
         EXTRA_PLAYER = true;
         try {
-            RenderUtil.renderPlayerEntity(player, posX, posY, scale, yawOffset, -500);
+            RenderUtil.renderPlayerEntity(player, posX, posY, scale, yawOffset, -500, event.partialTicks);
         } finally {
             EXTRA_PLAYER = false;
         }

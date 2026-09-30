@@ -12,6 +12,13 @@ public final class ControllerUtils {
     /** Plays the GUI preview's focus animation. */
     public static final String FOCUS_CONTROLLER = "focus_controller";
     public static final String SWING_CONTROLLER = "swing_controller";
+    /**
+     * The riding controllers (B-04). Upstream keys them {@code player.vehicle} and {@code player.passenger}
+     * ({@code client/controller/collections/PlayerControllerCollection.java:36,59}); the local {@code _controller}
+     * suffix is what {@code OpenYsmPlayerControllerRuntime#candidateControllerNames} strips to find that key.
+     */
+    public static final String VEHICLE_CONTROLLER = "vehicle_controller";
+    public static final String PASSENGER_CONTROLLER = "passenger_controller";
     public static final String OPENYSM_PRE_MAIN_CONTROLLER = "player.pre_main";
     public static final String OPENYSM_POST_MAIN_CONTROLLER = "player.post_main";
     public static final String OPENYSM_PRE_HOLD_CONTROLLER = "player.pre_hold";

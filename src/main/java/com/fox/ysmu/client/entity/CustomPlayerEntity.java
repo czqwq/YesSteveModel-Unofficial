@@ -45,58 +45,98 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     /**
      * 越往后优先级越高
+     * <p>
+     * Transition lengths are upstream's, from
+     * {@code client/controller/collections/PlayerControllerCollection.java:31-71}: the parallel axes, the pre/post
+     * slots and the armor slots are 0, {@code main} is 0.1, both hold controllers are 0.1, {@code swing} is 0,
+     * {@code use} is 0.1, {@code cap} is 0 and the two GUI preview channels are 0. They are not cosmetic: the engine
+     * pins a controller's clock at 0 in {@code AnimationState.Transitioning} until {@code tick >=
+     * transitionLengthTicks} ({@code AnimationController#process}), so a longer length spends the first frames of
+     * every state change blending into the clip's first frame and cuts the tail off short one-shots. A model may
+     * still override one per state through {@code blend_transition}
+     * ({@code OpenYsmPlayerControllerRuntime}).
      */
     @Override
 
     @SuppressWarnings("all")
     public void registerControllers(AnimationData data) {
         AnimationManager manager = AnimationManager.getInstance();
+        // B-06: every predicate is wrapped in `manager.scripted(...)`, which lets a pack script bound to that
+        // controller decide first (`functions/<anything>@player_ctrl_<name>.molang`). Upstream does the same thing in
+        // one place - its shared CodedAnimationController - and the wrapper costs one map lookup when the model binds
+        // no script to that controller, which is the usual case.
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("pre_parallel_%d_controller", i);
             String animationName = String.format("pre_parallel%d", i);
             data.addAnimationController(
-                new AnimationController<>(this, controllerName, 0, e -> manager.predicateParallel(e, animationName)));
+                new AnimationController<>(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
         }
+        // B-04: upstream registers `player.vehicle` right after the pre-parallel axis, with a 0.1 tick transition
+        // (client/controller/collections/PlayerControllerCollection.java:36).
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_MAIN_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, MAIN_CONTROLLER, 2, manager::predicateMain));
+            new AnimationController(this, VEHICLE_CONTROLLER, 0.1f, manager.scripted(manager::predicateVehicle)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_MAIN_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, OPENYSM_PRE_MAIN_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_HOLD_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, MAIN_CONTROLLER, 0.1f, manager.scripted(manager::predicateMain)));
         data.addAnimationController(
-            new AnimationController(this, HOLD_OFFHAND_CONTROLLER, 0, manager::predicateOffhandHold));
+            new AnimationController(this, OPENYSM_POST_MAIN_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, HOLD_MAINHAND_CONTROLLER, 0, manager::predicateMainhandHold));
+            new AnimationController(this, OPENYSM_PRE_HOLD_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_HOLD_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, HOLD_OFFHAND_CONTROLLER, 0.1f, manager.scripted(manager::predicateOffhandHold)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_SWING_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, SWING_CONTROLLER, 2, manager::predicateSwing));
+            new AnimationController(this, HOLD_MAINHAND_CONTROLLER, 0.1f, manager.scripted(manager::predicateMainhandHold)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_SWING_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, OPENYSM_POST_HOLD_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_USE_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, USE_CONTROLLER, 2, manager::predicateUse));
+            new AnimationController(this, OPENYSM_PRE_SWING_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_USE_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, SWING_CONTROLLER, 0f, manager.scripted(manager::predicateSwing)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_POST_SWING_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_PRE_USE_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        data.addAnimationController(
+            new AnimationController(this, USE_CONTROLLER, 0.1f, manager.scripted(manager::predicateUse)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_POST_USE_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        // Upstream registers `player.passenger` after the use axis, also at 0.1
+        // (PlayerControllerCollection.java:59).
+        data.addAnimationController(
+            new AnimationController(this, PASSENGER_CONTROLLER, 0.1f, manager.scripted(manager::predicatePassenger)));
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("parallel_%d_controller", i);
             String animationName = String.format("parallel%d", i);
             data.addAnimationController(
-                new AnimationController<>(this, controllerName, 0, e -> manager.predicateParallel(e, animationName)));
+                new AnimationController<>(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
         }
         // 为每个盔甲槽位注册控制器，使用1-4的索引值
         for (int slotIndex = 1; slotIndex <= 4; slotIndex++) {
             String controllerName = String.format("%s_controller", ConditionArmor.getSlotNameFromIndex(slotIndex));
             int finalSlotIndex = slotIndex;
             data.addAnimationController(
-                new AnimationController(this, controllerName, 0, e -> manager.predicateArmor(e, finalSlotIndex)));
+                new AnimationController(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateArmor(e, finalSlotIndex))));
         }
-        data.addAnimationController(new AnimationController(this, CAP_CONTROLLER, 2, manager::predicateCap));
+        data.addAnimationController(
+            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
         // GUI preview channels, after the cap controller so a hover/focus animation wins for the bones they share.
-        data.addAnimationController(new AnimationController(this, HOVER_CONTROLLER, 1, manager::predicateHover));
-        data.addAnimationController(new AnimationController(this, FOCUS_CONTROLLER, 1, manager::predicateFocus));
+        data.addAnimationController(
+            new AnimationController(this, HOVER_CONTROLLER, 0f, manager.scripted(manager::predicateHover)));
+        data.addAnimationController(
+            new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
         data.getAnimationControllers()
             .values()
             .forEach(
@@ -142,6 +182,18 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                 .floatValue();
         }
         return 0.7f;
+    }
+
+    /**
+     * Whether this model's layers - held item, armor, back attachments - are drawn before the model instead of after
+     * it, which the pack declares with {@code render_layers_first}.
+     * <p>
+     * Upstream reads the same flag from the model's player settings ({@code CustomHumanoidEntity#renderLayersFirst})
+     * and the engine asks for it through {@code IGeoRenderer#shouldRenderLayersFirst}. Defaults to {@code false}, the
+     * order every model had before the flag was honoured.
+     */
+    public boolean shouldRenderLayersFirst() {
+        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(this.mainModel));
     }
 
     /** The rendered entity, player or not. */

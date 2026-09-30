@@ -44,13 +44,10 @@ public class CtrlHoldFunction extends Function {
 
     /**
      * Reads a string argument back out of {@link MolangStringPool}; a missing/empty/unresolvable argument falls
-     * back, so a model written as {@code ctrl.hold()} cannot throw.
+     * back, so a model written as {@code ctrl.hold()} cannot throw. Shares the one implementation with
+     * {@link CtrlScriptBinding}'s functions.
      */
     private String stringArgument(int index, String fallback) {
-        if (this.args == null || index < 0 || index >= this.args.length) {
-            return fallback;
-        }
-        String value = MolangStringPool.get((int) this.getArg(index));
-        return value == null || value.isEmpty() ? fallback : value;
+        return CtrlScriptBinding.stringArgument(this.args, index, fallback);
     }
 }

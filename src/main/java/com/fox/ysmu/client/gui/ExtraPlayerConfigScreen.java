@@ -67,7 +67,15 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         }
 
         if (this.mc.thePlayer != null) {
-            RenderUtil.renderPlayerEntity(this.mc.thePlayer, this.posX, this.posY, this.scale, this.yawOffset, 50);
+            // The same frame partial tick the HUD overlay passes, so the doll on this screen poses like the real one.
+            RenderUtil.renderPlayerEntity(
+                this.mc.thePlayer,
+                this.posX,
+                this.posY,
+                this.scale,
+                this.yawOffset,
+                50,
+                this.mc.timer.renderPartialTicks);
         }
     }
 

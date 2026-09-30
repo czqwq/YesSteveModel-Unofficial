@@ -19,6 +19,7 @@ import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.client.animation.condition.ConditionArmor;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Controller;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.ControllerSet;
@@ -88,7 +89,8 @@ public final class OpenYsmPlayerControllerRuntime {
             state = nextState;
         }
 
-        String animationName = selectAnimation(state, match.preferredAnimationIndex, context);
+        String animationName = selectAnimation(state, match.preferredAnimationName, context);
+        reportDroppedEntries(animationId, geckoControllerName, state, animationName, context);
         if (StringUtils.isBlank(animationName) || !animationExists(animationId, animationName)) {
             return null;
         }
@@ -152,14 +154,17 @@ public final class OpenYsmPlayerControllerRuntime {
         return state;
     }
 
-    private static String selectAnimation(State state, int preferredAnimationIndex,
+    private static String selectAnimation(State state, String preferredAnimationName,
         OpenYsmControllerExpressionEvaluator.Context context) {
         if (state.animations.isEmpty()) {
             return null;
         }
-        if (preferredAnimationIndex >= 0 && preferredAnimationIndex < state.animations.size()) {
-            AnimationEntry entry = state.animations.get(preferredAnimationIndex);
-            return animationEntryActive(entry, context) ? entry.animationName : null;
+        if (StringUtils.isNotBlank(preferredAnimationName)) {
+            for (AnimationEntry entry : state.animations) {
+                if (preferredAnimationName.equals(entry.animationName)) {
+                    return animationEntryActive(entry, context) ? entry.animationName : null;
+                }
+            }
         }
         for (AnimationEntry entry : state.animations) {
             if (animationEntryActive(entry, context)) {
@@ -173,6 +178,49 @@ public final class OpenYsmPlayerControllerRuntime {
         OpenYsmControllerExpressionEvaluator.Context context) {
         return StringUtils.isBlank(entry.condition)
             || OpenYsmControllerExpressionEvaluator.evaluateBoolean(entry.condition, context);
+    }
+
+    /**
+     * B-12: a Bedrock state lists several animations and plays every entry whose own condition holds, but a controller
+     * here plays one clip at a time - the engine's queue is a sequential playlist, not a set of layers - so the other
+     * matching entries are simply lost.
+     * <p>
+     * This does not implement the capability; it makes the loss visible. Reported once per (model, controller, state)
+     * so a log answers the question the audit could not: whether any pack this client actually loads relies on it.
+     * "The pack's second animation never plays" is exactly the kind of silence the rest of this audit keeps finding.
+     */
+    private static void reportDroppedEntries(ResourceLocation animationId, String geckoControllerName, State state,
+        String selectedAnimationName, OpenYsmControllerExpressionEvaluator.Context context) {
+        if (StringUtils.isBlank(selectedAnimationName) || state.animations.size() < 2) {
+            return;
+        }
+        StringBuilder dropped = null;
+        for (AnimationEntry entry : state.animations) {
+            if (entry.animationName.equals(selectedAnimationName) || !animationEntryActive(entry, context)) {
+                continue;
+            }
+            if (dropped == null) {
+                dropped = new StringBuilder();
+            } else {
+                dropped.append(", ");
+            }
+            dropped.append(entry.animationName);
+        }
+        if (dropped == null) {
+            return;
+        }
+        OpenYsmAnimationControllerRegistry.warnOnce(
+            "multi-animation:" + animationId + ":" + geckoControllerName + ":" + state.name,
+            "OpenYSM state '" + state.name
+                + "' of controller "
+                + geckoControllerName
+                + " in "
+                + animationId
+                + " has more than one animation whose condition holds ("
+                + dropped
+                + "); this port plays one clip per controller, so only "
+                + selectedAnimationName
+                + " plays. Further occurrences are not logged.");
     }
 
     private static boolean animationExists(ResourceLocation animationId, String animationName) {
@@ -238,48 +286,104 @@ public final class OpenYsmPlayerControllerRuntime {
 
     private static List<ControllerMatch> resolveControllers(ControllerSet set, String geckoControllerName) {
         List<ControllerMatch> matches = new ArrayList<>();
-        int preferredIndex = getParallelIndex(geckoControllerName);
-        if (preferredIndex >= 0) {
-            if (geckoControllerName.startsWith("pre_parallel_")) {
-                addMatch(matches, set, "player.pre_parallel_0", preferredIndex);
-                addMatch(matches, set, "pre_parallel_0", preferredIndex);
-            } else {
-                addMatch(matches, set, "player.parallel_0", preferredIndex);
-                addMatch(matches, set, "parallel_0", preferredIndex);
-            }
-        } else if (MAIN_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.main", -1);
-            addMatch(matches, set, "player.base", -1);
-            addMatch(matches, set, "player.move", -1);
-            addMatch(matches, set, "main", -1);
-        } else if (HOLD_MAINHAND_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.hold_mainhand", -1);
-            addMatch(matches, set, "hold_mainhand", -1);
-        } else if (HOLD_OFFHAND_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.hold_offhand", -1);
-            addMatch(matches, set, "hold_offhand", -1);
-        } else if (SWING_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.swing", -1);
-            addMatch(matches, set, "swing", -1);
-        } else if (USE_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.use", -1);
-            addMatch(matches, set, "use", -1);
-        } else if (CAP_CONTROLLER.equals(geckoControllerName)) {
-            addMatch(matches, set, "player.cap", -1);
-            addMatch(matches, set, "cap", -1);
-        }
-        addMatch(matches, set, geckoControllerName, preferredIndex);
-        if (geckoControllerName.startsWith("player.")) {
-            addMatch(matches, set, geckoControllerName.substring("player.".length()), preferredIndex);
-        }
-        if (geckoControllerName.endsWith("_controller")) {
-            addMatch(matches, set, geckoControllerName.substring(0, geckoControllerName.length() - 11), preferredIndex);
+        String preferredAnimationName = parallelAnimationName(geckoControllerName);
+        for (String candidate : candidateControllerNames(geckoControllerName)) {
+            addMatch(matches, set, candidate, preferredAnimationName);
         }
         return matches;
     }
 
+    /**
+     * Every name a pack may have declared this GeckoLib controller under, in the order they are trusted.
+     * <p>
+     * The port names its controllers after its own Java wiring while packs are written against upstream's
+     * names, so one controller usually has several spellings and they belong in one reviewable table. The
+     * per-slot armor aliases are the ones a pack actually writes - upstream keys them {@code player.armor_<slot>}
+     * (client/controller/ArmorControllerDiscovery.java:35) and the shipped wine_fox/14_momo pack declares
+     * {@code player.armor_head} (controller/armor.animation_controllers.json:4) - whereas this port names its
+     * controller {@code <slot>_controller} (CustomPlayerEntity#registerControllers). Without those two lines a
+     * pack's whole per-slot armor state machine could never be matched and only the Java
+     * {@code <slot>:$id} / {@code <slot>:default} path would ever play.
+     * <p>
+     * Order is priority: a name both sides agree on is tried before an alias.
+     */
+    static List<String> candidateControllerNames(String geckoControllerName) {
+        List<String> names = new ArrayList<>();
+        if (geckoControllerName == null || geckoControllerName.isEmpty()) {
+            return names;
+        }
+        if (getParallelIndex(geckoControllerName) >= 0) {
+            // B-02: upstream pairs a parallel controller with its own clip by SUFFIX. A model that declares
+            // `player.parallel_<i>` gets that definition as the state machine, and a model that declares none gets
+            // the coded `parallel<i>` (PlayerControllerCollection.java:68-69 only builds ParallelPredicate(anim)
+            // as the fallback, and ParallelControllerDiscovery.java:52-70 derives the controller name from the
+            // animation `parallel<i>` itself). The grouped form - one `player.parallel_0` whose `animations` list
+            // holds all eight - is therefore a fallback for the controller-0 spelling only, not the definition
+            // every controller indexes into: 14_momo's list is `[parallel0, parallel2, parallel3, parallel1, ...]`,
+            // an order that carries no meaning precisely because upstream plays every entry of a state at once.
+            int parallelIndex = getParallelIndex(geckoControllerName);
+            boolean preParallel = geckoControllerName.startsWith("pre_parallel_");
+            String base = preParallel ? "pre_parallel_" : "parallel_";
+            names.add("player." + base + parallelIndex);
+            names.add(base + parallelIndex);
+            names.add("player." + base + "0");
+            names.add(base + "0");
+        } else if (MAIN_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.main");
+            names.add("player.base");
+            names.add("player.move");
+            names.add("main");
+        } else if (HOLD_MAINHAND_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.hold_mainhand");
+            names.add("hold_mainhand");
+        } else if (HOLD_OFFHAND_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.hold_offhand");
+            names.add("hold_offhand");
+        } else if (SWING_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.swing");
+            names.add("swing");
+        } else if (USE_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.use");
+            names.add("use");
+        } else if (CAP_CONTROLLER.equals(geckoControllerName)) {
+            names.add("player.cap");
+            names.add("cap");
+        }
+        names.add(geckoControllerName);
+        if (geckoControllerName.startsWith("player.")) {
+            names.add(geckoControllerName.substring("player.".length()));
+        }
+        if (geckoControllerName.endsWith("_controller")) {
+            names.add(geckoControllerName.substring(0, geckoControllerName.length() - 11));
+        }
+        String armorSlot = armorSlotOf(geckoControllerName);
+        if (armorSlot != null) {
+            names.add("player.armor_" + armorSlot);
+            names.add("armor_" + armorSlot);
+        }
+        return names;
+    }
+
+    /**
+     * The armor slot a GeckoLib controller stands for - {@code head} / {@code chest} / {@code legs} /
+     * {@code feet} - or {@code null} for every other controller. The slot vocabulary comes from the shared
+     * table in {@link ConditionArmor} rather than a second copy of it.
+     */
+    static String armorSlotOf(String geckoControllerName) {
+        if (geckoControllerName == null) {
+            return null;
+        }
+        for (int slotIndex = 1; slotIndex <= 4; slotIndex++) {
+            String slotName = ConditionArmor.getSlotNameFromIndex(slotIndex);
+            if (!slotName.isEmpty() && geckoControllerName.equals(slotName + "_controller")) {
+                return slotName;
+            }
+        }
+        return null;
+    }
+
     private static void addMatch(List<ControllerMatch> matches, ControllerSet set, String controllerName,
-        int preferredAnimationIndex) {
+        String preferredAnimationName) {
         Controller controller = set.controllers.get(controllerName);
         if (controller == null) {
             return;
@@ -289,7 +393,27 @@ public final class OpenYsmPlayerControllerRuntime {
                 return;
             }
         }
-        matches.add(new ControllerMatch(controller, preferredAnimationIndex));
+        matches.add(new ControllerMatch(controller, preferredAnimationName));
+    }
+
+    /**
+     * The clip a parallel controller stands for, by upstream's suffix rule: controller
+     * {@code parallel_<i>_controller} plays {@code parallel<i>}, and {@code pre_parallel_<i>_controller} plays
+     * {@code pre_parallel<i>} ({@code PlayerControllerCollection.java:31-32,68-69} plus
+     * {@code ParallelControllerDiscovery.java:52-70}, which derives the controller name from the animation name).
+     * <p>
+     * Selecting by name rather than by position is what makes a controller independent of the order of a grouped
+     * {@code animations} list - and that order demonstrably carries no meaning, because upstream plays every entry
+     * of a state simultaneously ({@code BedrockAnimationController#process} builds one player per entry).
+     *
+     * @return the clip name, or {@code null} for a controller that is not a parallel one
+     */
+    static String parallelAnimationName(String geckoControllerName) {
+        int parallelIndex = getParallelIndex(geckoControllerName);
+        if (parallelIndex < 0) {
+            return null;
+        }
+        return (geckoControllerName.startsWith("pre_parallel_") ? "pre_parallel" : "parallel") + parallelIndex;
     }
 
     private static int getParallelIndex(String geckoControllerName) {
@@ -355,11 +479,15 @@ public final class OpenYsmPlayerControllerRuntime {
 
     private static final class ControllerMatch {
         private final Controller controller;
-        private final int preferredAnimationIndex;
+        /**
+         * The clip this controller is expected to play, or {@code null} when the definition's own state picks it.
+         * Only parallel controllers set it (see {@link #parallelAnimationName}).
+         */
+        private final String preferredAnimationName;
 
-        private ControllerMatch(Controller controller, int preferredAnimationIndex) {
+        private ControllerMatch(Controller controller, String preferredAnimationName) {
             this.controller = controller;
-            this.preferredAnimationIndex = preferredAnimationIndex;
+            this.preferredAnimationName = preferredAnimationName;
         }
     }
 

@@ -68,6 +68,14 @@ public class ClientModelManager {
 
     public static Map<ResourceLocation, List<ResourceLocation>> MODELS = Maps.newHashMap();
     public static Map<ResourceLocation, Pair<Double, Double>> SCALE_INFO = Maps.newHashMap();
+    /**
+     * Whether a model declares {@code render_layers_first}: its held item and armor are drawn before the model rather
+     * than after it, because the model geometry covers them otherwise. Upstream reads the same flag from the model's
+     * player settings and orders its layer pass by it ({@code geckolib3/geo/GeoReplacedEntityRenderer.java:92,98,118}).
+     * The port parsed the flag into {@code RawProperties#renderLayersFirst} but never consumed it anywhere under
+     * {@code client/}, so the setting silently did nothing.
+     */
+    public static Map<ResourceLocation, Boolean> RENDER_LAYERS_FIRST = Maps.newHashMap();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
@@ -223,6 +231,7 @@ public class ClientModelManager {
                 SCALE_INFO.put(
                     id,
                     Pair.of(rawGeometryTree.properties.getHeightScale(), rawGeometryTree.properties.getWidthScale()));
+                RENDER_LAYERS_FIRST.put(id, Boolean.TRUE.equals(rawGeometryTree.properties.getRenderLayersFirst()));
                 ExtraInfo extraInfo = rawGeometryTree.properties.getExtraInfo();
                 EXTRA_INFO.put(id, handleExtraInfo(id, extraInfo));
                 // The information screen wants the same block, keyed by the model rather than by its main/arm
@@ -621,6 +630,7 @@ public class ClientModelManager {
             EXTRA_ANIMATION_NAME.size());
         MODELS.clear();
         SCALE_INFO.clear();
+        RENDER_LAYERS_FIRST.clear();
         EXTRA_INFO.clear();
         EXTRA_ANIMATION_NAME.clear();
         // The content signatures describe exactly the models being dropped here, so they go with them; otherwise a

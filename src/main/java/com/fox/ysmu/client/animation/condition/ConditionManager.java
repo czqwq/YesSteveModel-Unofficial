@@ -17,6 +17,11 @@ public class ConditionManager {
     public static Map<ResourceLocation, ConditionalHold> HOLD_MAINHAND = Maps.newHashMap();
     public static Map<ResourceLocation, ConditionalHold> HOLD_OFFHAND = Maps.newHashMap();
     public static Map<ResourceLocation, ConditionArmor> ARMOR = Maps.newHashMap();
+    // B-04: upstream also classifies the riding names (`vehicle$…` / `passenger$…`) and drives two dedicated
+    // controllers with them (ConditionManager.java:14-16,26-29 there). The port had no route for either prefix, so a
+    // pack's per-vehicle and per-passenger clips could never play.
+    public static Map<ResourceLocation, ConditionalVehicle> VEHICLE = Maps.newHashMap();
+    public static Map<ResourceLocation, ConditionalPassenger> PASSENGER = Maps.newHashMap();
 
     public static void addTest(ResourceLocation id, String name) {
         SWING.putIfAbsent(id, new ConditionalSwing(true));
@@ -26,6 +31,8 @@ public class ConditionManager {
         HOLD_MAINHAND.putIfAbsent(id, new ConditionalHold(true));
         HOLD_OFFHAND.putIfAbsent(id, new ConditionalHold(false));
         ARMOR.putIfAbsent(id, new ConditionArmor());
+        VEHICLE.putIfAbsent(id, new ConditionalVehicle());
+        PASSENGER.putIfAbsent(id, new ConditionalPassenger());
 
         ConditionalSwing conditionalSwing = SWING.get(id);
         ConditionalSwing conditionalSwingOffhand = SWING_OFFHAND.get(id);
@@ -34,6 +41,8 @@ public class ConditionManager {
         ConditionalHold conditionalHoldMainhand = HOLD_MAINHAND.get(id);
         ConditionalHold conditionalHoldOffhand = HOLD_OFFHAND.get(id);
         ConditionArmor conditionArmor = ARMOR.get(id);
+        ConditionalVehicle conditionalVehicle = VEHICLE.get(id);
+        ConditionalPassenger conditionalPassenger = PASSENGER.get(id);
 
         conditionalSwing.addTest(name);
         conditionalSwingOffhand.addTest(name);
@@ -42,6 +51,8 @@ public class ConditionManager {
         conditionalHoldMainhand.addTest(name);
         conditionalHoldOffhand.addTest(name);
         conditionArmor.addTest(name);
+        conditionalVehicle.addTest(name);
+        conditionalPassenger.addTest(name);
 
         // A-07: a name that is a condition name but has no route through any of the classifiers above would be
         // dropped silently; report each (model, name) once, with the reason.
@@ -56,6 +67,8 @@ public class ConditionManager {
         HOLD_MAINHAND.clear();
         HOLD_OFFHAND.clear();
         ARMOR.clear();
+        VEHICLE.clear();
+        PASSENGER.clear();
         ConditionNameDiagnostics.clear();
     }
 
@@ -93,5 +106,15 @@ public class ConditionManager {
 
     public static ConditionArmor getArmor(ResourceLocation id) {
         return ARMOR.get(id);
+    }
+
+    /** The riding classifier for one model, or {@code null} before the model registers any name. */
+    public static ConditionalVehicle getVehicle(ResourceLocation id) {
+        return VEHICLE.get(id);
+    }
+
+    /** The passenger classifier for one model, or {@code null} before the model registers any name. */
+    public static ConditionalPassenger getPassenger(ResourceLocation id) {
+        return PASSENGER.get(id);
     }
 }

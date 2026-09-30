@@ -37,7 +37,7 @@ public final class ModelCacheWriter {
      * hashes match as well, so a model can stay invisible across reloads and restarts even after the bug that baked
      * it was fixed. Bumping the value changes every hash, which re-bakes the payload and makes the client miss.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 2;
+    static final int OPEN_YSM_BAKE_VERSION = 3;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。

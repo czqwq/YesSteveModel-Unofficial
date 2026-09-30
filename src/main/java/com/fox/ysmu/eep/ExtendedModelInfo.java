@@ -31,6 +31,10 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     private ResourceLocation selectTexture = ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
     private String animation = "idle";
     private boolean playAnimation = false;
+    /** See {@link #getAnimationReplayCount()}; serialized, because the client that renders is not the side that asked. */
+    private int animationReplayCount;
+    /** The count this side has already acted on; not serialized, it belongs to whoever is rendering. */
+    private int consumedReplayCount;
     private boolean dirty; // dirty 标志可以保留，用于客户端渲染逻辑判断是否需要更新
 
     public ExtendedModelInfo(EntityPlayer player) {
@@ -64,6 +68,7 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
         }
         this.animation = source.animation;
         this.playAnimation = source.playAnimation;
+        this.animationReplayCount = source.animationReplayCount;
         markDirty();
     }
 
@@ -88,7 +93,32 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     public void playAnimation(String animation) {
         this.animation = animation;
         this.playAnimation = true;
+        // A-05: every request counts, including one that names the animation already showing. The name alone cannot
+        // express "play it again", and the engine's setAnimation is a no-op while it already holds that builder -
+        // which is why a second press of the same emote key left the model parked on the clip's last frame.
+        this.animationReplayCount++;
         markDirty();
+    }
+
+    /**
+     * A-05: how many times a play-animation has been requested. Upstream carries the same fact as a dirty flag that
+     * {@code CapPredicate} consumes and turns into {@code indicateReload()}
+     * ({@code client/animation/predicate/CapPredicate.java:23-28}); a counter rather than a boolean so a later,
+     * unrelated sync cannot replay a stale request.
+     */
+    public int getAnimationReplayCount() {
+        return animationReplayCount;
+    }
+
+    /**
+     * Whether this client still has to act on a play-animation request; answers {@code true} at most once per request.
+     */
+    public boolean consumeReplayRequest() {
+        if (animationReplayCount == consumedReplayCount) {
+            return false;
+        }
+        consumedReplayCount = animationReplayCount;
+        return true;
     }
 
     public void stopAnimation() {
@@ -146,6 +176,7 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
         properties.setString("select_texture", this.selectTexture == null ? "" : this.selectTexture.toString());
         properties.setString("animation", this.animation);
         properties.setBoolean("play_animation", this.playAnimation);
+        properties.setInteger("animation_replay_count", this.animationReplayCount);
 
         compound.setTag(EXT_PROP_NAME, properties);
     }
@@ -161,6 +192,8 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
             this.selectTexture = new ResourceLocation(properties.getString("select_texture"));
             this.animation = properties.getString("animation");
             this.playAnimation = properties.getBoolean("play_animation");
+            // A missing key reads as 0, which is the right default for an older sender.
+            this.animationReplayCount = properties.getInteger("animation_replay_count");
         }
     }
 

@@ -1,12 +1,19 @@
 package com.fox.ysmu.client.animation;
 
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.item.EntityBoat;
+import net.minecraft.entity.passive.EntityHorse;
+import net.minecraft.entity.passive.EntityPig;
 import net.minecraft.entity.passive.EntityTameable;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
@@ -14,10 +21,13 @@ import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
+import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.molang.PackFunctionScript;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -31,6 +41,7 @@ import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
+import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -138,6 +149,14 @@ public final class AnimationManager {
 
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         if (eep != null && eep.isPlayAnimation()) {
+            if (eep.consumeReplayRequest() && event.getController() != null) {
+                // A-05: pressing the same emote key again must restart its clip. The engine's setAnimation is a no-op
+                // while it already holds that builder and was not told to reload, so the request has to be turned into
+                // a reload - which is exactly what upstream's CapPredicate does with the entity's dirty flag
+                // (client/animation/predicate/CapPredicate.java:23-28: clearExtraAnimationDirty + indicateReload).
+                event.getController()
+                    .markNeedsReload();
+            }
             return playAnimation(event, eep.getAnimation());
         }
         return PlayState.STOP;
@@ -184,6 +203,7 @@ public final class AnimationManager {
         }
         PlayState controllerState = OpenYsmPlayerControllerRuntime.tryApply(event);
         if (controllerState != null) {
+            rememberMainState(player, "");
             return controllerState;
         }
         for (int i = Priority.HIGHEST; i <= Priority.LOWEST; i++) {
@@ -206,11 +226,92 @@ public final class AnimationManager {
                         continue;
                     }
                     ILoopType loopType = state.getLoopType();
+                    rememberMainState(player, animationName);
                     return playAnimation(event, animationName, loopType);
                 }
             }
         }
+        rememberMainState(player, "");
         return PlayState.STOP;
+    }
+
+    /**
+     * The main controller's currently selected state, per player - upstream's {@code HumanoidStateTracker}
+     * main-animation cache, which its {@code ctrl.<state>} script queries test against
+     * ({@code CtrlBinding#testCondition}).
+     * <p>
+     * Written by {@link #predicateMain} and read by the scripts of the controllers registered before `main`
+     * (`pre_parallel`, `vehicle`, `pre_main`), so those see the previous frame's value. Upstream has the same
+     * ordering, for the same reason: the cache is filled as the frame's controllers are processed in order.
+     */
+    private final Map<UUID, String> mainAnimationCache = new ConcurrentHashMap<>();
+
+    private void rememberMainState(EntityPlayer player, String animationName) {
+        if (animationName == null || animationName.isEmpty()) {
+            mainAnimationCache.remove(player.getUniqueID());
+        } else {
+            mainAnimationCache.put(player.getUniqueID(), animationName);
+        }
+    }
+
+    @Nullable
+    private String mainStateOf(EntityPlayer player) {
+        return mainAnimationCache.get(player.getUniqueID());
+    }
+
+    /**
+     * Every registered main-state name. The {@code ctrl.<state>} script queries are keyed by this vocabulary, so it is
+     * read off the state table rather than listing the names a second time.
+     */
+    public Set<String> registeredStateNames() {
+        Set<String> names = new LinkedHashSet<>();
+        for (LinkedList<AnimationState> states : data.values()) {
+            for (AnimationState state : states) {
+                names.add(state.getAnimationName());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Wraps a built-in predicate so a pack script bound to that controller is consulted first - see
+     * {@link #predicateWithPackScript}. Applied at every registration site, because upstream binds scripts in the
+     * shared controller class rather than per controller.
+     */
+    public AnimationController.IAnimationPredicate<CustomPlayerEntity> scripted(
+        AnimationController.IAnimationPredicate<CustomPlayerEntity> fallback) {
+        return event -> predicateWithPackScript(event, fallback::test);
+    }
+
+    /**
+     * Runs the script a pack bound to this controller when it has one, and otherwise defers to the built-in predicate.
+     * <p>
+     * Upstream binds scripts inside {@code CodedAnimationController}: {@code updateModel} looks the handler up by
+     * {@code name.replace(".", "_ctrl_")} and {@code process} lets it decide before the coded predicate
+     * ({@code geckolib3/core/controller/CodedAnimationController.java:65-72,124-134}). This port wires its controllers
+     * straight to their predicates, so the equivalent seam is here - the one place every controller's predicate passes
+     * through - and it is applied at the registration site in {@code CustomPlayerEntity#registerControllers}.
+     *
+     * @param fallback the built-in predicate, used whenever the script has no opinion this frame
+     */
+    public PlayState predicateWithPackScript(AnimationEvent<CustomPlayerEntity> event,
+        Function<AnimationEvent<CustomPlayerEntity>, PlayState> fallback) {
+        EntityPlayer player = event.getAnimatable()
+            .getPlayer();
+        if (player == null || event.getController() == null) {
+            return fallback.apply(event);
+        }
+        PackFunctionScript script = PackUserFunctions.scriptForController(event.getController().getName());
+        if (script == null) {
+            return fallback.apply(event);
+        }
+        PlayState scripted = CtrlScriptBinding.evaluate(
+            script,
+            GeckoLibCache.getInstance().parser,
+            player,
+            event.getController(),
+            mainStateOf(player));
+        return scripted == null ? fallback.apply(event) : scripted;
     }
 
     /** States already reported as missing, so a state evaluated every frame warns once per model. */
@@ -324,10 +425,16 @@ public final class AnimationManager {
         // A-01: 1.7.10 has no vanilla offhand slot (Backhand provides it). With Backhand present an *empty*
         // offhand must still reach ConditionalHold#doTest so it can answer `hold_offhand:empty`, so the
         // "offhand must hold something" precondition is gone; the slot's existence is what is checked now.
-        if (BackhandCompat.isBackhandLoaded() && checkSwingAndUse(player, false)) {
+        if (!BackhandCompat.isBackhandLoaded()) {
+            // Without the off-hand slot there is no off-hand pose to hold.
+            return PlayState.STOP;
+        }
+        if (checkSwingAndUse(player, false)) {
             return playIfPresent(event, findHoldAnimation(event, player, false));
         }
-        return PlayState.STOP;
+        // A-07: upstream answers PAUSE here, not STOP (client/animation/predicate/OffhandPredicate.java:27-29).
+        // Stopping made the off-hand clip reload mid-swing; pausing holds the pose the player had instead.
+        return PlayState.PAUSE;
     }
 
     public PlayState predicateMainhandHold(AnimationEvent<CustomPlayerEntity> event) {
@@ -364,7 +471,9 @@ public final class AnimationManager {
         if (checkSwingAndUse(player, true)) {
             return playIfPresent(event, findHoldAnimation(event, player, true));
         }
-        return PlayState.STOP;
+        // A-07: upstream answers PAUSE here, not STOP (client/animation/predicate/MainhandPredicate.java:31-33).
+        // Stopping made the held-item clip reload mid-swing; pausing holds the pose the player had instead.
+        return PlayState.PAUSE;
     }
 
     public PlayState predicateSwing(AnimationEvent<CustomPlayerEntity> event) {
@@ -480,6 +589,64 @@ public final class AnimationManager {
             .getAnimations()
             .get(animation).animations.containsKey(defaultName)) {
             return playAnimation(event, defaultName, ILoopType.EDefaultLoopTypes.LOOP);
+        }
+        return PlayState.STOP;
+    }
+
+    /**
+     * The {@code player.vehicle} controller (B-04): the per-vehicle clip a model declares, else the legacy riding
+     * states.
+     * <p>
+     * The order is upstream's ({@code client/animation/predicate/VehiclePredicate.java:51-96}): the {@code vehicle$…}
+     * condition name first, then the pig / saddleable / boat fallbacks, then {@code sit}. Upstream's mod-specific
+     * branches (SWEM, the Touhou chair, CarryOn, maid vehicles) have no 1.7.10 counterpart, and its {@code Saddleable}
+     * group is exactly the pig and the horse here. Falling through with {@code hasAnimation} rather than playing
+     * unconditionally is this port's rule for every state that a model may not define.
+     */
+    public PlayState predicateVehicle(AnimationEvent<CustomPlayerEntity> event) {
+        EntityPlayer player = event.getAnimatable()
+            .getPlayer();
+        if (player == null || player.ridingEntity == null || !player.ridingEntity.isEntityAlive()) {
+            return PlayState.STOP;
+        }
+        ConditionalVehicle condition = ConditionManager.getVehicle(getAnimationId(event));
+        if (condition != null) {
+            String name = condition.doTest(player);
+            if (StringUtils.isNoneBlank(name) && hasAnimation(event, name)) {
+                return playLoopAnimation(event, name);
+            }
+        }
+        Entity vehicle = player.ridingEntity;
+        if (vehicle instanceof EntityPig && hasAnimation(event, "ride_pig")) {
+            return playLoopAnimation(event, "ride_pig");
+        }
+        if (vehicle instanceof EntityHorse && hasAnimation(event, "ride")) {
+            return playLoopAnimation(event, "ride");
+        }
+        if (vehicle instanceof EntityBoat && hasAnimation(event, "boat")) {
+            return playLoopAnimation(event, "boat");
+        }
+        return hasAnimation(event, "sit") ? playLoopAnimation(event, "sit") : PlayState.STOP;
+    }
+
+    /**
+     * The {@code player.passenger} controller (B-04): the clip a model declares for whoever is riding the player
+     * ({@code passenger$…}), and nothing otherwise - upstream's predicate has no fallback either
+     * ({@code client/animation/predicate/PassengerPredicate.java:23-35}).
+     */
+    public PlayState predicatePassenger(AnimationEvent<CustomPlayerEntity> event) {
+        EntityPlayer player = event.getAnimatable()
+            .getPlayer();
+        if (player == null || player.riddenByEntity == null || !player.riddenByEntity.isEntityAlive()) {
+            return PlayState.STOP;
+        }
+        ConditionalPassenger condition = ConditionManager.getPassenger(getAnimationId(event));
+        if (condition == null) {
+            return PlayState.STOP;
+        }
+        String name = condition.doTest(player);
+        if (StringUtils.isNoneBlank(name) && hasAnimation(event, name)) {
+            return playLoopAnimation(event, name);
         }
         return PlayState.STOP;
     }

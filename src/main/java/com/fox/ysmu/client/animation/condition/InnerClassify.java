@@ -38,7 +38,9 @@ public final class InnerClassify {
      */
     private static final Set<String> KNOWN_TYPE_KEYWORDS = new HashSet<>(
         Arrays.asList(
+            "slashblade",
             "sword",
+            "gohei",
             "pickaxe",
             "shovel",
             "hoe",
@@ -64,8 +66,22 @@ public final class InnerClassify {
             return "";
         }
         Item item = stack.getItem();
+        // A-10: upstream asks for these two before anything else (client/animation/condition/InnerClassify.java:25-33
+        // is slashblade, sword, gohei, then the tools) because a SlashBlade blade is also a sword and would otherwise
+        // be classified as one, so the pack's blade clips would never play. See matchesModItem for how they match here.
+        if (matchesModItem(stack, "slashblade")) {
+            return "slashblade";
+        }
         if (item instanceof ItemSword || matchesName(stack, "sword")) {
             return "sword";
+        }
+        if (matchesModItem(stack, "gohei")) {
+            return "gohei";
+        }
+        // The tools follow upstream's order (InnerClassify.java:34-45: axe, pickaxe, shovel, hoe) rather than the
+        // port's earlier one, so a modded item that carries two of these names classifies the same way on both.
+        if (item instanceof ItemAxe || matchesName(stack, "axe")) {
+            return "axe";
         }
         if (item instanceof ItemPickaxe || matchesName(stack, "pickaxe")) {
             return "pickaxe";
@@ -75,9 +91,6 @@ public final class InnerClassify {
         }
         if (item instanceof ItemHoe || matchesName(stack, "hoe")) {
             return "hoe";
-        }
-        if (item instanceof ItemAxe || matchesName(stack, "axe")) {
-            return "axe";
         }
         if (matchesName(stack, "shield")) {
             return "shield";
@@ -252,6 +265,28 @@ public final class InnerClassify {
             }
         }
         return false;
+    }
+
+    /**
+     * A-10: {@code slashblade} and {@code gohei} name one mod's item rather than a vanilla class. Upstream tests the
+     * class - {@code item instanceof ItemSlashBlade} ({@code client/compat/slashblade/SlashBladeAnimation.java:19})
+     * and {@code item instanceof ItemHakureiGohei}
+     * ({@code client/compat/touhoulittlemaid/client/TlmClientCompatInner.java:83}) - plus an item tag for the blade.
+     * 1.7.10 has neither item tags nor a way for this port to compile against either mod, so the same intent is
+     * expressed as "the item's class name, its id or its ore-dictionary name carries the mod's own name". That name is
+     * upstream's own constant for the blade ({@code SLASH_BLADE_ID = "slashblade"},
+     * {@code client/compat/slashblade/SlashBladeCompat.java:20}); the class half is what makes it work for the 1.7.10
+     * build of the mod, whose registry domain need not spell it the same way.
+     */
+    private static boolean matchesModItem(ItemStack stack, String modName) {
+        if (matchesName(stack, modName)) {
+            return true;
+        }
+        Item item = stack.getItem();
+        return item != null && item.getClass()
+            .getSimpleName()
+            .toLowerCase(Locale.ROOT)
+            .contains(modName);
     }
 
     private static boolean matchesName(ItemStack stack, String needle) {

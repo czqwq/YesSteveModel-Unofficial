@@ -84,8 +84,49 @@ class OpenYsmBakeRoundTripTest {
         }
     }
 
-    private static int[] sourceCount(Path dir, String part) throws Exception {
-        Path file = dir.resolve("models")
+    /**
+     * {@code render_layers_first} decides whether a model's held item and armor are drawn before the model or after
+     * it, because a model whose geometry covers them has to draw them first. It crosses two repositories - the port
+     * writes it into the geometry description as {@code ysm_render_layers_first}, the engine's {@code ModelProperties}
+     * reads it back - so the round trip is what needs pinning rather than either half. The flag used to be parsed and
+     * never consumed, which is exactly the kind of silence a one-sided change produces again.
+     */
+    @Test
+    void theRenderLayersFirstFlagSurvivesTheBake() throws Exception {
+        assumeTrue(Files.isDirectory(PACK), "sample pack not present");
+        Path dir = PACK.resolve(MODELS[0]);
+        assumeTrue(Files.isDirectory(dir), "sample model " + MODELS[0] + " not present");
+
+        assertBakedRenderLayersFirst(dir, true, true);
+        assertBakedRenderLayersFirst(dir, false, false);
+    }
+
+    private static void assertBakedRenderLayersFirst(Path dir, boolean declared, boolean expected) throws Exception {
+        try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(dir)) {
+            RawYsmModel raw = deserializer.deserialize();
+            raw.properties.renderLayersFirst = declared;
+            try (rip.ysm.security.YSMByteBuf buffer = YSMBinarySerializer
+                .serialize(raw, OPEN_YSM_SYNC_FORMAT, true)) {
+                byte[] baked = buffer.toArray();
+                try (YSMBinaryDeserializer back = new YSMBinaryDeserializer(baked, OPEN_YSM_SYNC_FORMAT)) {
+                    ModelData data = RawYsmModelAdapter.toLegacyModelData(back.deserializeKeepOpen(), MODELS[0]);
+                    // Only the main geometry carries the model info block; the arm one is geometry only.
+                    byte[] main = data.getModel()
+                        .get("main");
+                    assertTrue(main != null, "the baked payload has no main geometry");
+                    RawGeometryTree tree = RawGeometryTree.parseHierarchy(
+                        Converter.fromJsonString(new String(main, StandardCharsets.UTF_8)));
+                    assertTrue(tree.properties != null, "the baked main geometry carries no properties block");
+                    assertEquals(
+                        expected,
+                        Boolean.TRUE.equals(tree.properties.getRenderLayersFirst()),
+                        "baked payload lost the render_layers_first flag (declared=" + declared + ")");
+                }
+            }
+        }
+    }
+
+    private static int[] sourceCount(Path dir, String part) throws Exception {        Path file = dir.resolve("models")
             .resolve(part + ".json");
         return Files.isRegularFile(file) ? count(new String(Files.readAllBytes(file), StandardCharsets.UTF_8))
             : new int[] { 0, 0, 0 };

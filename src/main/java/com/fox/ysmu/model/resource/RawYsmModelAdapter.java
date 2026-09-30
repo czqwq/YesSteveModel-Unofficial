@@ -370,6 +370,9 @@ public final class RawYsmModelAdapter {
     private static void applyOpenYsmModelInfo(RawYsmModel raw, JsonObject description) {
         description.addProperty("ysm_height_scale", (double) raw.properties.heightScale);
         description.addProperty("ysm_width_scale", (double) raw.properties.widthScale);
+        // The renderer orders its layer pass by this, and the packed payload is the only place the client can read it
+        // from, so it travels with the other host-specific model properties.
+        description.addProperty("ysm_render_layers_first", raw.properties.renderLayersFirst);
 
         JsonObject extraInfo = new JsonObject();
         extraInfo.addProperty("name", raw.metadata.name);

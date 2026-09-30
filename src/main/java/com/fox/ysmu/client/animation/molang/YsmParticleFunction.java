@@ -12,6 +12,7 @@ import net.minecraft.util.MathHelper;
 
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
+import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.ysmu;
 
 /**
@@ -92,6 +93,15 @@ public class YsmParticleFunction extends Function {
     @Override
     public double get() {
         Minecraft mc = Minecraft.getMinecraft();
+        // C-05: a preview must not emit into the world. The GUI tiles, the HUD paper doll and the world render of a
+        // player standing behind a screen all run the same animations, so without this gate a pack's `ysm.particle`
+        // in a preview channel spawned particles into the world - and, for the HUD pass, fired a second time for the
+        // same frame. Upstream expresses the same rule as a property of the entity it renders previews with (its
+        // CustomGuiPlayerEntity is an IPreviewEntity whose context is immutable, `ParticleFunction.java:21`); this
+        // port shares one model, so the equivalent fact is "a preview render is in progress".
+        if (CustomPlayerRenderer.isPreviewRendering()) {
+            return 0;
+        }
         EntityLivingBase entity = MolangFrameContext.getEntity();
         if (mc.theWorld == null || entity == null || this.arguments == null || this.arguments.length < 1) {
             return 0;

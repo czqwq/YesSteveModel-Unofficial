@@ -104,6 +104,13 @@ public final class NetworkHandler {
     public static final int SET_NPC_MODEL_ID = 94;
     public static final int SYNC_NPC_DATA = 95;
     public static final int UPDATE_NPC_DATA = 96;
+    /**
+     * A-16: a pack's {@code ysm.sync(...)} call and the server's echo of it
+     * ({@code C2SMolangSync} / {@code S2CMolangSync}). Two new ids, as the repository rule requires - existing numbers
+     * are part of the wire protocol and are never renumbered; 21 and 100 were free.
+     */
+    private static final int CLIENTBOUND_MOLANG_SYNC = 21;
+    private static final int SERVERBOUND_EMIT_MOLANG_SYNC = 100;
 
     public static void init() {
         registerServerboundMessages();
@@ -246,6 +253,11 @@ public final class NetworkHandler {
             SET_NPC_MODEL_ID,
             Side.SERVER);
         CHANNEL.registerMessage(
+            C2SMolangSync.Handler.class,
+            C2SMolangSync.class,
+            SERVERBOUND_EMIT_MOLANG_SYNC,
+            Side.SERVER);
+        CHANNEL.registerMessage(
             SyncNpcDataMessage.Handler.class,
             SyncNpcDataMessage.class,
             SYNC_NPC_DATA,
@@ -254,6 +266,11 @@ public final class NetworkHandler {
             UpdateNpcDataMessage.Handler.class,
             UpdateNpcDataMessage.class,
             UPDATE_NPC_DATA,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            S2CMolangSync.Handler.class,
+            S2CMolangSync.class,
+            CLIENTBOUND_MOLANG_SYNC,
             Side.CLIENT);
     }
 

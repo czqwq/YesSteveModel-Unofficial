@@ -15,9 +15,12 @@ import org.apache.commons.lang3.StringUtils;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
 import com.fox.ysmu.compat.BackhandCompat;
+import com.fox.ysmu.compat.EtFuturumCompat;
 
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.core.molang.LazyVariable;
+import software.bernie.geckolib3.core.molang.MolangParser;
 
 final class OpenYsmControllerExpressionEvaluator {
 
@@ -564,6 +567,17 @@ final class OpenYsmControllerExpressionEvaluator {
             if ("food_level".equals(name)) {
                 return player.getFoodStats().getFoodLevel();
             }
+            // Do not answer FALSE for a `ysm.*` name this chain does not list. `AnimationRegister` publishes far more
+            // of them than are enumerated above - `has_helmet`, `has_chest_plate`, `has_leggings`, `has_boots`,
+            // `has_elytra`, `elytra_rot_*`, ... - and every one of those used to be answered "false" here while the
+            // animation file's own MoLang read the real value: the one-name-two-stores defect A-03 fixed for `v.*`,
+            // still present on this axis. It is what kept wine_fox/14_momo's helmet off the head: its
+            // `player.armor_head` state machine transitions on `ysm.has_helmet`, which this chain never listed, so the
+            // condition was constant false and the state was never entered even once the controller name resolved.
+            LazyVariable published = MolangParser.VARIABLES.get("ysm." + name);
+            if (published != null) {
+                return published.get();
+            }
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "ysm:" + name,
                 "Unsupported OpenYSM controller ysm variable: ysm." + name);
@@ -571,6 +585,15 @@ final class OpenYsmControllerExpressionEvaluator {
         }
 
         private boolean isControllerState(String name) {
+            // A-09: upstream answers every `ctrl.<state>` with false while the entity has a live vehicle
+            // (CtrlBinding#testCondition, client/animation/molang/CtrlBinding.java:158-162): the main controller is not
+            // what plays the riding animation - the vehicle controller is - so its state queries mean nothing there.
+            // Without this rule `ctrl.idle` was *true* for a rider, because the riding names were not in the non-idle
+            // list either, and a controller expression branching on `ctrl.idle` selected the wrong state.
+            // (Upstream has the same short-circuit for ParCool; 1.7.10 has no such mod.)
+            if (player.ridingEntity != null && player.ridingEntity.isEntityAlive()) {
+                return false;
+            }
             if ("idle".equals(name)) {
                 return !hasNonIdleControllerState();
             }
@@ -587,6 +610,8 @@ final class OpenYsmControllerExpressionEvaluator {
                 || isControllerStateDirect("ladder_stillness")
                 || isControllerStateDirect("ladder_down")
                 || isControllerStateDirect("fly")
+                // A-04 registered this one; a glide is as much "not idle" as a flight is.
+                || isControllerStateDirect("elytra_fly")
                 || isControllerStateDirect("swim_stand")
                 || isControllerStateDirect("attacked")
                 || isControllerStateDirect("jump")
@@ -629,6 +654,11 @@ final class OpenYsmControllerExpressionEvaluator {
             }
             if ("fly".equals(name)) {
                 return isFlying();
+            }
+            if ("elytra_fly".equals(name)) {
+                // A-04: the very source the animation state uses, so `ctrl.elytra_fly` and the `elytra_fly` state
+                // cannot disagree about whether the player is gliding.
+                return EtFuturumCompat.isElytraFlying(player);
             }
             if ("swim_stand".equals(name)) {
                 return player.isInWater();

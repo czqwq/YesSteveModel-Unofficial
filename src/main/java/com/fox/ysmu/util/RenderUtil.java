@@ -21,6 +21,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.util.vector.Quaternion;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.compat.Axis;
 import com.fox.ysmu.compat.BackhandCompat;
@@ -320,8 +321,15 @@ public final class RenderUtil {
             IAnimatable animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(modelId, CustomPlayerEntity::new);
             if (animatable instanceof CustomPlayerEntity entity) {
                 consumer.accept(entity);
-                // A GUI preview poses the shared model with the pack's preview animation; restore it afterwards so the
-                // world never renders that pose (the port shares one model where upstream has a separate GUI entity).
+                // A GUI preview poses the shared model with the pack's preview animation and the world must never
+                // inherit that pose (this port shares one model where upstream keeps a separate GUI entity); the pose
+                // restore lives inside renderModel, because this path draws through IGeoRenderer#render rather than
+                // CustomPlayerRenderer#doRenderModel and so never reaches that renderer's own bracket.
+                //
+                // The bracket here is for a different reader: C-05's emission gate. `CustomPlayerRenderer
+                // .isPreviewRendering()` is what stops a preview from spawning world particles, and without this the
+                // tile path - which does run the model's controllers and timelines - was the one preview that still
+                // did.
                 CustomPlayerRenderer.beginPreviewRender();
                 try {
                     renderModel(
@@ -441,13 +449,37 @@ public final class RenderUtil {
                 AnimatedGeoModel provider = renderer.getGeoModelProvider();
                 ResourceLocation modelLocation = provider.getModelLocation(entity);
                 GeoModel model = provider.getModel(modelLocation);
-                AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(entity, 0, 0, 0, false, Collections.emptyList());
-                if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
-                    ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
+                // D-01: this path draws through IGeoRenderer#render instead of CustomPlayerRenderer#doRenderModel,
+                // and the renderer's own preview brace (previewRenderDepth -> ModelPoseSnapshot) is read only
+                // inside doRenderModel. The bracket around this call therefore never captured anything, so the
+                // tile's preview pose was left on the shared GeoModel for whichever path draws that model next
+                // (the world render and the HUD overlay both skip bones their animation does not drive).
+                // Upstream needs no brace here because a preview owns a dedicated entity; this port shares one
+                // model, so the tile has to put the pose back itself.
+                ModelPoseSnapshot pose = ModelPoseSnapshot.capture(model);
+                try {
+                    // C-07: the frame's partial tick, which is what upstream hands a catalog tile
+                    // (`CatalogModelButton.java:157-158` passes `Minecraft.getInstance().getFrameTime()` into
+                    // `RenderUtil.renderModelInGui`). The two limb values stay 0 because that is what upstream would
+                    // compute here too, not for convenience: it reads them off the preview entity's own walk animation
+                    // (`AnimatableEntity.java:287-296`), that entity is a stand-in which never walks, and no GUI or
+                    // preview code drives it.
+                    AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(
+                        entity,
+                        0,
+                        0,
+                        Minecraft.getMinecraft().timer.renderPartialTicks,
+                        false,
+                        Collections.emptyList());
+                    if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
+                        ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
+                    }
+                    Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
+                    diagnosePreviewPose(modelId, model);
+                    renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
+                } finally {
+                    pose.restore();
                 }
-                Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
-                diagnosePreviewPose(modelId, model);
-                renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
             });
         } finally {
             RenderHelper.disableStandardItemLighting();
@@ -536,7 +568,19 @@ public final class RenderUtil {
         }
     }
 
-    public static void renderPlayerEntity(EntityPlayer player, double posX, double posY, float scale, float yawOffset, double z) {
+    /**
+     * Draws the "extra player" overlay - the paper doll the HUD shows.
+     * <p>
+     * {@code partialTicks} is the frame's, not a constant: upstream passes one down the same path
+     * ({@code RenderUtil#renderExtraPlayerEntity}, called with {@code mc.getFrameTime()} from
+     * {@code client/gui/overlay/ExtraPlayerScreen.java}) and its engine even compensates when a caller hands it a
+     * literal {@code 1f} ({@code geckolib3/model/AnimatableEntity.java:284}). Passing {@code 1.0F} here used to make
+     * the paper doll a *different* render state from the world's at the same tick - same animation data, different
+     * {@code partialTick} - which is what kept the engine's per-frame de-duplication from firing and exposed the
+     * two-processes-per-frame defect behind "third person sprint does not animate".
+     */
+    public static void renderPlayerEntity(EntityPlayer player, double posX, double posY, float scale, float yawOffset,
+        double z, float partialTicks) {
         if (player != Minecraft.getMinecraft().thePlayer) return;  // 不知道为什么如果不加这句，额外玩家会渲染串了
         GL11.glEnable(GL11.GL_COLOR_MATERIAL);
         GL11.glPushMatrix();
@@ -551,7 +595,9 @@ public final class RenderUtil {
             GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
 
             GL11.glTranslatef(0.0F, player.yOffset, 0.0F);
-            withGuiEntityLighting(() -> RenderManager.instance.renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, 1.0F));
+            withGuiEntityLighting(
+                () -> RenderManager.instance
+                    .renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, partialTicks));
         } finally {
             GL11.glPopMatrix();
             RenderHelper.disableStandardItemLighting();

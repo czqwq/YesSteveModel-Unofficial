@@ -16,7 +16,9 @@ import org.jetbrains.annotations.Nullable;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
+import com.fox.ysmu.client.renderer.layer.CustomPlayerHeadLayer;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerItemInHandLayer;
+import com.fox.ysmu.client.renderer.layer.EtFuturumElytraLayer;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
@@ -46,6 +48,14 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     public CustomPlayerRenderer() {
         super(new CustomPlayerModel(), new CustomPlayerEntity());
         addLayer(new CustomPlayerItemInHandLayer<>(this));
+        // Upstream registers the head layer alongside the in-hand one
+        // (client/renderer/CustomPlayerRenderer.java:38-41); without it the head slot is invisible, because cancelling
+        // RenderPlayerEvent.Pre also skips the vanilla pass that drew it.
+        addLayer(new CustomPlayerHeadLayer<>(this));
+        // Same reasoning for the elytra: upstream's CustomPlayerElytraLayer hangs the wings off the model, and the
+        // vanilla pass that would have drawn 1.7.10's elytra (Et Futurum Requiem's SetArmorModel hook) is skipped
+        // along with the rest of RenderPlayer. Handles itself when that mod is absent.
+        addLayer(new EtFuturumElytraLayer<>(this));
     }
 
     @Override
@@ -116,6 +126,18 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
         try {
             super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+            // Restore the step that cancelling RenderPlayerEvent.Pre takes away with the rest of the draw.
+            // RendererLivingEntity#doRender calls passSpecialRender as its own step once its matrix is popped
+            // (build/rfg/minecraft-src .../RendererLivingEntity.java:295-296), and that is where a name tag is drawn
+            // and where RenderLivingEvent.Specials.Pre/Post fire. This renderer implements the whole draw itself
+            // instead of calling super, so both were simply missing: a YSM-drawn player had no name tag at all, and
+            // CustomPlayerRenderer#func_96449_a - which the port wrote to add the scoreboard line above the name -
+            // was waiting for a call that never came. The coordinates are the ones vanilla passes: passSpecialRender
+            // translates by them itself, so this runs with the matrix back at the camera-relative origin.
+            // A preview needs no equivalent of upstream's `isFakePlayer` gate: vanilla's own func_110813_b already
+            // refuses the camera's own player (the local player) and passengers, which is every entity this port
+            // previews.
+            passSpecialRender(entityObj, x, y, z);
         } finally {
             if (pose != null) {
                 pose.restore();
@@ -329,6 +351,17 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             return this.animatable.getHeightScale();
         }
         return super.getHeightScale(animatable);
+    }
+
+    /**
+     * The host owns {@code render_layers_first}: a model that declares it has its held item and armor drawn before the
+     * model instead of after it, because the model geometry covers them otherwise. The flag reaches the client model
+     * table from the loaded pack ({@code ClientModelManager.RENDER_LAYERS_FIRST}); upstream reads the same per-model
+     * setting and orders its layer pass by it ({@code geckolib3/geo/GeoReplacedEntityRenderer.java:92,98,118}).
+     */
+    @Override
+    public boolean shouldRenderLayersFirst(Object animatable) {
+        return this.animatable != null && this.animatable.shouldRenderLayersFirst();
     }
 
     public CustomPlayerEntity getCustomPlayerEntity() {
