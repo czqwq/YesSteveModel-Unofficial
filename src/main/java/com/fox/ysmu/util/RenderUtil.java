@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.gui.ModelPreviewAnimationState;
 import net.geckominecraft.client.renderer.GlStateManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.OpenGlHelper;
@@ -20,10 +21,12 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.util.vector.Quaternion;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.compat.Axis;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.Utils;
+import com.fox.ysmu.ysmu;
 import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.IAnimatableModel;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
@@ -36,6 +39,10 @@ public final class RenderUtil {
 
     private static final float GUI_LIGHTMAP_BRIGHTNESS = 240.0F;
 
+    /**
+     * Whether the diagnostic below reports. {@code -Dtlmd.gl.diag=true}, the same switch the port's own diagnostic
+     * uses, so one run answers for both sides.
+     */
     public static void withGuiEntityLighting(Runnable renderAction) {
         GuiEntityLightingState state = GuiEntityLightingState.capture();
         try {
@@ -213,7 +220,7 @@ public final class RenderUtil {
                 }
             }
         } catch (ExecutionException e) {
-            e.printStackTrace();
+            ysmu.LOG.warn("Failed to render the YSM player preview entity", e);
         }
     }
 
@@ -314,19 +321,55 @@ public final class RenderUtil {
             IAnimatable animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(modelId, CustomPlayerEntity::new);
             if (animatable instanceof CustomPlayerEntity entity) {
                 consumer.accept(entity);
-                renderModel((double) pPosX, (double) pPosY, (float) pScale, player, modelId, textureId, renderer, entity);
+                // A GUI preview poses the shared model with the pack's preview animation and the world must never
+                // inherit that pose (this port shares one model where upstream keeps a separate GUI entity); the pose
+                // restore lives inside renderModel, because this path draws through IGeoRenderer#render rather than
+                // CustomPlayerRenderer#doRenderModel and so never reaches that renderer's own bracket.
+                //
+                // The bracket here is for a different reader: C-05's emission gate. `CustomPlayerRenderer
+                // .isPreviewRendering()` is what stops a preview from spawning world particles, and without this the
+                // tile path - which does run the model's controllers and timelines - was the one preview that still
+                // did.
+                CustomPlayerRenderer.beginPreviewRender();
+                try {
+                    renderModel(
+                        (double) pPosX,
+                        (double) pPosY,
+                        (float) pScale,
+                        player,
+                        modelId,
+                        textureId,
+                        renderer,
+                        entity);
+                } finally {
+                    CustomPlayerRenderer.endPreviewRender();
+                }
             }
         } catch (ExecutionException e) {
-            e.printStackTrace();
+            ysmu.LOG.warn("Failed to render the YSM player model in the inventory GUI", e);
         }
     }
 
     public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
         ResourceLocation modelId, ResourceLocation textureId) {
+        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, false, false);
+    }
+
+    /**
+     * Draws a model preview and drives its GUI animation channels, mirroring upstream's catalog card.
+     * <p>
+     * {@code hovered}/{@code focused} feed {@link ModelPreviewAnimationState}, which decides the preview, hover and
+     * focus animation names the entity's controllers then play. The animatable is also allowed to keep ticking while
+     * the game is paused, because opening a GUI pauses single-player and the engine refuses to advance an animatable
+     * that has not opted in - without it the preview would show a frozen pose.
+     */
+    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
+        ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused) {
         renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, entity -> {
-            if (entity.hasPreviewAnimation()) {
-                entity.clearPreviewAnimation();
-            }
+            ModelPreviewAnimationState.forModel(modelId)
+                .apply(entity.getPreviewInfo(), hovered, focused, Minecraft.getSystemTime());
+            entity.getFactory()
+                .getOrCreateAnimationData(entity.hashCode()).shouldPlayWhilePaused = true;
         });
     }
 
@@ -338,14 +381,31 @@ public final class RenderUtil {
 
         GL11.glEnable(GL11.GL_COLOR_MATERIAL);
         GL11.glEnable(GL11.GL_DEPTH_TEST);
+        // 与上游 RenderUtil:324-334 逐字对齐：位置/缩放/Z 轴翻转 180°；声明 disable_preview_rotation 的模型
+        // 改为不俯仰并上移 5.5，否则俯仰 -10°。本移植原本在这里用的是自加的 -25° 三轴倾斜。
+        boolean disablePreviewRotation = com.fox.ysmu.client.gui.ModelPreviewRegistry
+            .previewRotationDisabled(modelId);
+        // 上游 RenderUtil:360 的 yRotGui 同时喂给两个地方：身体/头部角度，以及
+        // GeoReplacedEntityRenderer:71 的 setupRotations（LivingEntityRenderer 的实体朝向）。
+        // 本项目预览走的是 GeckoLib 的 IGeoRenderer.render，它只遍历 topLevelBones、完全不读实体朝向
+        // （世界路径才会经 doRender:128 调 applyRotations:236），所以 setupRotations 的那层
+        // Ry(180 - yBodyRot) 必须在预览路径上自己补，否则 disable_preview_rotation=false 的模型
+        // 会少掉上游的 -20° 旋转：包的 gui 动画把角色和自带边框一起放到了远离锚点的位置，缺了这
+        // 20° 整组就会在格子里偏心/偏下（=true 的模型 Ry(0)，所以看不出差别）。
+        float yRotGui = disablePreviewRotation ? 180.0F : 200.0F;
         GL11.glPushMatrix();
         GL11.glTranslatef((float) pPosX, (float) pPosY, 100.0F);
+        if (disablePreviewRotation) {
+            GL11.glTranslatef(0.0F, 5.5F, 0.0F);
+        }
         GL11.glScalef(pScale, pScale, -pScale);
         GL11.glRotatef(180.0F, 0.0F, 0.0F, 1.0F); // 将模型从倒置状态翻转过来
-        GL11.glRotatef(-25.0F, 0.4F, 0.8F, -0.08F); // 倾斜一点
+        GL11.glRotatef(disablePreviewRotation ? 0.0F : -10.0F, 1.0F, 0.0F, 0.0F); // 上游的俯仰角
+        GL11.glRotatef(180.0F - yRotGui, 0.0F, 1.0F, 0.0F); // 上游 setupRotations 的实体朝向
 
         // 保存玩家状态
         float yBodyRot = player.renderYawOffset;
+        float yBodyRotO = player.prevRenderYawOffset;
         float yRot = player.rotationYaw;
         float xRot = player.rotationPitch;
         float yHeadRotO = player.prevRotationYawHead;
@@ -359,42 +419,78 @@ public final class RenderUtil {
         itemStacks[3] = player.inventory.armorItemInSlot(0);
         itemStacks[4] = player.inventory.getCurrentItem();
         itemStacks[5] = BackhandCompat.getOffhandItem(player);
-        // 清空玩家物品以避免在模型上渲染
-        player.inventory.mainInventory[player.inventory.currentItem] = null;
-        BackhandCompat.setOffhandItem(player, null);
-        for (int i = 0; i < 4; i++) {
-            player.inventory.armorInventory[i] = null;
-        }
-
-        // 设置渲染状态
-        player.renderYawOffset = 200;
-        player.rotationYaw = 180;
-        player.rotationPitch = 0;
-        player.rotationYawHead = player.rotationYaw;
-        player.prevRotationYawHead = player.rotationYaw;
-
-        GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
-        RenderHelper.enableStandardItemLighting();
-        GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
+        // S-05:所有会改动玩家/GL 状态的步骤都放进 try,保证任何异常(包括光照与矩阵
+        // 调用抛出的异常)都不会把玩家物品栏、旋转角度或 GL 矩阵栈留在被污染的状态。
         try {
+            // The tile draws a detached preview entity, which has no player of its own; naming the owner here is what
+            // lets the model read the same v.roaming.* values it would read in the world (see
+            // CustomPlayerEntity#getMolangVariables). Cleared in the finally below.
+            entity.setPreviewOwner(player);
+            // 清空玩家物品以避免在模型上渲染
+            player.inventory.mainInventory[player.inventory.currentItem] = null;
+            BackhandCompat.setOffhandItem(player, null);
+            for (int i = 0; i < 4; i++) {
+                player.inventory.armorInventory[i] = null;
+            }
+
+            // 设置渲染状态：与上游 RenderUtil:360-368 一致——yBodyRot/yBodyRotO 与身体、头部使用同一个
+            // yRotGui（上游把 yRotGui 同时写进 yBodyRot 和 yBodyRotO，供 setupRotations 使用）。
+            player.renderYawOffset = yRotGui;
+            player.prevRenderYawOffset = yRotGui;
+            player.rotationYaw = yRotGui;
+            player.rotationPitch = 0;
+            player.rotationYawHead = yRotGui;
+            player.prevRotationYawHead = yRotGui;
+
+            GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
+            RenderHelper.enableStandardItemLighting();
+            GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
             withGuiEntityLighting(() -> {
                 AnimatedGeoModel provider = renderer.getGeoModelProvider();
                 ResourceLocation modelLocation = provider.getModelLocation(entity);
                 GeoModel model = provider.getModel(modelLocation);
-                AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(entity, 0, 0, 0, false, Collections.emptyList());
-                if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
-                    ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
+                // D-01: this path draws through IGeoRenderer#render instead of CustomPlayerRenderer#doRenderModel,
+                // and the renderer's own preview brace (previewRenderDepth -> ModelPoseSnapshot) is read only
+                // inside doRenderModel. The bracket around this call therefore never captured anything, so the
+                // tile's preview pose was left on the shared GeoModel for whichever path draws that model next
+                // (the world render and the HUD overlay both skip bones their animation does not drive).
+                // Upstream needs no brace here because a preview owns a dedicated entity; this port shares one
+                // model, so the tile has to put the pose back itself.
+                ModelPoseSnapshot pose = ModelPoseSnapshot.capture(model);
+                try {
+                    // C-07: the frame's partial tick, which is what upstream hands a catalog tile
+                    // (`CatalogModelButton.java:157-158` passes `Minecraft.getInstance().getFrameTime()` into
+                    // `RenderUtil.renderModelInGui`). The two limb values stay 0 because that is what upstream would
+                    // compute here too, not for convenience: it reads them off the preview entity's own walk animation
+                    // (`AnimatableEntity.java:287-296`), that entity is a stand-in which never walks, and no GUI or
+                    // preview code drives it.
+                    AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(
+                        entity,
+                        0,
+                        0,
+                        Minecraft.getMinecraft().timer.renderPartialTicks,
+                        false,
+                        Collections.emptyList());
+                    if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
+                        ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
+                    }
+                    Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
+                    diagnosePreviewPose(modelId, model);
+                    renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
+                } finally {
+                    pose.restore();
                 }
-                Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
-                renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
             });
         } finally {
             RenderHelper.disableStandardItemLighting();
             GL11.glPopMatrix();
             GL11.glDisable(GL11.GL_DEPTH_TEST);
+            // The preview entity is cached and reused for every tile, so the owner must not survive this frame.
+            entity.setPreviewOwner(null);
 
             // 恢复状态
             player.renderYawOffset = yBodyRot;
+            player.prevRenderYawOffset = yBodyRotO;
             player.rotationYaw = yRot;
             player.rotationPitch = xRot;
             player.prevRotationYawHead = yHeadRotO;
@@ -409,7 +505,82 @@ public final class RenderUtil {
         }
     }
 
-    public static void renderPlayerEntity(EntityPlayer player, double posX, double posY, float scale, float yawOffset, double z) {
+    /**
+     * TEMPORARY (see {@code .agent/phase15-roaming-variables.md}). Logs what a preview tile is about to draw: every
+     * top-level bone's scale and position, plus the bone named {@code Root} when the model has one, because those are
+     * the two things that can move a whole tile - a root bone scaled to 0 (the model collapses) and a root bone offset
+     * that flips between two authored positions (the model jumps out of the tile and back).
+     * <p>
+     * Throttled to one line a second so it can be left on while looking at a screen. Set to {@code false}, or delete
+     * this field with {@link #diagnosePreviewPose}, once the movement is identified.
+     */
+    private static final boolean DIAGNOSE_PREVIEW_POSE = true;
+
+    private static long lastPreviewPoseLogAt;
+
+    /** TEMPORARY, see {@link #DIAGNOSE_PREVIEW_POSE}. Never throws: a diagnostic must not fail a frame. */
+    private static void diagnosePreviewPose(ResourceLocation modelId, GeoModel model) {
+        if (!DIAGNOSE_PREVIEW_POSE) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastPreviewPoseLogAt < 1000L) {
+            return;
+        }
+        lastPreviewPoseLogAt = now;
+        try {
+            StringBuilder line = new StringBuilder();
+            for (software.bernie.geckolib3.geo.render.built.GeoBone root : model.topLevelBones) {
+                line.append(root.getName())
+                    .append("[s=")
+                    .append(root.getScaleX())
+                    .append('/')
+                    .append(root.getScaleY())
+                    .append('/')
+                    .append(root.getScaleZ())
+                    .append(" p=")
+                    .append(root.getPositionX())
+                    .append('/')
+                    .append(root.getPositionY())
+                    .append('/')
+                    .append(root.getPositionZ())
+                    .append("] ");
+            }
+            for (software.bernie.geckolib3.geo.render.built.GeoBone bone : model.topLevelBones) {
+                for (software.bernie.geckolib3.geo.render.built.GeoBone child : bone.childBones) {
+                    if ("Root".equals(child.getName())) {
+                        line.append("Root[s=")
+                            .append(child.getScaleX())
+                            .append(" p=")
+                            .append(child.getPositionX())
+                            .append('/')
+                            .append(child.getPositionY())
+                            .append('/')
+                            .append(child.getPositionZ())
+                            .append("] ");
+                    }
+                }
+            }
+            ysmu.LOG.info("preview pose model={} {}", modelId, line.toString()
+                .trim());
+        } catch (Throwable ignored) {
+            // Diagnostic only.
+        }
+    }
+
+    /**
+     * Draws the "extra player" overlay - the paper doll the HUD shows.
+     * <p>
+     * {@code partialTicks} is the frame's, not a constant: upstream passes one down the same path
+     * ({@code RenderUtil#renderExtraPlayerEntity}, called with {@code mc.getFrameTime()} from
+     * {@code client/gui/overlay/ExtraPlayerScreen.java}) and its engine even compensates when a caller hands it a
+     * literal {@code 1f} ({@code geckolib3/model/AnimatableEntity.java:284}). Passing {@code 1.0F} here used to make
+     * the paper doll a *different* render state from the world's at the same tick - same animation data, different
+     * {@code partialTick} - which is what kept the engine's per-frame de-duplication from firing and exposed the
+     * two-processes-per-frame defect behind "third person sprint does not animate".
+     */
+    public static void renderPlayerEntity(EntityPlayer player, double posX, double posY, float scale, float yawOffset,
+        double z, float partialTicks) {
         if (player != Minecraft.getMinecraft().thePlayer) return;  // 不知道为什么如果不加这句，额外玩家会渲染串了
         GL11.glEnable(GL11.GL_COLOR_MATERIAL);
         GL11.glPushMatrix();
@@ -424,7 +595,9 @@ public final class RenderUtil {
             GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
 
             GL11.glTranslatef(0.0F, player.yOffset, 0.0F);
-            withGuiEntityLighting(() -> RenderManager.instance.renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, 1.0F));
+            withGuiEntityLighting(
+                () -> RenderManager.instance
+                    .renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, partialTicks));
         } finally {
             GL11.glPopMatrix();
             RenderHelper.disableStandardItemLighting();

@@ -37,6 +37,20 @@ public final class ModelIdUtil {
         return new ResourceLocation(mainId.getResourceDomain(), newPath);
     }
 
+    /**
+     * The model a sub-model id belongs to: {@code ysmu:wine_fox/main} (or {@code .../arm}) becomes
+     * {@code ysmu:wine_fox}. Model metadata such as authors and the license belongs to the model, but the geometry
+     * that declares it is registered under the sub-model id.
+     */
+    public static ResourceLocation getParentModelId(ResourceLocation subModelId) {
+        String path = subModelId.getResourcePath();
+        int separator = path.lastIndexOf('/');
+        if (separator < 0) {
+            return subModelId;
+        }
+        return new ResourceLocation(subModelId.getResourceDomain(), path.substring(0, separator));
+    }
+
     @Nullable
     public static String getSubNameFromId(ResourceLocation mainId) {
         String path = mainId.getResourcePath();
@@ -59,6 +73,15 @@ public final class ModelIdUtil {
 
     public static String getModelDisplayName(ResourceLocation modelId) {
         return getModelDisplayName(modelId.getResourcePath());
+    }
+
+    /**
+     * The model's own name without its folder part, for example {@code 01_taisho_maid} for a model stored as
+     * {@code wine_fox/01_taisho_maid}. The model selection GUI uses this inside a folder, where the folder tile
+     * already shows the part that {@link #getModelDisplayName(ResourceLocation)} would repeat.
+     */
+    public static String getModelFileName(ResourceLocation modelId) {
+        return ModelPathUtil.fileName(getModelDisplayName(modelId));
     }
 
     public static String getModelDisplayName(String modelPath) {

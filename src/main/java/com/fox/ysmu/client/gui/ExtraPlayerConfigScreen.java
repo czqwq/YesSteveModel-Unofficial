@@ -10,6 +10,9 @@ import java.util.List;
 
 public class ExtraPlayerConfigScreen extends GuiScreen {
     private static final char RESET_KEY = 'r';
+    /** CU-09: 与 Config.PLAYER_SCALE 声明的范围（8.0..360.0）一致，避免拖拽产生 0/负值。 */
+    private static final float MIN_SCALE = 8.0F;
+    private static final float MAX_SCALE = 360.0F;
     private int posX;
     private int posY;
     private float scale;
@@ -64,7 +67,15 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         }
 
         if (this.mc.thePlayer != null) {
-            RenderUtil.renderPlayerEntity(this.mc.thePlayer, this.posX, this.posY, this.scale, this.yawOffset, 50);
+            // The same frame partial tick the HUD overlay passes, so the doll on this screen poses like the real one.
+            RenderUtil.renderPlayerEntity(
+                this.mc.thePlayer,
+                this.posX,
+                this.posY,
+                this.scale,
+                this.yawOffset,
+                50,
+                this.mc.timer.renderPartialTicks);
         }
     }
 
@@ -105,17 +116,38 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         if (isChangeScale) {
             double scale1 = mouseX - this.posX;
             double scale2 = (double) (mouseY - this.posY) / 2;
-            this.scale = (float) Math.min(scale1, scale2);
+            // CU-09: 拖到绿方块左/上方会得到 0 或负值（会让模型镜像/塌缩），必须钳制到 Config 声明的 8..360。
+            this.scale = clampScale((float) Math.min(scale1, scale2));
         }
         if (isChangePos) {
-            this.posX = mouseX;
-            this.posY = mouseY;
+            // CU-09: 位置也钳制在屏幕范围内，避免把渲染位置拖到屏幕外（或拖成负数）。
+            this.posX = clampPos(mouseX, this.width);
+            this.posY = clampPos(mouseY, this.height);
         }
         float dragX = mouseX - this.lastMouseX;
         if (button == RIGHT_MOUSE_BUTTON) {
             this.yawOffset += (dragX * 2);
         }
         this.lastMouseX = mouseX;
+    }
+
+    /** CU-09: 与 {@code Config.PLAYER_SCALE} 声明的范围（8.0..360.0）保持一致。 */
+    private static float clampScale(float value) {
+        if (value < MIN_SCALE) {
+            return MIN_SCALE;
+        }
+        return value > MAX_SCALE ? MAX_SCALE : value;
+    }
+
+    /** CU-09: 位置限定在 [0, screenSize] 内（Config 的 PlayerPosX/Y 声明下限为 0）。 */
+    private static int clampPos(int value, int screenSize) {
+        if (value < 0) {
+            return 0;
+        }
+        if (screenSize > 0 && value > screenSize) {
+            return screenSize;
+        }
+        return value;
     }
 
 
@@ -134,9 +166,10 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
 
     @Override
     public void onGuiClosed() {
-        Config.PLAYER_POS_X = this.posX;
-        Config.PLAYER_POS_Y = this.posY;
-        Config.PLAYER_SCALE = this.scale;
+        // CU-09: 关闭时再钳制一次，保证写回 Config 的值始终合法（Config.sync* 也会钳制）。
+        Config.PLAYER_POS_X = clampPos(this.posX, this.width);
+        Config.PLAYER_POS_Y = clampPos(this.posY, this.height);
+        Config.PLAYER_SCALE = clampScale(this.scale);
         Config.PLAYER_YAW_OFFSET = this.yawOffset;
         Config.save();
     }

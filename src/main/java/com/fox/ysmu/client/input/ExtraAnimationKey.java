@@ -8,6 +8,7 @@ import cpw.mods.fml.client.registry.ClientRegistry;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.InputEvent;
 import cpw.mods.fml.relauncher.Side;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
 import org.lwjgl.input.Keyboard;
 
@@ -28,11 +29,18 @@ public class ExtraAnimationKey {
 
     @SubscribeEvent
     public static void onKeyboardInput(InputEvent.KeyInputEvent event) {
+        Minecraft mc = Minecraft.getMinecraft();
+        // CU-04: isPressed() 先消费（pressTime 是一次性信号），再判断界面；
+        // GUI 打开时（聊天框打字、容器界面）不再发送动画包。
         for (KeyBinding key : EXTRA_ANIMATION_KEYS) {
-            if (key.isPressed()) {
-                NetworkHandler.CHANNEL.sendToServer(new SetPlayAnimation(EXTRA_ANIMATION_KEYS.indexOf(key)));
+            if (!key.isPressed()) {
+                continue;
+            }
+            if (mc.currentScreen != null || mc.thePlayer == null) {
                 return;
             }
+            NetworkHandler.CHANNEL.sendToServer(new SetPlayAnimation(EXTRA_ANIMATION_KEYS.indexOf(key)));
+            return;
         }
     }
 }

@@ -4,9 +4,18 @@ import com.fox.ysmu.Config;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
+import net.minecraft.entity.player.EntityPlayer;
 
 import java.util.List;
 
+/**
+ * 免责声明界面。
+ * <p>
+ * CU-14（有意为之的设计，勿当 bug 反复"修"）：未勾选"已阅读并同意"时点"关闭"只会关闭本界面
+ * （{@code displayGuiScreen(null)}），{@code Config.DISCLAIMER_SHOW} 仍为 true，下次按 Alt+Y 会再次弹出
+ * —— 即允许跳过但不会永久跳过，也不会永久卡死。本界面也不会在首次进入世界时自动弹出，只有
+ * {@code PlayerModelScreenKey} 会打开它。
+ */
 public class DisclaimerScreen extends GuiScreen {
     private GuiButton readCheckbox;
     private boolean hasAgreed;
@@ -43,7 +52,10 @@ public class DisclaimerScreen extends GuiScreen {
                 if (hasAgreed) {
                     Config.DISCLAIMER_SHOW = false;
                     Config.save();
-                    this.mc.displayGuiScreen(new PlayerModelScreen());
+                    // CU-03: 主菜单里 mc.thePlayer == null，此时打开模型界面会在渲染时 NPE，
+                    // 因此这里判空并把玩家显式传给界面（不把 null 交给 ModelSelectionTarget.of）。
+                    EntityPlayer player = this.mc.thePlayer;
+                    this.mc.displayGuiScreen(player == null ? null : new PlayerModelScreen(player));
                 } else {
                     this.mc.displayGuiScreen(null);
                 }

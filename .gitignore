@@ -8,11 +8,16 @@
 .classpath
 .project
 /bin/
+/tmp/
+/tools/
+/.agent-teams/
+/.agent/
 /config/
 /crash-reports/
 /logs/
 options.txt
 /saves/
+/.dsh-vision-router/
 usernamecache.json
 banned-ips.json
 banned-players.json

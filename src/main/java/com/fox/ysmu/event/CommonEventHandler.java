@@ -8,15 +8,25 @@ import cpw.mods.fml.common.gameevent.TickEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.WorldServer;
 import net.minecraftforge.event.entity.EntityEvent;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
+import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.world.WorldEvent;
+import com.fox.ysmu.api.ModelGuiApi;
+import com.fox.ysmu.data.EntityClips;
+import com.fox.ysmu.data.EntityModelData;
+import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.data.PlayerMotionState;
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.eep.ExtendedRoamingVariables;
 import com.fox.ysmu.eep.ExtendedStarModels;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelInfo;
+import com.fox.ysmu.network.message.SyncNpcDataMessage;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
 import com.fox.ysmu.network.message.SyncStarModels;
 import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
@@ -27,12 +37,38 @@ import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 @EventBusSubscriber
 public class CommonEventHandler {
 
+    /**
+     * CU-07: 1.7.10 对玩家实体的追踪半径固定为 512 格（EntityTracker.java:73），
+     * 模型变更广播必须用同一半径，否则 64~512 格之间的观察者收不到更新。
+     */
+    private static final double PLAYER_TRACKING_RANGE = 512.0D;
+
     private static final Map<UUID, Byte> LAST_MOTION_STATES = new HashMap<>();
 
     @SubscribeEvent
     public static void onPlayerLoggedIn(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedInEvent event) {
         if (event.player != null) {
             requestModelSync(event.player);
+            syncNpcModels(event.player);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onLivingDeath(LivingDeathEvent event) {
+        if (event.entity != null && event.entity.worldObj != null && !event.entity.worldObj.isRemote) {
+            NPCData.remove(event.entity);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onWorldUnload(WorldEvent.Unload event) {
+        // CU-10: 任何维度的世界卸载都清理这些按实体挂着的瞬时状态：NPC 模型覆盖、宿主推送的动画剪辑、
+        // 拾取器授权。原来只处理 dimensionId == 0，于是"在下界/末地退出服务器或存档"不会清理，
+        // 而 1.7.10 的 entityId 跨服务器可复现，旧条目可能套到新会话里 id 相同的实体上。
+        if (event.world != null && event.world.provider != null) {
+            NPCData.clear();
+            EntityClips.clear();
+            ModelGuiApi.clearAllSelectionGrants();
         }
     }
 
@@ -41,6 +77,7 @@ public class CommonEventHandler {
         if (event.player instanceof EntityPlayerMP) {
             LAST_MOTION_STATES.remove(event.player.getUniqueID());
             OpenYsmModelSyncServer.clear(event.player.getUniqueID());
+            ModelGuiApi.clearSelectionGrants(event.player);
         }
     }
 
@@ -63,6 +100,17 @@ public class CommonEventHandler {
         if (event.target instanceof EntityPlayer trackPlayer) {
             syncTrackedPlayerModelInfo(event.entityPlayer, trackPlayer);
             syncTrackedPlayerMotionState(event.entityPlayer, trackPlayer);
+        } else if (event.entityPlayer instanceof EntityPlayerMP viewer && NPCData.contains(event.target)) {
+            // A player who was out of range when the override was broadcast still needs it when their client
+            // starts tracking the entity, otherwise it only applies on the next login.
+            EntityModelData data = NPCData.getData(event.target);
+            if (data != null) {
+                NetworkHandler.sendNpcData(
+                    viewer,
+                    event.target.getEntityId(),
+                    data.getModelId(),
+                    data.getTextureId());
+            }
         }
     }
 
@@ -71,6 +119,34 @@ public class CommonEventHandler {
         if (event.entity instanceof EntityPlayer player) {
             syncJoinedPlayerState(player);
         }
+    }
+
+    private static int npcPruneTicker;
+
+    @SubscribeEvent
+    public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || ++npcPruneTicker < 1200) {
+            return;
+        }
+        npcPruneTicker = 0;
+        long now = System.currentTimeMillis();
+        // Entity ids are never reused, so a missing entry is only wasted memory; the grace keeps a
+        // temporarily chunk-unloaded entity's override from being pruned.
+        NPCData.retainAll(now, id -> {
+            WorldServer[] worlds = server.worldServers;
+            if (worlds != null) {
+                for (WorldServer world : worlds) {
+                    if (world != null && world.getEntityByID(id) != null) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }, 10L * 60L * 1000L);
     }
 
     @SubscribeEvent
@@ -85,12 +161,21 @@ public class CommonEventHandler {
         ServerModelManager.sendRequestSyncModelMessage(player);
     }
 
+    private static void syncNpcModels(EntityPlayer player) {
+        if (player instanceof EntityPlayerMP && !NPCData.isEmpty()) {
+            NetworkHandler.sendToClientPlayer(new SyncNpcDataMessage(NPCData.snapshot()), player);
+        }
+    }
+
     private static void registerPlayerProperties(EntityPlayer player) {
         if (ExtendedModelInfo.get(player) == null) {
             ExtendedModelInfo.register(player);
         }
         if (ExtendedStarModels.get(player) == null) {
             ExtendedStarModels.register(player);
+        }
+        if (ExtendedRoamingVariables.get(player) == null) {
+            ExtendedRoamingVariables.register(player);
         }
     }
 
@@ -114,6 +199,12 @@ public class CommonEventHandler {
         if (oldStarProps != null && newStarProps != null) {
             newStarProps.copyFrom(oldStarProps);
         }
+
+        ExtendedRoamingVariables oldRoamingProps = ExtendedRoamingVariables.get(oldPlayer);
+        ExtendedRoamingVariables newRoamingProps = ExtendedRoamingVariables.get(newPlayer);
+        if (oldRoamingProps != null && newRoamingProps != null) {
+            newRoamingProps.copyFrom(oldRoamingProps);
+        }
     }
 
     private static void syncTrackedPlayerModelInfo(EntityPlayer trackingPlayer, EntityPlayer trackedPlayer) {
@@ -125,12 +216,12 @@ public class CommonEventHandler {
     }
 
     private static void syncJoinedPlayerState(EntityPlayer player) {
-        ExtendedModelInfo modelInfo = ExtendedModelInfo.get(player);
-        if (modelInfo != null) {
-            if (player instanceof EntityPlayerMP serverPlayer) {
+        // CU-12: 只在服务端发送同步包。客户端的 ExtendedModelInfo.dirty 只写不读
+        // （唯一读取点 broadcastDirtyModelInfo 已被 event.side.isServer() 限住），因此客户端不再 markDirty。
+        if (player instanceof EntityPlayerMP serverPlayer) {
+            ExtendedModelInfo modelInfo = ExtendedModelInfo.get(serverPlayer);
+            if (modelInfo != null) {
                 NetworkHandler.sendToClientPlayer(new SyncModelInfo(serverPlayer.getEntityId(), modelInfo), serverPlayer);
-            } else {
-                modelInfo.markDirty();
             }
         }
         syncStarModels(player);
@@ -162,7 +253,9 @@ public class CommonEventHandler {
             player.posX,
             player.posY,
             player.posZ,
-            64.0D // 64个方块的范围，这是一个常用值
+            // CU-07: 必须与 1.7.10 的玩家实体追踪半径一致（EntityTracker.java:73 用 512），
+            // 原值 64 会让 64~512 格之间的观察者一直显示旧模型（StartTracking 只在进入追踪范围时补发一次）。
+            PLAYER_TRACKING_RANGE
         );
     }
 

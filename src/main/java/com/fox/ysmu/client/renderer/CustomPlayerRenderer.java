@@ -1,5 +1,8 @@
 package com.fox.ysmu.client.renderer;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.scoreboard.Score;
@@ -11,14 +14,18 @@ import net.minecraftforge.common.MinecraftForge;
 import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
+import com.fox.ysmu.client.renderer.layer.CustomPlayerHeadLayer;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerItemInHandLayer;
+import com.fox.ysmu.client.renderer.layer.EtFuturumElytraLayer;
+import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.ModelIdUtil;
+import com.fox.ysmu.ysmu;
 
-import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -26,44 +33,253 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
 public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayerEntity> {
 
     private GeoModel geoModel;
+    private final Set<ResourceLocation> warnedMissingModels = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Non-zero while a preview render (model GUI, model information screen or the HUD overlay) is in progress.
+     * <p>
+     * A preview plays an animation of its own and writes it into the shared {@code GeoModel}, so the world would
+     * inherit that pose afterwards; the preview paths therefore bracket themselves with
+     * {@link #beginPreviewRender()}/{@link #endPreviewRender()} and this renderer restores the pose in between.
+     */
+    private static int previewRenderDepth;
 
     @SuppressWarnings("all")
     public CustomPlayerRenderer() {
         super(new CustomPlayerModel(), new CustomPlayerEntity());
         addLayer(new CustomPlayerItemInHandLayer<>(this));
+        // Upstream registers the head layer alongside the in-hand one
+        // (client/renderer/CustomPlayerRenderer.java:38-41); without it the head slot is invisible, because cancelling
+        // RenderPlayerEvent.Pre also skips the vanilla pass that drew it.
+        addLayer(new CustomPlayerHeadLayer<>(this));
+        // Same reasoning for the elytra: upstream's CustomPlayerElytraLayer hangs the wings off the model, and the
+        // vanilla pass that would have drawn 1.7.10's elytra (Et Futurum Requiem's SetArmorModel hook) is skipped
+        // along with the rest of RenderPlayer. Handles itself when that mod is absent.
+        addLayer(new EtFuturumElytraLayer<>(this));
     }
 
     @Override
     public void doRender(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
         float partialTicks) {
-        if (this.animatable != null && entityObj instanceof EntityPlayer player) {
-            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-            if (eep != null) {
-                this.animatable.setPlayer(player);
-                if (NPCData.contains(player.getUniqueID())) {
-                    Pair<ResourceLocation, ResourceLocation> data = NPCData.getData(player.getUniqueID());
-                    this.animatable.setMainModel(ModelIdUtil.getMainId(data.left()));
-                    this.animatable.setTexture(data.right());
-                } else {
-                    this.animatable.setMainModel(ModelIdUtil.getMainId(eep.getModelId()));
-                    this.animatable.setTexture(eep.getSelectTexture());
-                }
+        // Replacement-renderer path (players, and the RenderLivingEvent bridge): a selected model this
+        // client does not have still falls back to the default, so the entity is never hidden. The verdict
+        // is intentionally ignored here.
+        doRenderModel(entityObj, x, y, z, entityYaw, partialTicks, true);
+    }
+
+    /**
+     * Renders the entity through YSM and reports whether this renderer produced a frame.
+     * <p>
+     * A caller that owns its own fallback renderer (for example a GeckoLib companion renderer) uses the
+     * return value to decide whether to draw instead: {@code false} means the model the entity actually
+     * asked for is not loaded on this client, so falling through keeps the entity visible with its own
+     * renderer instead of drawing YSM's generic default model over it.
+     * <p>
+     * This is why the default substitution is not applied here: if a missing model resolved to
+     * {@code ysmu:default/main} (which is loaded on every client), the model lookup below could never be
+     * null and this method could never report {@code false} for the case it exists to report.
+     *
+     * @return {@code true} when a model was drawn or another listener claimed the frame; {@code false} when
+     *         the requested model is unavailable to this client.
+     */
+    public boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
+        float partialTicks) {
+        return doRenderModel(entityObj, x, y, z, entityYaw, partialTicks, false);
+    }
+
+    private boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
+        float partialTicks, boolean fallBackToDefault) {
+        ResourceLocation requested = applyEntityModel(entityObj);
+        ResourceLocation location;
+        if (requested == null) {
+            if (!fallBackToDefault) {
+                // No override at all, so there is no YSM model for an external renderer to claim.
+                return false;
             }
-            if (MinecraftForge.EVENT_BUS.post(
-                new SpecialPlayerRenderEvent(
-                    player,
-                    this.animatable,
-                    ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel())))) {
-                return;
-            }
+            location = this.modelProvider.getModelLocation(this.animatable);
+        } else if (isModelAvailable(requested)) {
+            location = requested;
+        } else if (fallBackToDefault) {
+            warnMissingModel(requested, entityObj);
+            location = CustomPlayerModel.DEFAULT_MAIN_MODEL;
+        } else {
+            warnMissingModel(requested, entityObj);
+            return false;
         }
-        ResourceLocation location = this.modelProvider.getModelLocation(animatable);
+        if (MinecraftForge.EVENT_BUS.post(
+            new SpecialPlayerRenderEvent(
+                entityObj,
+                this.animatable,
+                ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel())))) {
+            // The render event was cancelled, so another listener owns this entity's frame.
+            return true;
+        }
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
             .get(location);
-        if (geoModel != null) {
-            this.geoModel = geoModel;
+        if (geoModel == null) {
+            warnMissingModel(location, entityObj);
+            return false;
+        }
+        this.geoModel = geoModel;
+        // A preview may pose the model however its own animation wants; the world must not inherit that pose.
+        ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
+        try {
             super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+            // Restore the step that cancelling RenderPlayerEvent.Pre takes away with the rest of the draw.
+            // RendererLivingEntity#doRender calls passSpecialRender as its own step once its matrix is popped
+            // (build/rfg/minecraft-src .../RendererLivingEntity.java:295-296), and that is where a name tag is drawn
+            // and where RenderLivingEvent.Specials.Pre/Post fire. This renderer implements the whole draw itself
+            // instead of calling super, so both were simply missing: a YSM-drawn player had no name tag at all, and
+            // CustomPlayerRenderer#func_96449_a - which the port wrote to add the scoreboard line above the name -
+            // was waiting for a call that never came. The coordinates are the ones vanilla passes: passSpecialRender
+            // translates by them itself, so this runs with the matrix back at the camera-relative origin.
+            // A preview needs no equivalent of upstream's `isFakePlayer` gate: vanilla's own func_110813_b already
+            // refuses the camera's own player (the local player) and passengers, which is every entity this port
+            // previews.
+            passSpecialRender(entityObj, x, y, z);
+        } finally {
+            if (pose != null) {
+                pose.restore();
+            }
+        }
+        return true;
+    }
+
+    /** Marks the start of a preview render (model GUI, information screen, HUD overlay). */
+    public static void beginPreviewRender() {
+        previewRenderDepth++;
+    }
+
+    /** Marks the end of a preview render; safe with nesting and in a {@code finally}. */
+    public static void endPreviewRender() {
+        if (previewRenderDepth > 0) {
+            previewRenderDepth--;
+        }
+    }
+
+    /** Whether a preview render is currently in progress. */
+    public static boolean isPreviewRendering() {
+        return previewRenderDepth > 0;
+    }
+
+    /**
+     * Whether this client currently has a drawable YSM model for the entity's override.
+     * <p>
+     * This asks about the model the entity actually requested, not the default model that
+     * {@link CustomPlayerEntity#getMainModel()} substitutes for a missing one. Asking about the substituted
+     * location would always answer {@code true} on a client that has the default model and so would never
+     * reveal that the entity's own model is absent.
+     */
+    public boolean hasModelFor(EntityLivingBase entityObj) {
+        // Pure query: must not touch the shared animatable, or asking whether an entity can be drawn would
+        // itself change what the next entity renders with.
+        return isModelAvailable(requestedModel(entityObj));
+    }
+
+    /**
+     * The main model id the entity asks for, before any default substitution.
+     * <p>
+     * Pure query: it must not touch the shared animatable (see {@link #hasModelFor}), and it must not
+     * allocate - it reads the stored override or the EEP fields directly (N-7).
+     *
+     * @return the requested main model id, or {@code null} when the entity has no usable override.
+     */
+    @Nullable
+    private static ResourceLocation requestedModel(EntityLivingBase entityObj) {
+        EntityModelData npcOverride = NPCData.getData(entityObj);
+        if (isComplete(npcOverride)) {
+            return ModelIdUtil.getMainId(npcOverride.getModelId());
+        }
+        ExtendedModelInfo eep = playerModelInfo(entityObj);
+        if (isComplete(eep)) {
+            return ModelIdUtil.getMainId(eep.getModelId());
+        }
+        return null;
+    }
+
+    /**
+     * Applies the entity's model/texture to the shared animatable; render path only. Returns the main model
+     * id the entity actually requested, before any default substitution.
+     * <p>
+     * R-05: when the entity has no usable override the shared animatable is reset to the built-in default
+     * instead of keeping what the previously rendered entity left there, so one entity can never be drawn
+     * with another entity's model or skin.
+     * <p>
+     * N-1: a half-filled override (a model without a texture) is treated as "no override" as well - the
+     * {@code null} texture would otherwise reach {@code TextureManager.bindTexture(null)} through
+     * {@link CustomPlayerModel#getTextureLocation(Object)} and crash the client. The reset below also
+     * re-establishes "texture is never null" before anything else runs.
+     *
+     * @return the requested main model id, or {@code null} when the entity has no usable override and the
+     *         default model is intended.
+     */
+    @Nullable
+    private ResourceLocation applyEntityModel(EntityLivingBase entityObj) {
+        if (this.animatable == null) {
+            return null;
+        }
+        this.animatable.setEntity(entityObj);
+
+        EntityModelData npcOverride = NPCData.getData(entityObj);
+        if (isComplete(npcOverride)) {
+            return applyOverride(npcOverride.getModelId(), npcOverride.getTextureId());
+        }
+
+        ExtendedModelInfo eep = playerModelInfo(entityObj);
+        if (isComplete(eep)) {
+            return applyOverride(eep.getModelId(), eep.getSelectTexture());
+        }
+
+        // No usable override: never fall through to the previous entity's state (R-05).
+        this.animatable.setMainModel(CustomPlayerModel.DEFAULT_MAIN_MODEL);
+        this.animatable.setTexture(CustomPlayerModel.DEFAULT_TEXTURE);
+        return null;
+    }
+
+    private ResourceLocation applyOverride(ResourceLocation modelId, ResourceLocation textureId) {
+        ResourceLocation main = ModelIdUtil.getMainId(modelId);
+        this.animatable.setMainModel(main);
+        this.animatable.setTexture(textureId);
+        return main;
+    }
+
+    /**
+     * The player's own selection, or {@code null} for a non-player entity.
+     * <p>
+     * Pure accessor; it exists so the two callers above can read the EEP fields without building an
+     * {@link EntityModelData} just to read them back (N-7).
+     */
+    @Nullable
+    private static ExtendedModelInfo playerModelInfo(EntityLivingBase entityObj) {
+        return entityObj instanceof EntityPlayer player ? ExtendedModelInfo.get(player) : null;
+    }
+
+    /**
+     * Whether an override carries both halves. N-1: the NPC path can only be null-free because
+     * {@code NPCData} rejects nulls, and a half-filled EEP can still exist (the client's own selection
+     * packet maps an empty texture string to {@code null}), so both are validated here as well.
+     */
+    private static boolean isComplete(@Nullable EntityModelData override) {
+        return override != null && override.getModelId() != null && override.getTextureId() != null;
+    }
+
+    private static boolean isComplete(@Nullable ExtendedModelInfo eep) {
+        return eep != null && eep.getModelId() != null && eep.getSelectTexture() != null;
+    }
+
+    private static boolean isModelAvailable(ResourceLocation main) {
+        return main != null && GeckoLibCache.getInstance()
+            .getGeoModels()
+            .containsKey(main);
+    }
+
+    private void warnMissingModel(ResourceLocation location, EntityLivingBase entityObj) {
+        if (warnedMissingModels.add(location)) {
+            ysmu.LOG.warn(
+                "YSM model {} is not loaded on this client; entity {} keeps its own renderer",
+                location,
+                entityObj);
         }
     }
 
@@ -135,6 +351,17 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             return this.animatable.getHeightScale();
         }
         return super.getHeightScale(animatable);
+    }
+
+    /**
+     * The host owns {@code render_layers_first}: a model that declares it has its held item and armor drawn before the
+     * model instead of after it, because the model geometry covers them otherwise. The flag reaches the client model
+     * table from the loaded pack ({@code ClientModelManager.RENDER_LAYERS_FIRST}); upstream reads the same per-model
+     * setting and orders its layer pass by it ({@code geckolib3/geo/GeoReplacedEntityRenderer.java:92,98,118}).
+     */
+    @Override
+    public boolean shouldRenderLayersFirst(Object animatable) {
+        return this.animatable != null && this.animatable.shouldRenderLayersFirst();
     }
 
     public CustomPlayerEntity getCustomPlayerEntity() {

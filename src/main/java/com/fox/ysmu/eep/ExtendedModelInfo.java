@@ -18,8 +18,11 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     // 1. 唯一的标识符
     public final static String EXT_PROP_NAME = "ysmu_ModelInfo";
 
-    // 用于网络同步和服务器端逻辑
-    private final EntityPlayer player;
+    // 用于网络同步和服务器端逻辑。
+    // CU-12: End 门重生时 Forge 会直接复用同一个 EEP 实例（EntityPlayer.java:2274-2277），
+    // 因此该引用必须在 init(Entity, World) 里重新绑定，否则会悬空指向旧玩家对象。
+    // 注意：全类没有其它地方读取 player，保留它是为了保持 EEP 的既有形状。
+    private EntityPlayer player;
 
     // 2. 将原 ModelInfoCapability 的字段和方法直接移到这里
     private ResourceLocation modelId = new ResourceLocation(
@@ -28,6 +31,10 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     private ResourceLocation selectTexture = ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
     private String animation = "idle";
     private boolean playAnimation = false;
+    /** See {@link #getAnimationReplayCount()}; serialized, because the client that renders is not the side that asked. */
+    private int animationReplayCount;
+    /** The count this side has already acted on; not serialized, it belongs to whoever is rendering. */
+    private int consumedReplayCount;
     private boolean dirty; // dirty 标志可以保留，用于客户端渲染逻辑判断是否需要更新
 
     public ExtendedModelInfo(EntityPlayer player) {
@@ -35,16 +42,33 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     }
 
     public void setModelAndTexture(ResourceLocation modelId, ResourceLocation selectTexture) {
+        // N-1（EEP 半边）：拒绝 null，而不是把它存进 EEP。调用方 network/message/SetModelAndTexture.java:65-66
+        // 会把空串映射成 null 再传进来；存 null 会让 saveNBTData 的 toString() 在下次存档/登出时 NPE
+        // （该异常只能在本文件关闭），也会让渲染与贴图查找拿到 null。语义：整次调用被忽略，
+        // 保留上一次的有效选择（而不是把玩家的模型/贴图置空）。
+        if (modelId == null || selectTexture == null) {
+            ysmu.LOG.warn(
+                "Ignoring YSM model selection with a null id (model={}, texture={}); keeping the previous selection",
+                modelId,
+                selectTexture);
+            return;
+        }
         this.modelId = modelId;
         this.selectTexture = selectTexture;
         markDirty();
     }
 
     public void copyFrom(ExtendedModelInfo source) {
-        this.modelId = source.modelId;
-        this.selectTexture = source.selectTexture;
+        // N-1：防御性拷贝 —— 即使 source 来自旧实例/异常路径，也不把 null 带进本实例。
+        if (source.modelId != null) {
+            this.modelId = source.modelId;
+        }
+        if (source.selectTexture != null) {
+            this.selectTexture = source.selectTexture;
+        }
         this.animation = source.animation;
         this.playAnimation = source.playAnimation;
+        this.animationReplayCount = source.animationReplayCount;
         markDirty();
     }
 
@@ -57,6 +81,11 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     }
 
     public void setSelectTexture(ResourceLocation selectTexture) {
+        // N-1：同 setModelAndTexture，拒绝 null 并保留上一次的有效贴图。
+        if (selectTexture == null) {
+            ysmu.LOG.warn("Ignoring YSM texture selection with a null id; keeping the previous texture");
+            return;
+        }
         this.selectTexture = selectTexture;
         markDirty();
     }
@@ -64,7 +93,32 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     public void playAnimation(String animation) {
         this.animation = animation;
         this.playAnimation = true;
+        // A-05: every request counts, including one that names the animation already showing. The name alone cannot
+        // express "play it again", and the engine's setAnimation is a no-op while it already holds that builder -
+        // which is why a second press of the same emote key left the model parked on the clip's last frame.
+        this.animationReplayCount++;
         markDirty();
+    }
+
+    /**
+     * A-05: how many times a play-animation has been requested. Upstream carries the same fact as a dirty flag that
+     * {@code CapPredicate} consumes and turns into {@code indicateReload()}
+     * ({@code client/animation/predicate/CapPredicate.java:23-28}); a counter rather than a boolean so a later,
+     * unrelated sync cannot replay a stale request.
+     */
+    public int getAnimationReplayCount() {
+        return animationReplayCount;
+    }
+
+    /**
+     * Whether this client still has to act on a play-animation request; answers {@code true} at most once per request.
+     */
+    public boolean consumeReplayRequest() {
+        if (animationReplayCount == consumedReplayCount) {
+            return false;
+        }
+        consumedReplayCount = animationReplayCount;
+        return true;
     }
 
     public void stopAnimation() {
@@ -116,10 +170,13 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     @Override
     public void saveNBTData(NBTTagCompound compound) {
         NBTTagCompound properties = new NBTTagCompound();
-        properties.setString("model_id", this.modelId.toString());
-        properties.setString("select_texture", this.selectTexture.toString());
+        // N-1：即使将来有绕过两个 setter 的路径让字段为 null（旧实例、反射、未来的新调用方），
+        // 存档也不能 NPE —— 空串会被 loadNBTData 读成空 ResourceLocation，而不是抛异常。
+        properties.setString("model_id", this.modelId == null ? "" : this.modelId.toString());
+        properties.setString("select_texture", this.selectTexture == null ? "" : this.selectTexture.toString());
         properties.setString("animation", this.animation);
         properties.setBoolean("play_animation", this.playAnimation);
+        properties.setInteger("animation_replay_count", this.animationReplayCount);
 
         compound.setTag(EXT_PROP_NAME, properties);
     }
@@ -135,11 +192,18 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
             this.selectTexture = new ResourceLocation(properties.getString("select_texture"));
             this.animation = properties.getString("animation");
             this.playAnimation = properties.getBoolean("play_animation");
+            // A missing key reads as 0, which is the right default for an older sender.
+            this.animationReplayCount = properties.getInteger("animation_replay_count");
         }
     }
 
     @Override
     public void init(Entity entity, World world) {
-        // 初始化时调用
+        // CU-12: 重新绑定玩家引用。End 门重生时 Forge 直接复用同一实例
+        // （EntityPlayer.java:2274-2277 的 this.extendedProperties = p_71049_1_.extendedProperties 后逐个 init），
+        // 若不在此更新，#player 会一直指向旧玩家对象。
+        if (entity instanceof EntityPlayer) {
+            this.player = (EntityPlayer) entity;
+        }
     }
 }

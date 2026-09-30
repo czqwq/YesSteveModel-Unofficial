@@ -39,8 +39,13 @@ public class SyncPlayerMotionState implements IMessage {
 
         @Override
         public IMessage onMessage(SyncPlayerMotionState message, MessageContext ctx) {
-            if (ctx.side == Side.CLIENT) {
-                ysmu.proxy.handlePlayerMotionState(message);
+            // N-10: never let a handler body escape into FML's catch(Throwable) -> rejectHandshake.
+            try {
+                if (ctx.side == Side.CLIENT) {
+                    ysmu.proxy.handlePlayerMotionState(message);
+                }
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to apply synced YSM player motion state", e);
             }
             return null;
         }

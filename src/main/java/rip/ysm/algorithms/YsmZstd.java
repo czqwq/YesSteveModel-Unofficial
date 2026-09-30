@@ -7,8 +7,16 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 public class YsmZstd {
+    /**
+     * 解压 YSM 魔改过的 zstd 帧。
+     *
+     * 内部的 {@code wash(...)} 会**就地改写**传入的数据（清除 FHD 的 checksum 位、把魔改块头还原成标准块头），
+     * 旧实现直接把调用方数组交出去，任何复用该数组的调用点都会拿到被改写的数据。这里先克隆一份，保证入参
+     * 零副作用；解压输出与旧实现逐字节相同（洗白逻辑未变，只是作用在副本上）。{@code null} 仍按原语义交给
+     * {@code wash} 抛 {@link IllegalArgumentException}。
+     */
     public static byte[] decompress(byte[] rawData) throws IOException {
-        byte[] data = YsmZstd.wash(rawData);
+        byte[] data = YsmZstd.wash(rawData == null ? null : rawData.clone());
         return ZstdUtil.decompress(data);
     }
 

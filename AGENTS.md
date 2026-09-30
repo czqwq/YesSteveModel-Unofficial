@@ -4,9 +4,32 @@
 
 YSMU is a Minecraft Forge 1.7.10 mod that ports Yes Steve Model/OpenYSM-style player models back to 1.7.10. The mod id is `ysmu`, the root package is `com.fox.ysmu`, and the Forge entry point is `src/main/java/com/fox/ysmu/ysmu.java`.
 
-The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, enables Jabel modern Java syntax while still targeting JVM 8, and shades/relocates Jackson. Runtime/development dependencies are declared in `dependencies.gradle`.
+The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, and enables Jabel modern Java syntax while still targeting JVM 8. Runtime/development dependencies are declared in `dependencies.gradle`; the GeckoLib engine is consumed from `libs/` as a separate mod.
 
 The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
+
+## Cross-Project Ownership
+
+GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:
+
+- **GeckoLib** (mod id `geckolib`): `E:\IDEA\Geckolib`, symlinked into this workspace as `tmp/Geckolib`.
+- **YSMU**: this repository.
+- **Touhou Little Maid**: `E:\IDEA\TouhouLittleMaid`, with its 1.20 reference source under `tmp/TouhouLittleMaid-1.20`.
+
+Any of the three may be changed at any time. A feature must never be blocked, simplified, half-done or
+duplicated merely because the code that would implement it lives in another of the three repositories. If the
+cleanest implementation belongs there, change it there and say so in the ExecPlan.
+
+The rule that must survive is a **runtime** property, not an editing restriction:
+
+- Each mod must still load and run without the others installed. `geckolib` is the exception: it is YSMU's
+  engine and YSMU declares `required-after:geckolib`.
+- YSMU and Touhou Little Maid stay optional to each other at runtime, and both already degrade cleanly when
+  the other is absent (a mod-id probe plus a reflective bridge). That is one way to keep the property, not a
+  ban on the two being compiled against each other. When a feature is genuinely better served by a
+  compile-time coupling, propose it explicitly instead of contorting the design around it.
+- Prefer one implementation to two. The same table, clip list or rule set existing in two of these
+  repositories is a defect: a rename lands in only one of them and the wrong half is silent.
 
 ## ExecPlans
 
@@ -18,15 +41,15 @@ When writing complex features or significant refactors, use an ExecPlan (as desc
 - `src/main/java/com/fox/ysmu/client`: client-only rendering, GUI, keybinds, animation predicates, texture/model registration, and upload state.
 - `src/main/java/com/fox/ysmu/model`: server-side model discovery, built-in model copying, cache generation, and folder/`.ysm` model format handling.
 - `src/main/java/com/fox/ysmu/network`: Forge `SimpleNetworkWrapper` setup and packet classes.
-- `src/main/java/com/fox/ysmu/eep`: 1.7.10 `IExtendedEntityProperties` state for selected model/texture, active animation, and starred models.
+- `src/main/java/com/fox/ysmu/eep`: 1.7.10 `IExtendedEntityProperties` state for selected model/texture, active animation, starred models, and each player's roaming variables.
 - `src/main/java/com/fox/ysmu/event`: GTNHLib event subscribers for common player sync and client rendering events.
 - `src/main/java/com/fox/ysmu/compat`: optional-mod compatibility wrappers. Keep Backhand and similar direct calls behind these wrappers.
 - `src/main/java/com/fox/ysmu/mixin`: Mixins only. `gradle.properties` restricts Mixins to package `com.fox.ysmu.mixin`.
-- `src/main/java/software/bernie`, `src/main/java/com/eliotlash`, and `src/main/java/net/geckominecraft`: vendored/ported GeckoLib, Molang/math, and legacy adapter code. Treat these as third-party compatibility code and keep edits narrow.
+- `libs/geckolib-5.09.52.417-dev.jar`: the GeckoLib 3 engine for 1.7.10, consumed as a separate mod (mod id `geckolib`) instead of being vendored. FML has a single class loader, so two copies of `software.bernie.geckolib3` would silently shadow each other. `dependencies.gradle` puts this jar on the compile, test and dev-runtime classpaths; players install GeckoLib's reobfuscated release jar next to YSMU.
 - `src/main/resources/assets/ysmu/custom`: built-in model assets copied into `config/ysmu/custom` during reload.
 - `src/main/resources/assets/ysmu/lang`: `en_US.lang` and `zh_CN.lang`. Keep new translation keys in sync.
 - `src/main/resources/mixins.ysmu.json`: Mixin config. Currently only `MixinItemRenderer` is listed as a client Mixin.
-- `src/main/resources/META-INF/*_at.cfg`: access transformers for Minecraft/GeckoLib internals.
+- `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). GeckoLib ships its own jar's ATs.
 - `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
 
 ## Minecraft and Forge Sources
@@ -49,15 +72,27 @@ Model sync starts with the server sending `RequestSyncModel`. The client replies
 
 Client rendering cancels vanilla `RenderPlayerEvent.Pre` in `ClientEventHandler` and delegates to `CustomPlayerRenderer`. `CustomPlayerRenderer` chooses model/texture state from `ExtendedModelInfo` or NPC overrides, posts `SpecialPlayerRenderEvent`, then renders through the GeckoLib replacement renderer. First-person hand rendering is split between `RenderHandEvent` and the Angelica-specific `MixinItemRenderer` path.
 
+The HUD "extra player" overlay (`ClientEventHandler.renderSelfGuiPlayer`, a preview render) draws that same local player through the same renderer and therefore the same `AnimationData`, so one frame reaches `AnimationController.process` twice for one entity at one `seekTime`. The engine must stay idempotent under that: the second process may not drop the animation a transition is moving to (`AnimationController.process` only polls `animationQueue` when it is non-empty). When it did, the controller never left `AnimationState.Transitioning` and the model rendered the transition's first frame forever - which appears as "walking animates but sprinting does not, in third person only", because in first person the HUD overlay is the only pass. See `.agent/phase7-geckolib-dependency.md`; `AnimationControllerTransitionTest` guards it.
+
+GeckoLib is a required separate mod (`dependencies = "required-after:geckolib"`). Where the engine needs host knowledge it goes through an interface, and YSMU implements it: `CustomPlayerEntity` implements `IMolangPhysicsScope` so `software.bernie.geckolib3.core.molang.MolangPhysicsRuntime` can key its per-frame MoLang scope, and `ClientEventHandler` pushes remote animation variables into the engine's `core.molang.RemoteAnimationVariables`. YSMU no longer ships a Molang physics runtime of its own.
+
 ## Model and Resource Rules
 
 Folder models live under `config/ysmu/custom/<model name>` and must include `main.json`, `arm.json`, and at least one `.png`. Optional animation files are `main.animation.json`, `arm.animation.json`, and `extra.animation.json`; missing animation files fall back to the built-in default animations.
 
 `.ysm` files in `config/ysmu/custom` are also scanned. Only files containing `main.json`, `arm.json`, and at least one `.png` are cached.
 
+Model images are normalised to PNG while a model is parsed. `ModelImageConverter` decodes BMP/JPEG/WebP/AVIF with the decoders vendored in `libs/ImageStream--SNAPSHOT.jar` (the library upstream OpenYSM declares as `com.github.OpenYSM:ImageStream`) and re-encodes them as PNG, mirroring upstream's `YSMClientMapper`; PNG is passed through untouched and an undecodable image is kept as-is with one warning per format. Clients therefore only ever receive PNG, and `ClientModelMetadataRegistry` keeps its own format guard for older caches. That jar is embedded into the mod jar unrelocated by the block at the end of `dependencies.gradle`, because the GTNH convention relocates `shadowImplementation` dependencies to `com/fox/ysmu/shadow/...`, which would break both the direct decoder calls and the `META-INF/services/javax.imageio.spi.*` names.
+
+The model-selection and texture screens animate each tile through `ModelPreviewRegistry` (the model's `preview_animation` from the sync payload, `idle` when it declares none) plus `ModelPreviewAnimationState`, the port of upstream's `CatalogModelPreviewAnimationState`. A model opts into the extra channels simply by defining animations named `hover`, `hover_fadeout` and `focus`; the fade-out window is that animation's length. `RenderUtil.renderEntityInInventory(..., hovered, focused)` drives the state machine and sets `AnimationData.shouldPlayWhilePaused` on the preview animatable, because opening a GUI pauses single-player and the engine otherwise refuses to advance its clock - without that flag the tiles render as frozen poses.
+
+A model's per-player settings are *roaming variables*: named floats that packs read as `v.roaming.<name>` and that the model's `模型设置` panel (declared as `extra_animation_buttons[].config_forms` in `ysm.json`) writes. The panel, the local copy and the server authority are `ModelConfigScreen`, `ClientRoamingStore` and `ExtendedRoamingVariables`; `ModelConfigRegistry` remembers which model declares which forms, and `ClientRoamingKeys` remembers the 32-bit namespace key of each model, which is derived from `RawProperties.sha256` by `ModelRoamingKey` so client and server agree without an extra payload field. The server is the authority: the client reports deltas through `C2SRoamingChanges` (serverbound id 99) and adopts the map the server echoes in `S2CRoamingState` (clientbound id 20), which also reaches every client tracking that player. Bounds live only in `ModelRoamingLimits`. A detached GUI preview reads the local player's values for the model it draws through `IMolangPhysicsScope.getMolangVariables`, because it has no entity for the engine to look roaming variables up by - that is what stops a preview tile from reading zero while the world reads the stored value.
+
+Packs assume a roaming variable outlives a single frame: a `timeline` statement such as `v.roaming.player_size=v.roaming.player_size?v.roaming.player_size:1` runs once per animation restart and every later frame reads what it assigned, and `parallel1` scales the whole model from it (`"MRoot":{"scale":"v.roaming.player_size"}`). That only works while the engine's MoLang scope is stable, so `MolangPhysicsRuntime.ScopeKey` compares the owning entity, model and animation **by value** - never by object identity. A GUI tile rebuilds `setMainModel(ModelIdUtil.getMainId(modelId))` on every rendered frame, so an identity component in that key would hand the tile a fresh, empty scope per frame, the variable would read 0 and the model would blink out; the world is unaffected because there the key is the player's UUID. `MolangScopeKeyStabilityTest` guards this.
+
 `ModelIdUtil` normalizes model names for `ResourceLocation`. Safe ids match `[a-z0-9._-]+`; unsafe names are encoded as `_name_` plus UTF-8 hex. Use `ModelIdUtil` helpers instead of hand-building model, main, arm, or texture ids.
 
-Built-in model assets in `src/main/resources/assets/ysmu/custom` are copied into the runtime config directory on reload. Be careful when changing these assets because the runtime reload path intentionally overwrites the built-in copies.
+Built-in model assets in `src/main/resources/assets/ysmu/custom` are copied into the runtime config directory on reload. Be careful when changing these assets because the runtime reload path intentionally overwrites the built-in copies. The one exception is a directory the user replaced with an OpenYSM model pack: when `config/ysmu/custom/<name>/ysm-pack.json` exists, the built-in copy for that name is skipped and logged (`ServerModelManager.builtInModelTarget`) and the directory counts as a pack root, not a model (`ServerModelManager.isPackRoot`). A pack root holds model directories, its `ysm-pack.png` is a cover and never a model texture, and its `ysm-pack.json` (name/description/lang) travels to clients in the OpenYSM sync index so the model selection GUI can label the folder with the pack's own name and cover.
 
 ## Network and Threading Rules
 
@@ -67,9 +102,11 @@ Do not perform heavy file IO, encryption/decryption, or model parsing directly o
 
 The model password must be available before cached model files can decrypt. Preserve the `SendModelPassword` before `RequestLoadModel` relationship and the retry behavior in `RequestLoadModel`.
 
+The OpenYSM sync cache is named from the model's own sha256 plus `ModelCacheWriter.OPEN_YSM_BAKE_VERSION`, never from the payload bytes, and its signature check only proves the file belongs to that hash. Bump that constant whenever the baked payload changes meaning - the serializer, `RawYsmModelAdapter`, or which parts of a model the deserializer bakes - because otherwise a payload written by an older build (for example one with no geometry, from before cubes were baked into faces) keeps being served to clients whose cache hashes match as well. That is how ten models stayed invisible across reloads and restarts while a fresh bake and every local test looked correct.
+
 ## Compatibility Notes
 
-Runtime prerequisites from the README are UniMixins and GTNHLib. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand, Jackson, and JUnit as declared in `dependencies.gradle`.
+Runtime prerequisites are UniMixins, GTNHLib and the separate `geckolib` mod. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
 
 Use `@EventBusSubscriber` from GTNHLib for event subscribers following the existing pattern. Client-only subscribers should specify `side = Side.CLIENT`.
 
@@ -83,21 +120,31 @@ On Windows PowerShell, read UTF-8 files with `-Encoding UTF8`; otherwise Chinese
 
 Modern Java syntax is enabled by Jabel, and the code already uses pattern variables. The produced mod still targets JVM 8, so avoid Java 9+ library APIs unless the project already provides or shades them.
 
-Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. Avoid broad rewrites in vendored GeckoLib/Molang code unless the task specifically requires it.
+Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. The GeckoLib animation engine lives in its own repository now, so engine fixes belong there rather than here.
 
 When adding user-facing text, update both `en_US.lang` and `zh_CN.lang`. When adding config fields, update `Config`, the relevant GUI screen if applicable, and translation keys.
 
 When adding model animation states, register names and priorities through `AnimationRegister`/`AnimationManager`, and ensure `ConditionManager.addTest` can classify conditional animation names.
 
+Animation-file expressions are evaluated by the legacy `software.bernie.geckolib3.core.molang.MolangParser` (a `MathBuilder` subclass in `com.eliotlash.mclib.math`), not by the engine's newer MoLang VM, so a Bedrock operator missing from `Operation` breaks a whole channel instead of raising anything visible: `"scale": "v.player_size??1"` failed to tokenise, the channel evaluated to 0 and ten model packs rendered as nothing. Add pack-facing operators to `com.eliotlash.mclib.math.Operation` (the lookup is table-driven) and cover them in `MolangParserCompatibilityTest`.
+
 ## Gradle and Verification
 
-Do not run Gradle commands from the sandbox. This environment cannot reliably execute the wrapper because Gradle needs host cache/network access outside the workspace. When a change needs build, test, or run verification, ask the user to execute the exact command and paste the output.
+Gradle may be run directly, but a running build occupies the project: the daemon holds the build
+outputs and the source tree, so editing while it runs can conflict with it or lose work. Start a build
+only as the **final confirmation**, once every change is finished and no other agent or subagent is
+still working in this workspace. Never start a build in the middle of a task.
 
-Useful commands for the user to run from the repository root:
+Run the narrowest task that answers the question, from the repository root:
 
-- `.\gradlew.bat build`
-- `.\gradlew.bat test`
+- `.\gradlew.bat compileJava` - fastest "does it still compile" check
+- `.\gradlew.bat test` - unit tests
+- `.\gradlew.bat build` - final confirmation only, when all work is done and nothing else is holding the tree
 - `.\gradlew.bat runClient`
 - `.\gradlew.bat runServer`
+
+Do not assemble a classpath by scanning the Gradle cache to typecheck a change. It is slow and it
+produces misleading errors, because several versions of the same jar end up on that classpath. Run the
+Gradle task instead.
 
 `src/test` holds the JUnit 5 sources that cover resource formats, sync packets, security helpers, and Molang physics. Because Gradle 9 no longer injects test-framework implementation dependencies, `testRuntimeClasspath` must keep the explicit `junit-platform-launcher` entry, and `fastutil` (used by mod code and pulled in transitively only for compilation) must stay declared for tests. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.

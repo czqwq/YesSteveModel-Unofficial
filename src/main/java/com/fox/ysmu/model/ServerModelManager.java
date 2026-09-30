@@ -6,28 +6,35 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.model.format.FolderFormat;
+import com.fox.ysmu.model.format.ModelCacheWriter;
 import com.fox.ysmu.model.format.OpenYsmFormat;
 import com.fox.ysmu.model.format.OpenYsmSyncInfo;
+import com.fox.ysmu.model.format.PackFormat;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.model.format.ServerPackData;
 import com.fox.ysmu.model.format.YsmFormat;
-import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.RequestSyncModel;
 import com.fox.ysmu.network.message.S2CVersionCheck17;
 import com.fox.ysmu.util.GetJarResources;
+import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
-import com.google.common.collect.Maps;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -63,11 +70,44 @@ public final class ServerModelManager {
      * 可以方便的通过此缓存，来判断客户端发来的 MD5 在不在服务端
      * 从而将服务器文件发送给玩家
      * 还可以获取其他服务端模型信息
+     *
+     * S-01：这两个表在 reload 期间被重建，同时会被网络线程(收包/发包)读取，
+     * 所以必须用并发容器；{@code Maps.newHashMap()} 在并发 put/iterate 下会
+     * 抛 ConcurrentModificationException 或读到半成品。原先还有一个"只写不读"的
+     * raw 模型表，已按 M-23 删除。
      */
-    public static final Map<String, ServerModelInfo> CACHE_NAME_INFO = Maps.newHashMap();
-    public static final Map<String, RawYsmModel> RAW_MODEL_INFO = Maps.newHashMap();
-    public static final Map<String, OpenYsmSyncInfo> OPEN_YSM_SYNC_INFO = Maps.newHashMap();
+    public static final Map<String, ServerModelInfo> CACHE_NAME_INFO = new ConcurrentHashMap<>();
+    public static final Map<String, OpenYsmSyncInfo> OPEN_YSM_SYNC_INFO = new ConcurrentHashMap<>();
+    /**
+     * 包根（含 {@code ysm-pack.json} 的目录）的清单与封面，键是带尾斜杠的层级（例如 {@code wine_fox/}）。
+     * 它让客户端的文件夹格子能显示包自己的名字、描述和封面，而不是目录名 + 通用图标；和
+     * {@link #CACHE_NAME_INFO} 一样在 reload 期间重建、被网络线程读取，所以用并发容器。
+     */
+    public static final Map<String, ServerPackData> PACKS = new ConcurrentHashMap<>();
     public static volatile byte[] OPEN_YSM_SERVER_KEY;
+
+    /**
+     * Whether the server has a renderable model under this id, used to reject model overrides that no client
+     * could draw.
+     *
+     * D-02：调用方拿到的可能是**磁盘名**（例如 {@code ysmu:example model}），而登记键是
+     * {@link ModelIdUtil#getInternalModelId} 编码后的内部 ID；先规范化再查，避免合法模型被拒。
+     */
+    public static boolean hasModel(ResourceLocation modelId) {
+        if (modelId == null) {
+            return false;
+        }
+        String path = modelId.getResourcePath();
+        if (CACHE_NAME_INFO.containsKey(path) || CACHE_NAME_INFO.containsKey(modelId.toString())) {
+            return true;
+        }
+        String internalId = ModelIdUtil.getInternalModelId(path);
+        if (CACHE_NAME_INFO.containsKey(internalId)) {
+            return true;
+        }
+        String internalFullId = ModelIdUtil.getInternalModelId(modelId.toString());
+        return CACHE_NAME_INFO.containsKey(internalFullId);
+    }
 
     /**
      * 特定文件名
@@ -77,6 +117,19 @@ public final class ServerModelManager {
     public static final String MAIN_ANIMATION_FILE_NAME = "main.animation.json";
     public static final String ARM_ANIMATION_FILE_NAME = "arm.animation.json";
     public static final String EXTRA_ANIMATION_FILE_NAME = "extra.animation.json";
+    /**
+     * OpenYSM 模型包（pack）清单。带有它的目录是一个**包根目录**，里面放的是若干模型目录，
+     * 它自己不是模型 —— 否则 {@code wine_fox/} 这种"包根 + 残留 main.json/arm.json"的目录会被
+     * 注册成一个和包同名的模型，并把包封面 {@link #PACK_ICON_FILE_NAME} 当成模型贴图。
+     */
+    public static final String PACK_INFO_FILE_NAME = "ysm-pack.json";
+    /** 包封面图，和清单同级；它永远不是模型贴图。 */
+    public static final String PACK_ICON_FILE_NAME = "ysm-pack.png";
+
+    /** 该目录是否是 OpenYSM 包根（含 {@code ysm-pack.json}），即"装模型的文件夹"而不是模型本身。 */
+    public static boolean isPackRoot(Path dir) {
+        return dir != null && Files.isRegularFile(dir.resolve(PACK_INFO_FILE_NAME));
+    }
 
     public static void sendRequestSyncModelMessage(List<EntityPlayer> playerList) {
         for (EntityPlayer player : playerList) {
@@ -84,28 +137,61 @@ public final class ServerModelManager {
         }
     }
 
+    /**
+     * 请求一次模型同步。
+     *
+     * 17 通道（{@code S2CVersionCheck17} + hash/cache/chunk）是**附加**的快速路径，legacy
+     * （{@code RequestSyncModel} -> {@code SyncModelFiles} -> {@code SendModelFile}）才是唯一能保证送达的通道，
+     * 所以这里**无条件**发送 legacy 请求：
+     *
+     * <ul>
+     * <li>17 索引（{@link #OPEN_YSM_SYNC_INFO}）只登记 {@code OpenYsmFormat} 能产出二进制负载的模型，内置模型与
+     * 传统 folder 模型**永远**不在其中，因此"17 这一轮成功"绝不等于"模型已送达"；</li>
+     * <li>legacy 这一轮的固定代价只有一次握手，加上客户端缺失清单里真正缺的文件
+     * （{@code SyncModelFiles} 按客户端自报的 md5 求差集），不是整批重传；</li>
+     * <li>两条通道都登记同一模型时，由 {@code ClientModelManager.registerAll} 的内容签名去重兜底。</li>
+     * </ul>
+     *
+     * 因此这里不做"17 成功就抑制 legacy"的门控：任何形如"17 索引已覆盖 legacy 索引（{@link #CACHE_NAME_INFO}）"
+     * 的判据都恒为假（内置模型恒为 legacy 格式且不参与 17 索引），它唯一的效果就是让模型两条通道都收不到。
+     */
     public static void sendRequestSyncModelMessage(EntityPlayer player) {
+        if (player == null) {
+            return;
+        }
         if (Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
             NetworkHandler.sendToClientPlayer(new S2CVersionCheck17(NetworkHandler.PROTOCOL_VERSION), player);
         }
+        sendLegacySyncModel(player);
+    }
+
+    private static void sendLegacySyncModel(EntityPlayer player) {
         NetworkHandler.sendToClientPlayer(new RequestSyncModel(), player);
     }
 
     public static void reloadPacks() {
         clearModelCaches();
         createConfigDirectories();
+        // 先补齐 blacklist.txt(首次运行时创建),再复制内置模型,这样用户预先放好的规则在第一次
+        // reload 就能生效。
+        initBlacklistFile();
         copyBuiltInModels();
         initPassword();
         initOpenYsmServerIndex();
         initBuiltNoticeFile();
-        initBlacklistFile();
         rebuildModelCaches();
+        // M-09:reloadPacks 末尾按本次登记清理 cache/server（保留 PASSWORD 与所有非缓存命名文件）。
+        try {
+            ModelCacheWriter.pruneUnregisteredCaches(CACHE_NAME_INFO, OPEN_YSM_SYNC_INFO);
+        } catch (Exception | LinkageError e) {
+            ysmu.LOG.warn("Failed to prune stale model caches; keeping every existing cache file", e);
+        }
     }
 
     private static void clearModelCaches() {
         CACHE_NAME_INFO.clear();
-        RAW_MODEL_INFO.clear();
         OPEN_YSM_SYNC_INFO.clear();
+        PACKS.clear();
     }
 
     private static void createConfigDirectories() {
@@ -120,21 +206,114 @@ public final class ServerModelManager {
     }
 
     private static void copyBuiltInModels() {
-        // 不管存不存在，强行覆盖
-        copyDefaultModel();
-        copyWineFoxModel();
-        copyVanillaModel();
+        // M-04:blacklist.txt 现在真的生效（此前只创建文件、没有任何读取点）。
+        List<Pattern> blacklist = readBlacklistPatterns();
+        if (!blacklist.isEmpty()) {
+            ysmu.LOG.info("Loaded {} built-in model blacklist rule(s) from blacklist.txt", blacklist.size());
+        }
+        // 内置模型仍然强行覆盖 config/ysmu/custom（AGENTS.md 的 Model and Resource Rules 明确
+        // 要求"runtime reload path intentionally overwrites the built-in copies"）；本轮只加黑名单，
+        // 不改变覆盖策略，也不迁移到 built/（那需要同步改 AGENTS.md 并动 client 侧的默认模型加载）。
+        copyDefaultModel(blacklist);
+        copyWineFoxModel(blacklist);
+        copyVanillaModel(blacklist);
+    }
+
+    /**
+     * M-04:读取 {@code config/ysmu/blacklist.txt} 的正则规则，口径与参考实现一致：
+     * 每行一个正则，{@code #} 开头为注释，匹配 {@code assets/ysmu/custom/<模型目录>/}。
+     */
+    private static List<Pattern> readBlacklistPatterns() {
+        List<Pattern> patterns = new ArrayList<>();
+        Path blacklistFile = FOLDER.resolve("blacklist.txt");
+        if (!Files.isRegularFile(blacklistFile)) {
+            return patterns;
+        }
+        try {
+            for (String line : Files.readAllLines(blacklistFile, StandardCharsets.UTF_8)) {
+                String rule = line.trim();
+                if (rule.isEmpty() || rule.startsWith("#")) {
+                    continue;
+                }
+                try {
+                    patterns.add(Pattern.compile(rule));
+                } catch (PatternSyntaxException e) {
+                    ysmu.LOG.warn("Ignoring invalid regular expression in blacklist.txt: {}", rule, e);
+                }
+            }
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to read {}", blacklistFile, e);
+        }
+        return patterns;
+    }
+
+    /**
+     * 与参考实现 {@code OpenYSM/.../ServerModelManager.processBlacklist} 相同的路径口径。
+     * {@code default} 模型不可被禁用：本模组的兜底路径直接依赖它
+     * （{@code FolderFormat}/{@code YsmFormat}/{@code RawYsmModelAdapter.readDefaultAnimation}、
+     * {@code ClientModelManager:389}）。
+     */
+    private static boolean isBlacklisted(List<Pattern> blacklist, String modelDirectory) {
+        if (blacklist.isEmpty() || "default".equals(modelDirectory)) {
+            return false;
+        }
+        String matchPath = "assets/" + ysmu.MODID + "/custom/" + modelDirectory + "/";
+        for (Pattern rule : blacklist) {
+            if (rule.matcher(matchPath)
+                .find()) {
+                ysmu.LOG.info("Skipping built-in model {} because blacklist rule '{}' matched", modelDirectory, rule);
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void rebuildModelCaches() {
-        OpenYsmFormat.cacheAllModels(BUILT);
-        OpenYsmFormat.cacheAllModels(CUSTOM);
-        cacheAllModels(CUSTOM);
+        // M-18:单个模型/单个扫描器失败不得让整次 reload 中断；每一步单独兜底。
+        // 包清单先扫：它只读 ysm-pack.json/png，既不影响下面的模型登记，也让 GUI 的文件夹格子在模型到达前
+        // 就已有名字与封面。
+        runCacheStep("packs (built)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+        runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
+        runCacheStep("OpenYSM (built)", () -> OpenYsmFormat.cacheAllModels(BUILT));
+        runCacheStep("OpenYSM (custom)", () -> OpenYsmFormat.cacheAllModels(CUSTOM));
+        runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
     }
 
-    private static void copyDefaultModel() {
-        Path defaultPath = CUSTOM.resolve("default");
-        createFolder(defaultPath);
+    private static void runCacheStep(String name, Runnable step) {
+        try {
+            step.run();
+        } catch (Exception | LinkageError e) {
+            // LinkageError 覆盖类加载/引擎版本不匹配（例如旧 jar 缺方法），此时跳过本步而不是让
+            // 整个 preInit 失败。
+            ysmu.LOG.warn("Model cache step '{}' failed; continuing with the remaining steps", name, e);
+        }
+    }
+
+    /**
+     * 内置模型解压的目标目录。当用户把同名目录换成 OpenYSM 包（含 {@link #PACK_INFO_FILE_NAME}）时返回
+     * {@code null}，表示本次不要写内置文件：包根本身不是模型，往里面塞 {@code main.json}/{@code arm.json}
+     * 只会在用户的包目录里留下一个和包同名的旧模型残骸（这正是 {@code custom/wine_fox} 出现
+     * "文件夹格 + 同名模型格"的原因）。
+     */
+    private static Path builtInModelTarget(String modelDirectory) {
+        Path target = CUSTOM.resolve(modelDirectory);
+        if (isPackRoot(target)) {
+            ysmu.LOG.info(
+                "Skipping built-in model {}: {} is an OpenYSM pack root ({} present), so the pack owns this directory",
+                modelDirectory,
+                target,
+                PACK_INFO_FILE_NAME);
+            return null;
+        }
+        createFolder(target);
+        return target;
+    }
+
+    private static void copyDefaultModel(List<Pattern> blacklist) {
+        Path defaultPath = builtInModelTarget("default");
+        if (defaultPath == null) {
+            return;
+        }
 
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/default/main.json"), defaultPath, MAIN_MODEL_FILE_NAME);
@@ -155,8 +334,13 @@ public final class ServerModelManager {
             defaultPath,
             EXTRA_ANIMATION_FILE_NAME);
 
-        Path defaultBoyPath = CUSTOM.resolve("default_boy");
-        createFolder(defaultBoyPath);
+        if (isBlacklisted(blacklist, "default_boy")) {
+            return;
+        }
+        Path defaultBoyPath = builtInModelTarget("default_boy");
+        if (defaultBoyPath == null) {
+            return;
+        }
 
         GetJarResources.copyYesSteveModelFile(
             getCustomFiles("custom/default_boy/main.json"),
@@ -173,9 +357,20 @@ public final class ServerModelManager {
             MAIN_ANIMATION_FILE_NAME);
     }
 
-    private static void copyVanillaModel() {
-        Path stevePath = CUSTOM.resolve("steve");
-        createFolder(stevePath);
+    private static void copyVanillaModel(List<Pattern> blacklist) {
+        copySteveModel(blacklist);
+        copyAlexModel(blacklist);
+        copyQinglukaModel(blacklist);
+    }
+
+    private static void copySteveModel(List<Pattern> blacklist) {
+        if (isBlacklisted(blacklist, "steve")) {
+            return;
+        }
+        Path stevePath = builtInModelTarget("steve");
+        if (stevePath == null) {
+            return;
+        }
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/steve/main.json"), stevePath, MAIN_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/steve/arm.json"), stevePath, ARM_MODEL_FILE_NAME);
@@ -185,9 +380,16 @@ public final class ServerModelManager {
             getCustomFiles("custom/steve/main.animation.json"),
             stevePath,
             MAIN_ANIMATION_FILE_NAME);
+    }
 
-        Path alexPath = CUSTOM.resolve("alex");
-        createFolder(alexPath);
+    private static void copyAlexModel(List<Pattern> blacklist) {
+        if (isBlacklisted(blacklist, "alex")) {
+            return;
+        }
+        Path alexPath = builtInModelTarget("alex");
+        if (alexPath == null) {
+            return;
+        }
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/main.json"), alexPath, MAIN_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/arm.json"), alexPath, ARM_MODEL_FILE_NAME);
         GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/gsl.png"), alexPath, "gsl.png");
@@ -195,9 +397,16 @@ public final class ServerModelManager {
             getCustomFiles("custom/alex/main.animation.json"),
             alexPath,
             MAIN_ANIMATION_FILE_NAME);
+    }
 
-        Path qinglukaPath = CUSTOM.resolve("qingluka");
-        createFolder(qinglukaPath);
+    private static void copyQinglukaModel(List<Pattern> blacklist) {
+        if (isBlacklisted(blacklist, "qingluka")) {
+            return;
+        }
+        Path qinglukaPath = builtInModelTarget("qingluka");
+        if (qinglukaPath == null) {
+            return;
+        }
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/qingluka/main.json"), qinglukaPath, MAIN_MODEL_FILE_NAME);
         GetJarResources
@@ -206,9 +415,14 @@ public final class ServerModelManager {
             .copyYesSteveModelFile(getCustomFiles("custom/qingluka/texture.png"), qinglukaPath, "texture.png");
     }
 
-    private static void copyWineFoxModel() {
-        Path wineFoxPath = CUSTOM.resolve("wine_fox");
-        createFolder(wineFoxPath);
+    private static void copyWineFoxModel(List<Pattern> blacklist) {
+        if (isBlacklisted(blacklist, "wine_fox")) {
+            return;
+        }
+        Path wineFoxPath = builtInModelTarget("wine_fox");
+        if (wineFoxPath == null) {
+            return;
+        }
 
         GetJarResources
             .copyYesSteveModelFile(getCustomFiles("custom/wine_fox/main.json"), wineFoxPath, MAIN_MODEL_FILE_NAME);
@@ -289,7 +503,13 @@ public final class ServerModelManager {
         try {
             String content = "# Yes Steve Model built-in model blacklist\n"
                 + "# One Java regular expression per line. Lines starting with # are comments.\n"
-                + "# The default legacy models copied into config/ysmu/custom are not controlled by this file yet.\n";
+                + "# Rules are matched with find() against assets/ysmu/custom/<model directory>/ ,\n"
+                + "# for example: assets/ysmu/custom/(steve|alex)/\n"
+                + "# A matching built-in model is not copied into config/ysmu/custom on reload.\n"
+                + "# Already extracted copies are left alone: delete the directory by hand if you blacklist\n"
+                + "# a model that was extracted earlier.\n"
+                + "# The default model cannot be disabled: the mod's fallback paths load their animations\n"
+                + "# and geometry from it.\n";
             FileUtils.writeStringToFile(blacklistFile.toFile(), content, StandardCharsets.UTF_8);
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to create OpenYSM blacklist file", e);

@@ -13,11 +13,28 @@ dependencies {
     compileOnly("org.jetbrains:annotations:26.0.2")
     devOnlyNonPublishable("com.github.GTNewHorizons:Backhand:1.8.0:dev")
     devOnlyNonPublishable("com.github.GTNewHorizons:GTNHLib:0.6.40:dev")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
-    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
-    shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
-    shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
-    // Do not shadow OpenYSM ImageStream until decoder calls are wired directly; its ImageIO SPI files crash if minimized away.
+    // GeckoLib 3 for 1.7.10 ships as its own mod (mod id `geckolib`). FML loads every mod into one class
+    // loader, so a vendored copy here would silently shadow the installed mod; the engine now lives in that
+    // jar instead. `libs/` carries the engine's `dev` jar (MCP names) used for compilation and the dev
+    // runtime; players install the reobfuscated release jar next to YSMU. Jackson is shaded and relocated
+    // inside that jar (software.bernie.geckolib3.shadow.*), so YSMU no longer depends on it.
+    compileOnly files("libs/geckolib-5.09.52.417-dev.jar")
+    testImplementation files("libs/geckolib-5.09.52.417-dev.jar")
+    devOnlyNonPublishable files("libs/geckolib-5.09.52.417-dev.jar")
+    // ImageStream: the image decoder library upstream OpenYSM depends on (declared there as
+    // `minecraftLibrary("com.github.OpenYSM:ImageStream:-SNAPSHOT")` plus jarJar in OpenYSM/build.gradle).
+    // Its pure-Java JPEG/WebP/AVIF decoders are what let the server normalize every pack image to PNG while it
+    // parses a model (`ModelImageConverter`), so the client only ever receives PNG - which is why upstream never
+    // meets "no image reader" for a WebP/AVIF avatar.
+    //
+    // It is vendored in `libs/` like the GeckoLib engine rather than pulled from JitPack at build time, because the
+    // GTNH convention's `shadowImplementation` relocates its content to `com/fox/ysmu/shadow/...`: the direct
+    // decoder calls in `ModelImageConverter` and the `META-INF/services/javax.imageio.spi.*` entries would then
+    // point at packages that do not exist. The class files are embedded unrelocated by the block at the end of
+    // this file. Refresh the jar from `com.github.OpenYSM:ImageStream:-SNAPSHOT` if upstream fixes a decoder.
+    compileOnly files("libs/ImageStream--SNAPSHOT.jar")
+    testImplementation files("libs/ImageStream--SNAPSHOT.jar")
+    devOnlyNonPublishable files("libs/ImageStream--SNAPSHOT.jar")
     // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.6.2")
@@ -30,4 +47,15 @@ dependencies {
     test {
         useJUnitPlatform()
     }
+}
+
+// Embed the vendored ImageStream classes (and its ImageIO SPI entries) into the mod jar, unrelocated - the 1.7.10
+// counterpart of upstream's `jarJar`. Its manifest and signature files are excluded so the mod's own manifest wins.
+tasks.matching { it.name == 'shadowJar' || it.name == 'jar' }.configureEach { task ->
+    task.from(zipTree(file('libs/ImageStream--SNAPSHOT.jar'))) {
+        exclude 'META-INF/MANIFEST.MF'
+        exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'
+        exclude 'META-INF/maven/**'
+    }
+    task.duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
 }

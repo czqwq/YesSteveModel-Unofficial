@@ -239,6 +239,12 @@ public class RawYsmModel {
         public String type = "";
         public String title = "";
         public String description = "";
+        /**
+         * The MoLang expression this form reads and writes, taken from the JSON key {@code "value"} - for example
+         * {@code v.roaming.player_size}. The name is historic (upstream keeps the same expression as
+         * {@code read_program} and builds {@code write_program} as {@code expression + "=t.value"}); it is not a
+         * numeric default, so do not parse it as one.
+         */
         public String defaultValue = "";
         public float step;
         public float min;

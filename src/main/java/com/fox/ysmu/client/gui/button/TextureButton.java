@@ -1,10 +1,6 @@
 package com.fox.ysmu.client.gui.button;
 
-import com.fox.ysmu.eep.ExtendedModelInfo;
-import com.fox.ysmu.network.NetworkHandler;
-import com.fox.ysmu.network.message.OpenModelGuiMessage;
-import com.fox.ysmu.network.message.SetModelAndTexture;
-import com.fox.ysmu.network.message.SetNpcModelAndTexture;
+import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.Minecraft;
@@ -12,7 +8,6 @@ import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.util.ResourceLocation;
-import net.minecraft.entity.player.EntityPlayer;
 import org.lwjgl.opengl.GL11;
 
 import java.util.List;
@@ -21,26 +16,25 @@ public class TextureButton extends GuiButton {
     private final ResourceLocation modelId;
     private final ResourceLocation textureId;
     private final String name;
-    private final EntityPlayer player;
+    private final ModelSelectionTarget target;
+    /** CU-16: 缩放因子与显示高度在构造时缓存（每次 initGui 重建按钮），避免每帧重建 ScaledResolution。 */
+    private final int guiScale;
+    private final int guiDisplayHeight;
 
-    public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, EntityPlayer player) {
+    public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, ModelSelectionTarget target) {
         super(id, pX, pY, 54, 102, "");
         this.modelId = modelId;
         this.textureId = textureId;
         this.name = ModelIdUtil.getSubNameFromId(textureId);
-        this.player = player;
+        this.target = target;
+
+        Minecraft mc = Minecraft.getMinecraft();
+        this.guiScale = mc == null ? 1 : new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        this.guiDisplayHeight = mc == null ? 1 : mc.displayHeight;
     }
 
     public void doPress() {
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep != null) {
-            eep.setModelAndTexture(modelId, textureId);
-        }
-        if (player.equals(Minecraft.getMinecraft().thePlayer)) {
-            NetworkHandler.CHANNEL.sendToServer(new SetModelAndTexture(modelId, textureId));
-        } else {
-            NetworkHandler.CHANNEL.sendToServer(new SetNpcModelAndTexture(modelId, textureId, OpenModelGuiMessage.CURRENT_NPC_ID));
-        }
+        target.apply(modelId, textureId);
     }
 
     @Override
@@ -48,16 +42,22 @@ public class TextureButton extends GuiButton {
         FontRenderer font = mc.fontRenderer;
         this.field_146123_n = mouseX >= this.xPosition && mouseY >= this.yPosition && mouseX < this.xPosition + this.width && mouseY < this.yPosition + this.height;
         this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, 0xFF_434242, 0xFF_434242);
-        int scale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        int scale = this.guiScale;
         int scissorX = this.xPosition * scale;
-        int scissorY = mc.displayHeight - ((this.yPosition + this.height - 20) * scale);
+        int scissorY = this.guiDisplayHeight - ((this.yPosition + this.height - 20) * scale);
         int scissorW = this.width * scale;
         int scissorH = (this.height - 20) * scale;
+        boolean selected = textureId.equals(target.getTextureId());
+        // CU-13: scissor 必须在 finally 里恢复，渲染异常时不能让整个界面被裁剪。
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
-        GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-        RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
-            35, mc.thePlayer, modelId, textureId);
-        GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        try {
+            GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+            // 同时驱动预览动画通道（悬停/已选中），与上游纹理选择界面一致
+            RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
+                35, mc.thePlayer, modelId, textureId, this.func_146115_a(), selected);
+        } finally {
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        }
 
         List<String> split = font.listFormattedStringToWidth(name, 50);
         if (split.size() > 1) {
@@ -66,8 +66,6 @@ public class TextureButton extends GuiButton {
         } else {
             this.drawCenteredString(font, name, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
         }
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        boolean selected = eep != null && textureId.equals(eep.getSelectTexture());
         if (selected || this.field_146123_n) {
             drawBorder(selected ? 0xff_82C56A : 0xff_F3EFE0);
         }

@@ -1,7 +1,5 @@
 package com.fox.ysmu.model.resource;
 
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -17,13 +15,13 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Stream;
 
-import javax.imageio.ImageIO;
-
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.ysmu;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 
 import software.bernie.geckolib3.geo.raw.pojo.Converter;
 
@@ -64,6 +62,10 @@ public class YSMFolderDeserializer implements AutoCloseable {
 
         parseGlobalResources();
         this.finalFolderHash = calculateFinalFolderHash();
+        // S-03:字段名沿用 RawProperties.sha256，但这里写入的是"已读文件表"的 MD5 十六进制串，
+        // 不是真正的 SHA-256。该值会经 ModelCacheWriter.getHashSource 参与 OpenYSM 二进制缓存名
+        // 与哈希计算(rip.ysm.security.YsmCrypt.calculateModelHashes)，客户端侧用同一份数据得出
+        // 同一个值，属于已上线的协议耦合，因此保留字段名与内容，仅在此说明。
         this.model.properties.sha256 = this.finalFolderHash;
         this.model.footer.version = 65535;
         validateMainPlayerModel();
@@ -343,28 +345,28 @@ public class YSMFolderDeserializer implements AutoCloseable {
         if (data == null) {
             return;
         }
-        ImageMeta meta = parseImageMeta(data);
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, path);
         RawYsmModel.RawTexture.SubTexture subTexture = new RawYsmModel.RawTexture.SubTexture();
         subTexture.specularType = specularType;
-        subTexture.hash = sha256Hex(data);
-        subTexture.width = meta.width;
-        subTexture.height = meta.height;
-        subTexture.imageFormat = meta.format;
-        subTexture.data = data;
+        subTexture.hash = sha256Hex(converted.data);
+        subTexture.width = converted.width;
+        subTexture.height = converted.height;
+        subTexture.imageFormat = converted.format;
+        subTexture.data = converted.data;
         subTexture.unknownFlag = 1;
         texture.subTextures.add(subTexture);
     }
 
     private RawYsmModel.RawTexture parseTexture(String path, byte[] data) throws IOException {
-        ImageMeta meta = parseImageMeta(data);
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, path);
         RawYsmModel.RawTexture texture = new RawYsmModel.RawTexture();
         texture.name = extractFileName(path);
         texture.sourceFileName = extractFileNameWithExtension(path);
-        texture.hash = sha256Hex(data);
-        texture.width = meta.width;
-        texture.height = meta.height;
-        texture.imageFormat = meta.format;
-        texture.data = data;
+        texture.hash = sha256Hex(converted.data);
+        texture.width = converted.width;
+        texture.height = converted.height;
+        texture.imageFormat = converted.format;
+        texture.data = converted.data;
         texture.unknownFlag = 1;
         return texture;
     }
@@ -396,37 +398,44 @@ public class YSMFolderDeserializer implements AutoCloseable {
 
         int index = 0;
         for (JsonObject item : items) {
-            RawYsmModel.RawSubEntity sub = new RawYsmModel.RawSubEntity();
-            sub.identifier = getStr(item, "__temp_identifier", defaultIdentifier + "_" + index);
-            if (item.has("match")) {
-                sub.matchIds = readStringArray(item.get("match"));
-            }
-            if (item.has("model")) {
-                byte[] modelData = readResource(item.get("model").getAsString());
-                if (modelData != null) {
-                    sub.model = parseGeometry(modelData, 0, item.get("model").getAsString());
+            // 单个子实体（载具/投掷物）失败不得拖垮整个玩家模型：01_taisho_maid 的 models/foxcar.json 声明
+            // format_version 1.21.0，以前会让整只"酒狐"从模型列表里消失；现在只丢这一个子实体。
+            String identifier = getStr(item, "__temp_identifier", defaultIdentifier + "_" + index);
+            try {
+                RawYsmModel.RawSubEntity sub = new RawYsmModel.RawSubEntity();
+                sub.identifier = identifier;
+                if (item.has("match")) {
+                    sub.matchIds = readStringArray(item.get("match"));
                 }
-            }
-            if (item.has("texture")) {
-                for (JsonElement textureElem : asIterable(item.get("texture"))) {
-                    parseTextureReference(textureElem, sub.textures);
-                }
-            }
-            if (item.has("animation")) {
-                for (JsonElement animElem : asIterable(item.get("animation"))) {
-                    if (!animElem.isJsonPrimitive()) {
-                        continue;
-                    }
-                    byte[] animData = readResource(animElem.getAsString());
-                    if (animData != null) {
-                        RawYsmModel.RawAnimationFile animationFile = parseAnimations(animData);
-                        animationFile.sourceJson = animData;
-                        animationFile.fileHash = sha256Hex(animData);
-                        sub.animationFiles.put(extractFileName(animElem.getAsString()), animationFile);
+                if (item.has("model")) {
+                    byte[] modelData = readResource(item.get("model").getAsString());
+                    if (modelData != null) {
+                        sub.model = parseGeometry(modelData, 0, item.get("model").getAsString());
                     }
                 }
+                if (item.has("texture")) {
+                    for (JsonElement textureElem : asIterable(item.get("texture"))) {
+                        parseTextureReference(textureElem, sub.textures);
+                    }
+                }
+                if (item.has("animation")) {
+                    for (JsonElement animElem : asIterable(item.get("animation"))) {
+                        if (!animElem.isJsonPrimitive()) {
+                            continue;
+                        }
+                        byte[] animData = readResource(animElem.getAsString());
+                        if (animData != null) {
+                            RawYsmModel.RawAnimationFile animationFile = parseAnimations(animData);
+                            animationFile.sourceJson = animData;
+                            animationFile.fileHash = sha256Hex(animData);
+                            sub.animationFiles.put(extractFileName(animElem.getAsString()), animationFile);
+                        }
+                    }
+                }
+                targetMap.put(sub.identifier, sub);
+            } catch (Exception e) {
+                ysmu.LOG.warn("Skipping {} '{}' of model {}: it cannot be parsed", defaultIdentifier, identifier, e);
             }
-            targetMap.put(sub.identifier, sub);
             index++;
         }
     }
@@ -459,12 +468,214 @@ public class YSMFolderDeserializer implements AutoCloseable {
                 RawYsmModel.RawBone bone = new RawYsmModel.RawBone();
                 bone.name = getStr(boneObj, "name", "");
                 bone.parentName = getStr(boneObj, "parent", "");
-                bone.pivot = getFloatArray(boneObj, "pivot", 3);
-                bone.rotation = getFloatArray(boneObj, "rotation", 3);
+                // M-03:内部约定见 RawYsmModelAdapter.generatedPivotArray/generatedRotationArray：
+                // 枢轴 X 取反；旋转以弧度保存，且 X/Y 取反、Z 保持。ysm.json / main.json 里是
+                // 未取反的角度值，所以在这里做一次转换。
+                float[] pivot = getFloatArray(boneObj, "pivot", 3);
+                bone.pivot = new float[] { -pivot[0], pivot[1], pivot[2] };
+                float[] rotation = getFloatArray(boneObj, "rotation", 3);
+                bone.rotation = new float[] { (float) -Math.toRadians(rotation[0]),
+                    (float) -Math.toRadians(rotation[1]), (float) Math.toRadians(rotation[2]) };
+
+                float boneInflate = (float) getDouble(boneObj, "inflate", 0d);
+                boolean boneMirror = getBool(boneObj, "mirror", false);
+                if (hasArray(boneObj, "cubes")) {
+                    for (JsonElement cubeElem : boneObj.getAsJsonArray("cubes")) {
+                        if (!cubeElem.isJsonObject()) {
+                            continue;
+                        }
+                        // M-02:把 JSON 立方体烘焙成二进制的 face 列表，否则 OpenYSM 二进制同步
+                        // 载荷(YSMBinarySerializer.writeGeometry 只写 bones/cubes/faces)会退化成
+                        // 一个没有任何几何的模型。
+                        bone.cubes.add(parseCube(geometry, cubeElem.getAsJsonObject(), boneInflate, boneMirror));
+                    }
+                }
                 geometry.bones.add(bone);
             }
         }
         return geometry;
+    }
+
+    /**
+     * 把 ysm.json/main.json 里的一个 cube 烘焙成二进制格式使用的四边面列表。
+     * 坐标约定与 {@code OpenYSM} 参考实现一致(位置除以 16，X 轴取反)。
+     */
+    private static RawYsmModel.RawCube parseCube(RawYsmModel.RawGeometry geometry, JsonObject cubeObj,
+        float boneInflate, boolean boneMirror) {
+        RawYsmModel.RawCube cube = new RawYsmModel.RawCube();
+
+        float inflate = cubeObj.has("inflate") ? cubeObj.get("inflate").getAsFloat() : boneInflate;
+        boolean mirror = cubeObj.has("mirror") ? cubeObj.get("mirror").getAsBoolean() : boneMirror;
+
+        float[] origin = getFloatArray(cubeObj, "origin", 3);
+        float[] size = getFloatArray(cubeObj, "size", 3);
+
+        float x = -origin[0] - size[0] - inflate;
+        float y = origin[1] - inflate;
+        float z = origin[2] - inflate;
+        float width = size[0] + inflate * 2f;
+        float height = size[1] + inflate * 2f;
+        float depth = size[2] + inflate * 2f;
+
+        CubeBakeTransform bake = null;
+        if (cubeObj.has("rotation") || cubeObj.has("pivot")) {
+            bake = new CubeBakeTransform(getFloatArray(cubeObj, "pivot", 3), getFloatArray(cubeObj, "rotation", 3));
+        }
+
+        JsonElement uvElem = cubeObj.get("uv");
+        if (uvElem == null || uvElem.isJsonNull()) {
+            return cube;
+        }
+        JsonObject faceUvs;
+        if (uvElem.isJsonArray()) {
+            JsonArray uvArray = uvElem.getAsJsonArray();
+            float uvX = uvArray.size() > 0 ? uvArray.get(0).getAsFloat() : 0f;
+            float uvY = uvArray.size() > 1 ? uvArray.get(1).getAsFloat() : 0f;
+            faceUvs = createBoxUv(uvX, uvY, (float) Math.floor(size[0]), (float) Math.floor(size[1]),
+                (float) Math.floor(size[2]));
+        } else if (uvElem.isJsonObject()) {
+            faceUvs = uvElem.getAsJsonObject();
+        } else {
+            return cube;
+        }
+
+        bakeFace(cube, faceUvs, "north", "north", mirror, x, y, z, width, height, depth, geometry, bake);
+        bakeFace(cube, faceUvs, "south", "south", mirror, x, y, z, width, height, depth, geometry, bake);
+        bakeFace(cube, faceUvs, "east", mirror ? "west" : "east", mirror, x, y, z, width, height, depth, geometry,
+            bake);
+        bakeFace(cube, faceUvs, "west", mirror ? "east" : "west", mirror, x, y, z, width, height, depth, geometry,
+            bake);
+        bakeFace(cube, faceUvs, "up", "up", mirror, x, y, z, width, height, depth, geometry, bake);
+        bakeFace(cube, faceUvs, "down", "down", mirror, x, y, z, width, height, depth, geometry, bake);
+        return cube;
+    }
+
+    private static void bakeFace(RawYsmModel.RawCube cube, JsonObject faceUvs, String faceType, String uvFaceName,
+        boolean mirror, float x, float y, float z, float width, float height, float depth,
+        RawYsmModel.RawGeometry geometry, CubeBakeTransform bake) {
+        if (!hasObject(faceUvs, uvFaceName)) {
+            return;
+        }
+        JsonObject faceData = faceUvs.getAsJsonObject(uvFaceName);
+        float[] uv = getFloatArray(faceData, "uv", 2);
+        float[] uvSize = getFloatArray(faceData, "uv_size", 2);
+
+        float textureWidth = geometry.textureWidth > 0f ? geometry.textureWidth : 64f;
+        float textureHeight = geometry.textureHeight > 0f ? geometry.textureHeight : 64f;
+        float u0 = uv[0] / textureWidth;
+        float v0 = uv[1] / textureHeight;
+        float u1 = (uv[0] + uvSize[0]) / textureWidth;
+        float v1 = (uv[1] + uvSize[1]) / textureHeight;
+        if (!mirror) {
+            float swap = u0;
+            u0 = u1;
+            u1 = swap;
+        }
+
+        float[] rawNormal;
+        switch (faceType) {
+            case "west":
+                rawNormal = new float[] { -1f, 0f, 0f };
+                break;
+            case "east":
+                rawNormal = new float[] { 1f, 0f, 0f };
+                break;
+            case "north":
+                rawNormal = new float[] { 0f, 0f, -1f };
+                break;
+            case "south":
+                rawNormal = new float[] { 0f, 0f, 1f };
+                break;
+            case "up":
+                rawNormal = new float[] { 0f, 1f, 0f };
+                break;
+            default:
+                rawNormal = new float[] { 0f, -1f, 0f };
+                break;
+        }
+
+        float x1 = x / 16f;
+        float x2 = (x + width) / 16f;
+        float y1 = y / 16f;
+        float y2 = (y + height) / 16f;
+        float z1 = z / 16f;
+        float z2 = (z + depth) / 16f;
+
+        float[] p1 = { x1, y1, z1 };
+        float[] p2 = { x1, y1, z2 };
+        float[] p3 = { x1, y2, z1 };
+        float[] p4 = { x1, y2, z2 };
+        float[] p5 = { x2, y1, z1 };
+        float[] p6 = { x2, y1, z2 };
+        float[] p7 = { x2, y2, z1 };
+        float[] p8 = { x2, y2, z2 };
+
+        float[][] corners;
+        switch (faceType) {
+            case "west":
+                corners = new float[][] { p4, p3, p1, p2 };
+                break;
+            case "east":
+                corners = new float[][] { p7, p8, p6, p5 };
+                break;
+            case "north":
+                corners = new float[][] { p3, p7, p5, p1 };
+                break;
+            case "south":
+                corners = new float[][] { p8, p4, p2, p6 };
+                break;
+            case "up":
+                corners = new float[][] { p4, p8, p7, p3 };
+                break;
+            default:
+                corners = new float[][] { p1, p5, p6, p2 };
+                break;
+        }
+
+        RawYsmModel.RawFace face = new RawYsmModel.RawFace();
+        if (bake == null) {
+            face.normal = rawNormal;
+            for (int i = 0; i < 4; i++) {
+                face.positions[i] = corners[i];
+            }
+        } else {
+            bake.rotateNormal(rawNormal, face.normal);
+            for (int i = 0; i < 4; i++) {
+                bake.apply(corners[i], face.positions[i]);
+            }
+        }
+        face.u = new float[] { u0, u1, u1, u0 };
+        face.v = new float[] { v0, v0, v1, v1 };
+        cube.faces.add(face);
+    }
+
+    /** 把 box-uv 数组形式(uv 偏移 + 尺寸)展开成六个面的 uv 节点。 */
+    private static JsonObject createBoxUv(float uvX, float uvY, float dx, float dy, float dz) {
+        JsonObject uv = new JsonObject();
+        uv.add("north", createFaceUvNode(uvX + dz, uvY + dz, dx, dy));
+        uv.add("south", createFaceUvNode(uvX + dz + dx + dz, uvY + dz, dx, dy));
+        uv.add("east", createFaceUvNode(uvX, uvY + dz, dz, dy));
+        uv.add("west", createFaceUvNode(uvX + dz + dx, uvY + dz, dz, dy));
+        uv.add("up", createFaceUvNode(uvX + dz, uvY, dx, dz));
+        uv.add("down", createFaceUvNode(uvX + dz + dx, uvY + dz, dx, -dz));
+        return uv;
+    }
+
+    private static JsonObject createFaceUvNode(float u, float v, float width, float height) {
+        JsonObject node = new JsonObject();
+        JsonArray uv = new JsonArray();
+        // t41:JsonArray.add 只接受 JsonElement,float 不会隐式转换(dev 树曾因此 BUILD FAILED)。
+        // 这里用 box 成 Number 的 JsonPrimitive 显式构造,与仓库既有写法一致
+        // (RawYsmModelAdapter.java:650 的 new JsonPrimitive((Number) value)、:467 的
+        //  new JsonPrimitive((double) value));写进去的仍是原来的四个 float 值。
+        uv.add(new JsonPrimitive(Float.valueOf(u)));
+        uv.add(new JsonPrimitive(Float.valueOf(v)));
+        JsonArray size = new JsonArray();
+        size.add(new JsonPrimitive(Float.valueOf(width)));
+        size.add(new JsonPrimitive(Float.valueOf(height)));
+        node.add("uv", uv);
+        node.add("uv_size", size);
+        return node;
     }
 
     private RawYsmModel.RawAnimationFile parseAnimations(byte[] data) {
@@ -479,26 +690,185 @@ public class YSMFolderDeserializer implements AutoCloseable {
             animation.name = entry.getKey();
             if (entry.getValue().isJsonObject()) {
                 JsonObject animObj = entry.getValue().getAsJsonObject();
+                // M-20（非目标）：`animation_length` 缺失时的默认值仍按 dev 保持 0d，
+                // 与参考实现的 Float.POSITIVE_INFINITY 不同，本阶段不改。
                 animation.length = (float) getDouble(animObj, "animation_length", 0d);
                 animation.loopMode = parseLoopMode(animObj.get("loop"));
+                if (animObj.has("blend_weight") && !animObj.get("blend_weight").isJsonNull()) {
+                    JsonElement blend = animObj.get("blend_weight");
+                    if (blend.isJsonPrimitive() && blend.getAsJsonPrimitive().isNumber()) {
+                        animation.blendWeight = blend.getAsFloat();
+                    } else {
+                        animation.blendWeight = blend.getAsString();
+                    }
+                }
                 if (hasObject(animObj, "bones")) {
                     for (Map.Entry<String, JsonElement> boneEntry : animObj.getAsJsonObject("bones").entrySet()) {
+                        if (!boneEntry.getValue().isJsonObject()) {
+                            continue;
+                        }
+                        JsonObject boneObj = boneEntry.getValue().getAsJsonObject();
                         RawYsmModel.RawBoneAnimation bone = new RawYsmModel.RawBoneAnimation();
                         bone.boneName = boneEntry.getKey();
+                        // M-02:关键帧必须真的落进 RawKeyframe，否则二进制载荷只有骨名没有轨道。
+                        parseChannelToKeyframes(boneObj, "rotation", bone.rotation);
+                        parseChannelToKeyframes(boneObj, "position", bone.position);
+                        parseChannelToKeyframes(boneObj, "scale", bone.scale);
                         animation.boneAnimations.add(bone);
                     }
                 }
+                parseTimeline(animObj, animation);
+                parseSoundEffects(animObj, animation);
             }
             file.animations.put(animation.name, animation);
         }
         return file;
     }
 
+    /** M-02:把一条骨骼轨道的 JSON 关键帧解析成内部 {@link RawYsmModel.RawKeyframe} 列表。 */
+    private static void parseChannelToKeyframes(JsonObject boneObj, String channel,
+        List<RawYsmModel.RawKeyframe> target) {
+        JsonElement channelElem = boneObj.get(channel);
+        if (channelElem == null || channelElem.isJsonNull()) {
+            return;
+        }
+        if (!channelElem.isJsonObject()) {
+            RawYsmModel.RawKeyframe keyframe = new RawYsmModel.RawKeyframe();
+            keyframe.timestamp = 0f;
+            keyframe.interpolationMode = 0;
+            keyframe.hasPreData = false;
+            keyframe.postData = molangArray(channelElem);
+            target.add(keyframe);
+            return;
+        }
+
+        List<Map.Entry<String, JsonElement>> entries = new ArrayList<>(channelElem.getAsJsonObject().entrySet());
+        entries.sort((left, right) -> Float.compare(parseTimestamp(left.getKey()), parseTimestamp(right.getKey())));
+        for (Map.Entry<String, JsonElement> entry : entries) {
+            float timestamp = parseTimestamp(entry.getKey());
+            if (timestamp < 0f) {
+                continue;
+            }
+            RawYsmModel.RawKeyframe keyframe = new RawYsmModel.RawKeyframe();
+            keyframe.timestamp = timestamp;
+            keyframe.interpolationMode = 0;
+            JsonElement value = entry.getValue();
+            if (value != null && value.isJsonObject()) {
+                JsonObject valueObj = value.getAsJsonObject();
+                if (valueObj.has("lerp_mode") && !valueObj.get("lerp_mode").isJsonNull()) {
+                    String lerpMode = valueObj.get("lerp_mode")
+                        .getAsString();
+                    if ("catmullrom".equals(lerpMode)) {
+                        keyframe.interpolationMode = 2;
+                    } else if ("step".equals(lerpMode)) {
+                        keyframe.interpolationMode = 1;
+                    }
+                } else {
+                    keyframe.interpolationMode = 1;
+                }
+                if (valueObj.has("pre") && valueObj.has("post")) {
+                    keyframe.hasPreData = true;
+                    keyframe.preData = molangArray(valueObj.get("pre"));
+                    keyframe.postData = molangArray(valueObj.get("post"));
+                } else {
+                    keyframe.hasPreData = false;
+                    keyframe.postData = molangArray(
+                        valueObj.has("post") ? valueObj.get("post")
+                            : valueObj.has("pre") ? valueObj.get("pre") : valueObj);
+                }
+            } else {
+                keyframe.hasPreData = false;
+                keyframe.postData = molangArray(value);
+            }
+            target.add(keyframe);
+        }
+    }
+
+    private static void parseTimeline(JsonObject animObj, RawYsmModel.RawAnimation animation) {
+        if (!hasObject(animObj, "timeline")) {
+            return;
+        }
+        for (Map.Entry<String, JsonElement> entry : animObj.getAsJsonObject("timeline")
+            .entrySet()) {
+            float timestamp = parseTimestamp(entry.getKey());
+            if (timestamp < 0f) {
+                continue;
+            }
+            RawYsmModel.RawTimelineEvent event = new RawYsmModel.RawTimelineEvent();
+            event.timestamp = timestamp;
+            for (JsonElement value : asIterable(entry.getValue())) {
+                if (!value.isJsonNull()) {
+                    event.events.add(value.getAsString());
+                }
+            }
+            animation.timelineEvents.add(event);
+        }
+    }
+
+    private static void parseSoundEffects(JsonObject animObj, RawYsmModel.RawAnimation animation) {
+        if (!hasObject(animObj, "sound_effects")) {
+            return;
+        }
+        for (Map.Entry<String, JsonElement> entry : animObj.getAsJsonObject("sound_effects")
+            .entrySet()) {
+            float timestamp = parseTimestamp(entry.getKey());
+            if (timestamp < 0f || !entry.getValue()
+                .isJsonObject()) {
+                continue;
+            }
+            RawYsmModel.RawSoundEffect effect = new RawYsmModel.RawSoundEffect();
+            effect.timestamp = timestamp;
+            effect.effectName = getStr(entry.getValue().getAsJsonObject(), "effect", "");
+            animation.soundEffects.add(effect);
+        }
+    }
+
+    /** Keyframe/timeline 的时间键，非法键返回 -1 以便调用方跳过。 */
+    private static float parseTimestamp(String key) {
+        try {
+            return Float.parseFloat(key);
+        } catch (NumberFormatException e) {
+            return -1f;
+        }
+    }
+
+    private static Object[] molangArray(JsonElement elem) {
+        Object[] values = new Object[] { 0f, 0f, 0f };
+        if (elem == null || elem.isJsonNull()) {
+            return values;
+        }
+        if (elem.isJsonArray()) {
+            JsonArray array = elem.getAsJsonArray();
+            for (int i = 0; i < Math.min(3, array.size()); i++) {
+                JsonElement value = array.get(i);
+                if (value.isJsonPrimitive() && value.getAsJsonPrimitive()
+                    .isNumber()) {
+                    values[i] = value.getAsFloat();
+                } else {
+                    values[i] = value.getAsString();
+                }
+            }
+        } else {
+            Object scalar = elem.isJsonPrimitive() && elem.getAsJsonPrimitive()
+                .isNumber() ? elem.getAsFloat() : elem.getAsString();
+            values[0] = scalar;
+            values[1] = scalar;
+            values[2] = scalar;
+        }
+        return values;
+    }
+
+    /**
+     * ysm.json 的 {@code loop} 取值到内部 loopMode 的映射：1 = LOOP、3 = HOLD_ON_LAST_FRAME、
+     * 0 = PLAY_ONCE。M-17 只修 {@code hold_on_last_frame} 的编号（dev 基线错写成 2）；
+     * {@code loop} 缺失时的默认值仍按 M-20 保持 dev 的 0（参考实现为 2，属非目标）。
+     */
     private static int parseLoopMode(JsonElement loop) {
         if (loop == null || loop.isJsonNull()) {
             return 0;
         }
-        if (loop.isJsonPrimitive() && loop.getAsJsonPrimitive().isBoolean()) {
+        if (loop.isJsonPrimitive() && loop.getAsJsonPrimitive()
+            .isBoolean()) {
             return loop.getAsBoolean() ? 1 : 0;
         }
         if (loop.isJsonPrimitive()) {
@@ -507,7 +877,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
                 return 1;
             }
             if ("hold_on_last_frame".equals(value)) {
-                return 2;
+                return 3;
             }
         }
         return 0;
@@ -694,32 +1064,18 @@ public class YSMFolderDeserializer implements AutoCloseable {
     }
 
     private RawYsmModel.RawImage parseImage(String name, byte[] data) throws IOException {
-        ImageMeta meta = parseImageMeta(data);
+        // Normalise to PNG here, where every image of an OpenYSM model is read, so both sync channels and the
+        // server cache only ever carry PNG (upstream does the same when it maps a model for the client).
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(data, name);
         RawYsmModel.RawImage image = new RawYsmModel.RawImage();
         image.name = name;
-        image.data = data;
-        image.width = meta.width;
-        image.height = meta.height;
-        image.format = meta.format;
+        image.data = converted.data;
+        image.width = converted.width;
+        image.height = converted.height;
+        image.format = converted.format;
         image.unknownFlag = 1;
-        image.isPng = meta.format == 2;
+        image.isPng = converted.isPng();
         return image;
-    }
-
-    private static ImageMeta parseImageMeta(byte[] data) throws IOException {
-        int format = detectFormat(data);
-        if (format == 2 && data.length >= 24) {
-            int width = ((data[16] & 0xFF) << 24) | ((data[17] & 0xFF) << 16) | ((data[18] & 0xFF) << 8)
-                | (data[19] & 0xFF);
-            int height = ((data[20] & 0xFF) << 24) | ((data[21] & 0xFF) << 16) | ((data[22] & 0xFF) << 8)
-                | (data[23] & 0xFF);
-            return new ImageMeta(width, height, format);
-        }
-        BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
-        if (image != null) {
-            return new ImageMeta(image.getWidth(), image.getHeight(), format);
-        }
-        return new ImageMeta(0, 0, format);
     }
 
     public static int detectFormat(byte[] data) {
@@ -956,6 +1312,12 @@ public class YSMFolderDeserializer implements AutoCloseable {
         return obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsDouble() : def;
     }
 
+    /**
+     * S-03:散件模型的"文件夹哈希"。名字容易误解 —— 它用 MD5(不是 SHA-256)拼接
+     * "相对路径 + 文件 MD5" 后取摘要，结果存入 {@code RawProperties.sha256}。
+     * 保持现有算法与字段名是为了与已发布客户端的缓存名/哈希协议一致；若要改成真
+     * SHA-256，必须同时升级两侧协议。
+     */
     private String calculateFinalFolderHash() {
         try {
             MessageDigest digest = MessageDigest.getInstance("MD5");
@@ -997,15 +1359,65 @@ public class YSMFolderDeserializer implements AutoCloseable {
         return new String(output);
     }
 
-    private static final class ImageMeta {
-        private final int width;
-        private final int height;
-        private final int format;
+    /**
+     * cube 级旋转的烘焙变换，等价于参考实现的
+     * {@code T(-pivot/16) * Rz(rot.z) * Ry(-rot.y) * Rx(-rot.x) * T(pivot/16)}(JOML 后乘约定)。
+     * 这里用普通 float 数学实现，避免为一个 cube 再引入矩阵库。
+     */
+    private static final class CubeBakeTransform {
 
-        private ImageMeta(int width, int height, int format) {
-            this.width = width;
-            this.height = height;
-            this.format = format;
+        private final float pivotX;
+        private final float pivotY;
+        private final float pivotZ;
+        private final float cosZ;
+        private final float sinZ;
+        private final float cosY;
+        private final float sinY;
+        private final float cosX;
+        private final float sinX;
+
+        private CubeBakeTransform(float[] pivot, float[] rotation) {
+            this.pivotX = pivot[0] / 16f;
+            this.pivotY = pivot[1] / 16f;
+            this.pivotZ = pivot[2] / 16f;
+            this.cosZ = (float) Math.cos(Math.toRadians(rotation[2]));
+            this.sinZ = (float) Math.sin(Math.toRadians(rotation[2]));
+            this.cosY = (float) Math.cos(-Math.toRadians(rotation[1]));
+            this.sinY = (float) Math.sin(-Math.toRadians(rotation[1]));
+            this.cosX = (float) Math.cos(-Math.toRadians(rotation[0]));
+            this.sinX = (float) Math.sin(-Math.toRadians(rotation[0]));
+        }
+
+        private void apply(float[] in, float[] out) {
+            float[] rotated = new float[3];
+            rotate(new float[] { in[0] + this.pivotX, in[1] - this.pivotY, in[2] - this.pivotZ }, rotated);
+            out[0] = rotated[0] - this.pivotX;
+            out[1] = rotated[1] + this.pivotY;
+            out[2] = rotated[2] + this.pivotZ;
+        }
+
+        private void rotateNormal(float[] in, float[] out) {
+            rotate(in, out);
+            float length = (float) Math.sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+            if (length > 1.0E-6f) {
+                out[0] /= length;
+                out[1] /= length;
+                out[2] /= length;
+            }
+        }
+
+        private void rotate(float[] in, float[] out) {
+            float x = in[0] * this.cosZ - in[1] * this.sinZ;
+            float y = in[0] * this.sinZ + in[1] * this.cosZ;
+            float z = in[2];
+            float rotatedX = x * this.cosY + z * this.sinY;
+            z = -x * this.sinY + z * this.cosY;
+            x = rotatedX;
+            float rotatedY = y * this.cosX - z * this.sinX;
+            z = y * this.sinX + z * this.cosX;
+            out[0] = x;
+            out[1] = rotatedY;
+            out[2] = z;
         }
     }
 }

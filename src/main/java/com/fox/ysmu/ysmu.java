@@ -13,7 +13,12 @@ import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
 
-@Mod(modid = ysmu.MODID, version = Tags.VERSION, name = "ysmu", acceptedMinecraftVersions = "[1.7.10]")
+@Mod(
+    modid = ysmu.MODID,
+    version = Tags.VERSION,
+    name = "ysmu",
+    acceptedMinecraftVersions = "[1.7.10]",
+    dependencies = "required-after:geckolib")
 public class ysmu {
 
     public static final String MODID = "ysmu";

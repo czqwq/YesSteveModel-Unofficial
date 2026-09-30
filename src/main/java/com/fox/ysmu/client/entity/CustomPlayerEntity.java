@@ -2,11 +2,13 @@ package com.fox.ysmu.client.entity;
 
 import static com.fox.ysmu.util.ControllerUtils.*;
 
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationManager;
@@ -22,16 +24,17 @@ import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.manager.AnimationData;
 import software.bernie.geckolib3.core.manager.AnimationFactory;
+import software.bernie.geckolib3.core.molang.IMolangPhysicsScope;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.util.GeckoLibUtil;
 
-public class CustomPlayerEntity implements IAnimatable {
+public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     private final AnimationFactory factory = GeckoLibUtil.createFactory(this, true);
     private ResourceLocation mainModel = CustomPlayerModel.DEFAULT_MAIN_MODEL;
     private ResourceLocation texture = CustomPlayerModel.DEFAULT_TEXTURE;
-    private String previewAnimation = "";
-    private EntityPlayer player = null;
+    private final com.fox.ysmu.client.gui.PreviewAnimationInfo previewInfo = new com.fox.ysmu.client.gui.PreviewAnimationInfo();
+    private EntityLivingBase entity = null;
 
     @NotNull
     private static <P extends IAnimatable> PlayState playLoopAnimation(AnimationEvent<P> event, String animationName) {
@@ -42,55 +45,98 @@ public class CustomPlayerEntity implements IAnimatable {
 
     /**
      * 越往后优先级越高
+     * <p>
+     * Transition lengths are upstream's, from
+     * {@code client/controller/collections/PlayerControllerCollection.java:31-71}: the parallel axes, the pre/post
+     * slots and the armor slots are 0, {@code main} is 0.1, both hold controllers are 0.1, {@code swing} is 0,
+     * {@code use} is 0.1, {@code cap} is 0 and the two GUI preview channels are 0. They are not cosmetic: the engine
+     * pins a controller's clock at 0 in {@code AnimationState.Transitioning} until {@code tick >=
+     * transitionLengthTicks} ({@code AnimationController#process}), so a longer length spends the first frames of
+     * every state change blending into the clip's first frame and cuts the tail off short one-shots. A model may
+     * still override one per state through {@code blend_transition}
+     * ({@code OpenYsmPlayerControllerRuntime}).
      */
     @Override
 
     @SuppressWarnings("all")
     public void registerControllers(AnimationData data) {
         AnimationManager manager = AnimationManager.getInstance();
+        // B-06: every predicate is wrapped in `manager.scripted(...)`, which lets a pack script bound to that
+        // controller decide first (`functions/<anything>@player_ctrl_<name>.molang`). Upstream does the same thing in
+        // one place - its shared CodedAnimationController - and the wrapper costs one map lookup when the model binds
+        // no script to that controller, which is the usual case.
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("pre_parallel_%d_controller", i);
             String animationName = String.format("pre_parallel%d", i);
             data.addAnimationController(
-                new AnimationController<>(this, controllerName, 0, e -> manager.predicateParallel(e, animationName)));
+                new AnimationController<>(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
         }
+        // B-04: upstream registers `player.vehicle` right after the pre-parallel axis, with a 0.1 tick transition
+        // (client/controller/collections/PlayerControllerCollection.java:36).
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_MAIN_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, MAIN_CONTROLLER, 2, manager::predicateMain));
+            new AnimationController(this, VEHICLE_CONTROLLER, 0.1f, manager.scripted(manager::predicateVehicle)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_MAIN_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, OPENYSM_PRE_MAIN_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_HOLD_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, MAIN_CONTROLLER, 0.1f, manager.scripted(manager::predicateMain)));
         data.addAnimationController(
-            new AnimationController(this, HOLD_OFFHAND_CONTROLLER, 0, manager::predicateOffhandHold));
+            new AnimationController(this, OPENYSM_POST_MAIN_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, HOLD_MAINHAND_CONTROLLER, 0, manager::predicateMainhandHold));
+            new AnimationController(this, OPENYSM_PRE_HOLD_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_HOLD_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, HOLD_OFFHAND_CONTROLLER, 0.1f, manager.scripted(manager::predicateOffhandHold)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_SWING_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, SWING_CONTROLLER, 2, manager::predicateSwing));
+            new AnimationController(this, HOLD_MAINHAND_CONTROLLER, 0.1f, manager.scripted(manager::predicateMainhandHold)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_SWING_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, OPENYSM_POST_HOLD_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_PRE_USE_CONTROLLER, 0, manager::predicateOpenYsmSlot));
-        data.addAnimationController(new AnimationController(this, USE_CONTROLLER, 2, manager::predicateUse));
+            new AnimationController(this, OPENYSM_PRE_SWING_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(
-            new AnimationController(this, OPENYSM_POST_USE_CONTROLLER, 0, manager::predicateOpenYsmSlot));
+            new AnimationController(this, SWING_CONTROLLER, 0f, manager.scripted(manager::predicateSwing)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_POST_SWING_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_PRE_USE_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        data.addAnimationController(
+            new AnimationController(this, USE_CONTROLLER, 0.1f, manager.scripted(manager::predicateUse)));
+        data.addAnimationController(
+            new AnimationController(this, OPENYSM_POST_USE_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        // Upstream registers `player.passenger` after the use axis, also at 0.1
+        // (PlayerControllerCollection.java:59).
+        data.addAnimationController(
+            new AnimationController(this, PASSENGER_CONTROLLER, 0.1f, manager.scripted(manager::predicatePassenger)));
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("parallel_%d_controller", i);
             String animationName = String.format("parallel%d", i);
             data.addAnimationController(
-                new AnimationController<>(this, controllerName, 0, e -> manager.predicateParallel(e, animationName)));
+                new AnimationController<>(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
         }
         // 为每个盔甲槽位注册控制器，使用1-4的索引值
         for (int slotIndex = 1; slotIndex <= 4; slotIndex++) {
             String controllerName = String.format("%s_controller", ConditionArmor.getSlotNameFromIndex(slotIndex));
             int finalSlotIndex = slotIndex;
             data.addAnimationController(
-                new AnimationController(this, controllerName, 0, e -> manager.predicateArmor(e, finalSlotIndex)));
+                new AnimationController(
+                    this,
+                    controllerName,
+                    0,
+                    manager.scripted(e -> manager.predicateArmor(e, finalSlotIndex))));
         }
-        data.addAnimationController(new AnimationController(this, CAP_CONTROLLER, 2, manager::predicateCap));
+        data.addAnimationController(
+            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
+        // GUI preview channels, after the cap controller so a hover/focus animation wins for the bones they share.
+        data.addAnimationController(
+            new AnimationController(this, HOVER_CONTROLLER, 0f, manager.scripted(manager::predicateHover)));
+        data.addAnimationController(
+            new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
         data.getAnimationControllers()
             .values()
             .forEach(
@@ -138,12 +184,92 @@ public class CustomPlayerEntity implements IAnimatable {
         return 0.7f;
     }
 
+    /**
+     * Whether this model's layers - held item, armor, back attachments - are drawn before the model instead of after
+     * it, which the pack declares with {@code render_layers_first}.
+     * <p>
+     * Upstream reads the same flag from the model's player settings ({@code CustomHumanoidEntity#renderLayersFirst})
+     * and the engine asks for it through {@code IGeoRenderer#shouldRenderLayersFirst}. Defaults to {@code false}, the
+     * order every model had before the flag was honoured.
+     */
+    public boolean shouldRenderLayersFirst() {
+        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(this.mainModel));
+    }
+
+    /** The rendered entity, player or not. */
+    public EntityLivingBase getEntity() {
+        return entity;
+    }
+
+    public void setEntity(EntityLivingBase entity) {
+        this.entity = entity;
+    }
+
+    /**
+     * The rendered entity when it is a player.
+     *
+     * @return the player, or {@code null} for a non-player entity.
+     */
+    @Nullable
     public EntityPlayer getPlayer() {
-        return player;
+        return entity instanceof EntityPlayer ? (EntityPlayer) entity : null;
     }
 
     public void setPlayer(EntityPlayer player) {
-        this.player = player;
+        this.entity = player;
+    }
+
+    // IMolangPhysicsScope: lets the GeckoLib engine key its per-frame MoLang scope on this animatable.
+
+    /**
+     * The player whose roaming variables a GUI preview tile is drawing, or {@code null} for anything else.
+     * <p>
+     * This is deliberately not {@link #entity}: setting that field would make {@link #getPlayer()} non-null, and the
+     * preview predicates branch on exactly that to decide whether to play the tile's preview animation or the world
+     * state machine, so the preview would stop animating. The owner only exists so the tile reads the same
+     * {@code v.roaming.*} namespace the previewed model would read in the world; upstream has the same shape, where
+     * the animation processor is handed a roaming struct for the entity behind the preview.
+     */
+    @Nullable
+    private EntityPlayer previewOwner;
+
+    /** Sets (or with {@code null} clears) the owner of the preview currently being drawn. */
+    public void setPreviewOwner(@Nullable EntityPlayer previewOwner) {
+        this.previewOwner = previewOwner;
+    }
+
+    /**
+     * The roaming variables the tile should read. A world animatable is seeded from
+     * {@code RemoteAnimationVariables} by the engine itself, so only a detached preview answers here.
+     */
+    @Override
+    @Nullable
+    public java.util.Map<String, Double> getMolangVariables() {
+        EntityPlayer owner = this.previewOwner;
+        if (owner == null || this.entity != null) {
+            return null;
+        }
+        net.minecraft.util.ResourceLocation previewed = com.fox.ysmu.util.ModelIdUtil
+            .getModelIdFromMainId(getMainModel());
+        return com.fox.ysmu.client.roaming.ClientRoamingStore.valuesFor(
+            owner.getUniqueID(),
+            com.fox.ysmu.client.roaming.ClientRoamingKeys.keyFor(previewed));
+    }
+
+    @Override
+    @Nullable
+    public EntityLivingBase getMolangEntity() {
+        return entity;
+    }
+
+    @Override
+    public ResourceLocation getMolangModelId() {
+        return getMainModel();
+    }
+
+    @Override
+    public ResourceLocation getMolangAnimationId() {
+        return getAnimation();
     }
 
     @Override
@@ -152,31 +278,53 @@ public class CustomPlayerEntity implements IAnimatable {
         return this.factory;
     }
 
+    /**
+     * The texture to draw. N-1: never returns {@code null} - the engine hands this straight to
+     * {@code TextureManager.bindTexture(ResourceLocation)}, and a {@code null} there ends in a
+     * {@code ReportedException("Registering texture")} crash. The field starts at the built-in default and
+     * {@link #setTexture(ResourceLocation)} ignores {@code null}, so this is a second line of defence for
+     * an override that was stored half-filled (for example a player selection whose texture string was
+     * empty, which {@code SetModelAndTexture} decodes as {@code null}).
+     */
     public ResourceLocation getTexture() {
-        return texture;
+        return texture == null ? CustomPlayerModel.DEFAULT_TEXTURE : texture;
     }
 
+    /**
+     * Sets the texture. A {@code null} argument is ignored rather than stored: the previous (non-null)
+     * texture is kept, so the animatable can never hold a value that would crash the render path (N-1).
+     */
     public void setTexture(ResourceLocation texture) {
-        this.texture = texture;
+        if (texture != null) {
+            this.texture = texture;
+        }
     }
 
     public String getPreviewAnimation() {
-        return previewAnimation;
+        return previewInfo.getPreview();
     }
 
     public void setPreviewAnimation(String previewAnimation) {
-        this.previewAnimation = previewAnimation;
+        previewInfo.setPreview(previewAnimation);
     }
 
     public void clearPreviewAnimation() {
-        this.previewAnimation = "";
+        previewInfo.clear();
     }
 
     public boolean hasPreviewAnimation() {
-        return StringUtils.isNoneBlank(this.previewAnimation);
+        return previewInfo.hasPreview();
     }
 
     public boolean hasPreviewAnimation(String previewAnimation) {
-        return hasPreviewAnimation() && previewAnimation.equals(this.previewAnimation);
+        return previewInfo.hasPreview(previewAnimation);
+    }
+
+    /**
+     * The preview channels this entity should play, mirroring upstream's {@code PreviewAnimationInfo}: the GUI drives
+     * it (preview/hover/focus) and the cap, hover and focus controllers read it back.
+     */
+    public com.fox.ysmu.client.gui.PreviewAnimationInfo getPreviewInfo() {
+        return previewInfo;
     }
 }

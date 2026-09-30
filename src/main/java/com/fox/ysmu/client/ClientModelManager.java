@@ -2,8 +2,11 @@ package com.fox.ysmu.client;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -11,10 +14,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.Nullable;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.util.*;
 
 import org.apache.commons.io.FileUtils;
@@ -24,16 +29,18 @@ import org.apache.commons.lang3.StringUtils;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
-import com.fox.ysmu.client.animation.molang.MolangPhysicsRuntime;
+import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.client.texture.OuterFileTexture;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.FolderFormat;
+import com.fox.ysmu.model.format.ServerModelInfo;
 import com.fox.ysmu.model.resource.YsmControllerResources;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelFiles;
 import com.fox.ysmu.util.GsonHelper;
+import com.fox.ysmu.util.Md5Utils;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
@@ -45,6 +52,7 @@ import com.google.gson.JsonObject;
 import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.raw.pojo.Converter;
 import software.bernie.geckolib3.geo.raw.pojo.ExtraInfo;
@@ -60,15 +68,52 @@ public class ClientModelManager {
 
     public static Map<ResourceLocation, List<ResourceLocation>> MODELS = Maps.newHashMap();
     public static Map<ResourceLocation, Pair<Double, Double>> SCALE_INFO = Maps.newHashMap();
+    /**
+     * Whether a model declares {@code render_layers_first}: its held item and armor are drawn before the model rather
+     * than after it, because the model geometry covers them otherwise. Upstream reads the same flag from the model's
+     * player settings and orders its layer pass by it ({@code geckolib3/geo/GeoReplacedEntityRenderer.java:92,98,118}).
+     * The port parsed the flag into {@code RawProperties#renderLayersFirst} but never consumed it anywhere under
+     * {@code client/}, so the setting silently did nothing.
+     */
+    public static Map<ResourceLocation, Boolean> RENDER_LAYERS_FIRST = Maps.newHashMap();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
+    /** Layout versions already reported, so an unsupported geometry format is logged once instead of 150 times. */
+    private static final Map<String, Boolean> WARNED_UNSUPPORTED_LAYOUTS = Maps.newConcurrentMap();
+    /**
+     * Content signature of every model currently installed by {@link #registerAll}, so the same model arriving on
+     * both sync channels is registered once instead of twice. Cleared together with the runtime caches it
+     * describes.
+     */
+    private static final Map<ResourceLocation, String> REGISTERED_MODEL_CONTENT = Maps.newConcurrentMap();
+    /** Bedrock cache files are named after the hex MD5 of their bytes, which is always 32 characters long. */
+    private static final int MD5_HEX_LENGTH = 32;
+    private static final int CACHE_HASH_BUFFER_BYTES = 8192;
+    /** How long a model sync waits for the client world before it gives up instead of blocking a thread. */
+    private static final long SYNC_WORLD_WAIT_MILLIS = 30000L;
+    /** Bumped on every sync request and on disconnect, so a superseded verification never sends its reply. */
+    private static volatile long SYNC_GENERATION;
+    /**
+     * The reply waiting for {@code theWorld} to exist. Only the client thread writes it; a disconnect or a newer
+     * sync request clears it, which cancels the waiting reply.
+     */
+    private static volatile PendingModelSync pendingModelSync;
+    /** At most one retry hop off the client thread, so a stalled client tick cannot pile up submissions. */
+    private static final AtomicBoolean SYNC_RETRY_QUEUED = new AtomicBoolean();
 
     public static void registerAll(ModelData data) {
         ResourceLocation modelId = getModelId(data);
+        // N-02: the legacy channel and the OpenYSM channel both end here, and a second registration of identical
+        // content rebuilds every GeoModel and re-uploads every texture for no gain.
+        String signature = contentSignature(data);
+        if (signature != null && signature.equals(REGISTERED_MODEL_CONTENT.get(modelId))) {
+            ysmu.LOG.info("YSM client skipping model {}: identical content is already registered", modelId);
+            return;
+        }
         ysmu.LOG.info(
             "YSM client registering model {}: geometry={}, textures={}, animations={}",
             modelId,
@@ -87,10 +132,66 @@ public class ClientModelManager {
             modelId,
             MODELS.size(),
             MODELS.get(modelId) == null ? 0 : MODELS.get(modelId).size());
+        if (signature != null) {
+            REGISTERED_MODEL_CONTENT.put(modelId, signature);
+        }
     }
 
     private static ResourceLocation getModelId(ModelData data) {
         return new ResourceLocation(ysmu.MODID, data.getModelId());
+    }
+
+    /**
+     * Content fingerprint of everything {@link #registerAll} installs for a model: the geometry, texture and
+     * animation bytes plus the digest the server published as this model's metadata.
+     * <p>
+     * Returns {@code null} when no digest is available, in which case the caller registers unconditionally rather
+     * than assuming that two models are equal.
+     */
+    @Nullable
+    private static String contentSignature(ModelData data) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("MD5");
+            updateDigest(digest, data.getModel());
+            updateDigest(digest, data.getTexture());
+            updateDigest(digest, data.getAnimation());
+            ServerModelInfo info = data.getInfo();
+            String md5 = info == null ? null : info.getMd5();
+            if (md5 != null) {
+                digest.update(md5.getBytes(StandardCharsets.UTF_8));
+            }
+            return Md5Utils.toHexString(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            ysmu.LOG.warn("Cannot fingerprint YSM model {} for duplicate detection", data.getModelId(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Hashes the files of one {@code name -> bytes} map in name order. The name and the length are part of the
+     * digest so that two different maps cannot hash to the same value.
+     */
+    private static void updateDigest(MessageDigest digest, Map<String, byte[]> files) {
+        if (files == null) {
+            digest.update((byte) -2);
+            return;
+        }
+        List<String> names = new ArrayList<>(files.keySet());
+        Collections.sort(names);
+        for (String name : names) {
+            byte[] bytes = files.get(name);
+            digest.update(name.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            if (bytes == null) {
+                digest.update((byte) -1);
+                continue;
+            }
+            digest.update((byte) (bytes.length >>> 24));
+            digest.update((byte) (bytes.length >>> 16));
+            digest.update((byte) (bytes.length >>> 8));
+            digest.update((byte) bytes.length);
+            digest.update(bytes);
+        }
     }
 
     private static void registerGeometry(ResourceLocation modelId, ModelData data) {
@@ -120,15 +221,22 @@ public class ClientModelManager {
             String modelJson = new String(data, StandardCharsets.UTF_8);
             RawGeoModel rawModel = Converter.fromJsonString(modelJson);
 
-            if (rawModel.getFormatVersion() == FormatVersion.VERSION_1_12_0) {
+            // MON-01: whether this port attempts a layout is the engine's decision, not a second table kept here.
+            // The previous local whitelist is what made every 1.8.0/1.10.0 model disappear.
+            FormatVersion formatVersion = rawModel.getFormatVersion();
+            if (formatVersion != null && formatVersion.isSupportedLayout()) {
                 RawGeometryTree rawGeometryTree = RawGeometryTree.parseHierarchy(rawModel);
                 GeoModel geoModel = GeoBuilder.getGeoBuilder(id.getResourceDomain())
                     .constructGeoModel(rawGeometryTree);
                 SCALE_INFO.put(
                     id,
                     Pair.of(rawGeometryTree.properties.getHeightScale(), rawGeometryTree.properties.getWidthScale()));
+                RENDER_LAYERS_FIRST.put(id, Boolean.TRUE.equals(rawGeometryTree.properties.getRenderLayersFirst()));
                 ExtraInfo extraInfo = rawGeometryTree.properties.getExtraInfo();
                 EXTRA_INFO.put(id, handleExtraInfo(id, extraInfo));
+                // The information screen wants the same block, keyed by the model rather than by its main/arm
+                // sub-model. The richer author list (with avatars) arrives separately over the OpenYSM channel.
+                ClientModelMetadataRegistry.acceptExtraInfo(ModelIdUtil.getParentModelId(id), extraInfo);
                 if (extraInfo != null && extraInfo.getExtraAnimationNames() != null
                     && extraInfo.getExtraAnimationNames().length > 0) {
                     EXTRA_ANIMATION_NAME.put(id, extraInfo.getExtraAnimationNames());
@@ -143,10 +251,33 @@ public class ClientModelManager {
                     extraInfo != null && extraInfo.getExtraAnimationNames() != null
                         ? extraInfo.getExtraAnimationNames().length
                         : 0);
+            } else {
+                warnUnsupportedLayout(id, formatVersion);
             }
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to register geometry " + id, e);
             e.printStackTrace();
+        }
+    }
+
+    /**
+     * Reports a geometry file this port cannot build, once per declared version.
+     * <p>
+     * The version gate itself delegates to {@link FormatVersion#isSupportedLayout()}, so this only fires for a
+     * file that declares no usable {@code format_version} at all: a value the enum cannot represent is already
+     * rejected inside the engine's converter and logged by the caller's catch block.
+     * <p>
+     * Note that the gate only decides whether a layout is attempted. Whether the engine's geometry tree can parse
+     * a newer Bedrock layout is a separate engine-side question, so passing this gate is not a promise that such a
+     * model builds - it only stops this port from silently skipping a compatible one.
+     */
+    private static void warnUnsupportedLayout(ResourceLocation id, @Nullable FormatVersion version) {
+        String key = String.valueOf(version);
+        if (WARNED_UNSUPPORTED_LAYOUTS.putIfAbsent(key, Boolean.TRUE) == null) {
+            ysmu.LOG.warn(
+                "YSM client cannot build geometry {}: the engine does not support its declared layout ({}); skipping",
+                id,
+                version == null ? "no format_version" : version);
         }
     }
 
@@ -170,9 +301,14 @@ public class ClientModelManager {
     }
 
     private static void registerTexture(ResourceLocation id, byte[] data) {
-        Minecraft.getMinecraft()
-            .getTextureManager()
-            .loadTexture(id, new OuterFileTexture(data));
+        TextureManager textureManager = Minecraft.getMinecraft()
+            .getTextureManager();
+        // R-01: loadTexture only replaces the map entry, so registering an id twice would leak the GL texture the
+        // previous OuterFileTexture uploaded and nothing would ever free it. deleteTexture is a no-op for an
+        // unknown id, which keeps this idempotent and safe as the single registration point. Both calls touch GL
+        // state and therefore have to run on the client thread, as every registerAll caller does.
+        textureManager.deleteTexture(id);
+        textureManager.loadTexture(id, new OuterFileTexture(data));
     }
 
     private static void registerAnimations(ResourceLocation id, Map<String, byte[]> mapData) {
@@ -276,7 +412,27 @@ public class ClientModelManager {
         }
     }
 
+    /**
+     * Asks the server which of its models this client already has cached.
+     * <p>
+     * CUI-01: the packet handler that reaches this method runs on a network thread, while {@code theWorld}, the
+     * runtime caches and the cache directory all belong to the client thread, so the work is scheduled there.
+     */
     public static void sendSyncModelMessage() {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.func_152345_ab()) {
+            // Already on the client thread; func_152344_a would run this inline anyway.
+            ClientModelManager.prepareModelSync();
+            return;
+        }
+        mc.func_152344_a(ClientModelManager::prepareModelSync);
+    }
+
+    /** Client thread: resets the sync state, clears the runtime caches, then reads the cache directory. */
+    private static void prepareModelSync() {
+        long generation = SYNC_GENERATION + 1L;
+        SYNC_GENERATION = generation;
+        pendingModelSync = null;
         ysmu.LOG.info(
             "YSM client starting model sync: currentModels={}, rememberedCachedModels={}",
             MODELS.size(),
@@ -284,23 +440,122 @@ public class ClientModelManager {
         PASSWORD = null;
         PASSWORD_UUID = null;
         clearCachedModelMd5();
-        Minecraft.getMinecraft()
-            .func_152344_a(ClientModelManager::clearRuntimeModelCaches);
-        String[] md5Info = getMd5Info();
-        ysmu.LOG.info("YSM client sending model sync md5 list: count={}, values={}", md5Info.length, Lists.newArrayList(md5Info));
-        SyncModelFiles syncModelFiles = new SyncModelFiles(md5Info);
-        ThreadTools.THREAD_POOL.submit(() -> {
-            while (Minecraft.getMinecraft().theWorld == null) {
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
-            NetworkHandler.CHANNEL.sendToServer(syncModelFiles);
-        });
+        // CUI-01: the cache reset and the cache-directory listing run in this one client task, in this order, so
+        // the reply describes the state the client is actually in when it is built.
+        clearRuntimeModelCaches();
+        String[] candidates = getMd5Info();
+        long deadline = System.currentTimeMillis() + SYNC_WORLD_WAIT_MILLIS;
+        // M-10: a name is only a claim until the bytes behind it are checked, and that is file IO. Verify on the
+        // model pool - without ever waiting there - and reschedule the reply instead of blocking the client thread.
+        Runnable verification = () -> verifyCachedModelFiles(candidates, generation, deadline);
+        ThreadTools.THREAD_POOL.submit(verification);
     }
 
+    /** Pool thread: keeps the names whose file content really hashes to them, then reschedules the reply. */
+    private static void verifyCachedModelFiles(String[] candidates, long generation, long deadline) {
+        List<String> verified = new ArrayList<>(candidates.length);
+        for (String name : candidates) {
+            if (generation != SYNC_GENERATION || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            File file = ServerModelManager.CACHE_CLIENT.resolve(name)
+                .toFile();
+            if (contentMatchesFileName(file, name)) {
+                verified.add(name);
+            } else {
+                // A crash or a disconnect can leave a half-written file under a full MD5 name; reporting it would
+                // make the server grant a load request that can never succeed, and it would never resend the file.
+                ysmu.LOG.warn("YSM client discarding stale model cache file {}: its content is not {}", file, name);
+            }
+        }
+        String[] md5Info = verified.toArray(new String[0]);
+        // Called from the pool, so func_152344_a queues and the client thread runs it on its next tick.
+        Minecraft.getMinecraft()
+            .func_152344_a(() -> armModelSyncReply(md5Info, generation, deadline));
+    }
+
+    /** Client thread: makes this reply the current one and tries to send it. */
+    private static void armModelSyncReply(String[] md5Info, long generation, long deadline) {
+        if (generation != SYNC_GENERATION) {
+            return;
+        }
+        PendingModelSync send = new PendingModelSync(md5Info, deadline);
+        pendingModelSync = send;
+        trySendModelSync(send);
+    }
+
+    /** Client thread: sends the reply once a world exists, or re-arms the bounded, tick-driven wait below. */
+    private static void trySendModelSync(PendingModelSync send) {
+        if (send == null || send != pendingModelSync) {
+            return;
+        }
+        if (Minecraft.getMinecraft().theWorld != null) {
+            pendingModelSync = null;
+            ysmu.LOG.info(
+                "YSM client sending model sync md5 list: count={}, values={}",
+                send.md5Info.length,
+                Lists.newArrayList(send.md5Info));
+            NetworkHandler.CHANNEL.sendToServer(new SyncModelFiles(send.md5Info));
+            return;
+        }
+        // N-12/M-06: this used to sleep on the model pool until the world was ready. Waiting is now free instead of
+        // occupying the pool: each attempt is one client tick, and it is abandoned after a deadline.
+        if (Thread.currentThread().isInterrupted()) {
+            pendingModelSync = null;
+            ysmu.LOG.warn("YSM client model sync cancelled before a client world existed");
+            return;
+        }
+        if (System.currentTimeMillis() >= send.deadline) {
+            pendingModelSync = null;
+            ysmu.LOG.warn(
+                "YSM client gave up sending its model sync after {} ms without a client world",
+                SYNC_WORLD_WAIT_MILLIS);
+            return;
+        }
+        scheduleModelSyncRetry();
+    }
+
+    /**
+     * Re-arms {@link #trySendModelSync} once through the client task queue. {@code func_152344_a} runs its runnable
+     * inline when the caller already is the client thread, so this hop goes through the model pool: the queued
+     * runnable is then executed by the client thread on its next tick, which is what makes the wait tick-driven.
+     */
+    private static void scheduleModelSyncRetry() {
+        if (!SYNC_RETRY_QUEUED.compareAndSet(false, true)) {
+            return;
+        }
+        Runnable hop = () -> Minecraft.getMinecraft()
+            .func_152344_a(() -> {
+                SYNC_RETRY_QUEUED.set(false);
+                // Re-read the field: a newer sync request may have replaced the reply this hop was armed for.
+                PendingModelSync pending = pendingModelSync;
+                if (pending != null) {
+                    trySendModelSync(pending);
+                }
+            });
+        ThreadTools.THREAD_POOL.submit(hop);
+    }
+
+    /** A model sync reply that is waiting for {@code theWorld}, with the point in time it stops being worth sending. */
+    private static final class PendingModelSync {
+
+        private final String[] md5Info;
+        private final long deadline;
+
+        private PendingModelSync(String[] md5Info, long deadline) {
+            this.md5Info = md5Info;
+            this.deadline = deadline;
+        }
+    }
+
+    /**
+     * Names of the cache files this client may claim to have.
+     * <p>
+     * N-07/M-10: a cache file is named after the uppercase hex MD5 that {@code ModelCacheWriter} and
+     * {@code SendModelFile} computed over its bytes, so anything that is not 32 hex characters - above all a
+     * {@code <md5>.part} file left behind by an interrupted chunked upload - is not a cache hit and must not be
+     * reported as one. Whether the content really matches the name is checked separately, off the client thread.
+     */
     private static String[] getMd5Info() {
         File cacheDir = ServerModelManager.CACHE_CLIENT.toFile();
         if (!cacheDir.isDirectory() && !cacheDir.mkdirs()) {
@@ -308,13 +563,62 @@ public class ClientModelManager {
             return new String[0];
         }
         Collection<File> files = FileUtils.listFiles(cacheDir, FileFileFilter.FILE, null);
-        String[] output = new String[files.size()];
-        int i = 0;
+        List<String> output = new ArrayList<>(files.size());
+        List<String> ignored = Lists.newArrayList();
         for (File file : files) {
-            output[i] = file.getName();
-            i++;
+            String name = file.getName();
+            if (isCacheMd5Name(name)) {
+                output.add(name);
+            } else {
+                ignored.add(name);
+            }
         }
-        return output;
+        if (!ignored.isEmpty()) {
+            ysmu.LOG.info(
+                "YSM client ignoring {} file(s) in the model cache that are not named after an MD5: {}",
+                ignored.size(),
+                ignored);
+        }
+        return output.toArray(new String[0]);
+    }
+
+    /** Whether a file name is a plain 32 character hex MD5, the only shape a cache file can legitimately have. */
+    private static boolean isCacheMd5Name(String name) {
+        if (name == null || name.length() != MD5_HEX_LENGTH) {
+            return false;
+        }
+        for (int i = 0; i < MD5_HEX_LENGTH; i++) {
+            char c = name.charAt(i);
+            boolean hex = c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether the file's bytes hash to the name they are stored under, which is the criterion the writer used. */
+    private static boolean contentMatchesFileName(File file, String name) {
+        if (!file.isFile() || file.length() == 0L) {
+            return false;
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("MD5");
+            try (InputStream input = FileUtils.openInputStream(file)) {
+                byte[] buffer = new byte[CACHE_HASH_BUFFER_BYTES];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    if (read > 0) {
+                        digest.update(buffer, 0, read);
+                    }
+                }
+            }
+            return Md5Utils.toHexString(digest.digest())
+                .equalsIgnoreCase(name);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to hash YSM client model cache file " + file, e);
+            return false;
+        }
     }
 
     private static void clearRuntimeModelCaches() {
@@ -326,8 +630,26 @@ public class ClientModelManager {
             EXTRA_ANIMATION_NAME.size());
         MODELS.clear();
         SCALE_INFO.clear();
+        RENDER_LAYERS_FIRST.clear();
         EXTRA_INFO.clear();
         EXTRA_ANIMATION_NAME.clear();
+        // The content signatures describe exactly the models being dropped here, so they go with them; otherwise a
+        // model that is still identical to the previous server's copy would be skipped into an empty cache.
+        REGISTERED_MODEL_CONTENT.clear();
+        // The pack table belongs to the server whose models are being dropped; keeping it would label the next
+        // server's folders with the previous server's names and cover art.
+        ClientPackRegistry.clear();
+        ClientModelMetadataRegistry.clear();
+        PackUserFunctions.clear();
+        // The preview animations belong to the models being dropped; keeping them would make the selection GUI ask the
+        // next server's models for animations they never declared.
+        com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
+        // The declared settings panels belong to the models being dropped as well, and for the same reason.
+        com.fox.ysmu.client.gui.ModelConfigRegistry.clear();
+        // Roaming namespaces are keyed by model content hash, so they belong to the dropped models too.
+        com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
+        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();
         MolangPhysicsRuntime.clear();
@@ -351,6 +673,10 @@ public class ClientModelManager {
     public static void clearConnectionState() {
         PASSWORD = null;
         PASSWORD_UUID = null;
+        // A reply still waiting for a world belongs to the connection that just ended, so drop it and invalidate the
+        // in-flight verification with it.
+        SYNC_GENERATION++;
+        pendingModelSync = null;
         clearCachedModelMd5();
         OpenYsmModelSyncClient.clearConnectionState();
     }

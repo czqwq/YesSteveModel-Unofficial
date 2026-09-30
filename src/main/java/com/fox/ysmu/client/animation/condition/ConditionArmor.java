@@ -1,4 +1,6 @@
-// TODO 待检查
+// S-03: checked - the classifier mirrors 1.20.1's ConditionArmor (slot names head/chest/legs/feet mapped to the
+// 1.7.10 EntityPlayer#getEquipmentInSlot indices 4/3/2/1, `$id` and `#ore-dictionary` forms, `:default` fallback in
+// AnimationManager#predicateArmor), so the old "not yet checked" marker is gone.
 package com.fox.ysmu.client.animation.condition;
 
 import java.util.List;

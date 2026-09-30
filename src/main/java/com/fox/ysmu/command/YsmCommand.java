@@ -10,6 +10,8 @@ import java.nio.file.Path;
 import java.util.*;
 
 import net.minecraft.command.*;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ChatComponentTranslation;
 
 import org.apache.commons.io.FileUtils;
@@ -51,10 +53,26 @@ public class YsmCommand extends CommandBase {
         checkModelFiles(sender, CUSTOM);
         ServerModelManager.reloadPacks();
 
-        ServerModelManager.sendRequestSyncModelMessage(sender.getEntityWorld().playerEntities);
+        // CUI-02: 广播给全服所有玩家，而不是只广播命令执行者所在维度的玩家。
+        // N-02（取舍：保留）：这是 /ysm reload 之后唯一的服务端权威重同步入口 —— 每个玩家恰好调用一次，
+        // 不存在"同一事件被触发两次"；17 与 legacy 两条通道如何选择（以及协议打开时旧实现会两条都发）
+        // 由 model/ServerModelManager.sendRequestSyncModelMessage（:119-124）决定，而它在 model/**，
+        // 不在本任务 inScope → 记为跨任务依赖（fix-network 的 N-02 服务端侧 gate）。
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server != null && server.getConfigurationManager() != null) {
+            for (EntityPlayerMP player : server.getConfigurationManager().playerEntityList) {
+                ServerModelManager.sendRequestSyncModelMessage(player);
+            }
+        } else {
+            ServerModelManager.sendRequestSyncModelMessage(sender.getEntityWorld().playerEntities);
+        }
 
         watch.stop();
-        sender.addChatMessage(new ChatComponentTranslation("message.yes_steve_model.model.reload.info", watch.getTime()));
+        // CU-02: 语言串只能是 %s（%.2f 会被 ChatComponentTranslation 当作非法格式串并抛异常），
+        // 且 %.2f 必须接收 double —— 传 long 会抛 IllegalFormatConversionException。
+        sender.addChatMessage(new ChatComponentTranslation(
+            "message.yes_steve_model.model.reload.info",
+            String.format(Locale.ROOT, "%.2f", (double) watch.getTime())));
     }
 
     private void checkModelFiles(ICommandSender sender, Path rootPath) {

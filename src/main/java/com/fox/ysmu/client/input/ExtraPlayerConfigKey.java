@@ -16,9 +16,18 @@ public class ExtraPlayerConfigKey {
 
     @SubscribeEvent
     public static void onKeyboardInput(InputEvent.KeyInputEvent event) {
+        // CU-04: 先消费 isPressed()（pressTime 是一次性信号），再判断界面与玩家状态。
+        boolean pressed = EXTRA_PLAYER_RENDER_KEY.isPressed();
+        if (!pressed) {
+            return;
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.currentScreen != null || mc.thePlayer == null) {
+            return;
+        }
         boolean isAltKeyDown = Keyboard.isKeyDown(Keyboard.KEY_LMENU) || Keyboard.isKeyDown(Keyboard.KEY_RMENU);
-        if (EXTRA_PLAYER_RENDER_KEY.isPressed() && isAltKeyDown) {
-            Minecraft.getMinecraft().displayGuiScreen(new ExtraPlayerConfigScreen());
+        if (isAltKeyDown) {
+            mc.displayGuiScreen(new ExtraPlayerConfigScreen());
         }
     }
 }

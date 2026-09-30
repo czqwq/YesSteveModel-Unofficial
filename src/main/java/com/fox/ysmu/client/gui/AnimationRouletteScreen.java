@@ -17,15 +17,22 @@ import org.lwjgl.input.Keyboard;
 import org.lwjgl.opengl.GL11;
 
 public class AnimationRouletteScreen extends GuiScreen {
+
+    /** 轮盘扇区数，必须与 ExtraAnimationKey.EXTRA_ANIMATION_KEYS 的长度一致。 */
+    private static final int KEY_COUNT = 8;
+
     private int x;
     private int y;
     private int selectId = -1;
     private String[] names;
+    /** CU-16: 按键提示文本只在 initGui 时构造一次，避免每帧重复建 ChatComponent 并格式化。 */
+    private String[] keyTexts = new String[KEY_COUNT];
 
     @Override
     public void initGui() {
         this.x = width / 2;
         this.y = height / 2 - 8;
+        this.buildKeyTexts();
 
         if (mc != null && mc.thePlayer != null) {
             ExtendedModelInfo eep = ExtendedModelInfo.get(mc.thePlayer);
@@ -35,6 +42,27 @@ public class AnimationRouletteScreen extends GuiScreen {
                     this.names = ClientModelManager.EXTRA_ANIMATION_NAME.get(ModelIdUtil.getMainId(modelId));
                 }
             }
+        }
+    }
+
+    private void buildKeyTexts() {
+        for (int i = 0; i < KEY_COUNT; i++) {
+            if (i >= ExtraAnimationKey.EXTRA_ANIMATION_KEYS.size()) {
+                this.keyTexts[i] = "";
+                continue;
+            }
+            ChatComponentText keyText = new ChatComponentText("[ ");
+            keyText.getChatStyle()
+                .setColor(EnumChatFormatting.YELLOW);
+            KeyBinding keyMapping = ExtraAnimationKey.EXTRA_ANIMATION_KEYS.get(i);
+            if (keyMapping.getKeyCode() == Keyboard.KEY_NONE) {
+                keyText.appendSibling(new ChatComponentTranslation("key.yes_steve_model.extra_animation.none"));
+            } else {
+                String keyName = Keyboard.getKeyName(keyMapping.getKeyCode());
+                keyText.appendSibling(new ChatComponentText(keyName));
+            }
+            keyText.appendSibling(new ChatComponentText(" ]"));
+            this.keyTexts[i] = keyText.getFormattedText();
         }
     }
 
@@ -50,7 +78,11 @@ public class AnimationRouletteScreen extends GuiScreen {
             mc.getSoundHandler().playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation("gui.button.press"), 1.0F));
             NetworkHandler.CHANNEL.sendToServer(new SetPlayAnimation(selectId));
             if (mc.thePlayer != null && Config.PRINT_ANIMATION_ROULETTE_MSG) {
-                mc.thePlayer.addChatMessage(new ChatComponentTranslation("message.yes_steve_model.model.animation_roulette.play", selectId));
+                // CU-01: 1.7.10 的 ChatComponentTranslation 只支持 %s/%<n>$s，%d 会在聊天栏渲染时抛
+                // ChatComponentTranslationFormatException（客户端崩溃），因此这里传字符串。
+                mc.thePlayer.addChatMessage(new ChatComponentTranslation(
+                    "message.yes_steve_model.model.animation_roulette.play",
+                    "extra" + selectId));
             }
             mc.displayGuiScreen(null);
         }
@@ -63,21 +95,13 @@ public class AnimationRouletteScreen extends GuiScreen {
     }
 
     private void drawRouletteText() {
-        int count = 8;
+        int count = KEY_COUNT;
         float startDeg = (float) (Math.PI / count);
         for (int i = 0; i < count; i++) {
             int r = 65;
 
-            ChatComponentText keyText = new ChatComponentText("[ ");
-            keyText.getChatStyle().setColor(EnumChatFormatting.YELLOW);
-            KeyBinding keyMapping = ExtraAnimationKey.EXTRA_ANIMATION_KEYS.get(i);
-            if (keyMapping.getKeyCode() == Keyboard.KEY_NONE) {
-                keyText.appendSibling(new ChatComponentTranslation("key.yes_steve_model.extra_animation.none"));
-            } else {
-                String keyName = Keyboard.getKeyName(keyMapping.getKeyCode());
-                keyText.appendSibling(new ChatComponentText(keyName));
-            }
-            keyText.appendSibling(new ChatComponentText(" ]"));
+            // CU-16: 按键文本在 initGui 已缓存，这里不再每帧构造 ChatComponent。
+            String keyText = i < this.keyTexts.length && this.keyTexts[i] != null ? this.keyTexts[i] : "";
             int textX = (int) (x + r * MathHelper.cos(startDeg));
             int textY = (int) (y + r * MathHelper.sin(startDeg) - (float) this.fontRendererObj.FONT_HEIGHT / 2);
             if (this.names != null && this.names.length > i && StringUtils.isNoneBlank(this.names[i])) {
@@ -85,7 +109,7 @@ public class AnimationRouletteScreen extends GuiScreen {
             } else {
                 this.drawCenteredString(fontRendererObj, String.valueOf(i), textX, textY - 8, 0xF3EFE0);
             }
-            this.drawCenteredString(fontRendererObj, keyText.getFormattedText(), textX, textY + 4, 0xF3EFE0);
+            this.drawCenteredString(fontRendererObj, keyText, textX, textY + 4, 0xF3EFE0);
 
             startDeg = (float) (startDeg + 2 * Math.PI / count);
         }
