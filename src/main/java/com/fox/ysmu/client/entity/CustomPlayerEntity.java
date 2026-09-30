@@ -169,6 +169,41 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     // IMolangPhysicsScope: lets the GeckoLib engine key its per-frame MoLang scope on this animatable.
 
+    /**
+     * The player whose roaming variables a GUI preview tile is drawing, or {@code null} for anything else.
+     * <p>
+     * This is deliberately not {@link #entity}: setting that field would make {@link #getPlayer()} non-null, and the
+     * preview predicates branch on exactly that to decide whether to play the tile's preview animation or the world
+     * state machine, so the preview would stop animating. The owner only exists so the tile reads the same
+     * {@code v.roaming.*} namespace the previewed model would read in the world; upstream has the same shape, where
+     * the animation processor is handed a roaming struct for the entity behind the preview.
+     */
+    @Nullable
+    private EntityPlayer previewOwner;
+
+    /** Sets (or with {@code null} clears) the owner of the preview currently being drawn. */
+    public void setPreviewOwner(@Nullable EntityPlayer previewOwner) {
+        this.previewOwner = previewOwner;
+    }
+
+    /**
+     * The roaming variables the tile should read. A world animatable is seeded from
+     * {@code RemoteAnimationVariables} by the engine itself, so only a detached preview answers here.
+     */
+    @Override
+    @Nullable
+    public java.util.Map<String, Double> getMolangVariables() {
+        EntityPlayer owner = this.previewOwner;
+        if (owner == null || this.entity != null) {
+            return null;
+        }
+        net.minecraft.util.ResourceLocation previewed = com.fox.ysmu.util.ModelIdUtil
+            .getModelIdFromMainId(getMainModel());
+        return com.fox.ysmu.client.roaming.ClientRoamingStore.valuesFor(
+            owner.getUniqueID(),
+            com.fox.ysmu.client.roaming.ClientRoamingKeys.keyFor(previewed));
+    }
+
     @Override
     @Nullable
     public EntityLivingBase getMolangEntity() {

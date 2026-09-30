@@ -57,7 +57,13 @@ public class ClientEventHandler {
 
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || !pendingModelLoad) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
+        // below, which only guards the one-shot model load. Cheap when nothing changed.
+        com.fox.ysmu.client.roaming.ClientRoamingSync.flushPending();
+        if (!pendingModelLoad) {
             return;
         }
         pendingModelLoad = false;
@@ -280,6 +286,8 @@ public class ClientEventHandler {
         RemotePlayerAnimationQueries.clear();
         RemotePlayerMotionStates.clear();
         RemoteAnimationVariables.clear();
+        // The roaming values belong to the server that just went away, and so do the pending reports for it.
+        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
         NPCData.clear();
         EntityClips.clear();
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。

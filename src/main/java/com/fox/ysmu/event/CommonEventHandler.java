@@ -21,6 +21,7 @@ import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.data.PlayerMotionState;
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.eep.ExtendedRoamingVariables;
 import com.fox.ysmu.eep.ExtendedStarModels;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.NetworkHandler;
@@ -173,6 +174,9 @@ public class CommonEventHandler {
         if (ExtendedStarModels.get(player) == null) {
             ExtendedStarModels.register(player);
         }
+        if (ExtendedRoamingVariables.get(player) == null) {
+            ExtendedRoamingVariables.register(player);
+        }
     }
 
     private static void syncTrackedPlayerMotionState(EntityPlayer trackingPlayer, EntityPlayer trackedPlayer) {
@@ -194,6 +198,12 @@ public class CommonEventHandler {
         ExtendedStarModels newStarProps = ExtendedStarModels.get(newPlayer);
         if (oldStarProps != null && newStarProps != null) {
             newStarProps.copyFrom(oldStarProps);
+        }
+
+        ExtendedRoamingVariables oldRoamingProps = ExtendedRoamingVariables.get(oldPlayer);
+        ExtendedRoamingVariables newRoamingProps = ExtendedRoamingVariables.get(newPlayer);
+        if (oldRoamingProps != null && newRoamingProps != null) {
+            newRoamingProps.copyFrom(oldRoamingProps);
         }
     }
 

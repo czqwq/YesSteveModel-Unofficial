@@ -105,6 +105,44 @@ mutates the shared animatable's entity/model/texture. `ClientEventHandler.onRend
 rendered with. The override lookup is now split into a pure `resolveOverride`/`requestedModel` pair,
 and only the render path applies it.
 
+## Fix: an animation kept frozen in `AnimationState.Transitioning`
+
+Symptom: in third person the player walked with animation but **sprinting was motionless**, while in first
+person both worked. The headless reproduction is
+`src/test/java/com/fox/ysmu/client/animation/engine/AnimationControllerTransitionTest.java`, which drives
+`AnimationController.process` directly: one process per frame leaves `Transitioning`, two processes at the
+same `seekTime` never do.
+
+YSMU draws the local player twice per frame and both paths reach the same `AnimationData`:
+
+    ClientEventHandler.onRender            (RenderPlayerEvent.Pre, world render)  partialTicks = frame tick
+    ClientEventHandler.renderSelfGuiPlayer (HUD "extra player", previewRenderDepth > 0) partialTicks = 1.0
+
+`AnimationController.process` polls `animationQueue` to pick the animation being transitioned to, and the
+queue holds exactly one entry. The world render drains it; the HUD render then reached the same
+`tick == 0` branch with an empty queue and assigned `null` over the animation that was mid-transition. On
+the next frame `setAnimation`'s loop guard reads that field - `loopType == LOOP && currentAnimation == null`
+- and answers `needsAnimationReload`, which re-runs the transition branch and resets the tick. The
+transition needs `transitionLengthTicks` (2 for the main controller) of a clock that is reset every frame,
+so it could never elapse: the controller stayed in `Transitioning` indefinitely, `query.anim_time` stayed 0,
+and the model rendered the transition's first frame forever.
+
+The 0 is visible in the pack's own scripting, which is what made it identifiable: 艾莲·乔's `run` computes
+`v.bv=math.cos((v.speed?6:4)*query.anim_time*360/(28/24))*5` and `v.by=...*200` from `query.anim_time`, so
+a frozen clock reads as the exact maxima `v.bv=5.0 v.by=200.0` for as long as the freeze lasts, and `run`'s
+guard-conditional channels (`(!v.hold?-32.5)+(v.hold?(v.speed?-33.51:-39.51))`) collapse to one constant.
+
+The engine fix is in `AnimationController.process`: only take an animation from `animationQueue` when there
+is one (`!animationQueue.isEmpty()`), so a second process at the same tick keeps the animation that is
+transitioning instead of clobbering it. Processing one controller twice at one tick is now idempotent,
+which is what a host with two render paths for one entity needs. A model that *should* stop still does:
+the separate `currentAnimation == null && animationQueue.size() == 0` check above sets `Stopped`, and
+`processCurrentAnimation` still stops the controller when the queue runs out.
+
+This is engine-side (`E:\IDEA\Geckolib`, `software.bernie.geckolib3.core.controller.AnimationController`),
+so it ships through the jar workflow: `gradlew assemble` there, then copy
+`build/libs/geckolib-5.09.52.417-dev.jar` over `libs/`.
+
 ## Interfaces and Dependencies
 
     libs/geckolib-5.09.52.417-dev.jar                        the shared engine (mod id `geckolib`)

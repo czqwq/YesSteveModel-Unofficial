@@ -634,6 +634,11 @@ public class ClientModelManager {
         // The preview animations belong to the models being dropped; keeping them would make the selection GUI ask the
         // next server's models for animations they never declared.
         com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
+        // The declared settings panels belong to the models being dropped as well, and for the same reason.
+        com.fox.ysmu.client.gui.ModelConfigRegistry.clear();
+        // Roaming namespaces are keyed by model content hash, so they belong to the dropped models too.
+        com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
+        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
         com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();

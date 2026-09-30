@@ -19,6 +19,7 @@ import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.data.EntityClips;
@@ -193,12 +194,53 @@ public final class AnimationManager {
             for (AnimationState state : states) {
                 if (state.getPredicate().test(player, event)) {
                     String animationName = state.getAnimationName();
+                    if (!definesAnimation(event, animationName)) {
+                        // The model does not define this state's animation. Handing it over anyway drives
+                        // AnimationController#setAnimation into its "Could not load animation: ... Is it missing?"
+                        // branch, which prints to stdout and leaves the controller with no fallback at all - so the
+                        // model keeps whatever it was showing. For a model without `run` that is exactly "walking
+                        // animates, sprinting does not". Fall through to the next matching state instead, which is
+                        // what predicateEntityLocomotion has always done (a70479ad) and what playIfPresent does for
+                        // the hold/swing controllers (D-A5).
+                        warnMissingState(animationName, event);
+                        continue;
+                    }
                     ILoopType loopType = state.getLoopType();
                     return playAnimation(event, animationName, loopType);
                 }
             }
         }
         return PlayState.STOP;
+    }
+
+    /** States already reported as missing, so a state evaluated every frame warns once per model. */
+    private static final java.util.Set<String> REPORTED_MISSING_STATES =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Whether the model defines an animation, answering {@code true} when its animation file is unknown.
+     * <p>
+     * Fail-open on purpose: {@link #hasAnimation} answers {@code false} for an unknown file, which is right where a
+     * caller can stop, but in the main state loop it would skip every state and freeze a model whose animations simply
+     * had not been registered yet.
+     */
+    private static boolean definesAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        AnimationFile file = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(getAnimationId(event));
+        return file == null || file.animations.containsKey(animationName);
+    }
+
+    private static void warnMissingState(String animationName, AnimationEvent<CustomPlayerEntity> event) {
+        String key = getAnimationId(event) + "|" + animationName;
+        if (!REPORTED_MISSING_STATES.add(key)) {
+            return;
+        }
+        ysmu.LOG.warn(
+            "Model {} does not define the '{}' state; the next matching state is used instead, so that state falls "
+                + "back rather than leaving the main controller without an animation",
+            getAnimationId(event),
+            animationName);
     }
 
     /**

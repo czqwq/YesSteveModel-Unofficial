@@ -138,8 +138,90 @@ class MolangParserCompatibilityTest {
     }
 
     @Test
-    void booleanLiteralsBehaveAsOneAndZero() throws Exception {
-        // AnimationRegister registers them in the client; the raw parser answering 0 for `true` is what made
+    void colonlessConditionalOperatorParses() throws Exception {
+        // YSM/Bedrock packs also write `cond?value` without a colon (meaning `cond ? value : 0`), and they nest it
+        // inside a full ternary. parseSymbols used to answer any expression that still contained a bare '?' after
+        // tryTernary with the constant 0, so every one of these channels silently became 0: 艾莲·乔's cover preview
+        // pinned the whole model at "-4+(!v.fm?50)" = -4 instead of sliding it to 46 for the first two seconds, and
+        // walk/run Root positions plus the tac/arm swing scales were wrong the same way.
+        MolangParser parser = new MolangParser();
+
+        // `!v.fm?50`: an unset variable is 0, so !0 == 1 and the value is taken.
+        assertEquals(50.0D, parser.parseExpression("!v.fm?50")
+            .get(), 0.0D);
+        assertEquals(46.0D, parser.parseExpression("-4+(!v.fm?50)")
+            .get(), 0.0D);
+        // Once the model's own initialiser (parallel1's timeline: `v.roaming.player_size=v.roaming.player_size
+        // ?v.roaming.player_size:1;`) has run, the same expression answers 0.
+        parser.parseExpression("v.fm=1")
+            .get();
+        assertEquals(0.0D, parser.parseExpression("!v.fm?50")
+            .get(), 0.0D);
+        assertEquals(-4.0D, parser.parseExpression("-4+(!v.fm?50)")
+            .get(), 0.0D);
+
+        // The colon-less form nested inside a real ternary, and the parenthesised chain from `walk`.
+        MolangParser second = new MolangParser();
+        second.parseExpression("v.hold=1")
+            .get();
+        second.parseExpression("v.speed=1")
+            .get();
+        assertEquals(-0.1D, second.parseExpression("v.hold?(v.speed?-0.1:-0.05)")
+            .get(), 0.0D);
+        second.parseExpression("v.hold=0")
+            .get();
+        assertEquals(0.0D, second.parseExpression("v.hold?(v.speed?-0.1:-0.05)")
+            .get(), 0.0D);
+        assertEquals(
+            0.2D,
+            second.parseExpression("(!v.leftbow&&!v.rightbow?(0.2))")
+                .get(),
+            0.0D);
+        // Comparison binding: `v.attack!=5?2` must be `(attack != 5) ? 2 : 0`.
+        assertEquals(2.0D, second.parseExpression("v.attack!=5?2")
+            .get(), 0.0D);
+
+        // A well-formed ternary is still claimed by tryTernary, not by the binary operator.
+        assertEquals(2.0D, second.parseExpression("1?2:3")
+            .get(), 0.0D);
+        assertEquals(3.0D, second.parseExpression("0?2:3")
+            .get(), 0.0D);
+    }
+
+    @Test
+    void bracePlaceholdersEvaluateToZeroInsteadOfKillingTheChannel() throws Exception {
+        // 艾莲·乔1.4.0 writes these in the position channels of its run and walk animations - 302 expressions in all -
+        // and nothing in that pack defines `data3`. '{' is an illegal character for the tokenizer, so before this the
+        // whole channel failed to parse and the animation lost the bones it drove: that model walked and ran without
+        // the motion those channels carry while all of its numeric channels played normally.
+        MolangParser parser = new MolangParser();
+        parser.parseExpression("v.hold=1")
+            .get();
+        parser.parseExpression("v.speed=1")
+            .get();
+        assertEquals(
+            0.24D,
+            parser.parseExpression("(!v.hold?0) + (v.hold?(v.speed?0.24:{data3}))")
+                .get(),
+            1.0E-9D);
+        // The placeholder is the neutral value, so the branch that uses it contributes nothing.
+        parser.parseExpression("v.speed=0")
+            .get();
+        assertEquals(
+            0.0D,
+            parser.parseExpression("(!v.hold?0) + (v.hold?(v.speed?0.24:{data3}))")
+                .get(),
+            1.0E-9D);
+        // Several placeholders in one expression still parse, each contributing the neutral value.
+        assertEquals(
+            1.0D,
+            parser.parseExpression("1+{data0}+{data1}+{data2}")
+                .get(),
+            1.0E-9D);
+    }
+
+    @Test
+    void booleanLiteralsBehaveAsOneAndZero() throws Exception {        // AnimationRegister registers them in the client; the raw parser answering 0 for `true` is what made
         // `v.north=true` assign 0.
         MolangParser parser = new MolangParser();
         parser.register(new LazyVariable("true", 1));

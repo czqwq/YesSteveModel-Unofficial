@@ -37,6 +37,12 @@ import java.util.stream.Collectors;
  * rules themselves live in {@link ModelBrowserState}.
  */
 public class PlayerModelScreen extends GuiScreen {
+    /**
+     * Id of the selected model's settings icon. Deliberately far from the grid ids, which start at 11 and grow with the
+     * page, so it can never collide with a tile.
+     */
+    private static final int MODEL_SETTINGS_BUTTON_ID = 50;
+
     private final ModelSelectionTarget target;
     /** Which folder is open and which page each folder is on; static state inside, like upstream. */
     private final ModelBrowserState browser = new ModelBrowserState();
@@ -159,6 +165,13 @@ public class PlayerModelScreen extends GuiScreen {
             this.buttonList.add(new FlatIconButton(5, x + 308, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
         }
         this.buttonList.add(new FlatIconButton(6, x + 397, y + 5, 18, 18, 16, 16).setTooltips("gui.yes_steve_model.config"));
+        // The selected model's own settings panel (the pack's 模型设置), offered only when the model declares one.
+        // The global options icon stays at (397, 5); this one sits below it and reuses the same settings glyph.
+        if (ModelConfigRegistry.hasSettings(this.target.getModelId())) {
+            this.buttonList.add(
+                new FlatIconButton(MODEL_SETTINGS_BUTTON_ID, x + 397, y + 27, 18, 18, 16, 16)
+                    .setTooltips("gui.yes_steve_model.model.config.title"));
+        }
         this.buttonList.add(new FlatIconButton(8, x + 377, y + 5, 18, 18, 80, 0).setTooltips("gui.yes_steve_model.open_model_folder.open"));
         this.buttonList.add(new FlatColorButton(9, x + 198, y + 215, 52, 14, I18n.format("gui.yes_steve_model.pre_page")));
         this.buttonList.add(new FlatColorButton(10, x + 308, y + 215, 52, 14, I18n.format("gui.yes_steve_model.next_page")));
@@ -265,6 +278,11 @@ public class PlayerModelScreen extends GuiScreen {
                 if (this.browser.page() < this.browser.maxPage()) {
                     this.browser.page(this.browser.page() + 1);
                     this.initGui();
+                }
+                break;
+            case MODEL_SETTINGS_BUTTON_ID:
+                if (this.target.getModelId() != null) {
+                    this.mc.displayGuiScreen(new ModelConfigScreen(this, this.target.getModelId()));
                 }
                 break;
             default:

@@ -32,9 +32,13 @@ public final class NetworkHandler {
      * packet 03 now carries the legacy model count. An old peer would decode those packets at the wrong offsets,
      * so the handshake has to reject the pair. Version 2 also introduces the new serverbound id 98
      * ({@code RevokeModelGuiGrant}, NF-01), which only exists in this build.</li>
+     * <li>3: the roaming-variable channel, serverbound id 99 ({@code C2SRoamingChanges}) and clientbound id 20
+     * ({@code S2CRoamingState}). Sending either to an older peer would hit FML's unknown-discriminator path, which
+     * disconnects rather than ignores, so the pair has to fail the handshake instead. See
+     * {@code .agent/phase15-roaming-variables.md}.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 2;
+    public static final int NETWORK_PROTOCOL = 3;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -65,6 +69,13 @@ public final class NetworkHandler {
      * The id is appended after 97; nothing existing is renumbered.
      */
     private static final int SERVERBOUND_REVOKE_MODEL_GUI_GRANT = 98;
+    /**
+     * The roaming-variable channel (see {@code .agent/phase15-roaming-variables.md}): client to server reports a
+     * settings change, server to client answers with the authoritative map. Appended after 98 and 19; nothing
+     * existing is renumbered.
+     */
+    private static final int SERVERBOUND_ROAMING_CHANGES = 99;
+    private static final int CLIENTBOUND_ROAMING_STATE = 20;
 
     private static final int CLIENTBOUND_SEND_MODEL_FILE = 1;
     private static final int CLIENTBOUND_REQUEST_SYNC_MODEL = 2;
@@ -147,6 +158,11 @@ public final class NetworkHandler {
             RevokeModelGuiGrant.class,
             SERVERBOUND_REVOKE_MODEL_GUI_GRANT,
             Side.SERVER);
+        CHANNEL.registerMessage(
+            C2SRoamingChanges.Handler.class,
+            C2SRoamingChanges.class,
+            SERVERBOUND_ROAMING_CHANGES,
+            Side.SERVER);
     }
 
     private static void registerClientboundMessages() {
@@ -211,6 +227,11 @@ public final class NetworkHandler {
             SendModelFileChunk.class,
             CLIENTBOUND_SEND_MODEL_FILE_CHUNK,
             Side.CLIENT);
+        CHANNEL.registerMessage(
+            S2CRoamingState.Handler.class,
+            S2CRoamingState.class,
+            CLIENTBOUND_ROAMING_STATE,
+            Side.CLIENT);
     }
 
     private static void initBukkit() {
@@ -246,6 +267,19 @@ public final class NetworkHandler {
     public static void broadcastNpcData(Entity entity, int entityId, ResourceLocation modelId,
         ResourceLocation textureId) {
         broadcastNpcData(new UpdateNpcDataMessage(entityId, modelId, textureId), entity);
+    }
+
+    /**
+     * Sends a message to every client that could see {@code entity}, the entity's own client included when it is a
+     * player. Used by the roaming channel so a settings change reaches exactly the clients that render that player.
+     */
+    public static void sendToTrackingPlayers(IMessage message, Entity entity, double range) {
+        if (message == null || entity == null || entity.worldObj == null) {
+            return;
+        }
+        CHANNEL.sendToAllAround(
+            message,
+            new NetworkRegistry.TargetPoint(entity.dimension, entity.posX, entity.posY, entity.posZ, range));
     }
 
     /** Server-side send entry: tells nearby clients to drop an entity's model override. */

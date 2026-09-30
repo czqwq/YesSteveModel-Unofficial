@@ -15,7 +15,9 @@ import net.minecraft.util.ResourceLocation;
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.gui.ModelConfigRegistry;
 import com.fox.ysmu.client.gui.ModelPreviewRegistry;
+import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
@@ -398,6 +400,17 @@ public final class OpenYsmModelSyncClient {
                         modelId,
                         raw.properties == null ? null : raw.properties.previewAnimation,
                         raw.properties != null && raw.properties.disablePreviewRotation);
+                    // The model's own settings panel (extra_animation_buttons[].config_forms, each form naming a
+                    // v.roaming.* variable) travels in the same payload. Remembering it here is what lets the
+                    // selection screen offer that panel; nothing else on the client reads it.
+                    ModelConfigRegistry.accept(
+                        modelId,
+                        raw.properties == null ? null : raw.properties.extraAnimationButtons,
+                        raw.properties == null ? null : raw.properties.extraAnimationClassifies);
+                    // The roaming-variable namespace of this model is derived from its content hash, which only this
+                    // payload carries; remember it so the settings panel and the preview address the same namespace
+                    // the server will use.
+                    ClientRoamingKeys.accept(modelId, raw.properties == null ? null : raw.properties.sha256);
                 });
             return true;
         } catch (Exception e) {

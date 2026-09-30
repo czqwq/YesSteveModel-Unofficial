@@ -414,6 +414,10 @@ public final class RenderUtil {
         // S-05:所有会改动玩家/GL 状态的步骤都放进 try,保证任何异常(包括光照与矩阵
         // 调用抛出的异常)都不会把玩家物品栏、旋转角度或 GL 矩阵栈留在被污染的状态。
         try {
+            // The tile draws a detached preview entity, which has no player of its own; naming the owner here is what
+            // lets the model read the same v.roaming.* values it would read in the world (see
+            // CustomPlayerEntity#getMolangVariables). Cleared in the finally below.
+            entity.setPreviewOwner(player);
             // 清空玩家物品以避免在模型上渲染
             player.inventory.mainInventory[player.inventory.currentItem] = null;
             BackhandCompat.setOffhandItem(player, null);
@@ -442,12 +446,15 @@ public final class RenderUtil {
                     ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
                 }
                 Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
+                diagnosePreviewPose(modelId, model);
                 renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
             });
         } finally {
             RenderHelper.disableStandardItemLighting();
             GL11.glPopMatrix();
             GL11.glDisable(GL11.GL_DEPTH_TEST);
+            // The preview entity is cached and reused for every tile, so the owner must not survive this frame.
+            entity.setPreviewOwner(null);
 
             // 恢复状态
             player.renderYawOffset = yBodyRot;
@@ -463,6 +470,69 @@ public final class RenderUtil {
             player.inventory.armorInventory[0] = itemStacks[3];
             player.inventory.mainInventory[player.inventory.currentItem] = itemStacks[4];
             BackhandCompat.setOffhandItem(player, itemStacks[5]);
+        }
+    }
+
+    /**
+     * TEMPORARY (see {@code .agent/phase15-roaming-variables.md}). Logs what a preview tile is about to draw: every
+     * top-level bone's scale and position, plus the bone named {@code Root} when the model has one, because those are
+     * the two things that can move a whole tile - a root bone scaled to 0 (the model collapses) and a root bone offset
+     * that flips between two authored positions (the model jumps out of the tile and back).
+     * <p>
+     * Throttled to one line a second so it can be left on while looking at a screen. Set to {@code false}, or delete
+     * this field with {@link #diagnosePreviewPose}, once the movement is identified.
+     */
+    private static final boolean DIAGNOSE_PREVIEW_POSE = true;
+
+    private static long lastPreviewPoseLogAt;
+
+    /** TEMPORARY, see {@link #DIAGNOSE_PREVIEW_POSE}. Never throws: a diagnostic must not fail a frame. */
+    private static void diagnosePreviewPose(ResourceLocation modelId, GeoModel model) {
+        if (!DIAGNOSE_PREVIEW_POSE) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastPreviewPoseLogAt < 1000L) {
+            return;
+        }
+        lastPreviewPoseLogAt = now;
+        try {
+            StringBuilder line = new StringBuilder();
+            for (software.bernie.geckolib3.geo.render.built.GeoBone root : model.topLevelBones) {
+                line.append(root.getName())
+                    .append("[s=")
+                    .append(root.getScaleX())
+                    .append('/')
+                    .append(root.getScaleY())
+                    .append('/')
+                    .append(root.getScaleZ())
+                    .append(" p=")
+                    .append(root.getPositionX())
+                    .append('/')
+                    .append(root.getPositionY())
+                    .append('/')
+                    .append(root.getPositionZ())
+                    .append("] ");
+            }
+            for (software.bernie.geckolib3.geo.render.built.GeoBone bone : model.topLevelBones) {
+                for (software.bernie.geckolib3.geo.render.built.GeoBone child : bone.childBones) {
+                    if ("Root".equals(child.getName())) {
+                        line.append("Root[s=")
+                            .append(child.getScaleX())
+                            .append(" p=")
+                            .append(child.getPositionX())
+                            .append('/')
+                            .append(child.getPositionY())
+                            .append('/')
+                            .append(child.getPositionZ())
+                            .append("] ");
+                    }
+                }
+            }
+            ysmu.LOG.info("preview pose model={} {}", modelId, line.toString()
+                .trim());
+        } catch (Throwable ignored) {
+            // Diagnostic only.
         }
     }
 
