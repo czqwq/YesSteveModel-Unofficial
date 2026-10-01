@@ -65,7 +65,16 @@ public class OuterFileTexture extends AbstractTexture {
         // a. getGlTextureId() 会在第一次调用时返回-1，TextureUtil会为其分配一个新的纹理ID
         // b. 这个方法处理了创建纹理、绑定、设置参数（如过滤）和上传像素数据的所有步骤
         boolean blur = false; // 是否使用模糊/线性过滤
-        boolean clamp = false; // 是否使用边缘拉伸
+        // clamp = true，即 GL_CLAMP / 边缘拉伸，这也是上游所依赖的平台默认：它的纹理经由 1.20 的 TextureManager
+        // 上传，采样器默认 CLAMP_TO_EDGE。
+        //
+        // 为什么必须 clamp：包用"把不想要的面的 uv_size 写 0"来表示"这面没有图案"，上游照样建面
+        // （GeoBuilder:186-193 只跳过 uv 数据缺失的面），而这类面的四个 uv 全部相同。法阵
+        // ysmGlowdamofazhen3 的 south 面就是 uv=(256,0)/uv_size=(0,0) → 归一化后四个顶点都是 u=1.0。
+        // 在 clamp 下 u=1.0 取的是该行最后一个纹素，实测 magic.png (255,0) 是全透明的 A0 → 这个面不可见，
+        // 正是上游的表现；在 REPEAT 下 u=1.0 绕回第 0 列，实测 (0,0) 是 A255 的不透明灰 (57,51,67) →
+        // 整片 60×60 被铺成一块不透明的灰色方片，盖住法阵并与它 z-fighting 出噪点。
+        boolean clamp = true; // 是否使用边缘拉伸
         TextureUtil.uploadTextureImageAllocate(this.getGlTextureId(), bufferedImage, blur, clamp);
     }
 

@@ -214,6 +214,23 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(getMainModel()));
     }
 
+    /**
+     * Whether this model has a vertex drawn translucently, which is the question upstream asks its baked model state
+     * before choosing a render type ({@code GeoModelState#hasTranslucentVertices}, {@code nativeState
+     * .getTranslucentVertexCount() != 0}, {@code geckolib3/geo/animated/GeoModelState.java:73-74}). A translucent
+     * model is drawn with upstream's {@code CustomTranslucentRenderType} - blending and back-face culling - and a
+     * flat decal depends on the culling, because the pack zeroes the uvs of the face it does not want and those faces
+     * are still built.
+     * <p>
+     * Upstream's count is native and cannot be read here, so the port answers with the same input its bake has: the
+     * texture that is about to be bound, sampled at the uvs of the faces the model actually draws (see
+     * {@code ClientModelManager#TRANSLUCENT_TEXTURES}). Defaults to {@code false}, the cutout branch every model had
+     * before this existed.
+     */
+    public boolean hasTranslucentVertices() {
+        return ClientModelManager.TRANSLUCENT_TEXTURES.contains(CustomPlayerModel.textureFor(this));
+    }
+
     /** The rendered entity, player or not. */
     public EntityLivingBase getEntity() {
         return entity;

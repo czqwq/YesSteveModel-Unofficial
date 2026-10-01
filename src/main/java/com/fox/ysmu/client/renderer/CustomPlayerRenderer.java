@@ -413,6 +413,18 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         return this.animatable != null && this.animatable.shouldRenderLayersFirst();
     }
 
+    /**
+     * The host answers the question upstream asks its baked model state before it chooses a render type:
+     * {@code GeoModelState#hasTranslucentVertices}, i.e. {@code nativeState.getTranslucentVertexCount() != 0}
+     * ({@code com/elfmcys/ysm/geckolib3/geo/animated/GeoModelState.java:73-74}), which the engine asks for through the
+     * hook of the same name. Upstream's count is native and unreadable here, so {@code CustomPlayerEntity} answers
+     * from the texture that is about to be bound - the same input upstream's bake works from.
+     */
+    @Override
+    public boolean hasTranslucentVertices(Object animatable) {
+        return this.animatable != null && this.animatable.hasTranslucentVertices();
+    }
+
     public CustomPlayerEntity getCustomPlayerEntity() {
         return this.animatable;
     }

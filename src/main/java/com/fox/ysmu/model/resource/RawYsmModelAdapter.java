@@ -373,6 +373,23 @@ public final class RawYsmModelAdapter {
         // The renderer orders its layer pass by this, and the packed payload is the only place the client can read it
         // from, so it travels with the other host-specific model properties.
         description.addProperty("ysm_render_layers_first", raw.properties.renderLayersFirst);
+        // The texture the model declares as its own default. Upstream resolves the texture that gets drawn inside
+        // the model that was loaded - the requested name, then this declared default, then the first entry
+        // (ModelManifestLookup:10-29) - and the packed payload is the only place the client can read it from, so it
+        // travels with the other host-specific properties, exactly like render_layers_first above. The client still
+        // validates it against the model's own texture list before binding it, the way upstream's containsTexture
+        // does, so the field's own "default" sentinel and a stale name fall through instead of binding nothing.
+        if (raw.properties.defaultTexture != null && !raw.properties.defaultTexture.isEmpty()) {
+            description.addProperty("ysm_default_texture", raw.properties.defaultTexture);
+        }
+        // Upstream's forceCulling, which it parses from the pack's "all_cutout"
+        // (format/parser/pojo/manifest/settings/ModelProperties.java:35-36 names the field forceCulling and gives it
+        // @SerializedName("all_cutout")) and feeds to its bake. The port parses and syncs that field already
+        // (YSMFolderDeserializer:174, YSMBinarySerializer:491 / YSMBinaryDeserializer:620) and carries it here under a
+        // ysm_ name like the other host-specific properties, so the client holds what upstream's client holds.
+        // Nothing consumes it yet: upstream's only consumer is the native bake, so that is recorded as a divergence
+        // rather than filled with an invented consumer.
+        description.addProperty("ysm_all_cutout", raw.properties.allCutout);
 
         JsonObject extraInfo = new JsonObject();
         extraInfo.addProperty("name", raw.metadata.name);

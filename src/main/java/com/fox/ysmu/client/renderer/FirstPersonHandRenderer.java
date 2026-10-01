@@ -312,9 +312,15 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void prepareCustomArmState() {
+        // Upstream draws this arm unconditionally with CustomTranslucentRenderType
+        // (client/renderer/CustomFirstPersonArmRenderer.java:39), i.e. blending and back-face culling. This path does
+        // not go through IGeoRenderer#render - it draws the bone directly - so the state its type would set is applied
+        // here, and culling is the half that matters: without it the zero-uv back faces of the model's flat decals
+        // are drawn as single-texel slabs over the art.
         GlStateManager.enableBlend();
         OpenGlHelper.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
-        GlStateManager.disableCull();
+        GlStateManager.disableAlpha();
+        GlStateManager.enableCull();
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }
 

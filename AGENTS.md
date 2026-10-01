@@ -20,6 +20,97 @@ The reference is `tmp/YesSteveModel-dev-1.20`. Read it before changing behaviour
 - **Never add state upstream does not keep** to work around a timing difference. If a value is not available yet, the upstream-shaped answers are to resolve it through the structure that owns it (upstream resolves a texture *name* inside the model that was loaded), or to carry it as an explicit override, or to wait. Tracking "what I have already done" in a side set and gating on it has already produced one shipped regression here: a texture id set that rejected the player's own Minecraft skin for the built-in `steve`/`alex` models, which upstream draws by handing the skin to the renderer as a render-event override.
 - **Do not copy an upstream bug.** Cite the behaviour, not the typo - for example upstream reads a render event's texture override *before* posting the event, so its own field never sees what its listener set; the port reads it after.
 
+### Known divergences from upstream
+
+Every place where this port answers a question differently from `tmp/YesSteveModel-dev-1.20`. Each is either resolved
+(say how) or waiting for the owner. Being listed here is not a licence to invent a third answer: pick upstream's
+shape, or record why 1.7.10 or the port's own architecture cannot.
+
+- **Molang variable names are case-insensitive.** Upstream canonicalises every identifier through
+  `MolangNames.identifier` (`api/molang/MolangNames.java:29-35`, `toLowerCase(Locale.ROOT)`). The port now does the
+  same in one rule, `MolangParser.canonicalVariableName`, used by the parser's own registry, by
+  `RemoteAnimationVariables.normalize` (the wire path) and by the physics scope's variable table. Before it, a pack's
+  `v.roaming.C` was stored as written and looked up lower-cased, so it read as 0 and every `v.roaming.C==0?...` took
+  its first branch: the pack's own settings toggles silently did nothing. Resolved - see
+  `.agent/phase18-glow-and-roaming-case.md`.
+- **Per-bone glow, transparency and colour.** Upstream keeps them in a 14-float-per-bone attribute array
+  (`geckolib3/model/AnimatedGeoBone.java:9-16`, packing at `:201-211`) and consumes it in its native renderer
+  (`natives/render/NativeModelState.java:57-66`). The port carries the same values with the same packing on
+  `GeoBone` and registers the same three names (`bone_color`, `bone_transparency`, `bone_glow`) in `MolangParser`,
+  but draws them with the fixed-function pipeline: a glow level >= 0 renders the bone unlit, because 1.7.10 has no
+  per-bone lightmap. The level stays on the bone so a brightness mapping can be added once it can be checked against
+  upstream instead of guessed. Port-specific by a 1.7.10 constraint.
+- **The client's texture ladder has no rung for the model's own declared default.** Upstream resolves the texture
+  inside the model that was loaded - requested name, then `settings.defaultTexture` (which
+  `RawModelAssembler:189-196` fills with the first texture when the pack declares none), then the first entry
+  (`format/schema/model/ModelManifestLookup.java:10-29`). The port parses and syncs that same field
+  (`YSMFolderDeserializer:170` and `:1031`, `RawYsmModel:210`, `YSMBinarySerializer:483` /
+  `YSMBinaryDeserializer:611`) but the client ladder put the global `Config.DEFAULT_MODEL_TEXTURE` in that rung
+  (`CustomPlayerModel.textureFor`), so it only differed for a pack that declares `default_texture`. Resolved: the
+  engine's `ModelProperties` gained a `defaultTexture` (`ysm_default_texture`), `RawYsmModelAdapter` injects it beside
+  `ysm_render_layers_first`, `ClientModelManager.DECLARED_DEFAULT_TEXTURES` carries it with the same hygiene as
+  `RENDER_LAYERS_FIRST`, and `CustomPlayerModel.resolveTexture` uses it between the selection and the constant,
+  validating it against the model's own texture list the way upstream's `containsTexture` does.
+  `Config.DEFAULT_MODEL_TEXTURE` keeps its exact role. `ResolveTextureLadderTest` guards it.
+- **Two sync channels can deliver the same folder model.** Upstream syncs one channel. The port has a legacy and an
+  OpenYSM channel, and for a folder model they serialise differently - the baked side re-emits the JSON pretty
+  printed with the pack's floats widened to doubles, which is 3.0 MB of geometry against 9.0 MB for
+  `wine_fox/05_magical`, with the six textures byte-identical. The duplicate check hashes those bytes, so it never
+  matched: every `wine_fox/*` model was registered six times per session against three for each `.ysm` pack, and each
+  re-registration parked the geometry, dropped the ready marker and the installed animations, and left the model
+  drawing the built-in default for about a second - the flicker. Resolved by giving each model one channel:
+  `SyncModelFiles` no longer offers a model the OpenYSM index carries, and only while
+  `Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL` is on, so built-in models and models `OpenYsmFormat` cannot produce a payload
+  for stay legacy-only. `CACHE_NAME_INFO` keeps its entry either way - it is also the registry that stops the legacy
+  folder scanner rescanning a directory the OpenYSM scanner already registered.
+- **Render state is chosen as a type before the draw, the way upstream chooses a `RenderType`.** Upstream has one
+  entry point, `IGeoRenderer#getRenderType(texture, visible, glowing, translucent)`
+  (`geckolib3/geo/IGeoRenderer.java:33-39`), returning `CustomTranslucentRenderType` - which wraps
+  `RenderType.entityTranslucent`, i.e. blending and culling - when the model has a translucent vertex, and
+  `RenderType.entityCutoutNoCull` (alpha test, no blending, no culling) when it does not, and it hands that type to
+  the draw as a parameter (`:18-26`). The port has the same shape: `YsmRenderType` is 1.7.10's stand-in for
+  `RenderType` (the platform has none), `IGeoRenderer#getRenderType` carries upstream's name, parameters, defaults and
+  both branches, and `render(model, animatable, type, ...)` applies the type instead of deciding. The port adds no
+  `getRenderType` override, because the engine's default body *is* upstream's rule. `hasTranslucentVertices` is
+  upstream's name from `GeoModelState:73-74`; upstream reads a native vertex count, and the port substitutes the
+  host's answer from the texture about to be bound - the same input upstream's bake gets - with that substitution
+  stated in the javadoc. The first-person arm does not go through `render`, so `FirstPersonHandRenderer` applies the
+  state upstream's arm renderer gets from `CustomTranslucentRenderType`; that is where the grey single-texel back
+  faces of `wine_fox/05_magical`'s flat decals were being drawn.
+  Two gaps are recorded rather than invented: 1.7.10 has no outline pass, so the glowing branch draws nothing
+  (`getRenderType` returns null); and the engine keeps its port-only 0.001 inflate on a zero-thickness cube, which
+  upstream does not have (`GeoBuilder.java:100-116`), because removing it would make a flat decal's two faces exactly
+  coplanar on the cutout-no-cull branch and z-fight. `all_cutout` is upstream's `forceCulling`
+  (`format/parser/pojo/manifest/settings/ModelProperties.java:35-36`); the port already parses and syncs it
+  (`RawYsmModel:214`, `YSMFolderDeserializer:174`, `YSMBinarySerializer:491` / `YSMBinaryDeserializer:620`) and now
+  carries it to the client as `ysm_all_cutout` into the engine's `ModelProperties.forceCulling`. **Nothing consumes
+  it**, because upstream's only consumer is its native bake - carried and recorded rather than given an invented
+  consumer, and it changes no behaviour while nothing reads it.
+  History worth keeping: an earlier attempt dropped the degenerate faces inside `GeoCube`, which acts on geometry
+  **every** model shares, and it broke models that had rendered correctly; it was reverted. Do not let a predicate of
+  that kind act on shared geometry, and do not add a method upstream does not have - the improvised
+  `shouldCullBackFaces` was deleted for exactly that reason.
+  Two mappings were settled by reading rather than guessing. Upstream's `RenderFirstPlayerBackground` is the
+  first-person **arm**'s background pass, not the HUD overlay; its counterpart here is `FirstPersonHandRenderer`,
+  which applies that pass's state. The HUD extra-player overlay (`ClientEventHandler#renderSelfGuiPlayer`) is
+  port-only - upstream has no equivalent - so it goes through `doRender` and takes the same per-model answer as the
+  world. And upstream's third geo renderer, `GeoProjectilesRenderer`, has no counterpart in this engine, so there is
+  no third place that has to ask for a type.
+- **Model textures are uploaded clamped, not repeated.** Upstream relies on the platform default: its textures go
+  through 1.20's `TextureManager`, whose sampler is `CLAMP_TO_EDGE`. The port's `OuterFileTexture` passed
+  `clamp = false`, i.e. `GL_REPEAT`. That matters because a pack marks the faces it does not want with a zero
+  `uv_size` - `wine_fox/05_magical`'s `ysmGlowdamofazhen3` declares `south` as `uv [256, 0], uv_size [0, 0]` - upstream
+  builds those faces anyway (`GeoBuilder:186-193` skips only a face whose uv data is missing), and all four of that
+  face's uvs normalize to `u = 1.0`. Clamped, that is the last texel of the row, which is transparent in every skin
+  of that pack, so the face is invisible; repeated, it wraps to the first texel, which is opaque grey in `magic.png`
+  and `water.png`, and the face becomes a 60×60 opaque slab over the model's art. Measured: `magic.png` is `A255
+  RGB(57,51,67)` at (0,0) and `A0` at (255,0). `OuterFileTextureWrapTest` pins both halves. Resolved - and note that
+  this fix lives in the port, so it needs the YSMU jar rebuilt, not just Geckolib.
+- **`EntityModelRenderApi.isModelLoaded` is a port-only query.** Upstream's host-facing surface is events
+  (`RenderModelEvent`, `RenderLayerEvent`, `RegisterRenderStateModifierEvent`, `RegisterModelLocatorEvent`) with no
+  readiness query at all. The port returns true for a parked model while the renderer is drawing the built-in
+  default. Open: an owner decision, recorded rather than resolved.
+
 ## Cross-Project Ownership
 
 GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:

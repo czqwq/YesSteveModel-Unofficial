@@ -83,19 +83,44 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         if (!ClientModelManager.isModelPublished(requested)) {
             return DEFAULT_TEXTURE;
         }
-        List<ResourceLocation> textures = ClientModelManager.MODELS.get(
-            ModelIdUtil.getModelIdFromMainId(requested));
-        ResourceLocation selected = customPlayer.getTexture();
-        if (textures != null && textures.contains(selected)) {
+        ResourceLocation modelId = ModelIdUtil.getModelIdFromMainId(requested);
+        return resolveTexture(
+            modelId,
+            ClientModelManager.MODELS.get(modelId),
+            customPlayer.getTexture(),
+            ClientModelManager.DECLARED_DEFAULT_TEXTURES.get(modelId));
+    }
+
+    /**
+     * The texture to bind, resolved the way upstream resolves it: inside the model that was loaded, so it can never
+     * name a texture that model does not have.
+     * <p>
+     * Upstream's ladder ({@code format/schema/model/ModelManifestLookup.java:10-29}) is the requested name, then the
+     * model's own declared {@code settings.defaultTexture} - which {@code RawModelAssembler:189-196} fills with the
+     * first declared texture when the pack declares none - and only then the first entry. Every rung is checked
+     * against this model's texture list, which is what upstream's {@code containsTexture} does, so a stale or
+     * misspelled declaration falls through rather than binding a texture the model does not have.
+     * <p>
+     * {@code Config.DEFAULT_MODEL_TEXTURE} stays as one more rung between the declared default and the first entry:
+     * it is also the initial per-player selection ({@code ExtendedModelInfo:31}), and a selection made for a model
+     * that has since been replaced has to land somewhere defined.
+     */
+    public static ResourceLocation resolveTexture(ResourceLocation modelId, @Nullable List<ResourceLocation> textures,
+        @Nullable ResourceLocation selected, @Nullable ResourceLocation declaredDefault) {
+        if (textures == null || textures.isEmpty()) {
+            return DEFAULT_TEXTURE;
+        }
+        if (selected != null && textures.contains(selected)) {
             return selected;
         }
-        ResourceLocation preferred = ModelIdUtil.getSubModelId(
-            ModelIdUtil.getModelIdFromMainId(requested),
-            Config.DEFAULT_MODEL_TEXTURE);
-        if (textures != null && textures.contains(preferred)) {
-            return preferred;
+        if (declaredDefault != null && textures.contains(declaredDefault)) {
+            return declaredDefault;
         }
-        return textures != null && !textures.isEmpty() ? textures.get(0) : DEFAULT_TEXTURE;
+        ResourceLocation configured = ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
+        if (textures.contains(configured)) {
+            return configured;
+        }
+        return textures.get(0);
     }
 
     @Override

@@ -476,7 +476,19 @@ public final class RenderUtil {
                     }
                     Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
                     diagnosePreviewPose(modelId, model);
-                    renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
+                    // The preview asks for a render type the way every upstream draw does - visible, not glowing, and
+                    // translucent when the model's art is - and hands it to the draw
+                    // (com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:18-39).
+                    renderer.render(
+                        model,
+                        entity,
+                        renderer.getRenderType(provider.getTextureLocation(entity), true, false,
+                            entity.hasTranslucentVertices()),
+                        0,
+                        1.0f,
+                        1.0f,
+                        1.0f,
+                        1.0f);
                 } finally {
                     pose.restore();
                 }

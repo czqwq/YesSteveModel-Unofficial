@@ -54,6 +54,7 @@ import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -68,7 +69,11 @@ import software.bernie.geckolib3.geo.raw.pojo.FormatVersion;
 import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
 import software.bernie.geckolib3.geo.raw.tree.RawGeometryTree;
 import software.bernie.geckolib3.geo.render.GeoBuilder;
+import software.bernie.geckolib3.geo.render.built.GeoBone;
+import software.bernie.geckolib3.geo.render.built.GeoCube;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
+import software.bernie.geckolib3.geo.render.built.GeoQuad;
+import software.bernie.geckolib3.geo.render.built.GeoVertex;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.util.json.JsonAnimationUtils;
 
@@ -84,6 +89,29 @@ public class ClientModelManager {
      * {@code client/}, so the setting silently did nothing.
      */
     public static Map<ResourceLocation, Boolean> RENDER_LAYERS_FIRST = Maps.newHashMap();
+    /**
+     * The texture each model declares as its own default, as the full sub-model id, carried in the packed payload
+     * under {@code ysm_default_texture} and read back through the geometry's properties.
+     * <p>
+     * Upstream's ladder for the texture that gets drawn is the requested name, then the model's own
+     * {@code settings.defaultTexture} - which {@code RawModelAssembler:189-196} fills with the first declared
+     * texture when the pack declares none - and only then the first entry
+     * ({@code format/schema/model/ModelManifestLookup.java:10-29}). The port parsed and synced that field but the
+     * client ladder put the global {@code Config.DEFAULT_MODEL_TEXTURE} in that rung, so a pack that declares a
+     * default was ignored. A value that is not one of the model's own textures is skipped when it is used, which is
+     * what upstream's {@code containsTexture} does.
+     */
+    public static Map<ResourceLocation, ResourceLocation> DECLARED_DEFAULT_TEXTURES = Maps.newHashMap();
+    /**
+     * Texture ids whose model art is drawn translucently, which is the port's storage for the question upstream asks
+     * before it picks a render type: whether the model has a translucent vertex
+     * ({@code GeoModelState#hasTranslucentVertices}, {@code com/elfmcys/ysm/geckolib3/geo/animated/GeoModelState.java
+     * :73-74}). A translucent model is drawn with upstream's {@code CustomTranslucentRenderType} - blending and
+     * culling - and a cutout one with {@code entityCutoutNoCull}
+     * ({@code geckolib3/geo/IGeoRenderer.java:33-39}). Filled at publish from the decoded image and the built
+     * geometry, and read by {@code CustomPlayerEntity#hasTranslucentVertices}.
+     */
+    public static Set<ResourceLocation> TRANSLUCENT_TEXTURES = Sets.newHashSet();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
@@ -301,6 +329,7 @@ public class ClientModelManager {
                 EXTRA_INFO.remove(id);
                 SCALE_INFO.remove(id);
                 RENDER_LAYERS_FIRST.remove(id);
+                DECLARED_DEFAULT_TEXTURES.remove(id);
             }
             if (data.getModel()
                 .isEmpty()) {
@@ -613,11 +642,105 @@ public class ClientModelManager {
             refuseGeometry(built.modelId);
             return;
         }
+        // Which of this model's textures upstream would draw as translucent, decided from the same input its bake uses
+        // (the texture's pixels). Assigned, not merely added, so a re-registration that changes the art corrects it.
+        indexTranslucentTextures(built);
         markGeometryReady(built.modelId);
         ysmu.LOG.info(
             "YSM client built model {} on demand: pending={}",
             built.modelId,
             PENDING_GEOMETRY.size());
+    }
+
+    /**
+     * Records, per texture of a just-published model, whether any face of it samples a non-opaque texel.
+     * <p>
+     * This is how the port answers the question upstream answers before it draws a model: "does it have a translucent
+     * vertex?" Upstream picks {@code entityTranslucent} - which culls back faces - when it does and
+     * {@code entityCutoutNoCull} when it does not ({@code com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:33-39},
+     * {@code GeoModelState:73-74}), and its bake learns that from the texture pixels
+     * ({@code BakedModelCache} receives a {@code TexturePixelsSupplier}). A flat decal is the case that needs it: the
+     * pack only gives art to one face, the others are built anyway with a zero uv span, and only culling keeps the
+     * coincident back face - a single stretched texel - from covering the decal.
+     * <p>
+     * Sampling the faces matters: these atlases are 58-65% transparent overall because that space is unused, and a
+     * whole-image test would mark every model translucent.
+     */
+    private static void indexTranslucentTextures(BuiltModel built) {
+        for (Map.Entry<String, BufferedImage> entry : built.textureImages.entrySet()) {
+            ResourceLocation textureId = ModelIdUtil.getSubModelId(built.modelId, entry.getKey());
+            if (samplesTranslucentTexel(entry.getValue(), built.geometry)) {
+                TRANSLUCENT_TEXTURES.add(textureId);
+            } else {
+                TRANSLUCENT_TEXTURES.remove(textureId);
+            }
+        }
+    }
+
+    /**
+     * Whether any quad of the built geometry samples a texel of {@code image} that is not fully opaque. Quads carry
+     * normalized uvs, so the texel is the image size times the coordinate; the scan stops at the first hit.
+     */
+    private static boolean samplesTranslucentTexel(BufferedImage image, List<BuiltGeo> geometry) {
+        if (image == null || geometry == null) {
+            return false;
+        }
+        for (BuiltGeo geo : geometry) {
+            if (geo != null && samplesTranslucentTexel(image, geo.model)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether any quad of {@code model} samples a texel of {@code image} that is not fully opaque. Package-visible so
+     * a test can drive exactly the rule the publish uses, in particular that an opaque texture never trips it.
+     */
+    static boolean samplesTranslucentTexel(BufferedImage image, GeoModel model) {
+        if (image == null || model == null) {
+            return false;
+        }
+        int width = image.getWidth();
+        int height = image.getHeight();
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+        for (GeoBone bone : model.topLevelBones) {
+            if (samplesTranslucentTexel(image, bone, width, height)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean samplesTranslucentTexel(BufferedImage image, GeoBone bone, int width, int height) {
+        for (GeoCube cube : bone.childCubes) {
+            if (cube.quads == null) {
+                continue;
+            }
+            for (GeoQuad quad : cube.quads) {
+                if (quad == null || quad.vertices == null) {
+                    continue;
+                }
+                for (GeoVertex vertex : quad.vertices) {
+                    int x = (int) (vertex.textureU * width);
+                    int y = (int) (vertex.textureV * height);
+                    if (x < 0 || y < 0 || x >= width || y >= height) {
+                        continue;
+                    }
+                    if ((image.getRGB(x, y) >>> 24) < 255) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for (GeoBone child : bone.childBones) {
+            if (samplesTranslucentTexel(image, child, width, height)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -941,6 +1064,13 @@ public class ClientModelManager {
         private final double heightScale;
         private final double widthScale;
         private final boolean renderLayersFirst;
+        /**
+         * The texture this model declares as its own default, as the full sub-model id, or {@code null} when it
+         * declares none. Carried in the same {@code ysm_} property block as {@link #renderLayersFirst}; see
+         * {@link #DECLARED_DEFAULT_TEXTURES} for why it exists.
+         */
+        @Nullable
+        private final ResourceLocation declaredDefaultTexture;
         @Nullable
         private final ExtraInfo extraInfo;
 
@@ -950,7 +1080,19 @@ public class ClientModelManager {
             this.heightScale = tree.properties.getHeightScale();
             this.widthScale = tree.properties.getWidthScale();
             this.renderLayersFirst = Boolean.TRUE.equals(tree.properties.getRenderLayersFirst());
+            this.declaredDefaultTexture = declaredDefaultTexture(id, tree.properties.getDefaultTexture());
             this.extraInfo = tree.properties.getExtraInfo();
+        }
+
+        /**
+         * The declared default as a bindable id, or {@code null} when the model declares none. The name is a
+         * texture key of this model, the same form {@link #indexTextures} turns into an id; whether it really is one
+         * of this model's textures is checked where it is used, which is what upstream's {@code containsTexture}
+         * does.
+         */
+        @Nullable
+        private static ResourceLocation declaredDefaultTexture(ResourceLocation id, @Nullable String name) {
+            return name == null || name.isEmpty() ? null : ModelIdUtil.getSubModelId(id, name);
         }
     }
 
@@ -1023,6 +1165,14 @@ public class ClientModelManager {
             .put(built.id, built.model);
         SCALE_INFO.put(built.id, Pair.of(built.heightScale, built.widthScale));
         RENDER_LAYERS_FIRST.put(built.id, built.renderLayersFirst);
+        // Self-healing: a payload that declares no default must not inherit the previous bytes' declaration, so the
+        // absence removes rather than merely skipping the put. The invalidation sites drop it too, for the ids this
+        // build does not publish.
+        if (built.declaredDefaultTexture == null) {
+            DECLARED_DEFAULT_TEXTURES.remove(built.id);
+        } else {
+            DECLARED_DEFAULT_TEXTURES.put(built.id, built.declaredDefaultTexture);
+        }
         EXTRA_INFO.put(built.id, handleExtraInfo(built.id, built.extraInfo));
         // The information screen wants the same block, keyed by the model rather than by its main/arm
         // sub-model. The richer author list (with avatars) arrives separately over the OpenYSM channel.
@@ -1506,6 +1656,8 @@ public class ClientModelManager {
         synchronized (GEOMETRY_STATE_LOCK) {
             SCALE_INFO.clear();
             RENDER_LAYERS_FIRST.clear();
+        DECLARED_DEFAULT_TEXTURES.clear();
+        TRANSLUCENT_TEXTURES.clear();
             EXTRA_INFO.clear();
             EXTRA_ANIMATION_NAME.clear();
             PENDING_ANIMATIONS.clear();
