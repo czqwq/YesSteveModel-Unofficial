@@ -19,6 +19,7 @@ import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.condition.ConditionArmor;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Controller;
@@ -32,7 +33,6 @@ import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class OpenYsmPlayerControllerRuntime {
 
@@ -49,6 +49,10 @@ public final class OpenYsmPlayerControllerRuntime {
         if (player == null) {
             return null;
         }
+        // Install this model's animations before reading the controller table, for the same reason the animation
+        // lookups do: getAnimation() answers with the built-in default while the model's own animations are parked,
+        // so reading the registry first would apply the *default's* controller definitions to this model.
+        ClientModelManager.ensureAnimations(animatable.getMainModel());
         ResourceLocation animationId = animatable.getAnimation();
         ControllerSet set = OpenYsmAnimationControllerRegistry.get(animationId);
         if (set == null) {
@@ -224,7 +228,9 @@ public final class OpenYsmPlayerControllerRuntime {
     }
 
     private static boolean animationExists(ResourceLocation animationId, String animationName) {
-        AnimationFile file = GeckoLibCache.getInstance().getAnimations().get(animationId);
+        // Installs the model's animations on first use; going straight to the cache would report a controller's
+        // animation as missing for a model that simply has not been drawn yet.
+        AnimationFile file = ClientModelManager.animationFileFor(animationId);
         if (file == null || !file.animations.containsKey(animationName)) {
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "missing-animation:" + animationId + ":" + animationName,

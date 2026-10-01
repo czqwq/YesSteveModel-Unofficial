@@ -13,6 +13,7 @@ import net.minecraftforge.common.MinecraftForge;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
@@ -34,6 +35,18 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
 
     private GeoModel geoModel;
     private final Set<ResourceLocation> warnedMissingModels = ConcurrentHashMap.newKeySet();
+
+    /**
+     * The texture the current render must use instead of the model's own, set from the render event; see
+     * {@code SpecialPlayerRenderEvent#getTextureLocationOverride}.
+     * <p>
+     * Mirrors upstream's {@code CustomPlayerRenderer#textureOverride}: it is the one place a texture outside the
+     * model's own list is allowed to reach the engine, and it exists because the built-in {@code steve}/{@code alex}
+     * models draw the player's actual Minecraft skin. Reset on every render, so a listener that sets it for one frame
+     * cannot leak it into the next.
+     */
+    @Nullable
+    private ResourceLocation textureOverride;
 
     /**
      * Non-zero while a preview render (model GUI, model information screen or the HUD overlay) is in progress.
@@ -106,17 +119,30 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             warnMissingModel(requested, entityObj);
             return false;
         }
-        if (MinecraftForge.EVENT_BUS.post(
-            new SpecialPlayerRenderEvent(
-                entityObj,
-                this.animatable,
-                ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel())))) {
+        SpecialPlayerRenderEvent renderEvent = new SpecialPlayerRenderEvent(
+            entityObj,
+            this.animatable,
+            ModelIdUtil.getModelIdFromMainId(this.animatable.getMainModel()));
+        if (MinecraftForge.EVENT_BUS.post(renderEvent)) {
             // The render event was cancelled, so another listener owns this entity's frame.
             return true;
         }
-        GeoModel geoModel = GeckoLibCache.getInstance()
-            .getGeoModels()
-            .get(location);
+        // Read after the event has been posted, so the listeners have had their say: upstream reads it before, which
+        // is why its renderer field never sees what its own vanilla-skin listener sets.
+        this.textureOverride = renderEvent.getTextureLocationOverride();
+        GeoModel geoModel;
+        if (ClientModelManager.ensureGeometry(location)) {
+            geoModel = GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(location);
+        } else {
+            // Synced, but its geometry is still being built on the loader thread. Draw the built-in default for the
+            // few frames that takes: reporting a model that is on its way as missing would drop this entity to its
+            // vanilla renderer and it would never come back.
+            geoModel = GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(CustomPlayerModel.DEFAULT_MAIN_MODEL);
+        }
         if (geoModel == null) {
             warnMissingModel(location, entityObj);
             return false;
@@ -170,6 +196,12 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * {@link CustomPlayerEntity#getMainModel()} substitutes for a missing one. Asking about the substituted
      * location would always answer {@code true} on a client that has the default model and so would never
      * reveal that the entity's own model is absent.
+     * <p>
+     * A parked model counts as available here on purpose: this is the gate that keeps the entity on the YSM renderer,
+     * and the path behind it is also what asks for the build. Answering false would hand the entity to its vanilla
+     * renderer and, because nothing else asks for that build, it would stay parked for the session.
+     * {@link #isPublishedFor} is the narrower question, for callers that want to know whether the real model can be
+     * drawn right now.
      */
     public boolean hasModelFor(EntityLivingBase entityObj) {
         // Pure query: must not touch the shared animatable, or asking whether an entity can be drawn would
@@ -260,6 +292,22 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * {@code NPCData} rejects nulls, and a half-filled EEP can still exist (the client's own selection
      * packet maps an empty texture string to {@code null}), so both are validated here as well.
      */
+    /**
+     * The texture for this render: the event's override when a listener supplied one, otherwise whatever the model
+     * provider resolves.
+     * <p>
+     * The engine asks the renderer for this on every bind ({@code GeoReplacedEntityRenderer#getEntityTexture}), which
+     * is exactly the seam upstream uses for its own {@code textureOverride}. Keeping the override here rather than on
+     * the animatable is what tells a texture that is deliberately outside the model (the player's own skin for
+     * {@code steve}/{@code alex}, a companion mod's own) apart from a pack texture that simply has not been uploaded -
+     * the renderer is the only place that knows the difference.
+     */
+    @Override
+    public ResourceLocation getTextureLocation(Object instance) {
+        ResourceLocation override = this.textureOverride;
+        return override != null ? override : super.getTextureLocation(instance);
+    }
+
     private static boolean isComplete(@Nullable EntityModelData override) {
         return override != null && override.getModelId() != null && override.getTextureId() != null;
     }
@@ -269,9 +317,10 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     }
 
     private static boolean isModelAvailable(ResourceLocation main) {
-        return main != null && GeckoLibCache.getInstance()
-            .getGeoModels()
-            .containsKey(main);
+        // A model whose geometry is parked but not yet built still counts as available: it will be drawn, with the
+        // built-in default standing in for it for the few frames the build takes. Reporting it as missing here would
+        // instead make the entity fall back to its own vanilla renderer and never come back.
+        return main != null && ClientModelManager.isModelAvailable(main);
     }
 
     private void warnMissingModel(ResourceLocation location, EntityLivingBase entityObj) {

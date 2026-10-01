@@ -24,6 +24,8 @@ public class AnimationRouletteScreen extends GuiScreen {
     private int x;
     private int y;
     private int selectId = -1;
+    /** The model whose extra-animation labels this wheel shows; see {@link #resolveNames}. */
+    private ResourceLocation modelId;
     private String[] names;
     /** CU-16: 按键提示文本只在 initGui 时构造一次，避免每帧重复建 ChatComponent 并格式化。 */
     private String[] keyTexts = new String[KEY_COUNT];
@@ -38,10 +40,32 @@ public class AnimationRouletteScreen extends GuiScreen {
             ExtendedModelInfo eep = ExtendedModelInfo.get(mc.thePlayer);
             if (eep != null) {
                 ResourceLocation modelId = eep.getModelId();
-                if (ClientModelManager.EXTRA_ANIMATION_NAME.containsKey(ModelIdUtil.getMainId(modelId))) {
-                    this.names = ClientModelManager.EXTRA_ANIMATION_NAME.get(ModelIdUtil.getMainId(modelId));
-                }
+                // Ask for the model's geometry. This only *queues* the build - the table the labels come from is
+                // filled when the build is published on a later tick - which is why the labels are re-resolved while
+                // the screen is open rather than captured once here; see resolveNames.
+                ClientModelManager.ensureGeometry(modelId);
+                this.modelId = modelId;
+                resolveNames();
             }
+        }
+    }
+
+    /**
+     * Re-reads the model's extra-animation labels, which arrive asynchronously.
+     * <p>
+     * The table is written when the model is published, and this screen can be opened before that has happened - the
+     * first open after a join is exactly that case. Upstream has no such gap: the labels are part of the model's
+     * manifest, which its catalog holds before the model is ever drawn. The port keeps them in the geometry payload
+     * and parses that payload on demand, so the equivalent is to ask again once the payload has landed, which is what
+     * the tooltip and the information screen already do by re-reading per frame.
+     */
+    private void resolveNames() {
+        if (this.modelId == null) {
+            return;
+        }
+        String[] resolved = ClientModelManager.EXTRA_ANIMATION_NAME.get(ModelIdUtil.getMainId(this.modelId));
+        if (resolved != null) {
+            this.names = resolved;
         }
     }
 
@@ -68,6 +92,9 @@ public class AnimationRouletteScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int pMouseX, int pMouseY, float pPartialTick) {
+        // The labels arrive with the model's publish, which can happen while this screen is open; asking again here
+        // costs one map lookup and means a wheel opened during the build fills in rather than staying bare.
+        resolveNames();
         drawRoulette(pMouseX, pMouseY);
         drawRouletteText();
     }

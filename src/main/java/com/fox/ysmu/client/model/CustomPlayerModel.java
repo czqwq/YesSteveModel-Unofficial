@@ -12,11 +12,14 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.Config;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.IAnimatable;
+import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
@@ -54,13 +57,45 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     @Override
 
     public ResourceLocation getTextureLocation(Object object) {
-        if (object instanceof CustomPlayerEntity customPlayer) {
-            // N-1: the engine passes this result straight to TextureManager.bindTexture, so a null must
-            // never escape. getTexture() already falls back, this is the model-provider-side guarantee.
-            ResourceLocation texture = customPlayer.getTexture();
-            return texture == null ? DEFAULT_TEXTURE : texture;
+        return object instanceof CustomPlayerEntity customPlayer ? textureFor(customPlayer) : DEFAULT_TEXTURE;
+    }
+
+    /**
+     * The texture to bind for an entity, resolved the way upstream resolves it: through the model's own texture list.
+     * <p>
+     * Upstream's render target owns its texture id, so the selection is looked up inside the model that was loaded and
+     * can never name a texture that model does not have. YSMU receives the selection as an id from the server instead,
+     * so the same guarantee has to be re-established here: an id that is not one of this model's textures is not
+     * bindable, and the model's own default stands in for it - upstream's {@code playerResources()
+     * .defaultTextureName()}. That covers a selection left over from a pack that renamed its files, and a mismatched
+     * pair, without inventing a rule upstream does not have.
+     * <p>
+     * While the model is not published the renderer is drawing the built-in default (see {@link #getModel}), so the
+     * default's texture is the one that belongs with it.
+     * <p>
+     * A texture deliberately outside the model - the player's own Minecraft skin for the built-in {@code steve} /
+     * {@code alex} models, or one a companion mod supplies - never travels through here: it is carried by
+     * {@code SpecialPlayerRenderEvent#getTextureLocationOverride} and preferred by the renderer and the arm, which is
+     * the seam upstream uses for exactly that case.
+     */
+    public static ResourceLocation textureFor(CustomPlayerEntity customPlayer) {
+        ResourceLocation requested = customPlayer.getRequestedMainModel();
+        if (!ClientModelManager.isModelPublished(requested)) {
+            return DEFAULT_TEXTURE;
         }
-        return DEFAULT_TEXTURE;
+        List<ResourceLocation> textures = ClientModelManager.MODELS.get(
+            ModelIdUtil.getModelIdFromMainId(requested));
+        ResourceLocation selected = customPlayer.getTexture();
+        if (textures != null && textures.contains(selected)) {
+            return selected;
+        }
+        ResourceLocation preferred = ModelIdUtil.getSubModelId(
+            ModelIdUtil.getModelIdFromMainId(requested),
+            Config.DEFAULT_MODEL_TEXTURE);
+        if (textures != null && textures.contains(preferred)) {
+            return preferred;
+        }
+        return textures != null && !textures.isEmpty() ? textures.get(0) : DEFAULT_TEXTURE;
     }
 
     @Override
@@ -70,6 +105,52 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             return customPlayer.getAnimation();
         }
         return DEFAULT_MAIN_ANIMATION;
+    }
+
+    /**
+     * Installs a model's animations the first time anything asks for one of them.
+     * <p>
+     * Animations are the largest part of a synced payload and nothing needs them in order to list the models, so the
+     * client parks them at registration and this is the single choke point every play path already goes through -
+     * the engine looks an animation up by name both when one is requested and again on every frame for the one
+     * already playing. After the first call this is one lookup in a map that only holds the models not yet drawn.
+     */
+    @Override
+    public Animation getAnimation(String name, IAnimatable animatable) {
+        if (animatable instanceof CustomPlayerEntity customPlayer) {
+            // Keyed on the model, not on getAnimation(): that one answers with the built-in default until this
+            // model's own animations exist, so asking it first would install the wrong model's payload.
+            ClientModelManager.ensureAnimations(customPlayer.getMainModel());
+        }
+        return super.getAnimation(name, animatable);
+    }
+
+    /**
+     * Draws the model that has been asked for, or the built-in default until it has been built.
+     * <p>
+     * Geometry is built on demand rather than at registration, so the first frame a model is wanted it is usually
+     * still being parsed. Returning the default for those frames is what makes the change invisible to the player -
+     * something is drawn immediately and the real model replaces it on the frame the build is published - and it is
+     * the same thing the engine would do if the model were genuinely absent, minus the warning.
+     * <p>
+     * This is also where the build is requested, which is deliberate: every path that draws a model comes through
+     * here, including the GUI tiles, so no caller can forget to ask for it.
+     */
+    @Override
+    public GeoModel getModel(ResourceLocation location) {
+        // The cache test is not redundant with ensureGeometry: a model can be "not pending" without being drawable -
+        // quarantined after a failed build, or registered through a low-level entry point that does not mark it -
+        // and AnimatedGeoModel.getModel throws when the location is absent, on a path the GUI does not guard. The
+        // quarantine is tested explicitly because the engine's cache can still hold geometry for such a model from an
+        // earlier connection, and that geometry is not what this connection asked for.
+        if (ClientModelManager.isGeometryFailed(location)
+            || !ClientModelManager.ensureGeometry(location)
+            || GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(location) == null) {
+            return super.getModel(DEFAULT_MAIN_MODEL);
+        }
+        return super.getModel(location);
     }
 
     @Override

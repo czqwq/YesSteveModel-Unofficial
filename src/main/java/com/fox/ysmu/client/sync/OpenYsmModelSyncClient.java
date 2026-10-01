@@ -386,8 +386,16 @@ public final class OpenYsmModelSyncClient {
             ResourceLocation modelId = new ResourceLocation(ysmu.MODID, context.modelId);
             List<RawYsmModel.RawMetadata.Author> authors = raw.metadata == null
                 ? Collections.emptyList() : new ArrayList<>(raw.metadata.authors);
+            long generation = ClientModelManager.currentGeneration();
             Minecraft.getMinecraft()
                 .func_152344_a(() -> {
+                    // This payload was parsed off the client thread, which takes long enough to outlive a disconnect
+                    // and the join that follows. Registering after that would put the previous server's model into the
+                    // new server's catalogue, where a build requested from it carries the new generation and passes
+                    // every guard, so the generation it was parsed on is checked first.
+                    if (generation != ClientModelManager.currentGeneration()) {
+                        return;
+                    }
                     ClientModelManager.registerAll(data);
                     ClientModelMetadataRegistry.acceptStructuredAuthors(modelId, authors);
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's

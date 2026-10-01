@@ -5,6 +5,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.Iterator;
 
+import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
@@ -26,10 +27,30 @@ public class OuterFileTexture extends AbstractTexture {
      */
     private static final int MAX_DIMENSION = 4096;
 
+    /** The payload to decode here, for a texture that could not be decoded earlier; see {@link #decode}. */
+    @Nullable
     private final byte[] data;
+    /** A payload already decoded, which only has to be uploaded here. */
+    @Nullable
+    private final BufferedImage image;
 
     public OuterFileTexture(byte[] data) {
         this.data = data;
+        this.image = null;
+    }
+
+    /**
+     * A texture whose image was decoded earlier, on the loader thread.
+     * <p>
+     * This is the port's half of upstream's split: upstream decodes a texture on a worker
+     * ({@code PreparedTextureSet.prepare}) and only the GPU upload is asserted onto the render thread
+     * ({@code HostTexturePublisher.publish}, which asserts the render thread). Everything below {@code loadTexture} is
+     * CPU work - reading the header, checking the limits, decoding - and only the last call touches GL, so decoding
+     * where the payload is already being parsed keeps a tick from paying for every texture of the models it installs.
+     */
+    public OuterFileTexture(BufferedImage image) {
+        this.data = null;
+        this.image = image;
     }
 
     @Override
@@ -37,8 +58,8 @@ public class OuterFileTexture extends AbstractTexture {
         // 1. 在上传新纹理前，先删除旧的OpenGL纹理ID（如果存在）
         this.deleteGlTexture();
 
-        // 2. 只读图片头部就先做体积/尺寸预检，避免直接解码超大图（PNG 解压炸弹）
-        BufferedImage bufferedImage = readImageWithinLimits();
+        // 2. 上传。图已经解好的话就只做这一步；只有在这一步之前没解成功（或者走的是同步的 eager 路径）才在这里解码。
+        BufferedImage bufferedImage = this.image != null ? this.image : decode(this.data);
 
         // 3. 使用 1.7.10 的 TextureUtil 将 BufferedImage 上传到GPU
         // a. getGlTextureId() 会在第一次调用时返回-1，TextureUtil会为其分配一个新的纹理ID
@@ -49,25 +70,27 @@ public class OuterFileTexture extends AbstractTexture {
     }
 
     /**
-     * 预检并解码贴图。违规时抛 {@link IOException}：
+     * 预检并解码贴图。纯 CPU，没有 GL 调用，所以可以在 loader 线程上做（见 {@link #OuterFileTexture(BufferedImage)}）。
+     * <p>
+     * 违规时抛 {@link IOException}：
      * {@code TextureManager.loadTexture} 会捕获它、记录 "Failed to load texture" 并改用全局 missing
      * texture，因此表现为可见的缺失贴图，而不是 OOM / 客户端崩溃——调用方
      * {@code ClientModelManager.registerTexture} 只捕获 {@code Exception}，而 {@code OutOfMemoryError}
      * 是 {@code Error}，捕获不到。
      */
-    private BufferedImage readImageWithinLimits() throws IOException {
-        if (this.data == null || this.data.length == 0) {
+    public static BufferedImage decode(@Nullable byte[] data) throws IOException {
+        if (data == null || data.length == 0) {
             throw new IOException("empty YSM texture data");
         }
-        if (this.data.length > MAX_DATA_BYTES) {
+        if (data.length > MAX_DATA_BYTES) {
             ysmu.LOG.warn(
                 "YSM texture rejected: {} bytes exceeds the {} byte limit",
-                this.data.length,
+                data.length,
                 MAX_DATA_BYTES);
-            throw new IOException("YSM texture data too large (" + this.data.length + " bytes)");
+            throw new IOException("YSM texture data too large (" + data.length + " bytes)");
         }
 
-        try (ImageInputStream imageInput = ImageIO.createImageInputStream(new ByteArrayInputStream(this.data))) {
+        try (ImageInputStream imageInput = ImageIO.createImageInputStream(new ByteArrayInputStream(data))) {
             if (imageInput == null) {
                 throw new IOException("cannot create an image input stream for YSM texture data");
             }
@@ -76,7 +99,7 @@ public class OuterFileTexture extends AbstractTexture {
             if (!readers.hasNext()) {
                 ysmu.LOG.warn(
                     "YSM texture rejected: no image reader accepts the {} byte payload",
-                    this.data.length);
+                    data.length);
                 throw new IOException("no image reader for YSM texture data");
             }
 
@@ -95,11 +118,11 @@ public class OuterFileTexture extends AbstractTexture {
                     throw new IOException("YSM texture is too large (" + width + "x" + height + ")");
                 }
 
-                BufferedImage image = reader.read(0);
-                if (image == null) {
+                BufferedImage decoded = reader.read(0);
+                if (decoded == null) {
                     throw new IOException("image reader returned no image for YSM texture data");
                 }
-                return image;
+                return decoded;
             } finally {
                 reader.dispose();
             }

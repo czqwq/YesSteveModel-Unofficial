@@ -191,9 +191,19 @@ public class RequestLoadModel implements IMessage {
             byte[] fileBytes = FileUtils.readFileToByteArray(modelFile);
             ModelData data = EncryptTools.decryptModel(UuidUtils.asBytes(passwordUuid), password, fileBytes);
             if (data != null) {
-                // Resource registration always returns to the client thread.
+                // Resource registration always returns to the client thread. The generation this work started on
+                // travels with it: reading and decrypting a cache file takes long enough to outlive a disconnect and
+                // the join that follows, and registering after that would put the previous server's model into the
+                // new server's catalogue, where a build requested from it carries the new generation and therefore
+                // passes every guard.
+                long generation = ClientModelManager.currentGeneration();
                 Minecraft.getMinecraft()
-                    .func_152344_a(() -> ClientModelManager.registerAll(data));
+                    .func_152344_a(() -> {
+                        if (generation != ClientModelManager.currentGeneration()) {
+                            return;
+                        }
+                        ClientModelManager.registerAll(data);
+                    });
             } else {
                 ysmu.LOG.warn("Failed to decrypt YSM model cache file {}", fileName);
             }

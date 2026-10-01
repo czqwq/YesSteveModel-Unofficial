@@ -50,6 +50,9 @@ public class ClientEventHandler {
 
     @SubscribeEvent
     public static void onTextureStitchEventPost(TextureStitchEvent.Post event) {
+        // Record the client thread as early as the client offers a client-only entry point, so the model manager's
+        // off-thread install guard is meaningful from the moment anything can ask it for animations.
+        ClientModelManager.markClientThread();
         if (event.map.getTextureType() == 0) {
             pendingModelLoad = true;
         }
@@ -63,6 +66,13 @@ public class ClientEventHandler {
         // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
         // below, which only guards the one-shot model load. Cheap when nothing changed.
         com.fox.ysmu.client.roaming.ClientRoamingSync.flushPending();
+        // Record this as the client thread, so the model manager can refuse to install animations from anywhere else
+        // (a host mod may query clips from the server thread).
+        ClientModelManager.markClientThread();
+        // Install at most a few models that finished building on the loader thread. This is the publish half of
+        // on-demand model loading: the parse happens off this thread and only the cache write and the texture upload
+        // happen here, a few per tick, so a catalog of models fills in without ever blocking a frame.
+        ClientModelManager.tick();
         if (!pendingModelLoad) {
             return;
         }
@@ -103,8 +113,11 @@ public class ClientEventHandler {
         if (isVanillaPlayer(event.getModelId()) && event.getEntity() instanceof AbstractClientPlayer clientPlayer) {
             animatable.setEntity(clientPlayer);
             animatable.setMainModel(ModelIdUtil.getMainId(event.getModelId()));
-            ResourceLocation location = clientPlayer.getLocationSkin();
-            animatable.setTexture(location);
+            // The built-in steve/alex models draw the player's own Minecraft skin, which is not one of the pack's
+            // textures. Upstream hands such a texture to the renderer as an override rather than as the model's
+            // texture (see VanillaPlayerRenderEvent), which is what keeps it distinguishable from a pack texture that
+            // has simply not been uploaded.
+            event.setTextureLocationOverride(clientPlayer.getLocationSkin());
         }
     }
 

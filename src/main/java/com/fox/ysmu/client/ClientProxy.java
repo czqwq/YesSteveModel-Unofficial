@@ -25,6 +25,9 @@ public class ClientProxy extends CommonProxy {
     @Override
     public void init(FMLInitializationEvent event) {
         super.init(event);
+        // The earliest client-only entry point: record the client thread here so the model manager's off-thread
+        // install guard is meaningful from mod init, not only from the first resource reload or tick.
+        ClientModelManager.markClientThread();
         AnimationRegister.registerAnimationState();
         AnimationRegister.registerVariables();
         CUSTOM_PLAYER_RENDERER = new CustomPlayerRenderer();

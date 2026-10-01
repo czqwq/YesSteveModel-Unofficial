@@ -145,9 +145,12 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public ResourceLocation getMainModel() {
-        if (GeckoLibCache.getInstance()
-            .getGeoModels()
-            .containsKey(this.mainModel)) {
+        // The engine's cache alone is not enough to answer this: it outlives a connection, so a model the previous
+        // server had by this name is still in it. Asking whether *this connection* installed the model is what keeps
+        // the answer agreeing with the predicates the renderer uses - if it disagreed, the renderer would substitute
+        // the built-in default while this method still handed out the foreign id, and the engine would resolve that
+        // id to the previous server's geometry.
+        if (ClientModelManager.isModelPublished(this.mainModel)) {
             return mainModel;
         }
         return CustomPlayerModel.DEFAULT_MAIN_MODEL;
@@ -155,6 +158,17 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     public void setMainModel(ResourceLocation mainModel) {
         this.mainModel = mainModel;
+    }
+
+    /**
+     * The model this entity was asked for, before any substitution.
+     * <p>
+     * {@link #getMainModel()} deliberately answers with the built-in default while the requested model is not in the
+     * engine's cache, which is right for everything that draws and wrong for anything that has to know *which* model
+     * it is talking about - for example deciding whether that model's textures have been uploaded yet.
+     */
+    public ResourceLocation getRequestedMainModel() {
+        return this.mainModel;
     }
 
     public ResourceLocation getAnimation() {
@@ -167,8 +181,12 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public float getHeightScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        // getMainModel(), not the raw field: while this model is still being built the renderer draws the built-in
+        // default in its place, so the scale must be read for the model that is actually being drawn. The raw field
+        // would only ever answer with the fallback below, which happens to match today and would silently stop
+        // matching the moment the built-in default's scale changes.
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .left()
                 .floatValue();
         }
@@ -176,8 +194,8 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public float getWidthScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .right()
                 .floatValue();
         }
@@ -193,7 +211,7 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
      * order every model had before the flag was honoured.
      */
     public boolean shouldRenderLayersFirst() {
-        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(this.mainModel));
+        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(getMainModel()));
     }
 
     /** The rendered entity, player or not. */

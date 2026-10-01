@@ -8,6 +8,18 @@ The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` a
 
 The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
 
+## Upstream Fidelity
+
+**When upstream already implements a feature, implement it the way upstream does. Do not home-grow a mechanism for something upstream has already solved.**
+
+The reference is `tmp/YesSteveModel-dev-1.20`. Read it before changing behaviour, and cite the upstream file and line in the commit, the ExecPlan entry, or the code comment that the change rests on. A change whose only justification is "it seemed reasonable" is not finished.
+
+- **Find the upstream mechanism first.** For a behaviour change, locate what upstream does for the same problem - it is usually one class and a handful of lines - and port that shape, including the fallback it picks when the data is missing.
+- **Do not invent where upstream has nothing.** If upstream has no equivalent (for example YSMU's host-facing `EntityModelRenderApi`, which upstream does not have), do not invent a new predicate or a new semantic. Record the difference as a finding and let the owner arbitrate; a locally invented mechanism is a defect even when it works.
+- **A port-specific addition needs a port-specific reason** - a 1.7.10 constraint, or the port's own architecture (one shared renderer for the world, the HUD overlay and the GUI). Say which, and keep the addition as small as possible.
+- **Never add state upstream does not keep** to work around a timing difference. If a value is not available yet, the upstream-shaped answers are to resolve it through the structure that owns it (upstream resolves a texture *name* inside the model that was loaded), or to carry it as an explicit override, or to wait. Tracking "what I have already done" in a side set and gating on it has already produced one shipped regression here: a texture id set that rejected the player's own Minecraft skin for the built-in `steve`/`alex` models, which upstream draws by handing the skin to the renderer as a render-event override.
+- **Do not copy an upstream bug.** Cite the behaviour, not the typo - for example upstream reads a render event's texture override *before* posting the event, so its own field never sees what its listener set; the port reads it after.
+
 ## Cross-Project Ownership
 
 GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:
