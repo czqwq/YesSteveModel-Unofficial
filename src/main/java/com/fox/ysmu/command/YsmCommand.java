@@ -21,6 +21,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.time.StopWatch;
 
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.S2CPlaySound;
 
 public class YsmCommand extends CommandBase {
 
@@ -31,7 +33,7 @@ public class YsmCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/ysm reload";
+        return "/ysm <reload|playsound [name]>";
     }
 
     @Override
@@ -41,10 +43,30 @@ public class YsmCommand extends CommandBase {
 
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
-        if (args.length != 1 || !"reload".equalsIgnoreCase(args[0])) {
-            throw new WrongUsageException(getCommandUsage(sender));
+        if (args.length == 1 && "reload".equalsIgnoreCase(args[0])) {
+            processReload(sender);
+            return;
         }
-        processReload(sender);
+        if (args.length >= 1 && "playsound".equalsIgnoreCase(args[0]) && args.length <= 2) {
+            processPlaySound(sender, args.length == 2 ? args[1] : "");
+            return;
+        }
+        throw new WrongUsageException(getCommandUsage(sender));
+    }
+
+    /**
+     * {@code /ysm playsound [name]} - forwards to the issuer's own client.
+     * <p>
+     * The sound library lives entirely on the client: model sound bytes are only ever decoded there, and playback
+     * goes through this client's {@code SoundSystem}. A dedicated server has no {@code Minecraft} instance at all,
+     * so running the request here would list nothing and play nothing. The server's job is the permission check
+     * ({@link #getRequiredPermissionLevel}) and the forward; the client does the rest, including the reply.
+     * <p>
+     * No name lists what that client has; a name plays it.
+     */
+    private void processPlaySound(ICommandSender sender, String soundName) {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        NetworkHandler.CHANNEL.sendTo(new S2CPlaySound(soundName), player);
     }
 
     private void processReload(ICommandSender sender) {

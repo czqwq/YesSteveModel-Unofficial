@@ -23,6 +23,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
@@ -326,10 +327,31 @@ public final class AnimationManager {
      * had not been registered yet.
      */
     private static boolean definesAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
-        AnimationFile file = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(getAnimationId(event));
+        AnimationFile file = ensureAnimationFile(event);
         return file == null || file.animations.containsKey(animationName);
+    }
+
+    /**
+     * The animation file for this event, installing the model's animations first if they are still parked.
+     * <p>
+     * A model's animations are installed on first use rather than at registration, and both of the lookups below
+     * *decide* whether anything will ever ask the engine for an animation: {@link #hasAnimation} gates the non-player
+     * locomotion states, so a model whose animations were never installed would answer "no" to every state, select
+     * nothing, and never reach the engine lookup that would have installed them. Asking here closes that loop.
+     */
+    @Nullable
+    private static AnimationFile ensureAnimationFile(AnimationEvent<CustomPlayerEntity> event) {
+        CustomPlayerEntity animatable = event.getAnimatable();
+        // Keyed on the model: getAnimation() answers with the built-in default until this model's own animations
+        // exist, so resolving the animation id first would install the wrong model's payload.
+        ClientModelManager.ensureAnimations(animatable.getMainModel());
+        return ClientModelManager.animationFileFor(getAnimationId(event));
+    }
+
+    /** Whether the model backing this animation event actually defines the named animation. */
+    private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        AnimationFile file = ensureAnimationFile(event);
+        return file != null && file.animations.containsKey(animationName);
     }
 
     private static void warnMissingState(String animationName, AnimationEvent<CustomPlayerEntity> event) {
@@ -366,8 +388,8 @@ public final class AnimationManager {
         // A-05 / A-06③: a non-player animatable never reaches AnimationRegister#setParserValue (it takes an
         // EntityPlayer), so this is where the per-frame MoLang context - current entity plus per-axis movement -
         // is published. The player branch publishes the same context in setParserValue, which runs before any
-        // controller is evaluated.
-        MolangFrameContext.begin(entity);
+        // controller is evaluated. The model id travels with it so ysm.play_sound resolves against the right pack.
+        MolangFrameContext.begin(entity, event.getAnimatable() == null ? null : event.getAnimatable().getMainModel());
         // The pack's own scripts resolve fn.<name> against the frame's model; a non-player animatable never reaches
         // AnimationRegister#setParserValue, so this is its publish point.
         PackUserFunctions.begin(event.getAnimatable() == null ? null : event.getAnimatable().getMainModel());
@@ -401,14 +423,6 @@ public final class AnimationManager {
             }
         }
         return hasAnimation(event, "idle") ? playLoopAnimation(event, "idle") : PlayState.STOP;
-    }
-
-    /** Whether the model backing this animation event actually defines the named animation. */
-    private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
-        AnimationFile file = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(getAnimationId(event));
-        return file != null && file.animations.containsKey(animationName);
     }
 
     public PlayState predicateOffhandHold(AnimationEvent<CustomPlayerEntity> event) {
@@ -582,12 +596,10 @@ public final class AnimationManager {
             return playLoopAnimation(event, conditionalAnimation);
         }
 
-        ResourceLocation animation = getAnimationId(event);
+        AnimationFile animationFile = ensureAnimationFile(event);
         String slotName = ConditionArmor.getSlotNameFromIndex(slotIndex);
         String defaultName = slotName + ":default";
-        if (GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animation).animations.containsKey(defaultName)) {
+        if (animationFile != null && animationFile.animations.containsKey(defaultName)) {
             return playAnimation(event, defaultName, ILoopType.EDefaultLoopTypes.LOOP);
         }
         return PlayState.STOP;

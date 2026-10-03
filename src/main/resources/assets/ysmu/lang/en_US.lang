@@ -333,3 +333,21 @@ molang.yes_steve_model.ysm.elytra_rot_z.desc=Returns the entity's elytra z rotat
 molang.yes_steve_model.ysm.food_level.desc=Returns the player's hunger value.
 molang.yes_steve_model.ysm.first_person_mod_hide.desc=Return 1.0 if the First Person Mod is installed and player's head needs to be hidden, else it returns 0.0
 gui.yes_steve_model.empty_models=No models available
+# High-version local assets (LocalAssetProvider): one-time notes when the configured high-version
+# game directory cannot be read. {nl} is a line break.
+message.yes_steve_model.asset.invalid_game_path=High-version game path is invalid: %s
+message.yes_steve_model.asset.not_a_directory=High-version game path is not a valid directory: %s
+message.yes_steve_model.asset.asset_version_missing=HighVersionAssetVersion not set{nl}Available indexes: %s
+message.yes_steve_model.asset.index_not_found=Asset index not found (HighVersionAssetVersion may be wrong){nl}Available indexes: %s
+message.yes_steve_model.asset.index_parse_failed=Failed to parse asset index: %s
+message.yes_steve_model.asset.sounds_json_missing=Asset index is missing sounds.json (may not be an official high-version game directory)
+message.yes_steve_model.asset.sounds_obj_missing=sounds.json object file not found
+message.yes_steve_model.asset.sounds_parse_failed=Failed to parse sounds.json (may not be an official high-version game directory)
+message.yes_steve_model.asset.init_exception=High-version asset initialization error: %s
+message.yes_steve_model.asset.jar_not_found=Version jar not found (HighVersionJarVersion may be wrong; high-version particle textures will fall back)
+message.yes_steve_model.asset.jar_open_failed=Failed to open version jar: %s
+message.yes_steve_model.asset.fallback_no_jar=HighVersionJarVersion not set; falling back to 1.7.10 built-in particles
+message.yes_steve_model.asset.fallback_jar_not_open=Version jar not opened (HighVersionJarVersion='%s' may be wrong); falling back to 1.7.10 built-in particles
+message.yes_steve_model.asset.available_versions=Available versions: %s
+message.yes_steve_model.asset.load_failed=High-version asset loading failed (see log)
+message.yes_steve_model.asset.config_hint=(ysmu.cfg high-version asset config)

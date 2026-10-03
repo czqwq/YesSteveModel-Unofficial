@@ -1,0 +1,968 @@
+package com.fox.ysmu.client.audio;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.audio.PositionedSoundRecord;
+import net.minecraft.client.audio.SoundHandler;
+import net.minecraft.client.audio.SoundManager;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.ResourceLocation;
+
+import com.fox.ysmu.Config;
+import com.fox.ysmu.compat.LocalAssetProvider;
+import com.fox.ysmu.compat.SoundNamespaceCompat;
+import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.ysmu;
+
+/**
+ * YSM 模型自定义音效管理器。
+ * 通过反射直接操作 paulscode SoundSystem 播放缓存的 OGG 文件，
+ * 支持音源追踪和自动清理。
+ */
+public final class YSMSoundManager {
+
+    private static final Path SOUND_CACHE = ServerModelManager.CACHE.resolve("sounds");
+    /** 模型自定义音效注册表：modelKey::name → 主模型 id（按需解密的来源）。 */
+    private static final Map<String, ResourceLocation> SOUND_SOURCES = new ConcurrentHashMap<>();
+    /** 已按需解密的模型音效字节：modelKey::name → OGG bytes（内存驻留，不落盘明文）。 */
+    private static final Map<String, byte[]> SOUND_FILES = new ConcurrentHashMap<>();
+    /**
+     * 播放归属 → (soundName → SoundSystem source name)。
+     *
+     * <p>**为什么必须按归属分层**：控制器名和音效名都会在不同玩家之间重名 —— 每个玩家都有
+     * {@code cap_controller}、{@code main_controller}，两个玩家用同一个模型时音效名也相同。
+     * 原先 {@code ACTIVE_SOURCES} 只按 soundName 索引、{@code CONTROLLER_SOUNDS} 只按
+     * controllerName 索引，于是：A 的关键帧音效被 B 的同名播放"替换"掉（playSound 先停同名再播，
+     * 停的其实是 A 的源），B 的控制器停止又会把 A 正在播的音效一起停掉。归属键由
+     * {@link #ownerKey} 给出（模型持有者的 UUID；预览/无主调用用本地槽位），
+     * 使"每个演员各自持有自己的控制器-音效映射"成立。</p>
+     */
+    private static final Map<String, Map<String, String>> ACTIVE_SOURCES = new ConcurrentHashMap<>();
+    /** 播放归属 → (GeckoLib controller name → 该控制器最近触发的音效名)。 */
+    private static final Map<String, Map<String, String>> CONTROLLER_SOUNDS = new ConcurrentHashMap<>();
+    /** 无主/预览槽位：GUI 预览实体没有 player，刻意保持"本地一个槽位"的既有行为。 */
+    static final String LOCAL_OWNER = "local";
+    private static final java.util.concurrent.atomic.AtomicInteger sourceCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+    /** Lazily cached SoundSystem reflection handle */
+    private static Object sndSystem = null;
+    private static boolean sndSystemSearched = false;
+    /** Reflection handles for SoundHandler's SoundManager and SoundManager's
+     *  SoundSystem field, cached once so resolveSndSystem() can re-read the value
+     *  cheaply (vanilla swaps the SoundSystem instance on every resource reload). */
+    private static java.lang.reflect.Field sndManagerField = null;
+    private static java.lang.reflect.Field sndSystemField = null;
+    /** Lazily cached setPosition reflection handle (per-tick position updates). */
+    private static java.lang.reflect.Method sndSetPosition = null;
+    /**
+     * 防抖：同一 controller+sound 在短时间内的重复触发将被忽略。
+     * 当动画子条件变化（如站立→奔跑导致 sword_attack_01 切换到 sword_attack_run1）
+     * 时，GeckoLib 的 resetEventKeyFrames() 会清除已执行的关键帧记录，
+     * 导致声音关键帧在动画重设后再次触发。此防抖防止同一声音在短时间内重复播放。
+     */
+    private static final Map<String, Long> SOUND_KEYFRAME_LAST_TIME = new ConcurrentHashMap<>();
+    private static final long SOUND_KEYFRAME_COOLDOWN_MS = 100L;
+
+    /**
+     * When true, onSoundKeyframe / playSound will skip actual playback.
+     * Set by RenderUtil before rendering GUI previews (ModelButton, TextureButton)
+     * to prevent GeckoLib animation keyframes from playing sounds during off-screen
+     * model preview rendering.
+     */
+    private static boolean previewRendering = false;
+
+    public static void setPreviewRendering(boolean value) {
+        previewRendering = value;
+    }
+
+    private YSMSoundManager() {}
+
+    // ── Public API ────────────────────────────────────────
+
+    public static void registerModelSounds(ResourceLocation modelId, RawYsmModel raw) {
+        if (raw.soundFiles == null || raw.soundFiles.isEmpty()) return;
+        String modelKey = modelId.toString(); // modelId 为 main id
+        for (Map.Entry<String, RawYsmModel.RawDataFile> e : raw.soundFiles.entrySet()) {
+            String name = e.getKey();
+            RawYsmModel.RawDataFile sf = e.getValue();
+            if (sf == null || sf.data == null || sf.data.length == 0) continue;
+            // 不再写明文 .ogg 到磁盘（防私有模型音效泄漏）：只记录「音效名 → 主模型」，
+            // 首次播放时从加密客户端缓存按需解密（getSoundBytes → loadRawModelFromCache），
+            // 之后字节驻留内存。磁盘上只保留加密缓存。
+            SOUND_SOURCES.put(modelKey + "::" + name, modelId);
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND] registered '{}'::'{}' (lazy, {} bytes)", modelKey, name, sf.data.length);
+            }
+        }
+    }
+
+    /**
+     * 播放模型音效。如果同名音效已在播放，先停止旧的再播新的。
+     * 会先停止所有活跃的 YSM 音源（防止音源泛滥）。
+     */
+    /** 检查 soundId 是否已在 1.7.10 的 SoundHandler 中注册。 */
+    private static boolean soundExistsInHandler(String soundId) {
+        if (soundId == null) return false;
+        try {
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc == null) return false;
+            SoundHandler handler = mc.getSoundHandler();
+            // Find SoundManager field by type (works with MCP names and obfuscated names)
+            java.lang.reflect.Field sndMgrFd = null;
+            for (java.lang.reflect.Field f : SoundHandler.class.getDeclaredFields()) {
+                if (SoundManager.class.isAssignableFrom(f.getType())) {
+                    sndMgrFd = f;
+                    break;
+                }
+            }
+            if (sndMgrFd == null) return false;
+            sndMgrFd.setAccessible(true);
+            Object sndMgr = sndMgrFd.get(handler);
+            // The registry field must be found by its generic type, not by name:
+            // mods are reobfuscated, so the literal "soundRegistry" does not exist
+            // at runtime (SRG renames it) and the old name lookup always threw —
+            // the catch then returned true, which pushed EVERY sound name into the
+            // vanilla handler and made it log "Unable to play unknown
+            // soundEvent" for high-version names that 1.7.10 does not have.
+            java.lang.reflect.Field regFd = null;
+            for (java.lang.reflect.Field f : sndMgr.getClass().getDeclaredFields()) {
+                if (!java.util.Map.class.isAssignableFrom(f.getType())) continue;
+                java.lang.reflect.Type generic = f.getGenericType();
+                if (generic instanceof java.lang.reflect.ParameterizedType) {
+                    java.lang.reflect.Type[] args =
+                        ((java.lang.reflect.ParameterizedType) generic).getActualTypeArguments();
+                    if (args.length == 2 && args[0] == String.class
+                        && args[1].getTypeName().contains("SoundList")) {
+                        regFd = f;
+                        break;
+                    }
+                }
+            }
+            if (regFd == null) return false;
+            regFd.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, ?> reg = (java.util.Map<String, ?>) regFd.get(sndMgr);
+            return reg != null && reg.containsKey(soundId);
+        } catch (Exception e) {
+            // Unreadable registry: do not claim the sound exists — pushing an
+            // unknown name at the vanilla handler only produces a WARN.
+            return false;
+        }
+    }
+
+    /**
+     * 播放音效（带模型上下文）。查找顺序：
+     * 1. 模型自定义音效（SOUND_FILES，按 modelId::name 查找）
+     * 2. 1.7.10 SoundHandler（仅在音效已注册时调用，避免内部 WARN）
+     * 3. 命名空间翻译后的 SoundHandler
+     * 4. LocalAssetProvider（高版本游戏本地资产）
+     * 5. 全部失败 → 输出一条最终 WARN
+     */
+    public static void playSound(EntityPlayer player, String soundName, ResourceLocation modelId, float volume, float pitch) {
+        // 直接播放（命令 / ysm.play_sound / 调试）里"触发者"就是传入的玩家。
+        playSound(ownerKey(player), player, soundName, modelId, volume, pitch);
+    }
+
+    /** 播放归属键：模型持有者（触发者）的 UUID；null → 本地槽位（GUI 预览等无主场景）。 */
+    public static String ownerKey(EntityPlayer owner) {
+        return owner == null ? LOCAL_OWNER : owner.getUniqueID()
+            .toString();
+    }
+
+    /**
+     * 带归属的播放：{@code owner} 是"谁触发了这条音效"（决定归属槽位、供
+     * {@link #stopController}/{@link #stopSound} 定位），{@code hearer} 只是听者
+     * （1.7.10 下模型音效一律在本地玩家身上播放，见 {@link #updateSourcePositions} 的说明）。
+     */
+    static void playSound(String owner, EntityPlayer hearer, String soundName, ResourceLocation modelId, float volume,
+        float pitch) {
+        if (soundName == null || soundName.isEmpty()) return;
+
+        if (Config.DEBUG_SOUND) {
+            ysmu.LOG.info("[YSMU-SOUND] playSound: '{}' vol={} pitch={} model={} owner={}",
+                soundName, volume, pitch, modelId, owner);
+        }
+
+        // Step 1 — 模型自定义音效（按 modelId::name 隔离，避免跨模型同名冲突；
+        // 首次播放时从加密客户端缓存按需解密）
+        String modelKey = modelId != null ? modelId.toString() : null;
+        byte[] sound = null;
+        if (modelKey != null) {
+            sound = getSoundBytes(modelKey + "::" + soundName);
+            if (sound == null) {
+                for (Map.Entry<String, ResourceLocation> e : SOUND_SOURCES.entrySet()) {
+                    String key = e.getKey();
+                    // Only match sounds belonging to this model
+                    if (key.startsWith(modelKey + "::")) {
+                        String snd = namePartOf(key);
+                        if (snd.equals(soundName) || snd.equalsIgnoreCase(soundName)) {
+                            sound = getSoundBytes(key);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Legacy path (no modelId, e.g. debug command)
+            sound = getSoundBytes(soundName);
+            if (sound == null) {
+                for (String key : SOUND_SOURCES.keySet()) {
+                    String snd = namePartOf(key);
+                    if (snd.equals(soundName) || snd.equalsIgnoreCase(soundName)) {
+                        sound = getSoundBytes(key);
+                        break;
+                    }
+                }
+            }
+        }
+        if (sound != null) {
+            stopSound(owner, soundName);
+            playOggDirect(owner, sound, soundName, volume, pitch);
+            return;
+        }
+
+        // Step 2~4 — 命名空间音效（SoundHandler + LocalAssetProvider）
+        if (!soundName.contains(":")) return;
+
+        Minecraft mc = Minecraft.getMinecraft();
+        SoundHandler handler = mc.getSoundHandler();
+        boolean foundAny = false;
+
+        // Step 2 — 原始音效名（如 minecraft:entity.arrow.shoot，1.7.10 原生）
+        if (soundExistsInHandler(soundName)) {
+            handler.playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation(soundName), volume));
+            foundAny = true;
+        }
+
+        // Step 3 — 命名空间翻译（如 minecraft_1.21:item.trident.throw）
+        ResourceLocation translated = SoundNamespaceCompat.resolve(soundName);
+        if (translated != null && soundExistsInHandler(translated.toString())) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND] namespace translation: '{}' → '{}'", soundName, translated);
+            }
+            handler.playSound(PositionedSoundRecord.func_147674_a(translated, volume));
+            foundAny = true;
+        }
+
+        // Step 4 — 本地高版本游戏资产（绕过 SoundHandler）
+        Path localOgg = LocalAssetProvider.resolveSound(soundName);
+        if (localOgg != null) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND] local asset: '{}' → {}", soundName, localOgg);
+            }
+            playOggDirect(owner, localOgg, soundName, volume, pitch);
+            return;
+        }
+
+        // Step 5 — 所有 fallback 均失败，输出最终警告
+        if (!foundAny) {
+            ysmu.LOG.warn("[YSMU-SOUND] Unable to play unknown soundEvent: {} (not found in any provider)", soundName);
+        }
+    }
+
+    public static void playSound(EntityPlayer player, String soundName, float volume, float pitch) {
+        playSound(player, soundName, null, volume, pitch);
+    }
+
+    public static void playSoundAtPlayer(String soundName) {
+        playSoundAtPlayer(soundName, null);
+    }
+
+    public static void playSoundAtPlayer(String soundName, ResourceLocation modelId) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer != null) playSound(mc.thePlayer, soundName, modelId, 1.0f, 1.0f);
+    }
+
+    /**
+     * 由关键帧音效监听器调用。记录该音效来自哪个 GeckoLib 控制器，
+     * 以便当该控制器/动画停止时能清理对应音效。
+     */
+    public static void onSoundKeyframe(String controllerName, String soundName) {
+        // 无归属调用 → 本地槽位（与 GUI 预览一致）。显式写类型，避免与
+        // (String ownerSlot, String controllerName, String soundName, ?) 形式产生歧义。
+        onSoundKeyframe((EntityPlayer) null, controllerName, soundName, null);
+    }
+
+    /**
+     * 由关键帧音效监听器调用。记录该音效来自**哪个持有者的哪个控制器**，以及模型上下文。
+     *
+     * @param owner 触发这条音效的模型持有者（即被渲染的玩家）。同一时刻可能有多个玩家各自
+     *        的 {@code cap_controller} 在播不同的音效，只有带上持有者才能把它们分开；
+     *        预览实体没有 player，此时用本地槽位（刻意保持"预览音效只占本机一格"的既有行为）。
+     * @param controllerName GeckoLib 控制器名称
+     * @param soundName 音效名称（动画 keyframe 中定义的名称）
+     * @param modelId 当前模型的 ResourceLocation，用于隔离同名音效
+     */
+    public static void onSoundKeyframe(EntityPlayer owner, String controllerName, String soundName,
+        ResourceLocation modelId) {
+        onSoundKeyframe(ownerKey(owner), controllerName, soundName, modelId);
+    }
+
+    /**
+     * 按归属槽位记录一次关键帧音效（内部/测试用的规范形式；{@link #ownerKey} 给出槽位键）。
+     *
+     * <p>归属槽位与控制器名共同构成播放身份：不同玩家可以有同名控制器（{@code cap_controller}）、
+     * 同一模型的两个玩家可以有同名音效，只有槽位参与键才能把两者分开。</p>
+     */
+    public static void onSoundKeyframe(String ownerSlot, String controllerName, String soundName,
+        ResourceLocation modelId) {
+        if (controllerName == null || soundName == null) return;
+        if (previewRendering) {
+            // During GUI preview rendering, suppress sounds from parallel controllers
+            // (which would otherwise spam keyframe sounds every animation loop cycle).
+            // Cap controller (focus/hover) and main controller (idle/preview) sounds
+            // are still allowed — users expect to hear focus animation sound effects
+            // when clicking a model button.
+            if (controllerName.startsWith("parallel_") || controllerName.startsWith("pre_parallel_")) {
+                return;
+            }
+        }
+        if (Config.DEBUG_SOUND) {
+            ysmu.LOG.info("[YSMU-SOUND] onSoundKeyframe: owner={} ctrl='{}' sound='{}' model={}",
+                ownerSlot, controllerName, soundName, modelId);
+        }
+        // 防抖：同一「持有者 + controller + sound」在短时间内重复触发则忽略。
+        // 这解决了动画子条件变化（如站立攻击→奔跑攻击）时
+        // GeckoLib 重置关键帧导致声音重复播放的问题。
+        // 归属必须进 key：否则同一模型的两个玩家会互相把对方的关键帧音效防抖掉。
+        String debounceKey = ownerSlot + "::" + controllerName + "::" + soundName;
+        if (modelId != null) debounceKey = modelId + "::" + debounceKey;
+        long now = System.currentTimeMillis();
+        Long last = SOUND_KEYFRAME_LAST_TIME.get(debounceKey);
+        if (last != null && now - last < SOUND_KEYFRAME_COOLDOWN_MS) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND] debounced: owner={} ctrl='{}' sound='{}' ({}ms since last)",
+                    ownerSlot, controllerName, soundName, now - last);
+            }
+            return;
+        }
+        SOUND_KEYFRAME_LAST_TIME.put(debounceKey, now);
+        // If this (owner, controller) was playing a different sound, stop the old one
+        Map<String, String> controllers = mutableControllerSoundsOf(ownerSlot);
+        String oldSound = controllers.get(controllerName);
+        if (oldSound != null && !oldSound.equals(soundName)) {
+            stopSound(ownerSlot, oldSound);
+        }
+        controllers.put(controllerName, soundName);
+        // 听者仍是本地玩家（1.7.10 下模型音效一律在本地玩家身上播放），但归属记在触发者头上。
+        playOwnerSound(ownerSlot, soundName, modelId);
+    }
+
+    /**
+     * 关键帧音效的实际播放（听者 = 本地玩家）。
+     *
+     * <p>这一步是**副作用**，它跑在 GeckoLib 动画 tick 的监听器里：任何失败（客户端还没起来、
+     * 类解析不了）都只允许退化成"这次没声音"，绝不允许把动画 tick 或渲染帧带崩。
+     * 记账（控制器 → 音效、音效 → 音源）在调用它之前就已经完成，所以播放失败也不会留下
+     * 悬空引用。</p>
+     */
+    private static void playOwnerSound(String ownerSlot, String soundName, ResourceLocation modelId) {
+        try {
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc != null && mc.thePlayer != null) {
+                playSound(ownerSlot, mc.thePlayer, soundName, modelId, 1.0f, 1.0f);
+            }
+        } catch (Throwable t) {
+            if (playbackFailureLogged.compareAndSet(false, true)) {
+                ysmu.LOG.warn("[YSMU-SOUND] keyframe playback unavailable ({}); sounds are skipped: {}",
+                    t.getClass()
+                        .getSimpleName(),
+                    String.valueOf(t.getMessage()));
+            }
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean playbackFailureLogged =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** 停止指定控制器触发的音效（动画停止时调用）。{@code owner} 见 {@link #ownerKey}。 */
+    public static void stopController(String controllerName) {
+        stopController(null, controllerName);
+    }
+
+    /** 停止「该持有者的该控制器」触发的音效（动画停止时调用）。 */
+    public static void stopController(EntityPlayer owner, String controllerName) {
+        stopControllerByOwnerSlot(ownerKey(owner), controllerName);
+    }
+
+    /** 按归属槽位停止控制器音效（调用方已持有槽位键，避免重复计算 UUID）。 */
+    public static void stopControllerByOwnerSlot(String ownerSlot, String controllerName) {
+        if (controllerName == null) return;
+        Map<String, String> controllers = CONTROLLER_SOUNDS.get(ownerSlot);
+        String soundName = controllers == null ? null : controllers.remove(controllerName);
+        if (soundName != null) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopController owner={} '{}' -> '{}'", probeStamp(), ownerSlot,
+                    controllerName, soundName);
+            }
+            stopSound(ownerSlot, soundName);
+        }
+        // 清除该控制器的防抖记录，确保下次重新触发时能正常播放。
+        // 防抖 key 形如 [modelId::]owner::controller::sound，按 "::owner::controller::" 或
+        // "owner::controller::" 前缀匹配（用户可能用 owner 槽位而非 EntityPlayer 调用，
+        // 两种写法都要覆盖）。
+        String prefix = ownerSlot + "::" + controllerName + "::";
+        final String midfix = "::" + prefix;
+        SOUND_KEYFRAME_LAST_TIME.keySet()
+            .removeIf(k -> k.startsWith(prefix) || k.contains(midfix));
+    }
+
+    /** 停止指定名称的音效（不区分归属）。 */
+    public static void stopSound(String soundName) {
+        for (Map<String, String> bySound : ACTIVE_SOURCES.values()) {
+            String src = bySound.remove(soundName);
+            if (src != null) {
+                if (Config.DEBUG_SOUND) {
+                    ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopSound '{}' (src={})", probeStamp(), soundName, src);
+                }
+                stopSource(src);
+            }
+        }
+    }
+
+    /** 停止「该持有者」播出的指定名称音效；其他持有者的同名音效不受影响。 */
+    public static void stopSound(String ownerSlot, String soundName) {
+        Map<String, String> bySound = ACTIVE_SOURCES.get(ownerSlot);
+        if (bySound == null) return;
+        String src = bySound.remove(soundName);
+        if (src != null) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopSound owner={} '{}' (src={})", probeStamp(), ownerSlot,
+                    soundName, src);
+            }
+            stopSource(src);
+        }
+    }
+
+    /**
+     * 停止「该归属」播出的全部音效（{@code ysm.stop_all_sounds()} 不带 global 参数时的语义：
+     * 参考实现里 global=0 表示"停止当前实体上下文的播放实例"）。
+     */
+    public static void stopAll(String ownerSlot) {
+        Map<String, String> bySound = ACTIVE_SOURCES.remove(ownerSlot);
+        if (bySound != null) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopAll owner={} ({} active)", probeStamp(), ownerSlot,
+                    bySound.size());
+            }
+            for (String src : bySound.values()) {
+                stopSource(src);
+            }
+        }
+        CONTROLLER_SOUNDS.remove(ownerSlot);
+    }
+
+    /** 停止所有 YSM 发出的音效（{@code ysm.stop_all_sounds(1)} 的 global 语义 / 模型切换清理） */
+    public static void stopAll() {
+        if (Config.DEBUG_SOUND && activeSourceCount() > 0) {
+            ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopAll ({} owner(s), {} active)", probeStamp(), ACTIVE_SOURCES.size(),
+                activeSourceCount());
+        }
+        for (Map<String, String> bySound : ACTIVE_SOURCES.values()) {
+            for (String src : bySound.values()) {
+                stopSource(src);
+            }
+        }
+        ACTIVE_SOURCES.clear();
+        CONTROLLER_SOUNDS.clear();
+    }
+
+    /** 清掉某个持有者的全部音效状态（玩家登出/模型切换时用），不影响其他持有者。 */
+    public static void clearOwner(EntityPlayer owner) {
+        clearOwnerSlot(ownerKey(owner));
+    }
+
+    /** 按归属槽位清理（见 {@link #ownerKey}）。 */
+    public static void clearOwnerSlot(String ownerSlot) {
+        Map<String, String> bySound = ACTIVE_SOURCES.remove(ownerSlot);
+        if (bySound != null && !bySound.isEmpty()) {
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND-PROBE] {} clearOwner {} ({} active)", probeStamp(), ownerSlot,
+                    bySound.size());
+            }
+            for (String src : bySound.values()) {
+                stopSource(src);
+            }
+        }
+        CONTROLLER_SOUNDS.remove(ownerSlot);
+        SOUND_KEYFRAME_LAST_TIME.keySet()
+            .removeIf(k -> k.startsWith(ownerSlot + "::") || k.contains("::" + ownerSlot + "::"));
+    }
+
+    /**
+     * 诊断：某归属当前登记的「控制器 → 音效名」。测试与 DebugSound 用来确认归属隔离
+     * （一个玩家/预览槽位的登记不会出现在另一个槽位里）。
+     */
+    public static Map<String, String> controllerSoundsOf(String ownerSlot) {
+        Map<String, String> m = CONTROLLER_SOUNDS.get(ownerSlot);
+        return m == null ? java.util.Collections.emptyMap() : java.util.Collections.unmodifiableMap(m);
+    }
+
+    /** 诊断：某归属当前活跃的音效名（音源仍在追踪中的）。 */
+    public static java.util.Set<String> activeSoundNamesOf(String ownerSlot) {
+        Map<String, String> m = ACTIVE_SOURCES.get(ownerSlot);
+        return m == null ? java.util.Collections.emptySet() : new java.util.HashSet<>(m.keySet());
+    }
+
+    /** 该归属下的「控制器 → 音效」映射（不存在时创建）。 */
+    private static Map<String, String> mutableControllerSoundsOf(String ownerSlot) {
+        return CONTROLLER_SOUNDS.computeIfAbsent(ownerSlot, k -> new ConcurrentHashMap<>());
+    }
+
+    /** 该归属下的「音效名 → 音源名」映射（不存在时创建）。 */
+    private static Map<String, String> activeSourcesOf(String ownerSlot) {
+        return ACTIVE_SOURCES.computeIfAbsent(ownerSlot, k -> new ConcurrentHashMap<>());
+    }
+
+    /**
+     * 把活跃音源的位置更新到玩家当前坐标（每 tick 由 ClientEventHandler 调用）。
+     * OpenAL 的 panning 基于音源相对听者的方位：若音源固定在播放时刻的位置而听者
+     * 移动，左右平移会立即造成左右声道跳变/混叠。把音源绑定在玩家身上后相对方位
+     * 恒定在正前方，panning 保持中央（第一人称自身音效语义上也正确）。
+     * 成本：活跃源数 × 1 次反射 setPosition，活跃源通常只有几个，可忽略。
+     */
+    public static void updateSourcePositions() {
+        if (activeSourceCount() == 0) return;
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null || mc.thePlayer == null) return;
+        Object ss = resolveSndSystem();
+        if (ss == null) return;
+        probeActiveSources(ss);
+        if (sndSetPosition == null) {
+            try {
+                sndSetPosition = ss.getClass().getMethod(
+                    "setPosition", String.class, float.class, float.class, float.class);
+            } catch (NoSuchMethodException e) {
+                ysmu.LOG.warn("[YSMU-SOUND] setPosition not available");
+                return;
+            }
+        }
+        float px = (float) mc.thePlayer.posX;
+        float py = (float) mc.thePlayer.posY;
+        float pz = (float) mc.thePlayer.posZ;
+        for (Map<String, String> bySound : ACTIVE_SOURCES.values()) {
+            for (String src : bySound.values()) {
+                try {
+                    sndSetPosition.invoke(ss, src, px, py, pz);
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /** 所有归属下仍在播放的音源总数（诊断与开销判断用）。 */
+    private static int activeSourceCount() {
+        int n = 0;
+        for (Map<String, String> bySound : ACTIVE_SOURCES.values()) {
+            n += bySound.size();
+        }
+        return n;
+    }
+
+    /** Returns an unmodifiable view of all registered sounds (name → in-memory OGG bytes). */
+    public static Map<String, byte[]> getSoundFiles() {
+        return java.util.Collections.unmodifiableMap(SOUND_FILES);
+    }
+
+    /** 从 "modelKey::name" 键中取音效名（无 "::" 时返回整串）。 */
+    private static String namePartOf(String key) {
+        int idx = key.indexOf("::");
+        return idx >= 0 ? key.substring(idx + 2) : key;
+    }
+
+    /**
+     * 后台线程预暖（geo/anim 懒加载同源解密时调用）：把从加密客户端缓存解出的
+     * 模型音效字节填入内存缓存，首次播放不再走主线程解密（消除 ~0.5s 首播卡顿）。
+     */
+    public static void cacheModelSounds(ResourceLocation mainId, RawYsmModel raw) {
+        if (raw == null || raw.soundFiles == null || raw.soundFiles.isEmpty()) return;
+        String modelKey = mainId.toString();
+        for (Map.Entry<String, RawYsmModel.RawDataFile> e : raw.soundFiles.entrySet()) {
+            RawYsmModel.RawDataFile sf = e.getValue();
+            if (sf == null || sf.data == null || sf.data.length == 0) continue;
+            String key = modelKey + "::" + e.getKey();
+            SOUND_FILES.put(key, sf.data);
+            SOUND_SOURCES.put(key, mainId);
+        }
+    }
+
+    /**
+     * 取音效字节：先查内存缓存；未加载则从加密客户端缓存按需解密该模型并提取
+     * 全部音效（一次解密，多音效共用）。正常路径下该模型首次使用时 geo/anim 懒加载
+     * 已预暖（cacheModelSounds），此处仅在边缘场景（如 /ysm playsound 直接播放
+     * 从未使用过的模型）触发。
+     */
+    private static byte[] getSoundBytes(String key) {
+        byte[] bytes = SOUND_FILES.get(key);
+        if (bytes != null) return bytes;
+        ResourceLocation mainId = SOUND_SOURCES.get(key);
+        if (mainId == null) return null;
+        RawYsmModel raw = com.fox.ysmu.client.ClientModelManager.loadRawModelFromCache(mainId);
+        if (raw == null || raw.soundFiles == null || raw.soundFiles.isEmpty()) return null;
+        String prefix = key.contains("::") ? key.substring(0, key.indexOf("::") + 2) : key;
+        for (Map.Entry<String, RawYsmModel.RawDataFile> e : raw.soundFiles.entrySet()) {
+            RawYsmModel.RawDataFile sf = e.getValue();
+            if (sf == null || sf.data == null || sf.data.length == 0) continue;
+            SOUND_FILES.put(prefix + e.getKey(), sf.data);
+        }
+        return SOUND_FILES.get(key);
+    }
+
+    /** 清理注册的音效并停止播放 */
+    public static void clear() {
+        stopAll();
+        SOUND_SOURCES.clear();
+        SOUND_FILES.clear();
+        sndSystem = null;
+        sndSystemSearched = false;
+        sndManagerField = null;
+        sndSystemField = null;
+        sndSetPosition = null;
+    }
+
+    // ── Internal ──────────────────────────────────────────
+
+    private static String sanitize(String n) {
+        return n.replaceAll("[^a-zA-Z0-9._-]", "_").toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static void stopSource(String srcName) {
+        if (srcName == null) return;
+        try {
+            Object ss = resolveSndSystem();
+            if (ss == null) return;
+            try {
+                ss.getClass().getMethod("stop", String.class).invoke(ss, srcName);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                ss.getClass().getMethod("removeSource", String.class).invoke(ss, srcName);
+            } catch (NoSuchMethodException ignored) {}
+        } catch (Exception e) {
+            ysmu.LOG.warn("[YSMU-SOUND] Failed to stop source '{}': {}", srcName, e.getMessage());
+        }
+    }
+
+    /**
+     * Returns the SoundSystem to drive, re-reading the field vanilla owns on every
+     * call.
+     * <p>This must not be cached blindly: {@code SoundManager.loadSoundSystem()}
+     * assigns a brand new {@code SoundSystemStarterThread} on every resource reload
+     * while {@code unloadSoundSystem()} only calls {@code cleanup()} and leaves the
+     * field pointing at the old object. A handle cached before a reload (F3+T, a
+     * resource-pack change, anything that triggers a resource reload) therefore
+     * keeps accepting {@code newSource}/{@code play} into a cleaned-up library:
+     * both calls succeed, nothing is logged, and no sound is ever heard again — it
+     * cannot heal itself either. Re-reading the field is cheap (one reflective
+     * get per call) and rebinds as soon as vanilla swaps the instance.
+     */
+    private static Object resolveSndSystem() {
+        Object current = readVanillaSndSystem();
+        if (current != null) {
+            if (sndSystem != null && current != sndSystem) {
+                ysmu.LOG.info("[YSMU-SOUND] SoundSystem was replaced (resource reload) — rebinding");
+            }
+            sndSystem = current;
+            return sndSystem;
+        }
+        // Field not readable (unexpected mapping) or temporarily null: keep using
+        // whatever was resolved before rather than going silent.
+        return sndSystem;
+    }
+
+    /** Reads the SoundSystem instance vanilla's SoundManager currently holds, or
+     *  {@code null} when the reflecting fields cannot be located/read. The two
+     *  fields are cached on first success. */
+    private static Object readVanillaSndSystem() {
+        try {
+            if (sndManagerField == null) {
+                if (sndSystemSearched) return null;
+                sndSystemSearched = true;
+                Minecraft mc = Minecraft.getMinecraft();
+                if (mc == null) return null;
+                SoundHandler sh = mc.getSoundHandler();
+                for (java.lang.reflect.Field f : SoundHandler.class.getDeclaredFields()) {
+                    if (SoundManager.class.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        sndManagerField = f;
+                        break;
+                    }
+                }
+                if (sndManagerField == null) return null;
+            }
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc == null) return null;
+            Object sndMgr = sndManagerField.get(mc.getSoundHandler());
+            if (sndMgr == null) return null;
+            if (sndSystemField == null) {
+                sndSystemField = findSoundSystemField(sndMgr.getClass());
+                if (sndSystemField == null) {
+                    // Give up on discovery instead of rescanning on every call:
+                    // this runs once per tick while any source is active.
+                    sndManagerField = null;
+                    return null;
+                }
+                sndSystemField.setAccessible(true);
+            }
+            return sndSystemField.get(sndMgr);
+        } catch (Exception e) {
+            ysmu.LOG.warn("[YSMU-SOUND] Failed to resolve SoundSystem: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** Locates SoundManager's SoundSystem field: known MCP/SRG names first, then any
+     *  field whose declared type is a SoundSystem (class names are not obfuscated in
+     *  1.7.10, so this works under either naming scheme). */
+    private static java.lang.reflect.Field findSoundSystemField(Class<?> soundManagerClass) {
+        String[] names = {"field_148620_e", "sndSystem", "field_148617_c", "field_148614_b", "sndManager"};
+        for (String name : names) {
+            try {
+                return soundManagerClass.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {}
+        }
+        for (java.lang.reflect.Field f : soundManagerClass.getDeclaredFields()) {
+            if (f.getType().getName().contains("SoundSystem")) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    // ---- DebugSound diagnostics ---------------------------------------------
+    // Kept (unlike the temporary animation probes): paulscode's SoundSystem is the
+    // only place in 1.7.10 that can answer "is this source actually playing?", and
+    // the lookup chain in docs/analysis/sound-playback.md is exactly the one that
+    // needed it.  Both gates must be on to produce output: DebugSound (off by
+    // default) and, for the active-source dump, once per 20 ticks.
+    private static int probeTickCounter;
+    private static final long PROBE_T0 = System.currentTimeMillis();
+
+    /** Minecraft log lines only carry second resolution, so probe lines carry
+     *  elapsed milliseconds and the client tick to keep intra-second ordering readable. */
+    private static String probeStamp() {
+        Minecraft mc = Minecraft.getMinecraft();
+        int tick = mc != null && mc.thePlayer != null ? mc.thePlayer.ticksExisted : -1;
+        return "+" + (System.currentTimeMillis() - PROBE_T0) + "ms t=" + tick;
+    }
+
+    /** Rate-limited dump of the sources still tracked as active. */
+    private static void probeActiveSources(Object ss) {
+        if (!Config.DEBUG_SOUND) return;
+        if (++probeTickCounter % 20 != 0) return;
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Map<String, String>> owner : ACTIVE_SOURCES.entrySet()) {
+            for (Map.Entry<String, String> e : owner.getValue()
+                .entrySet()) {
+                String state = "?";
+                try {
+                    state = String.valueOf(
+                        ss.getClass().getMethod("playing", String.class).invoke(ss, e.getValue()));
+                } catch (Exception ignored) {}
+                sb.append(owner.getKey())
+                    .append('/')
+                    .append(e.getKey())
+                    .append("->")
+                    .append(e.getValue())
+                    .append('(')
+                    .append(state)
+                    .append(") ");
+            }
+        }
+        ysmu.LOG.info("[YSMU-SOUND-PROBE] {} owners={} active={} {}", probeStamp(),
+            ACTIVE_SOURCES.size(), activeSourceCount(), sb.toString().trim());
+    }
+    // ---- end DebugSound diagnostics -----------------------------------------
+
+    /** Check that the file is an OGG container with Vorbis audio.
+     *  Reads the OGG page header + segment table, then looks for "vorbis"
+     *  at the start of the first packet. Files that pass OggS check but lack
+     *  Vorbis data (e.g. OGG FLAC/Opus) will crash CodecJOrbis. */
+    private static boolean isValidOgg(Path path) {
+        try (java.io.InputStream is = java.nio.file.Files.newInputStream(path)) {
+            return isValidOggStream(is);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static boolean isValidOgg(byte[] data) {
+        try (java.io.InputStream is = new java.io.ByteArrayInputStream(data)) {
+            return isValidOggStream(is);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** Check that the stream is an OGG container with Vorbis audio.
+     *  Reads the OGG page header + segment table, then looks for "vorbis"
+     *  at the start of the first packet. Files that pass OggS check but lack
+     *  Vorbis data (e.g. OGG FLAC/Opus) will crash CodecJOrbis. */
+    private static boolean isValidOggStream(java.io.InputStream is) throws IOException {
+        byte[] hdr = new byte[4];
+        if (is.read(hdr) != 4 || hdr[0] != 'O' || hdr[1] != 'g' || hdr[2] != 'g' || hdr[3] != 'S')
+            return false;
+        // Skip stream_structure_version (1), header_type_flag (1), granule_position (8),
+        // bitstream_serial_number (4), page_sequence_number (4), page_checksum (4) = 22 bytes
+        long skipped = is.skip(22);
+        if (skipped < 22) return false;
+        int pageSegments = is.read();
+        if (pageSegments < 0) return false;
+        // Skip segment table (pageSegments bytes)
+        skipped = is.skip(pageSegments);
+        if (skipped < pageSegments) return false;
+        // First packet should be Vorbis identification header: packet_type=1, "vorbis"
+        int packetType = is.read();
+        if (packetType != 1) return false;
+        byte[] vorbis = new byte[6];
+        return is.read(vorbis) == 6
+            && vorbis[0] == 'v' && vorbis[1] == 'o' && vorbis[2] == 'r'
+            && vorbis[3] == 'b' && vorbis[4] == 'i' && vorbis[5] == 's';
+    }
+
+    /** 通过 SoundSystem 直接播放 OGG（本地高版本游戏资产路径）。
+     *  与内存字节版（playOggDirect(byte[],...)）一致：播放前停止旧同名源，
+     *  播放后把 soundName→srcName 记入 ACTIVE_SOURCES，使 stopSound/
+     *  stopController/stopAll 能追踪并停止这些音效，避免每次播放泄漏音源。 */
+    private static void playOggDirect(String ownerSlot, Path oggPath, String soundName, float volume, float pitch) {
+        Object ss = resolveSndSystem();
+        if (ss == null) return;
+        // Skip invalid OGG files – passing them to CodecJOrbis can freeze the
+        // SoundSystem background thread.
+        if (!java.nio.file.Files.exists(oggPath) || !isValidOgg(oggPath)) {
+            ysmu.LOG.warn("[YSMU-SOUND] skipping invalid OGG: {}", oggPath);
+            return;
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null) return; // world not fully loaded yet
+        // 停止旧同名源（对齐内存字节路径：同名音效重播前先停旧的）。
+        if (soundName != null) stopSound(ownerSlot, soundName);
+        try {
+            String srcName = "ysm_" + sourceCounter.incrementAndGet();
+            float px = (float) mc.thePlayer.posX;
+            float py = (float) mc.thePlayer.posY;
+            float pz = (float) mc.thePlayer.posZ;
+            java.net.URL url = oggPath.toUri().toURL();
+
+            // paulscode SoundSystem selects the codec based on file extension.
+            // Assets from a game directory have no extension (SHA-1 hash names),
+            // so we need a .ogg filename for CodecJOrbis to detect the Vorbis
+            // codec.  Create a zero-copy hard link in the cache dir instead of
+            // duplicating the bytes – same disk blocks, just an extra name.
+            Path playPath = oggPath;
+            String fileName = oggPath.getFileName().toString();
+            if (!fileName.endsWith(".ogg") && !fileName.endsWith(".OGG")) {
+                Path cached = SOUND_CACHE.resolve(fileName + ".ogg");
+                if (!java.nio.file.Files.exists(cached)) {
+                    try {
+                        java.nio.file.Files.createDirectories(SOUND_CACHE);
+                        // Try hard link first (zero-copy, same inode/blocks)
+                        try {
+                            java.nio.file.Files.createLink(cached, oggPath);
+                        } catch (java.io.IOException | UnsupportedOperationException e) {
+                            // Hard link not available (e.g. different volume, FAT32) –
+                            // fall back to copy.
+                            java.nio.file.Files.copy(oggPath, cached,
+                                java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+                        }
+                    } catch (java.io.IOException e) {
+                        ysmu.LOG.warn("[YSMU-SOUND] failed to prepare {}: {}", cached, e.getMessage());
+                    }
+                }
+                if (java.nio.file.Files.exists(cached)) {
+                    playPath = cached;
+                }
+            }
+
+            // Use the URL overload with streaming=true to bypass
+            // LibraryLWJGLOpenAL.loadSound() (which uses Java AudioSystem and
+            // doesn't support OGG).  Streaming sources go through CodecJOrbis
+            // directly, which understands Vorbis.
+            java.net.URL absUrl = playPath.toAbsolutePath().toUri().toURL();
+            try {
+                // boolean参数: priority=false, toLoop=false → 不循环播放
+                ss.getClass().getMethod("newSource", boolean.class, String.class,
+                    java.net.URL.class, String.class, boolean.class, float.class,
+                    float.class, float.class, int.class, float.class)
+                    .invoke(ss, false, srcName, absUrl, absUrl.toString(),
+                        false, px, py, pz, 0, 16f);
+            } catch (NoSuchMethodException e) {
+                ysmu.LOG.warn("[YSMU-SOUND] newSource(URL) not available");
+                return;
+            }
+            // Set pitch/volume before play (Minecraft's order)
+            try { ss.getClass().getMethod("setPitch", String.class, float.class).invoke(ss, srcName, pitch); } catch (NoSuchMethodException ignored) {}
+            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume); } catch (NoSuchMethodException ignored) {}
+            ss.getClass().getMethod("play", String.class).invoke(ss, srcName);
+            // 追踪音源（对齐内存字节版），使停止路径能覆盖本地资产音效。
+            if (soundName != null) activeSourcesOf(ownerSlot).put(soundName, srcName);
+            if (Config.DEBUG_SOUND) ysmu.LOG.info("[YSMU-SOUND] playing '{}' as {}", oggPath.getFileName(), srcName);
+        } catch (Exception e) {
+            ysmu.LOG.warn("[YSMU-SOUND] Failed to play: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 通过 SoundSystem 播放内存中的 OGG 字节（模型音效专用，不落盘明文）。
+     * 用自定义 URLStreamHandler 构造一个带 ".ogg" 路径的 "file:" URL，
+     * openStream() 返回内存字节流——下游（CodecJOrbis 按扩展名选择、OGG 头校验）
+     * 与文件播放路径完全一致。
+     */
+    private static void playOggDirect(String ownerSlot, byte[] data, String soundName, float volume, float pitch) {
+        if (data == null || data.length == 0) return;
+        Object ss = resolveSndSystem();
+        if (ss == null) return;
+        // Skip invalid OGG data – passing them to CodecJOrbis can freeze the
+        // SoundSystem background thread.
+        if (!isValidOgg(data)) {
+            ysmu.LOG.warn("[YSMU-SOUND] skipping invalid in-memory OGG '{}' ({} bytes)", soundName, data.length);
+            return;
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null) return; // world not fully loaded yet
+        try {
+            String srcName = "ysm_" + sourceCounter.incrementAndGet();
+            float px = (float) mc.thePlayer.posX;
+            float py = (float) mc.thePlayer.posY;
+            float pz = (float) mc.thePlayer.posZ;
+            final byte[] payload = data;
+            java.net.URL url = new java.net.URL("file", "", -1,
+                "/ysmu_sounds/" + sanitize(soundName) + "_" + Integer.toHexString(data.length) + ".ogg",
+                new java.net.URLStreamHandler() {
+                    @Override
+                    protected java.net.URLConnection openConnection(java.net.URL u) {
+                        return new java.net.URLConnection(u) {
+                            @Override public void connect() {}
+                            @Override public int getContentLength() { return payload.length; }
+                            @Override public java.io.InputStream getInputStream() {
+                                return new java.io.ByteArrayInputStream(payload);
+                            }
+                        };
+                    }
+                });
+            try {
+                // boolean参数: priority=false, toLoop=false → 不循环播放
+                ss.getClass().getMethod("newSource", boolean.class, String.class,
+                    java.net.URL.class, String.class, boolean.class, float.class,
+                    float.class, float.class, int.class, float.class)
+                    .invoke(ss, false, srcName, url, url.toString(), false, px, py, pz, 0, 16f);
+            } catch (NoSuchMethodException e) {
+                ysmu.LOG.warn("[YSMU-SOUND] newSource(URL) not available");
+                return;
+            }
+            // Set pitch/volume before play (Minecraft's order)
+            try { ss.getClass().getMethod("setPitch", String.class, float.class).invoke(ss, srcName, pitch); } catch (NoSuchMethodException ignored) {}
+            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume); } catch (NoSuchMethodException ignored) {}
+            ss.getClass().getMethod("play", String.class).invoke(ss, srcName);
+            activeSourcesOf(ownerSlot).put(soundName, srcName);
+            if (Config.DEBUG_SOUND) ysmu.LOG.info("[YSMU-SOUND] playing in-memory '{}' as {}", soundName, srcName);
+        } catch (Exception e) {
+            ysmu.LOG.warn("[YSMU-SOUND] Failed to play: {}", e.getMessage());
+        }
+    }
+}

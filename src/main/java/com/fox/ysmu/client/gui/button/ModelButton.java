@@ -1,6 +1,7 @@
 package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -12,6 +13,7 @@ import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.util.IChatComponent;
 import net.minecraft.util.ResourceLocation;
 import org.apache.commons.lang3.tuple.Pair;
+import org.jetbrains.annotations.Nullable;
 import org.lwjgl.opengl.GL11;
 
 import java.util.List;
@@ -20,18 +22,16 @@ public class ModelButton extends GuiButton {
     private final static ResourceLocation ICON = new ResourceLocation(ysmu.MODID, "texture/icon.png");
     private final Pair<ResourceLocation, List<ResourceLocation>> modelInfo;
     private final int color;
-    public final List<IChatComponent> tooltips;
     private final ModelSelectionTarget target;
     /** CU-16: 缩放因子与显示高度在构造时缓存（按钮每次 initGui 重建），避免每帧重建 ScaledResolution。 */
     private final int guiScale;
     private final int guiDisplayHeight;
 
     public ModelButton(int id, int pX, int pY, Pair<ResourceLocation, List<ResourceLocation>> modelInfo,
-                       List<IChatComponent> tooltips, ModelSelectionTarget target) {
+                       ModelSelectionTarget target) {
         super(id, pX, pY, 52, 90, "");
         this.modelInfo = modelInfo;
         this.color = 0xFF_434242;
-        this.tooltips = tooltips;
         this.target = target;
         this.displayString = ModelIdUtil.getModelFileName(modelInfo.getLeft());
 
@@ -56,6 +56,19 @@ public class ModelButton extends GuiButton {
             return preferred;
         }
         return textures.get(0);
+    }
+
+    /**
+     * The hover tooltip for this tile.
+     * <p>
+     * Resolved on demand rather than captured when the button is constructed, because the extra info it shows comes
+     * from the model's geometry and geometry is parsed on demand: when this screen builds its buttons nothing has
+     * been drawn yet, so the value would otherwise be {@code null} for the whole life of the screen. Null is a
+     * normal answer and means "this model has no extra info".
+     */
+    @Nullable
+    public List<IChatComponent> tooltips() {
+        return ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(this.modelInfo.getLeft()));
     }
 
     public void doPress() {
@@ -87,7 +100,14 @@ public class ModelButton extends GuiButton {
         ResourceLocation texture = this.defaultTexture();
         // CU-13: scissor 必须在 finally 里恢复，渲染异常时不能让整个界面被裁剪。
         // CU-08: 没有贴图时跳过实体预览（原来会在 get(0) 处越界崩溃）。
-        if (texture != null) {
+        // The tile is drawn only once this model has been published on this connection. Asking is separate from
+        // drawing on purpose: ensureGeometry queues the build, while isModelPublished answers whether the geometry
+        // and textures are really there - and for a model whose build failed, or whose geometry is left over from a
+        // previous connection, those two differ. Binding this model's texture before it is uploaded would make
+        // TextureManager fall back to a lookup that cannot succeed; see CustomPlayerModel#getTextureLocation.
+        boolean published = ClientModelManager.isModelPublished(this.modelInfo.getLeft());
+        ClientModelManager.ensureGeometry(this.modelInfo.getLeft());
+        if (texture != null && published) {
             GL11.glEnable(GL11.GL_SCISSOR_TEST);
             try {
                 GL11.glScissor(scissorX, scissorY, scissorW, scissorH);

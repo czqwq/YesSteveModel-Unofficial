@@ -1,5 +1,6 @@
 package com.fox.ysmu.client.gui.button;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.RenderUtil;
@@ -49,14 +50,22 @@ public class TextureButton extends GuiButton {
         int scissorH = (this.height - 20) * scale;
         boolean selected = textureId.equals(target.getTextureId());
         // CU-13: scissor 必须在 finally 里恢复，渲染异常时不能让整个界面被裁剪。
-        GL11.glEnable(GL11.GL_SCISSOR_TEST);
-        try {
-            GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-            // 同时驱动预览动画通道（悬停/已选中），与上游纹理选择界面一致
-            RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
-                35, mc.thePlayer, modelId, textureId, this.func_146115_a(), selected);
-        } finally {
-            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        // Draw only once the model behind this texture has been built, for the same reason as ModelButton: until
+        // then its geometry is not in the engine's cache and its textures have not been uploaded, so rendering would
+        // either bind an id that does not exist yet or show the built-in default in every tile. The null test comes
+        // first because the id has to be derived before it can be looked up, and deriving it from null throws.
+        boolean drawable = modelId != null && ClientModelManager.isModelPublished(ModelIdUtil.getMainId(modelId));
+        ClientModelManager.ensureGeometry(modelId);
+        if (drawable) {
+            GL11.glEnable(GL11.GL_SCISSOR_TEST);
+            try {
+                GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+                // 同时驱动预览动画通道（悬停/已选中），与上游纹理选择界面一致
+                RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
+                    35, mc.thePlayer, modelId, textureId, this.func_146115_a(), selected);
+            } finally {
+                GL11.glDisable(GL11.GL_SCISSOR_TEST);
+            }
         }
 
         List<String> split = font.listFormattedStringToWidth(name, 50);

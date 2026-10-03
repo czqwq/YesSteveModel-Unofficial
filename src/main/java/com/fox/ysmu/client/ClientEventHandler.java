@@ -50,9 +50,26 @@ public class ClientEventHandler {
 
     @SubscribeEvent
     public static void onTextureStitchEventPost(TextureStitchEvent.Post event) {
+        // Record the client thread as early as the client offers a client-only entry point, so the model manager's
+        // off-thread install guard is meaningful from the moment anything can ask it for animations.
+        ClientModelManager.markClientThread();
         if (event.map.getTextureType() == 0) {
             pendingModelLoad = true;
         }
+    }
+
+    /**
+     * Resets the projectile timeline dispatch budget at the start of each render frame.
+     * <p>
+     * The budget is per frame rather than per projectile: a short-period timeline on one arrow would otherwise be
+     * free to dispatch without bound, and a screen full of arrows would multiply that by however many are visible.
+     */
+    @SubscribeEvent
+    public static void onRenderTick(TickEvent.RenderTickEvent event) {
+        if (event.phase != TickEvent.Phase.START) {
+            return;
+        }
+        com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.beginRenderFrame();
     }
 
     @SubscribeEvent
@@ -63,6 +80,16 @@ public class ClientEventHandler {
         // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
         // below, which only guards the one-shot model load. Cheap when nothing changed.
         com.fox.ysmu.client.roaming.ClientRoamingSync.flushPending();
+        // Keep playing model sounds centred on the listener; see YSMSoundManager#updateSourcePositions. No-op when
+        // nothing is playing.
+        com.fox.ysmu.client.audio.YSMSoundManager.updateSourcePositions();
+        // Record this as the client thread, so the model manager can refuse to install animations from anywhere else
+        // (a host mod may query clips from the server thread).
+        ClientModelManager.markClientThread();
+        // Install at most a few models that finished building on the loader thread. This is the publish half of
+        // on-demand model loading: the parse happens off this thread and only the cache write and the texture upload
+        // happen here, a few per tick, so a catalog of models fills in without ever blocking a frame.
+        ClientModelManager.tick();
         if (!pendingModelLoad) {
             return;
         }
@@ -103,8 +130,11 @@ public class ClientEventHandler {
         if (isVanillaPlayer(event.getModelId()) && event.getEntity() instanceof AbstractClientPlayer clientPlayer) {
             animatable.setEntity(clientPlayer);
             animatable.setMainModel(ModelIdUtil.getMainId(event.getModelId()));
-            ResourceLocation location = clientPlayer.getLocationSkin();
-            animatable.setTexture(location);
+            // The built-in steve/alex models draw the player's own Minecraft skin, which is not one of the pack's
+            // textures. Upstream hands such a texture to the renderer as an override rather than as the model's
+            // texture (see VanillaPlayerRenderEvent), which is what keeps it distinguishable from a pack texture that
+            // has simply not been uploaded.
+            event.setTextureLocationOverride(clientPlayer.getLocationSkin());
         }
     }
 
@@ -262,6 +292,11 @@ public class ClientEventHandler {
     public static void onPlayerLeave(PlayerEvent.PlayerLoggedOutEvent event) {
         // 注意：纯多人客户端不会收到这个 FML 事件（1.7.10 只有 ServerConfigurationManager 会 post），
         // 因此真正的兜底是下面的 onClientDisconnect。
+        // 音效归属状态按玩家清理：不留该玩家的"控制器→音效"映射与音源。集成服上任何客人登出都会走到
+        // 这里，所以只清这一个 owner，不动其他人的音源（SOURCE ClientEventHandler.java:537）。
+        if (event.player != null) {
+            com.fox.ysmu.client.audio.YSMSoundManager.clearOwner(event.player);
+        }
         clearClientRuntimeState();
     }
 
@@ -299,6 +334,10 @@ public class ClientEventHandler {
         EntityClips.clear();
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
+        // Model sounds as well: the sources are still playing in the SoundSystem and their bytes belong to the
+        // server that just went away, so leaving them would keep the previous server's audio going and keep a
+        // stale owner table alive across the next join.
+        com.fox.ysmu.client.audio.YSMSoundManager.clear();
     }
 
     private static boolean isVanillaPlayer(ResourceLocation modelId) {

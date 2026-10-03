@@ -126,6 +126,23 @@ public final class RawYsmModelAdapter {
         model.put("main", toGeometryJson(raw, raw.mainEntity.mainModel, true));
         model.put("arm", toGeometryJson(raw, raw.mainEntity.armModel, false));
 
+        // Projectile sub-entity geometry (a pack's files.projectiles entry, e.g. #arrow). The key is
+        // "projectile_<matchId>" and ClientModelManager turns it back into the sub-model id
+        // "<model>/projectile_<matchId>" that the renderer looks up.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null || sub.model == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                try {
+                    model.put("projectile_" + matchId, toGeometryJson(null, sub.model, false));
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to convert projectile geometry {} for model {}", matchId, modelId, e);
+                }
+            }
+        }
+
         Map<String, byte[]> textures = new LinkedHashMap<>();
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
             if (texture.data == null) {
@@ -146,6 +163,35 @@ public final class RawYsmModelAdapter {
             }
             textures.put(fileName, textureData);
         }
+        // Projectile sub-entity textures. The key carries the matchId as well as the file name, because the renderer
+        // picks a projectile's texture by searching for "projectile_<matchId>_" in the id.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawTexture texture : sub.textures.values()) {
+                    if (texture.data == null) {
+                        continue;
+                    }
+                    byte[] textureData = getLegacyTextureData(texture);
+                    if (textureData == null) {
+                        ysmu.LOG.warn(
+                            "Skipping unsupported projectile texture {} (format {}) for {}",
+                            textureName(texture),
+                            texture.imageFormat,
+                            matchId);
+                        continue;
+                    }
+                    String textureKey = "projectile_" + matchId + "_" + texture.name;
+                    if (!textureKey.endsWith(".png")) {
+                        textureKey += ".png";
+                    }
+                    textures.put(textureKey, textureData);
+                }
+            }
+        }
         if (textures.isEmpty()) {
             throw new IOException("RawYsmModel has no legacy-compatible player textures");
         }
@@ -159,9 +205,63 @@ public final class RawYsmModelAdapter {
                 putAnimationFile(animations, entry.getKey(), entry.getValue());
             }
         }
+        // Projectile animations and controllers. Both are complete data on a sub-entity
+        // (RawSubEntity.animationFiles / animationControllerFiles) and were previously thrown away here - the only
+        // place that handled them was the server-sync path. Losing them is not "one animation fewer": with no
+        // AnimationFile for the projectile the renderer returns before sampling anything, the geometry stays in its
+        // bind pose, and every sub-model the pack hides by scaling a bone (bow, crossbow, the effect boxes) is drawn
+        // at once.
+        //
+        // The keys match FolderFormat's: animation "projectile_<matchId>", controller "projectile_ctrl_<matchId>".
+        // ClientModelManager resolves both to the same sub-model id, so the local and synced paths agree.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
+                    putAnimationFile(animations, "projectile_" + matchId, animationFile);
+                }
+                for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
+                    if (controllerFile == null) {
+                        continue;
+                    }
+                    byte[] data = controllerFile.sourceJson == null ? createControllerJson(controllerFile)
+                        : controllerFile.sourceJson;
+                    if (data != null && data.length > 0) {
+                        animations.put("projectile_ctrl_" + matchId, data);
+                    }
+                }
+            }
+        }
         putAnimationControllers(animations, raw);
 
         return new ModelData(modelId, Type.FOLDER, model, textures, animations);
+    }
+
+    /**
+     * The entity ids a projectile sub-entity answers to: its declared {@code match} list, or its identifier when it
+     * declares none.
+     * <p>
+     * One sub-entity may match several entity types (a pack's {@code #arrow} covering both {@code minecraft:arrow} and
+     * {@code minecraft:spectral_arrow}), and each needs its own entry under its own id, because the renderer looks a
+     * projectile up by the entity type it is drawing.
+     */
+    private static java.util.List<String> matchIdsOf(RawYsmModel.RawSubEntity sub) {
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        if (sub.matchIds != null && sub.matchIds.length > 0) {
+            for (String matchId : sub.matchIds) {
+                if (StringUtils.isNotBlank(matchId)) {
+                    ids.add(matchId);
+                }
+            }
+            return ids;
+        }
+        if (StringUtils.isNotBlank(sub.identifier)) {
+            ids.add(sub.identifier);
+        }
+        return ids;
     }
 
     private static boolean hasGeometry(RawYsmModel.RawGeometry geometry) {
@@ -373,6 +473,23 @@ public final class RawYsmModelAdapter {
         // The renderer orders its layer pass by this, and the packed payload is the only place the client can read it
         // from, so it travels with the other host-specific model properties.
         description.addProperty("ysm_render_layers_first", raw.properties.renderLayersFirst);
+        // The texture the model declares as its own default. Upstream resolves the texture that gets drawn inside
+        // the model that was loaded - the requested name, then this declared default, then the first entry
+        // (ModelManifestLookup:10-29) - and the packed payload is the only place the client can read it from, so it
+        // travels with the other host-specific properties, exactly like render_layers_first above. The client still
+        // validates it against the model's own texture list before binding it, the way upstream's containsTexture
+        // does, so the field's own "default" sentinel and a stale name fall through instead of binding nothing.
+        if (raw.properties.defaultTexture != null && !raw.properties.defaultTexture.isEmpty()) {
+            description.addProperty("ysm_default_texture", raw.properties.defaultTexture);
+        }
+        // Upstream's forceCulling, which it parses from the pack's "all_cutout"
+        // (format/parser/pojo/manifest/settings/ModelProperties.java:35-36 names the field forceCulling and gives it
+        // @SerializedName("all_cutout")) and feeds to its bake. The port parses and syncs that field already
+        // (YSMFolderDeserializer:174, YSMBinarySerializer:491 / YSMBinaryDeserializer:620) and carries it here under a
+        // ysm_ name like the other host-specific properties, so the client holds what upstream's client holds.
+        // Nothing consumes it yet: upstream's only consumer is the native bake, so that is recorded as a divergence
+        // rather than filled with an invented consumer.
+        description.addProperty("ysm_all_cutout", raw.properties.allCutout);
 
         JsonObject extraInfo = new JsonObject();
         extraInfo.addProperty("name", raw.metadata.name);

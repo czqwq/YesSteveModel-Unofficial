@@ -35,7 +35,32 @@ public final class MolangInstructionExecutor {
     private static final Set<String> WARNED_INSTRUCTIONS = Collections
         .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
+    /** Controller names already reported as having run a timeline instruction; see {@link #noteTimelineExecution}. */
+    private static final Set<String> LOGGED_TIMELINE = Collections
+        .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
     private MolangInstructionExecutor() {}
+
+    /**
+     * Diagnostic ({@code DebugController}, one line per controller): this controller's timeline actually fired.
+     * <p>
+     * This is the line between "the animation is playing" and "the Molang inside its timeline really ran". Without
+     * it, whether a timeline dispatched can only be inferred from the variables it wrote - which is what made the
+     * projectile timeline (whose only observable effect is a spawned particle) so hard to confirm.
+     */
+    public static void noteTimelineExecution(String controllerName, String instructions) {
+        if (!com.fox.ysmu.Config.DEBUG_CONTROLLER || controllerName == null
+            || !LOGGED_TIMELINE.add(controllerName)) {
+            return;
+        }
+        int chars = instructions == null ? 0 : instructions.length();
+        ysmu.LOG.info("[YSMU-TL] controller '{}' fired a timeline instruction ({} chars)", controllerName, chars);
+    }
+
+    /** Drops the once-per-controller timeline log, for a model cache reload. */
+    public static void clearTimelineLog() {
+        LOGGED_TIMELINE.clear();
+    }
 
     public static void execute(String instructions) {
         if (StringUtils.isBlank(instructions)) {
@@ -86,7 +111,8 @@ public final class MolangInstructionExecutor {
             ysmu.LOG.warn(
                 "OpenYSM Molang function '{}' is not registered in the 1.7.10 runtime, so instruction '{}' is ignored"
                     + " (function not ported; registered functions are math.*, ysm.first_order, ysm.second_order,"
-                    + " ysm.bone_*, query.position, query.position_delta and ctrl.hold)",
+                    + " ysm.bone_*, ysm.particle, ysm.play_sound/stop_sound/stop_all_sounds, query.position,"
+                    + " query.position_delta and ctrl.hold)",
                 name,
                 statement);
         }

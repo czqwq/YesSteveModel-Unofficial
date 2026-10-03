@@ -112,6 +112,13 @@ public final class NetworkHandler {
     private static final int CLIENTBOUND_MOLANG_SYNC = 21;
     private static final int SERVERBOUND_EMIT_MOLANG_SYNC = 100;
 
+    /**
+     * A-17: the client half of {@code /ysm playsound}. Model sound bytes and the {@code SoundSystem} only exist on
+     * the client, so the server forwards the request instead of acting on it. Appended after 21; nothing existing is
+     * renumbered.
+     */
+    private static final int CLIENTBOUND_PLAY_SOUND = 30;
+
     public static void init() {
         registerServerboundMessages();
         registerClientboundMessages();
@@ -238,6 +245,12 @@ public final class NetworkHandler {
             S2CRoamingState.Handler.class,
             S2CRoamingState.class,
             CLIENTBOUND_ROAMING_STATE,
+            Side.CLIENT);
+        // A-17: the client half of /ysm playsound. See CLIENTBOUND_PLAY_SOUND above for why the server forwards.
+        CHANNEL.registerMessage(
+            S2CPlaySound.Handler.class,
+            S2CPlaySound.class,
+            CLIENTBOUND_PLAY_SOUND,
             Side.CLIENT);
     }
 

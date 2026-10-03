@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ModelPreviewAnimationState;
 import net.geckominecraft.client.renderer.GlStateManager;
 import net.minecraft.client.Minecraft;
@@ -421,6 +422,12 @@ public final class RenderUtil {
         itemStacks[5] = BackhandCompat.getOffhandItem(player);
         // S-05:所有会改动玩家/GL 状态的步骤都放进 try,保证任何异常(包括光照与矩阵
         // 调用抛出的异常)都不会把玩家物品栏、旋转角度或 GL 矩阵栈留在被污染的状态。
+        //
+        // 同时抑制本次 GUI 预览的音效播放：模型只在按钮上被悬停时，关键帧音效不该响起来
+        // （SOURCE RenderUtil.java:542/701 用 YSMSoundManager.setPreviewRendering 把整个预览
+        //  方法括起来）。这里括住同一段渲染（模型求值 + 提交），true 紧贴配对的 try，
+        //  所以任何抛出路径都不会把标志留在 true 上。
+        YSMSoundManager.setPreviewRendering(true);
         try {
             // The tile draws a detached preview entity, which has no player of its own; naming the owner here is what
             // lets the model read the same v.roaming.* values it would read in the world (see
@@ -476,12 +483,25 @@ public final class RenderUtil {
                     }
                     Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
                     diagnosePreviewPose(modelId, model);
-                    renderer.render(model, entity, 0, 1.0f, 1.0f, 1.0f, 1.0f);
+                    // The preview asks for a render type the way every upstream draw does - visible, not glowing, and
+                    // translucent when the model's art is - and hands it to the draw
+                    // (com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:18-39).
+                    renderer.render(
+                        model,
+                        entity,
+                        renderer.getRenderType(provider.getTextureLocation(entity), true, false,
+                            entity.hasTranslucentVertices()),
+                        0,
+                        1.0f,
+                        1.0f,
+                        1.0f,
+                        1.0f);
                 } finally {
                     pose.restore();
                 }
             });
         } finally {
+            YSMSoundManager.setPreviewRendering(false);
             RenderHelper.disableStandardItemLighting();
             GL11.glPopMatrix();
             GL11.glDisable(GL11.GL_DEPTH_TEST);

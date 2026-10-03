@@ -212,7 +212,6 @@ public class PlayerModelScreen extends GuiScreen {
                             xStart,
                             yStart,
                             Pair.of(id, ClientModelManager.MODELS.get(id)),
-                            ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(id)),
                             target));
                 }
             }
@@ -262,6 +261,10 @@ public class PlayerModelScreen extends GuiScreen {
             case 7:
                 // Model information: authors (with avatars), tips and license of the model applied to this target.
                 if (this.target.getModelId() != null) {
+                    // The folder channel's metadata is filled when the model is published, so ask for the build now;
+                    // ModelInfoScreen re-reads in drawScreen, so the page fills in by itself if it is opened before
+                    // that has happened.
+                    ClientModelManager.ensureGeometry(this.target.getModelId());
                     this.mc.displayGuiScreen(new ModelInfoScreen(this, this.target.getModelId()));
                 }
                 break;
@@ -377,8 +380,11 @@ public class PlayerModelScreen extends GuiScreen {
                 }
             }
             if (button instanceof ModelButton m) {
-                if (m.func_146115_a() && m.tooltips != null && !m.tooltips.isEmpty()) {
-                    List<String> tooltipStrings = m.tooltips.stream().map(IChatComponent::getFormattedText).collect(Collectors.toList());
+                // Read at the moment it is shown: the extra info comes from the model's geometry, which is parsed on
+                // demand, so at construction time - when the screen has drawn nothing yet - it is usually not there.
+                List<IChatComponent> tooltips = m.tooltips();
+                if (m.func_146115_a() && tooltips != null && !tooltips.isEmpty()) {
+                    List<String> tooltipStrings = tooltips.stream().map(IChatComponent::getFormattedText).collect(Collectors.toList());
                     this.func_146283_a(tooltipStrings, mouseX, mouseY);
                 }
             }

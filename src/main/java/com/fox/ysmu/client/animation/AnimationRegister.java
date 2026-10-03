@@ -13,16 +13,19 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
+import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
 import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.animation.molang.ParticleFunction;
 import com.fox.ysmu.client.animation.molang.QueryIsItemNameAnyFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionFunction;
-import com.fox.ysmu.client.animation.molang.YsmParticleFunction;
+import com.fox.ysmu.client.animation.molang.YsmSoundFunction;
 import com.fox.ysmu.client.animation.molang.YsmSyncFunction;
 import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
+import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
@@ -145,12 +148,31 @@ public class AnimationRegister {
         parser.functions.put("query.position_delta", QueryPositionDeltaFunction.class);
         parser.functions.put("query.position", QueryPositionFunction.class);
         parser.functions.put("query.is_item_name_any", QueryIsItemNameAnyFunction.class);
-        parser.functions.put("ysm.particle", YsmParticleFunction.class);
+        // ysm.particle / particle / abs_particle：OpenYSM 粒子 Molang 函数。
+        // ParticleFunction 通过 MolangStringPool 还原字符串参数（粒子 id），
+        // 实体上下文由 ParticleEffectUtil.setCurrentEntity 每帧写入。
+        parser.functions.put("ysm.particle", ParticleFunction.class);
+        // ysm.abs_particle：与 ysm.particle 成对。漏注册时整条关键帧表达式解析失败、
+        // 整个 animation 被丢弃（与 query.equipped_item_*_tag 同一条约定），
+        // 所以四个名字必须都在。ParticleFunction 按注册名里的 "abs_" 判定绝对模式。
+        parser.functions.put("ysm.abs_particle", ParticleFunction.class);
+        parser.functions.put("particle", ParticleFunction.class);
+        parser.functions.put("abs_particle", ParticleFunction.class);
+        // ysm.bone_pivot_abs：骨骼绝对枢轴（模型单位），沿父链应用完整变换。
+        // .x/.y/.z 后缀由 MolangParser.rewriteVectorFunction 重写为 _x/_y/_z 注册名。
+        parser.functions.put("ysm.bone_pivot_abs_x", BonePivotAbsFunction.class);
+        parser.functions.put("ysm.bone_pivot_abs_y", BonePivotAbsFunction.class);
+        parser.functions.put("ysm.bone_pivot_abs_z", BonePivotAbsFunction.class);
         // A-16: upstream YSMBinding.java:190 `function("sync", new Sync())` - a pack's way to hand values to every
         // client that can see the model; the echo runs the model's `@sync` script.
         parser.functions.put("ysm.sync", YsmSyncFunction.class);
         parser.functions.put("ysm.relative_block_name", YsmRelativeBlockNameFunction.class);
         parser.functions.put("ysm.relative_block_name_any", YsmRelativeBlockNameFunction.class);
+        // A pack's own sound instructions. Upstream registers all three in YSMBinding.java:185-187; without them a
+        // pack's `sound_effects` timeline entry is a parse failure, not a silent no-op.
+        parser.functions.put("ysm.play_sound", YsmSoundFunction.Play.class);
+        parser.functions.put("ysm.stop_sound", YsmSoundFunction.Stop.class);
+        parser.functions.put("ysm.stop_all_sounds", YsmSoundFunction.StopAll.class);
         parser.functions.put("ctrl.hold", CtrlHoldFunction.class);
         // fn.<name> 的函数体随模型而定（pack 的 functions/*.molang），无法静态注册一个类，交给动态解析。
         PackUserFunctions.installResolver(parser);
@@ -262,6 +284,19 @@ public class AnimationRegister {
         // A-15: see the assignment in setYsmValues for what this is and why it was missing.
         parser.register(new LazyVariable("ysm.input_vertical", 0));
 
+        // Projectile (sub-entity) values, published per frame by the projectile renderer. They are registered here
+        // rather than only written at render time because an animation file is parsed once, when its model is
+        // installed: a name that does not exist yet at that moment is not a variable the keyframe expression can
+        // resolve, and every projectile animation that reads one would parse to a constant.
+        //   ysm.in_ground            - the arrow is stuck in the ground this frame
+        //   ysm.on_ground_time       - ticks it has been stuck (YSM-wiki: unit is ticks, reset when moved)
+        //   ysm.delta_movement_length- the distance it moved this frame, for speed-driven effects
+        //   ysm.shoot_item_id        - pooled string id of the firing item, so a pack can pick its bow/crossbow model
+        parser.register(new LazyVariable("ysm.in_ground", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ysm.on_ground_time", 0));
+        parser.register(new LazyVariable("ysm.delta_movement_length", 0));
+        parser.register(new LazyVariable("ysm.shoot_item_id", 0));
+
         // parser.register(new LazyVariable("ysm.first_person_mod_hide", MolangUtils.FALSE));
     }
 
@@ -273,8 +308,16 @@ public class AnimationRegister {
         }
         // A-05 / A-06③: publish the frame's subject before anything is evaluated. The engine opens its own MoLang
         // scope in CustomPlayerModel#setMolangQueries, but it exposes no accessor for the animatable, so
-        // query.position_delta(axis) and the animation-file ctrl.hold read the entity from here.
-        MolangFrameContext.begin(player);
+        // query.position_delta(axis) and the animation-file ctrl.hold read the entity from here. The model id
+        // travels with it so ysm.play_sound resolves a sound name against the model that declared it.
+        MolangFrameContext.begin(
+            player,
+            animationEvent.getAnimatable() == null ? null
+                : animationEvent.getAnimatable()
+                    .getMainModel());
+        // 粒子 Molang 函数（particle/abs_particle）的实体上下文：mclib Function
+        // 无状态，粒子函数在 get() 时刻从这里读取当前渲染帧的玩家。
+        ParticleEffectUtil.setCurrentEntity(player);
         // Same reason, for the pack's own scripts: fn.<name> resolves against the model being rendered.
         PackUserFunctions.begin(
             animationEvent.getAnimatable() == null ? null : animationEvent.getAnimatable()
@@ -509,7 +552,7 @@ public class AnimationRegister {
      * <p>
      * The yaw is 1.7.10's {@code renderYawOffset}, interpolated - this port's "body yaw", i.e. the direction the entity
      * is actually facing, which is what a movement direction has to be measured against; the same choice
-     * {@code YsmParticleFunction} makes when it rotates an offset by the body yaw. (Upstream's {@code getViewYRot} is a
+     * {@code ParticleFunction} makes when it rotates an offset by the body yaw. (Upstream's {@code getViewYRot} is a
      * 1.20 vanilla method whose body-versus-head semantics are not readable from this workspace, but both candidates
      * agree on the sign this variable is used for - walking forwards versus backwards.)
      */

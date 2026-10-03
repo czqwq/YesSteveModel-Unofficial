@@ -119,11 +119,26 @@ public class SyncModelFiles implements IMessage {
         }
 
         private void sendModelFiles(String[] md5Info, EntityPlayerMP sender) {
+            // One channel per model, which is the shape upstream has. A model the OpenYSM channel carries must not
+            // also be delivered here: for a folder pack the two channels adapt the same source differently - the
+            // baked side re-emits the JSON pretty printed with the pack's floats widened to doubles, 3,021,214 bytes
+            // of geometry against 9,010,817 for wine_fox/05_magical - so the content-signature dedupe in
+            // ClientModelManager cannot see that they are the same model. It registered twice per session, and each
+            // re-registration parked the geometry it had just published, leaving the built-in default up for about a
+            // second: the flicker.
+            //
+            // Only models the OpenYSM index really carries are skipped, and only while that channel is enabled.
+            // Built-in models and every model OpenYsmFormat cannot produce a payload for stay legacy-only, which is
+            // what ServerModelManager's sync notes require; with the protocol off nothing changes at all.
+            boolean openYsmOwnsModels = Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL;
             // D-01 (network侧): filter through the shared "well-formed cache file name" predicate and drop null
             // md5 entries. A null md5 would otherwise reach CACHE_SERVER.resolve(null) and NPE inside the send task.
-            Collection<String> cache = CACHE_NAME_INFO.values()
+            Collection<String> cache = CACHE_NAME_INFO.entrySet()
                 .stream()
-                .map(ServerModelInfo::getMd5)
+                .filter(entry -> !(openYsmOwnsModels && OPEN_YSM_SYNC_INFO.containsKey(entry.getKey())))
+                .map(
+                    entry -> entry.getValue()
+                        .getMd5())
                 .filter(ServerModelInfo::hasWellFormedCacheFileName)
                 .collect(Collectors.toList());
             List<String> output = Lists.newArrayList(cache);

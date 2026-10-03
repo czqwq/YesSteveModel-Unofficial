@@ -140,20 +140,19 @@ public final class ServerModelManager {
     /**
      * 请求一次模型同步。
      *
-     * 17 通道（{@code S2CVersionCheck17} + hash/cache/chunk）是**附加**的快速路径，legacy
-     * （{@code RequestSyncModel} -> {@code SyncModelFiles} -> {@code SendModelFile}）才是唯一能保证送达的通道，
-     * 所以这里**无条件**发送 legacy 请求：
+     * 两条通道各自负责一部分模型，合起来覆盖全部：17 索引（{@link #OPEN_YSM_SYNC_INFO}）只登记
+     * {@code OpenYsmFormat} 能产出二进制负载的模型，这些模型由 17 通道投递，{@code SyncModelFiles} 不再重复投递
+     * （按模型、且仅在 17 协议启用时抑制，见该处注释）；内置模型与 {@code OpenYsmFormat} 产不出负载的传统模型
+     * 永远不在 17 索引里，只能走 legacy，因此这里仍然**无条件**发送 legacy 请求：
      *
      * <ul>
-     * <li>17 索引（{@link #OPEN_YSM_SYNC_INFO}）只登记 {@code OpenYsmFormat} 能产出二进制负载的模型，内置模型与
-     * 传统 folder 模型**永远**不在其中，因此"17 这一轮成功"绝不等于"模型已送达"；</li>
+     * <li>抑制条件是"该模型确实在 17 索引里且 17 协议已启用"，不是"17 索引非空就抑制"，所以不会有模型两条通道
+     * 都收不到；</li>
      * <li>legacy 这一轮的固定代价只有一次握手，加上客户端缺失清单里真正缺的文件
      * （{@code SyncModelFiles} 按客户端自报的 md5 求差集），不是整批重传；</li>
-     * <li>两条通道都登记同一模型时，由 {@code ClientModelManager.registerAll} 的内容签名去重兜底。</li>
+     * <li>两条通道都登记同一模型时，{@code ClientModelManager.registerAll} 的内容签名去重仍然兜底——但它对
+     * OpenYSM folder 模型失效（两条通道把同一模型序列化成不同字节），这正是改成按模型抑制投递的原因。</li>
      * </ul>
-     *
-     * 因此这里不做"17 成功就抑制 legacy"的门控：任何形如"17 索引已覆盖 legacy 索引（{@link #CACHE_NAME_INFO}）"
-     * 的判据都恒为假（内置模型恒为 legacy 格式且不参与 17 索引），它唯一的效果就是让模型两条通道都收不到。
      */
     public static void sendRequestSyncModelMessage(EntityPlayer player) {
         if (player == null) {

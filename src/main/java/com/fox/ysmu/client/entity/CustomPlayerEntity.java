@@ -139,15 +139,29 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
             new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
         data.getAnimationControllers()
             .values()
-            .forEach(
-                controller -> controller
-                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions)));
+            .forEach(controller -> {
+                controller
+                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions));
+                // A pack's `sound_effects` keyframes, which the port parsed and synced but never played. The owner is
+                // the entity behind this animatable; an NPC or a GUI preview has none and falls into the sound
+                // manager's local slot, which is also what keeps two players running the same model from sharing
+                // bookkeeping for controllers they both name `cap_controller`.
+                controller.registerSoundListener(
+                    event -> {
+                        String ctrlName = event.getController().getName();
+                        com.fox.ysmu.client.audio.YSMSoundManager.onSoundKeyframe(
+                            getPlayer(), ctrlName, event.sound, getMainModel());
+                    });
+            });
     }
 
     public ResourceLocation getMainModel() {
-        if (GeckoLibCache.getInstance()
-            .getGeoModels()
-            .containsKey(this.mainModel)) {
+        // The engine's cache alone is not enough to answer this: it outlives a connection, so a model the previous
+        // server had by this name is still in it. Asking whether *this connection* installed the model is what keeps
+        // the answer agreeing with the predicates the renderer uses - if it disagreed, the renderer would substitute
+        // the built-in default while this method still handed out the foreign id, and the engine would resolve that
+        // id to the previous server's geometry.
+        if (ClientModelManager.isModelPublished(this.mainModel)) {
             return mainModel;
         }
         return CustomPlayerModel.DEFAULT_MAIN_MODEL;
@@ -155,6 +169,17 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     public void setMainModel(ResourceLocation mainModel) {
         this.mainModel = mainModel;
+    }
+
+    /**
+     * The model this entity was asked for, before any substitution.
+     * <p>
+     * {@link #getMainModel()} deliberately answers with the built-in default while the requested model is not in the
+     * engine's cache, which is right for everything that draws and wrong for anything that has to know *which* model
+     * it is talking about - for example deciding whether that model's textures have been uploaded yet.
+     */
+    public ResourceLocation getRequestedMainModel() {
+        return this.mainModel;
     }
 
     public ResourceLocation getAnimation() {
@@ -167,8 +192,12 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public float getHeightScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        // getMainModel(), not the raw field: while this model is still being built the renderer draws the built-in
+        // default in its place, so the scale must be read for the model that is actually being drawn. The raw field
+        // would only ever answer with the fallback below, which happens to match today and would silently stop
+        // matching the moment the built-in default's scale changes.
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .left()
                 .floatValue();
         }
@@ -176,8 +205,8 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public float getWidthScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .right()
                 .floatValue();
         }
@@ -193,7 +222,24 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
      * order every model had before the flag was honoured.
      */
     public boolean shouldRenderLayersFirst() {
-        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(this.mainModel));
+        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(getMainModel()));
+    }
+
+    /**
+     * Whether this model has a vertex drawn translucently, which is the question upstream asks its baked model state
+     * before choosing a render type ({@code GeoModelState#hasTranslucentVertices}, {@code nativeState
+     * .getTranslucentVertexCount() != 0}, {@code geckolib3/geo/animated/GeoModelState.java:73-74}). A translucent
+     * model is drawn with upstream's {@code CustomTranslucentRenderType} - blending and back-face culling - and a
+     * flat decal depends on the culling, because the pack zeroes the uvs of the face it does not want and those faces
+     * are still built.
+     * <p>
+     * Upstream's count is native and cannot be read here, so the port answers with the same input its bake has: the
+     * texture that is about to be bound, sampled at the uvs of the faces the model actually draws (see
+     * {@code ClientModelManager#TRANSLUCENT_TEXTURES}). Defaults to {@code false}, the cutout branch every model had
+     * before this existed.
+     */
+    public boolean hasTranslucentVertices() {
+        return ClientModelManager.TRANSLUCENT_TEXTURES.contains(CustomPlayerModel.textureFor(this));
     }
 
     /** The rendered entity, player or not. */

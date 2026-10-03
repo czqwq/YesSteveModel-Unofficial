@@ -70,6 +70,22 @@ public class CommonEventHandler {
             EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
         }
+        // 客户端世界卸载：上一份世界遗留的音效音源与"控制器→音效"归属表、弹射物控制器状态、自定义粒子
+        // 都要清掉，否则它们会跟着进下一个世界（SOURCE CommonEventHandler.java:87-93）。
+        if (event.world != null && event.world.isRemote) {
+            com.fox.ysmu.client.audio.YSMSoundManager.clear();
+            com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
+            com.fox.ysmu.client.particle.CustomParticleManager.clear();
+        }
+    }
+
+    @SubscribeEvent
+    public static void onClientTick(TickEvent.ClientTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            // 高版本资源健康检查：配置了路径但加载失败时在 chat 提醒玩家（幂等，成本极低）
+            com.fox.ysmu.compat.LocalAssetProvider.warnIfMisconfigured();
+            com.fox.ysmu.client.particle.CustomParticleManager.tick();
+        }
     }
 
     @SubscribeEvent

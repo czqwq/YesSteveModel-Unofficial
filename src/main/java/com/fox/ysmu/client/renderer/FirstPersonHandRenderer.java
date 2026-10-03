@@ -28,6 +28,7 @@ import org.lwjgl.util.glu.Project;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.compat.BackhandCompat;
 
 import software.bernie.geckolib3.core.IAnimatable;
@@ -87,7 +88,15 @@ public final class FirstPersonHandRenderer {
         }
 
         event.setCanceled(true);
-        render(event, mc, player, itemRenderer, context.renderer, context.customPlayer, context.rightArm);
+        render(
+            event,
+            mc,
+            player,
+            itemRenderer,
+            context.renderer,
+            context.customPlayer,
+            context.rightArm,
+            context.texture);
         return true;
     }
 
@@ -106,13 +115,14 @@ public final class FirstPersonHandRenderer {
             context.renderer,
             context.customPlayer,
             context.rightArm,
+            context.texture,
             partialTicks,
             renderOffhand);
         return true;
     }
 
     public static void render(RenderHandEvent event, Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm) {
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, ResourceLocation texture) {
         float partialTicks = event.partialTicks;
         EntityRenderer entityRenderer = mc.entityRenderer;
 
@@ -135,6 +145,7 @@ public final class FirstPersonHandRenderer {
                     renderer,
                     customPlayer,
                     rightArm,
+                    texture,
                     partialTicks,
                     true);
             } finally {
@@ -183,15 +194,23 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void renderFirstPersonItems(Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, float partialTicks,
-        boolean renderOffhand) {
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, ResourceLocation texture,
+        float partialTicks, boolean renderOffhand) {
         applyVanillaHandLighting(player, partialTicks);
         applyVanillaArmViewSmoothing(player, partialTicks);
         setupLightmap(mc, player);
         GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
 
         try {
-            renderCustomEmptyMainHand(mc, player, itemRenderer, renderer, customPlayer, rightArm, partialTicks);
+            renderCustomEmptyMainHand(
+                mc,
+                player,
+                itemRenderer,
+                renderer,
+                customPlayer,
+                rightArm,
+                texture,
+                partialTicks);
             if (renderOffhand) {
                 BackhandCompat.renderOffhand(partialTicks);
             }
@@ -237,15 +256,18 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void renderCustomEmptyMainHand(Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
-        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, float partialTicks) {
+        CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, ResourceLocation texture,
+        float partialTicks) {
         GL11.glPushMatrix();
         try {
             applyVanillaEmptyHandTransform(player, itemRenderer, partialTicks);
             // R-04 契约：这里刻意不恢复纹理绑定——shouldRenderCustomHand 要求 thirdPersonView == 0 且未睡觉，
             // 因此本路径收尾的 renderVanillaOverlays 必然走到 itemRenderer.renderOverlays(partialTicks)
             // 并自行改绑纹理。若将来在两者之间插入绘制代码，必须先自行绑定纹理。
+            // The texture is the one resolved for this frame (an event override, else the model's own), not the
+            // entity's raw selection: the arm follows the same rule as the body, as upstream's arm renderer does.
             mc.getTextureManager()
-                .bindTexture(customPlayer.getTexture());
+                .bindTexture(texture);
             prepareCustomArmState();
             try {
                 alignGeckoArmToVanillaBipedArm(rightArm);
@@ -290,9 +312,15 @@ public final class FirstPersonHandRenderer {
     }
 
     private static void prepareCustomArmState() {
+        // Upstream draws this arm unconditionally with CustomTranslucentRenderType
+        // (client/renderer/CustomFirstPersonArmRenderer.java:39), i.e. blending and back-face culling. This path does
+        // not go through IGeoRenderer#render - it draws the bone directly - so the state its type would set is applied
+        // here, and culling is the half that matters: without it the zero-uv back faces of the model's flat decals
+        // are drawn as single-texel slabs over the art.
         GlStateManager.enableBlend();
         OpenGlHelper.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
-        GlStateManager.disableCull();
+        GlStateManager.disableAlpha();
+        GlStateManager.enableCull();
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }
 
@@ -408,6 +436,17 @@ public final class FirstPersonHandRenderer {
         if (modelId == null) {
             return null;
         }
+        // The arm model is built together with the rest of the model, on demand. Ask for it here so a player who is
+        // holding nothing but looking at their own hand still gets the model built; the lookup below stays null-safe
+        // for the few frames before that finishes.
+        com.fox.ysmu.client.ClientModelManager.ensureGeometry(modelId);
+        // ...but the arm geometry outlives a connection in the engine's cache while this connection's textures do
+        // not, and this path binds the model's texture directly (see renderCustomEmptyMainHand). A stale arm from the
+        // previous server would therefore bind a texture that has not been uploaded, so the custom hand waits for
+        // this connection to publish the model and the vanilla hand is used until then.
+        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(modelId)) {
+            return null;
+        }
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
             .get(ModelIdUtil.getArmId(modelId));
@@ -425,10 +464,17 @@ public final class FirstPersonHandRenderer {
         if (customPlayer == null) {
             return null;
         }
-        if (MinecraftForge.EVENT_BUS.post(new SpecialPlayerRenderEvent(player, customPlayer, modelId))) {
+        SpecialPlayerRenderEvent renderEvent = new SpecialPlayerRenderEvent(player, customPlayer, modelId);
+        if (MinecraftForge.EVENT_BUS.post(renderEvent)) {
             return null;
         }
-        return new CustomHandRenderContext(renderer, customPlayer, rightArm.get());
+        // The arm uses the same rule as the body, which is what upstream's CustomFirstPersonArmRenderer does: an
+        // event-supplied override wins, otherwise the model's own texture. Binding the entity's selected id directly
+        // would skip that rule and could bind a texture this client never registered.
+        ResourceLocation texture = renderEvent.getTextureLocationOverride() != null
+            ? renderEvent.getTextureLocationOverride()
+            : CustomPlayerModel.textureFor(customPlayer);
+        return new CustomHandRenderContext(renderer, customPlayer, rightArm.get(), texture);
     }
 
     private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ExtendedModelInfo eep,
@@ -457,12 +503,15 @@ public final class FirstPersonHandRenderer {
         private final CustomPlayerEntity customPlayer;
         /** R-09: the right-arm bone resolved once for this frame. */
         private final GeoBone rightArm;
+        /** The texture this arm must bind, resolved once for this frame; see the caller. */
+        private final ResourceLocation texture;
 
         private CustomHandRenderContext(CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer,
-            GeoBone rightArm) {
+            GeoBone rightArm, ResourceLocation texture) {
             this.renderer = renderer;
             this.customPlayer = customPlayer;
             this.rightArm = rightArm;
+            this.texture = texture;
         }
     }
 }
