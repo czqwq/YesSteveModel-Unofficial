@@ -114,10 +114,42 @@ public class ClientModelManager {
     public static Set<ResourceLocation> TRANSLUCENT_TEXTURES = Sets.newHashSet();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
+    /**
+     * The projectile sub-entity ids a model declares - the {@code match} entries of its
+     * {@code files.projectiles} - keyed by the model id.
+     * <p>
+     * A pack's arrow model is not drawn as part of the player: it replaces a vanilla entity's renderer, and the
+     * renderer has to find which of the model's sub-entities answers to the entity type it is drawing (a pack's
+     * {@code #arrow} covers {@code minecraft:arrow} and {@code minecraft:spectral_arrow} at once). This is that
+     * lookup.
+     */
+    public static Map<ResourceLocation, List<String>> PROJECTILE_MODEL_IDS = Maps.newHashMap();
+    /**
+     * The textures belonging to a model's projectile sub-entities, as full sub-model ids.
+     * <p>
+     * Their ids carry both the match id and the file name ({@code <model>/projectile_<matchId>_<name>.png}), which
+     * is how the renderer picks the projectile's own texture rather than one of the player's.
+     */
+    public static Map<ResourceLocation, List<ResourceLocation>> PROJECTILE_TEXTURE_IDS = Maps.newHashMap();
+    /** The key prefix a bridged projectile sub-entity uses inside a {@link ModelData} payload. */
+    public static final String PROJECTILE_KEY_PREFIX = "projectile_";
+    /** The key prefix a bridged projectile animation-controller file uses. */
+    private static final String PROJECTILE_CONTROLLER_KEY_PREFIX = "projectile_ctrl_";
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
+    // ── Lazy reloading from encrypted client cache ────────────────────────
+    /** Maps main model ID → cache file path (relative to CACHE_CLIENT) for re-reading from the encrypted client cache.
+     *  <p>并发：写发生在同步/解析路径（含后台解析线程），读发生在
+     *  {@link #loadRawModelFromCache}（{@code YSMSoundManager} 首次播放时调用），
+     *  所以必须是并发 map —— 普通 HashMap 会在扩容时被并发读撕出错误结果甚至死循环。 */
+    private static final Map<ResourceLocation, String> CACHED_MODEL_MD5 =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    /** Main model IDs whose encrypted client cache uses the OpenYSM (YsmCrypt) format.
+     *  Those files are decrypted with the session client key, not the legacy password. */
+    private static final java.util.Set<ResourceLocation> OPENYSM_CACHE_FORMAT =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
     /** Layout versions already reported, so an unsupported geometry format is logged once instead of 150 times. */
     private static final Map<String, Boolean> WARNED_UNSUPPORTED_LAYOUTS = Maps.newConcurrentMap();
     /**
@@ -268,6 +300,10 @@ public class ClientModelManager {
         // The texture *list* is the model index the selection screen builds its tiles from, so it stays here; only
         // the uploads are deferred.
         indexTextures(modelId, data.getTexture());
+        // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
+        // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
+        // the index to decide whether this model has one at all.
+        indexProjectiles(modelId, data);
         if (eager) {
             installNow(data);
         } else {
@@ -1226,6 +1262,56 @@ public class ClientModelManager {
     }
 
     /**
+     * Records the projectile sub-entities a model declares, so the arrow renderer can ask "does this model have a
+     * projectile for the entity I am drawing, and which texture is its own".
+     * <p>
+     * Both answers come out of the payload's key naming, which {@code RawYsmModelAdapter} produces:
+     * {@code projectile_<matchId>} for the geometry and {@code projectile_<matchId>_<file>.png} for the textures. The
+     * geometry and textures themselves are installed by the ordinary build and upload paths; this only records how to
+     * find them.
+     */
+    private static void indexProjectiles(ResourceLocation modelId, ModelData data) {
+        List<String> matchIds = new ArrayList<>();
+        for (String key : data.getModel()
+            .keySet()) {
+            if (key.startsWith(PROJECTILE_KEY_PREFIX)) {
+                String matchId = key.substring(PROJECTILE_KEY_PREFIX.length());
+                if (!matchId.isEmpty()) {
+                    matchIds.add(matchId);
+                }
+            }
+        }
+        if (matchIds.isEmpty()) {
+            // Assigned rather than skipped, so a re-registration that drops the projectiles stops answering with the
+            // previous payload's list.
+            PROJECTILE_MODEL_IDS.remove(modelId);
+            PROJECTILE_TEXTURE_IDS.remove(modelId);
+            return;
+        }
+        PROJECTILE_MODEL_IDS.put(modelId, matchIds);
+
+        List<ResourceLocation> projectileTextures = new ArrayList<>();
+        for (String name : data.getTexture()
+            .keySet()) {
+            if (name.startsWith(PROJECTILE_KEY_PREFIX)) {
+                projectileTextures.add(ModelIdUtil.getSubModelId(modelId, name));
+            }
+        }
+        if (projectileTextures.isEmpty()) {
+            PROJECTILE_TEXTURE_IDS.remove(modelId);
+        } else {
+            PROJECTILE_TEXTURE_IDS.put(modelId, projectileTextures);
+        }
+        if (com.fox.ysmu.Config.DEBUG_MODEL_LOAD) {
+            ysmu.LOG.info(
+                "YSM client indexed projectile sub-entities for {}: match={}, textures={}",
+                modelId,
+                matchIds,
+                projectileTextures.size());
+        }
+    }
+
+    /**
      * Uploads every texture of a model.
      * <p>
      * A texture the game cannot decode is <em>not</em> a failure here: {@code TextureManager.loadTexture} catches the
@@ -1318,7 +1404,43 @@ public class ClientModelManager {
             .getAnimations();
         AnimationFile main = new AnimationFile();
         Map<String, byte[]> controllerFiles = new LinkedHashMap<>();
+        // A projectile sub-entity's animation and controller files must NOT merge into the player's single animation
+        // namespace: a pack's arrow animation set and its player set both define `parallel0`, and merging them lets
+        // one overwrite the other for whichever is drawn second. Each projectile therefore gets its own AnimationFile
+        // registered under its own sub-model id, which is what the projectile renderer looks up.
+        ResourceLocation baseId = ModelIdUtil.getParentModelId(id);
+        Map<ResourceLocation, byte[]> projectileControllerFiles = new LinkedHashMap<>();
         for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
+            // The controller prefix is tested first: `projectile_ctrl_arrow` also starts with `projectile_`.
+            if (entry.getKey()
+                .startsWith(PROJECTILE_CONTROLLER_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(PROJECTILE_CONTROLLER_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation projectileId = ModelIdUtil
+                    .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
+                projectileControllerFiles.put(projectileId, bytes);
+                // Give the id an AnimationFile of its own even when the animation arrives in a separate entry: the
+                // renderer returns early - and draws the bind pose - when this lookup misses.
+                animations.computeIfAbsent(projectileId, ignored -> new AnimationFile());
+                continue;
+            }
+            if (entry.getKey()
+                .startsWith(PROJECTILE_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(PROJECTILE_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation projectileId = ModelIdUtil
+                    .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
+                animations.put(projectileId, projectileAnimationFile(bytes, projectileId));
+                continue;
+            }
             // Each file's bytes are decoded and parsed exactly once: that one JsonObject both answers "is this a
             // controller file?" and feeds the animation conversion. The previous shape parsed every file whose name
             // was not a controller name twice, because a probe parsed it to look for `animation_controllers` and the
@@ -1375,7 +1497,35 @@ public class ClientModelManager {
             // caller report the whole model as failed when its animations are in fact usable.
             ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
         }
+        // The projectile controllers live under the projectile's own sub-model id, which is also the id its geometry
+        // and its AnimationFile are registered under.
+        for (Map.Entry<ResourceLocation, byte[]> entry : projectileControllerFiles.entrySet()) {
+            try {
+                OpenYsmAnimationControllerRegistry.register(
+                    entry.getKey(),
+                    java.util.Collections.singletonList(entry.getValue()));
+            } catch (Throwable failure) {
+                ysmu.LOG.warn("Failed to register projectile controllers for {}", entry.getKey(), failure);
+            }
+        }
         ysmu.LOG.info("YSM client registered animations for {}: count={}", id, main.animations.size());
+    }
+
+    /** One projectile's animation file, parsed and never merged into the player's namespace. */
+    private static AnimationFile projectileAnimationFile(byte[] bytes, ResourceLocation projectileId) {
+        try {
+            JsonObject jsonObject = GsonHelper
+                .fromJson(ysmu.GSON, new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
+            return jsonObject == null ? new AnimationFile() : animationFileFromJson(jsonObject);
+        } catch (Exception e) {
+            ysmu.LOG.warn(
+                "Failed to parse projectile animation for {}: {}: {}",
+                projectileId,
+                e.getClass()
+                    .getSimpleName(),
+                StringUtils.defaultString(e.getMessage()));
+            return new AnimationFile();
+        }
     }
 
     private static AnimationFile getAnimationFile(String file) {
@@ -1642,6 +1792,48 @@ public class ClientModelManager {
         }
     }
 
+    /**
+     * 后台线程：从加密客户端缓存解密并反序列化模型（RawYsmModel）。
+     * 供按需懒加载使用（音效首次播放）；返回 null 表示缺失/损坏。
+     * legacy 格式（EncryptTools）不携带 soundFiles，返回 null。
+     * <p>Ported from the reference branch's {@code loadRawModelFromCache}; the only
+     * difference is the deserializer's format argument, which is the same literal
+     * {@code 32} ({@code OpenYsmFormat.OPEN_YSM_SYNC_FORMAT}) this port's sync path
+     * already passes, because this port's {@code OpenYsmFormat} does not declare the
+     * named constant.
+     *
+     * @param mainModelId 主模型 id（如 "ysmu:model_id/main"）
+     */
+    @Nullable
+    public static com.fox.ysmu.model.resource.pojo.RawYsmModel loadRawModelFromCache(ResourceLocation mainModelId) {
+        if (!OPENYSM_CACHE_FORMAT.contains(mainModelId)) {
+            return null;
+        }
+        String path = CACHED_MODEL_MD5.get(mainModelId);
+        if (path == null || path.isEmpty()) return null;
+        try {
+            java.io.File cacheFile = ServerModelManager.CACHE_CLIENT.resolve(path).toFile();
+            if (!cacheFile.isFile()) return null;
+            byte[] fileBytes = org.apache.commons.io.FileUtils.readFileToByteArray(cacheFile);
+            byte[] clearBytes = com.fox.ysmu.client.sync.OpenYsmModelSyncClient.readClientCacheToClearBytes(fileBytes);
+            if (clearBytes == null) return null;
+            try (com.fox.ysmu.model.resource.YSMBinaryDeserializer deserializer =
+                     new com.fox.ysmu.model.resource.YSMBinaryDeserializer(clearBytes,
+                         32)) {
+                com.fox.ysmu.model.resource.pojo.RawYsmModel raw = deserializer.deserializeKeepOpen();
+                deserializer.parseYSMFooter(raw);
+                raw.modelId = com.fox.ysmu.util.ModelIdUtil.getModelIdFromMainId(mainModelId).getResourcePath();
+                // 后台线程预暖音效：模型首次使用时顺带把音效字节填入内存缓存，
+                // 使首播不再在主线程解密（消除 ~0.5s 卡顿）。
+                com.fox.ysmu.client.audio.YSMSoundManager.cacheModelSounds(mainModelId, raw);
+                return raw;
+            }
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to load raw model from cache for {}: {}", mainModelId, e.getMessage());
+            return null;
+        }
+    }
+
     private static void clearRuntimeModelCaches() {
         ysmu.LOG.info(
             "YSM client clearing runtime model caches: models={}, scales={}, extraInfo={}, extraAnimations={}",
@@ -1684,10 +1876,22 @@ public class ClientModelManager {
         com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
         com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
         com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
+        // The registered sound names are keyed by main model id and belong to the models being dropped here, so they
+        // go with them; the reference branch clears the same registry at this point
+        // (ClientModelManager.clearRuntimeModelCaches → YSMSoundManager.clear()).
+        com.fox.ysmu.client.audio.YSMSoundManager.clear();
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();
         MolangPhysicsRuntime.clear();
         MolangInstructionExecutor.clearWarnings();
+        MolangInstructionExecutor.clearTimelineLog();
+        // The projectile index belongs to the models being dropped, and so does the per-projectile state those models
+        // were driving.
+        PROJECTILE_MODEL_IDS.clear();
+        PROJECTILE_TEXTURE_IDS.clear();
+        com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
+        com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.clear();
+        com.fox.ysmu.client.renderer.ArrowProjectileRenderer.clearDumpedTrees();
     }
 
     /**
@@ -1707,6 +1911,18 @@ public class ClientModelManager {
             if (!CACHE_MD5.contains(md5)) {
                 CACHE_MD5.add(md5);
             }
+        }
+    }
+
+    /** Records the cache file path (OpenYSM encrypted format) for a model so its own
+     *  sound bytes can be re-read and re-decrypted on demand, after the parsed payload
+     *  that carried them is gone. Called from the sync parse path with the relative path
+     *  the payload's file was written under. */
+    public static void rememberOpenYsmModelCache(ResourceLocation modelId, String cachePath) {
+        if (modelId != null && cachePath != null && !cachePath.isEmpty()) {
+            ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+            CACHED_MODEL_MD5.put(mainId, cachePath);
+            OPENYSM_CACHE_FORMAT.add(mainId);
         }
     }
 
@@ -1747,6 +1963,10 @@ public class ClientModelManager {
         synchronized (CACHE_MD5) {
             CACHE_MD5.clear();
         }
+        // The "model → encrypted cache file" map describes the models of the connection that just ended (or that is
+        // about to start a new sync round), and so does the format flag beside it.
+        CACHED_MODEL_MD5.clear();
+        OPENYSM_CACHE_FORMAT.clear();
     }
 
     private static byte[] getBytes(Path root, String fileName) throws IOException {

@@ -333,3 +333,21 @@ molang.yes_steve_model.ysm.elytra_rot_z.desc=玩家鞘翅的 Z 旋转角度
 molang.yes_steve_model.ysm.food_level.desc=返回玩家饥饿值
 molang.yes_steve_model.ysm.first_person_mod_hide.desc=当玩家安装 First Person Mod 且需要隐藏玩家头部时为 true，否者为 false
 gui.yes_steve_model.empty_models=暂无可用模型
+# 高版本本地资源(LocalAssetProvider): 配置的高版本游戏目录读不到时的一次性提示。
+# 换行用 {nl} 占位符。
+message.yes_steve_model.asset.invalid_game_path=高版本游戏路径无效: %s
+message.yes_steve_model.asset.not_a_directory=高版本游戏路径不是有效目录: %s
+message.yes_steve_model.asset.asset_version_missing=HighVersionAssetVersion 未设置{nl}可用索引: %s
+message.yes_steve_model.asset.index_not_found=找不到资产索引(HighVersionAssetVersion 可能不对) {nl}可用索引: %s
+message.yes_steve_model.asset.index_parse_failed=资产索引解析失败: %s
+message.yes_steve_model.asset.sounds_json_missing=资产索引缺少 sounds.json(可能不是官方高版本目录)
+message.yes_steve_model.asset.sounds_obj_missing=sounds.json 对象文件不存在
+message.yes_steve_model.asset.sounds_parse_failed=sounds.json 解析失败(可能不是官方高版本目录)
+message.yes_steve_model.asset.init_exception=高版本资源初始化异常: %s
+message.yes_steve_model.asset.jar_not_found=找不到版本 jar(HighVersionJarVersion 可能不对, 高版本粒子纹理将回退)
+message.yes_steve_model.asset.jar_open_failed=打开版本 jar 失败: %s
+message.yes_steve_model.asset.fallback_no_jar=未配置 HighVersionJarVersion, 将回退到 1.7.10 内置粒子
+message.yes_steve_model.asset.fallback_jar_not_open=版本 jar 未打开(HighVersionJarVersion='%s' 可能不对) , 将回退到 1.7.10 内置粒子
+message.yes_steve_model.asset.available_versions=可用版本: %s
+message.yes_steve_model.asset.load_failed=高版本资源加载失败(详见日志)
+message.yes_steve_model.asset.config_hint=(ysmu.cfg 高版本资源配置)

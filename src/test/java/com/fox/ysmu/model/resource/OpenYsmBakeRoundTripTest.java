@@ -61,7 +61,7 @@ class OpenYsmBakeRoundTripTest {
 
                         for (Map.Entry<String, byte[]> part : data.getModel()
                             .entrySet()) {
-                            int[] source = sourceCount(dir, part.getKey());
+                            int[] source = sourceCount(dir, raw, part.getKey());
                             int[] roundTrip = count(new String(part.getValue(), StandardCharsets.UTF_8));
 
                             assertEquals(
@@ -126,8 +126,33 @@ class OpenYsmBakeRoundTripTest {
         }
     }
 
-    private static int[] sourceCount(Path dir, String part) throws Exception {        Path file = dir.resolve("models")
-            .resolve(part + ".json");
+    /**
+     * The source geometry a payload key was bridged from.
+     * <p>
+     * A player geometry key ({@code main}, {@code arm}) names a file under {@code models/}. A projectile key does
+     * not: it is {@code projectile_<matchId>} and the match id is an entity type ({@code minecraft:arrow}), which is
+     * not a path and may not even be a legal file name. Its source geometry is the sub-entity the pack declared, so
+     * it is looked up in the parsed model rather than on disk - keeping the comparison just as strict, against the
+     * geometry that was really the input.
+     */
+    private static int[] sourceCount(Path dir, RawYsmModel raw, String key) throws Exception {
+        if (key.startsWith(com.fox.ysmu.client.ClientModelManager.PROJECTILE_KEY_PREFIX)) {
+            String matchId = key.substring(com.fox.ysmu.client.ClientModelManager.PROJECTILE_KEY_PREFIX.length());
+            for (RawYsmModel.RawSubEntity sub : raw.projectiles.values()) {
+                // Mirrors RawYsmModelAdapter's own rule: a declared match list names the entities, and the parsed
+                // identifier is the fallback for a sub-entity that declares none.
+                boolean matches = sub.matchIds != null && sub.matchIds.length > 0
+                    ? java.util.Arrays.asList(sub.matchIds)
+                        .contains(matchId)
+                    : matchId.equals(sub.identifier);
+                if (matches && sub.model != null && sub.model.sourceJson != null) {
+                    return count(new String(sub.model.sourceJson, StandardCharsets.UTF_8));
+                }
+            }
+            return new int[] { 0, 0, 0 };
+        }
+        Path file = dir.resolve("models")
+            .resolve(key + ".json");
         return Files.isRegularFile(file) ? count(new String(Files.readAllBytes(file), StandardCharsets.UTF_8))
             : new int[] { 0, 0, 0 };
     }

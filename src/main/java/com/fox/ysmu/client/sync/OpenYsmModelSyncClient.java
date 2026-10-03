@@ -30,6 +30,7 @@ import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.C2SCompleteFeedback17;
 import com.fox.ysmu.network.message.C2SModelSyncPayload17;
+import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
@@ -74,9 +75,12 @@ public final class OpenYsmModelSyncClient {
     private static volatile int lastCompletedSessionId;
     private static byte[] key1;
     private static byte[] lastKey;
-    private static byte[] serverKey;
-    private static byte[] clientKey;
-    private static String currentCacheFolderName;
+    // volatile: serverKey/clientKey are written by the packet-processing (pool) thread and read back from other
+    // threads - clientKey and currentCacheFolderName now also by ClientModelManager.loadRawModelFromCache /
+    // rememberOpenYsmModelCache on the playback and client threads. Same field modifiers as the reference branch.
+    private static volatile byte[] serverKey;
+    private static volatile byte[] clientKey;
+    private static volatile String currentCacheFolderName;
 
     private OpenYsmModelSyncClient() {}
 
@@ -94,13 +98,19 @@ public final class OpenYsmModelSyncClient {
         key1 = null;
         lastKey = null;
         serverKey = null;
-        clientKey = null;
+        // NOTE: clientKey is intentionally KEPT — the model's own sound bytes are
+        // re-read from the encrypted client cache after the sync teardown (which also
+        // calls resetConnectionState) and are decrypted with it
+        // (ClientModelManager.loadRawModelFromCache → readClientCacheToClearBytes).
+        // It is only cleared on disconnect (clearConnectionState). Same split as the
+        // reference branch's resetConnectionState/clearConnectionState.
         currentCacheFolderName = null;
         SERVER_MODELS.clear();
     }
 
     public static synchronized void clearConnectionState() {
         resetConnectionState();
+        clientKey = null;
     }
 
     private static synchronized void processServerData(int sessionId, byte[] packetBytes) {
@@ -384,8 +394,20 @@ public final class OpenYsmModelSyncClient {
             // The information screen's author avatars are part of this payload; hand them over together with the
             // model so the screen has them as soon as the model itself is selectable.
             ResourceLocation modelId = new ResourceLocation(ysmu.MODID, context.modelId);
+            // The id the playback path asks under (CustomPlayerEntity.getMainModel()), and therefore the id a
+            // model sound has to be registered against.
+            ResourceLocation mainModelId = ModelIdUtil.getMainId(modelId);
             List<RawYsmModel.RawMetadata.Author> authors = raw.metadata == null
                 ? Collections.emptyList() : new ArrayList<>(raw.metadata.authors);
+            // The pack's sounds/*.ogg bytes are in this payload too, and they are the only place a model sound can
+            // come from in 1.7.10 - there is no resource pack declaring them. The parsed model is still in hand
+            // here, so its sound *names* are filed now (name → this main model id); the bytes are not kept, because
+            // `raw` is a local that is gone the moment this method returns. YSMSoundManager re-reads and re-decrypts
+            // them from the encrypted client cache on first play (ClientModelManager.loadRawModelFromCache). This is
+            // the reference branch's ClientModelManager.registerExtraWheel → YSMSoundManager.registerModelSounds
+            // call, moved here because this port has no method that sees a parsed RawYsmModel at registration.
+            com.fox.ysmu.client.audio.YSMSoundManager
+                .registerModelSounds(mainModelId, raw);
             long generation = ClientModelManager.currentGeneration();
             Minecraft.getMinecraft()
                 .func_152344_a(() -> {
@@ -398,6 +420,19 @@ public final class OpenYsmModelSyncClient {
                     }
                     ClientModelManager.registerAll(data);
                     ClientModelMetadataRegistry.acceptStructuredAuthors(modelId, authors);
+                    // Record the encrypted client cache file this payload was parsed from (relative to
+                    // CACHE_CLIENT), so the model's sound bytes stay reachable after `raw` is gone:
+                    // YSMSoundManager re-decrypts them from it on first play
+                    // (ClientModelManager.loadRawModelFromCache). The name is the one handlePacket03/
+                    // handlePacket05 wrote this payload's file under. The reference branch keeps the same
+                    // record (rememberOpenYsmModelCache) for its lazy geo/anim/texture reload; here it is
+                    // what makes the sound path work at all.
+                    String cacheFileName = YSMClientCache
+                        .generateCacheFileName(context.hash1, context.hash2, clientKey);
+                    if (cacheFileName != null) {
+                        String folder = currentCacheFolderName == null ? "0" : currentCacheFolderName;
+                        ClientModelManager.rememberOpenYsmModelCache(modelId, folder + "/" + cacheFileName);
+                    }
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
                     // own scripts (fn.<name>) can be evaluated while it renders.
                     PackUserFunctions.register(modelId, raw.functionFiles);
@@ -499,6 +534,29 @@ public final class OpenYsmModelSyncClient {
         String folder = currentCacheFolderName == null ? "0" : currentCacheFolderName;
         return ServerModelManager.CACHE_CLIENT.resolve(folder)
             .toFile();
+    }
+
+    /** Decrypts a client cache file written by this session's OpenYSM sync into
+     *  clear bytes using the session client key. Returns null on failure. Used by
+     *  {@code ClientModelManager.loadRawModelFromCache} to re-read a model's own
+     *  sound bytes on first play, after the parsed payload that carried them is gone.
+     *  <p>This port carries no local-key fallback here: it has no
+     *  {@code LocalModelLoader}/{@code registerLocalModel} path for locally-registered
+     *  models to be restored, and {@code OpenYsmModelSyncServer.createClientCacheKey}
+     *  is package-private in another package, so the reference branch's
+     *  {@code localClientKey()} has neither a caller nor a reachable implementation.
+     *  {@link #clientKey} is the key every readable cache file was written with, and it
+     *  is kept across the sync teardown for exactly this call. */
+    public static byte[] readClientCacheToClearBytes(byte[] cacheBytes) {
+        if (cacheBytes == null) return null;
+        if (clientKey != null) {
+            try {
+                return YsmCrypt.read(cacheBytes, clientKey);
+            } catch (Exception ignored) {
+                // fall through: this file does not belong to this session's key
+            }
+        }
+        return null;
     }
 
     private static void sendPayload(byte[] payload) {

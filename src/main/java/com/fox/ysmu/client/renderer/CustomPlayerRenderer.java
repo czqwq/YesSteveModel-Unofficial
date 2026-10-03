@@ -27,6 +27,7 @@ import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -150,6 +151,16 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         this.geoModel = geoModel;
         // A preview may pose the model however its own animation wants; the world must not inherit that pose.
         ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
+        // Bone-transform tracking for the draw (reference branch CustomPlayerRenderer.java:170/192):
+        // MatrixStack.transformBone records each bone's accumulated matrix so ysm.bone_pivot_abs can read this
+        // frame's pose. The scales are the ones renderEarly applies (width, height, width) and the model id is the
+        // main id being drawn, which is what keeps two models' bones apart. The matching disable call sits in the
+        // finally below, so a failed render cannot leave tracking switched on.
+        MolangPhysicsRuntime.setBoneTracking(true,
+            getWidthScale(this.animatable),
+            getHeightScale(this.animatable),
+            getWidthScale(this.animatable),
+            this.animatable.getMainModel());
         try {
             super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
             // Restore the step that cancelling RenderPlayerEvent.Pre takes away with the rest of the draw.
@@ -165,6 +176,7 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             // previews.
             passSpecialRender(entityObj, x, y, z);
         } finally {
+            MolangPhysicsRuntime.setBoneTracking(false, 1.0F, 1.0F, 1.0F, null);
             if (pose != null) {
                 pose.restore();
             }

@@ -33,6 +33,57 @@ public class Config {
     public static boolean ACCEPT_SOUND_FX = true;
 
     /**
+     * Per-frame diagnostics for model sound effects: which model registered which sound, which controller fired
+     * which keyframe, and which source name a sound became. Off by default - the lines are per-keyframe.
+     */
+    public static boolean DEBUG_SOUND = false;
+
+    /**
+     * The debug switches the model and animation paths gate their diagnostics on. All off by default, and every
+     * site that uses one also rate-limits or deduplicates its output: without that, a single stuck projectile
+     * prints a line per frame and the log becomes unreadable at exactly the moment it is needed.
+     * <ul>
+     * <li>{@link #DEBUG_MODEL_LOAD} - which model files were read and which sub-models they declared;</li>
+     * <li>{@link #DEBUG_MODEL_RENDER} - geometry/texture lookup results on the render path;</li>
+     * <li>{@link #DEBUG_ANIMATION} - which animations a frame selected and which timeline instructions ran;</li>
+     * <li>{@link #DEBUG_CONTROLLER} - controller state-machine transitions and expression results.</li>
+     * </ul>
+     */
+    public static boolean DEBUG_MODEL_LOAD = false;
+    public static boolean DEBUG_MODEL_RENDER = false;
+    public static boolean DEBUG_ANIMATION = false;
+    public static boolean DEBUG_CONTROLLER = false;
+
+    /** {@code ysm.particle} / {@code ysm.abs_particle} diagnostics. */
+    public static boolean DEBUG_PARTICLE = false;
+
+    /**
+     * Debug/testing: an extra number of blocks subtracted from a particle's Y offset when it is spawned.
+     * Corrects a model whose particles sit consistently high (some are off by about two blocks).
+     */
+    public static double PARTICLE_Y_ADJUST = 0.0;
+
+    /** Debug/testing: force a particle's xyz offset to 0, i.e. spawn it exactly at the entity. */
+    public static boolean PARTICLE_ZERO_OFFSET = false;
+
+    /**
+     * A high-version Minecraft game directory, used to play sound ids and read particle textures that 1.7.10 does
+     * not ship (a pack may reference {@code minecraft:item.trident.throw}, which has no 1.7.10 equivalent). Empty
+     * disables the whole lookup; {@code LocalAssetProvider} reads it.
+     */
+    public static String HIGH_VERSION_GAME_PATH = "";
+
+    /** The asset-index version to read from that directory, e.g. {@code 32}. */
+    public static String HIGH_VERSION_ASSET_VERSION = "32";
+
+    /**
+     * The version directory under {@code <gamePath>/versions/} whose client jar holds {@code textures/particle}.
+     * Newer Minecraft versions keep those textures inside the version jar rather than in the assets index; leave
+     * empty when not needed.
+     */
+    public static String HIGH_VERSION_JAR_VERSION = "26.2";
+
+    /**
      * 在 Mod preInit 阶段调用，用于初始化配置文件并进行首次加载。
      * @param configFile a suggested configuration file from the FMLPreInitializationEvent.
      */
@@ -82,6 +133,29 @@ public class Config {
         PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "openysm_sync", PLAYER_SYNC_TIMEOUT, "OpenYSM model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
         LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "openysm_sync", LOW_BANDWIDTH_USAGE, "Whether OpenYSM sync should use smaller chunks and conservative throttling", load);
         ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "openysm_sync", ACCEPT_SOUND_FX, "Whether OpenYSM sync should accept model sound effect resources", load);
+
+        // Model sound diagnostics
+        DEBUG_SOUND = syncBoolean("DebugSound", "debug", DEBUG_SOUND, "Enable model sound cache/playback debug logging ([YSMU-SOUND])", load);
+
+        // Model / animation diagnostics (all off by default; each site rate-limits or deduplicates)
+        DEBUG_MODEL_LOAD = syncBoolean("DebugModelLoad", "debug", DEBUG_MODEL_LOAD, "Log model file loading and sub-model discovery", load);
+        DEBUG_MODEL_RENDER = syncBoolean("DebugModelRender", "debug", DEBUG_MODEL_RENDER, "Log geometry/texture lookup results on the render path", load);
+        DEBUG_ANIMATION = syncBoolean("DebugAnimation", "debug", DEBUG_ANIMATION, "Log animation selection and timeline dispatch", load);
+        DEBUG_CONTROLLER = syncBoolean("DebugController", "debug", DEBUG_CONTROLLER, "Log controller state transitions and expression results", load);
+        DEBUG_PARTICLE = syncBoolean("DebugParticle", "debug", DEBUG_PARTICLE, "Enable particle()/abs_particle() debug logging ([YSMU-PARTICLE])", load);
+        PARTICLE_Y_ADJUST = syncDouble("ParticleYAdjust", "debug", PARTICLE_Y_ADJUST, "Extra Y offset subtracted from particle()/abs_particle() spawn position, in blocks (debug/testing; default 0)", -10.0, 10.0, load);
+        PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
+
+        // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
+        // an engine-owned switch, because the engine must not read this mod's config - the dependency direction is
+        // host to engine (Geckolib's AGENTS.md, "Host Contract"). The host is therefore the one that translates its
+        // own debug switches into that flag, which is what the reference branch did by hard-coding the read.
+        software.bernie.geckolib3.GeckoLib.geoStatsEnabled = DEBUG_MODEL_LOAD && DEBUG_MODEL_RENDER;
+
+        // High-version local assets: sounds and particle textures 1.7.10 does not ship.
+        HIGH_VERSION_GAME_PATH = syncString("HighVersionGamePath", "local_assets", HIGH_VERSION_GAME_PATH, "Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft). YSMU reads sounds.json and OGG files from here to play high-version sounds that Et-Futurum doesn't cover.", load);
+        HIGH_VERSION_ASSET_VERSION = syncString("HighVersionAssetVersion", "local_assets", HIGH_VERSION_ASSET_VERSION, "Asset version to use (e.g. '32'). Must match the version subfolder under assets/indexes/ in the game directory.", load);
+        HIGH_VERSION_JAR_VERSION = syncString("HighVersionJarVersion", "local_assets", HIGH_VERSION_JAR_VERSION, "Version directory under <gamePath>/versions/ whose client jar holds textures/particles (e.g. '26.2'). Newer Minecraft versions keep textures inside the version jar; leave empty if not needed.", load);
 
         // 检查配置是否已更改，如果已更改，则保存
         if (configuration.hasChanged()) {

@@ -388,8 +388,8 @@ public final class AnimationManager {
         // A-05 / A-06③: a non-player animatable never reaches AnimationRegister#setParserValue (it takes an
         // EntityPlayer), so this is where the per-frame MoLang context - current entity plus per-axis movement -
         // is published. The player branch publishes the same context in setParserValue, which runs before any
-        // controller is evaluated.
-        MolangFrameContext.begin(entity);
+        // controller is evaluated. The model id travels with it so ysm.play_sound resolves against the right pack.
+        MolangFrameContext.begin(entity, event.getAnimatable() == null ? null : event.getAnimatable().getMainModel());
         // The pack's own scripts resolve fn.<name> against the frame's model; a non-player animatable never reaches
         // AnimationRegister#setParserValue, so this is its publish point.
         PackUserFunctions.begin(event.getAnimatable() == null ? null : event.getAnimatable().getMainModel());

@@ -81,12 +81,12 @@ public final class OpenYsmPlayerControllerRuntime {
             player,
             runtimeState);
         prepareFrameVariables(geckoControllerName, player, runtimeState, context);
-        State state = ensureState(event, match.controller, runtimeState, context);
+        State state = ensureState(event, player, match.controller, runtimeState, context);
         if (state == null) {
             return null;
         }
         for (int i = 0; i < 4; i++) {
-            State nextState = applyTransition(event, match.controller, state, runtimeState, context);
+            State nextState = applyTransition(event, player, match.controller, state, runtimeState, context);
             if (nextState == state) {
                 break;
             }
@@ -119,8 +119,8 @@ public final class OpenYsmPlayerControllerRuntime {
         return state;
     }
 
-    private static State ensureState(AnimationEvent<CustomPlayerEntity> event, Controller controller,
-        RuntimeState runtimeState, OpenYsmControllerExpressionEvaluator.Context context) {
+    private static State ensureState(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
+        Controller controller, RuntimeState runtimeState, OpenYsmControllerExpressionEvaluator.Context context) {
         State state = controller.states.get(runtimeState.currentState);
         if (state != null) {
             return state;
@@ -134,11 +134,13 @@ public final class OpenYsmPlayerControllerRuntime {
         runtimeState.lastSelectedAnimationState = "";
         runtimeState.lastSelectedAnimation = "";
         OpenYsmControllerExpressionEvaluator.executeStatements(initial.onEntry, context);
+        playStateSounds(initial, player);
         return initial;
     }
 
-    private static State applyTransition(AnimationEvent<CustomPlayerEntity> event, Controller controller, State state,
-        RuntimeState runtimeState, OpenYsmControllerExpressionEvaluator.Context context) {
+    private static State applyTransition(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
+        Controller controller, State state, RuntimeState runtimeState,
+        OpenYsmControllerExpressionEvaluator.Context context) {
         for (Transition transition : state.transitions) {
             State target = controller.states.get(transition.targetState);
             if (target == null) {
@@ -153,9 +155,33 @@ public final class OpenYsmPlayerControllerRuntime {
             runtimeState.lastSelectedAnimationState = "";
             runtimeState.lastSelectedAnimation = "";
             OpenYsmControllerExpressionEvaluator.executeStatements(target.onEntry, context);
+            playStateSounds(target, player);
             return target;
         }
         return state;
+    }
+
+    /**
+     * Plays the {@code sound_effects} an OpenYSM controller state declared, at the moment the state is entered.
+     * <p>
+     * Mirrors the reference branch's {@code OpenYsmPlayerControllerRuntime#playStateSounds} (its lines 689-697): the
+     * state's list is parsed into {@code State.soundEffects} by {@code OpenYsmAnimationControllerRegistry}, and each
+     * name is handed to the sound manager with no model context and default volume/pitch. The manager resolves a
+     * name against the model it was registered from and falls back to a vanilla sound of that name.
+     * <p>
+     * The controller name is deliberately NOT passed here: the reference branch keys state effects by the player and
+     * the sound name only, and passes the controller to {@code stopController} on the paths that end an animation
+     * (see the {@code stopController(player, geckoControllerName)} calls in {@code tryApplyController}).
+     */
+    private static void playStateSounds(State state, EntityPlayer player) {
+        if (state.soundEffects == null || state.soundEffects.isEmpty()) {
+            return;
+        }
+        for (String soundName : state.soundEffects) {
+            if (soundName != null && !soundName.isEmpty()) {
+                com.fox.ysmu.client.audio.YSMSoundManager.playSound(player, soundName, 1.0f, 1.0f);
+            }
+        }
     }
 
     private static String selectAnimation(State state, String preferredAnimationName,
@@ -495,6 +521,53 @@ public final class OpenYsmPlayerControllerRuntime {
             this.controller = controller;
             this.preferredAnimationName = preferredAnimationName;
         }
+    }
+
+    /**
+     * How long one animation takes to play through, in ticks - its period, for the purpose of scheduling repeated
+     * timeline events.
+     * <p>
+     * Package-visible because {@link ProjectileTimelineRuntime} must reach the same answer this path does; two
+     * independent guesses at "how often does this animation loop" would make a projectile's trail pulse at a
+     * different rate than the same animation on a player.
+     * <p>
+     * A declared {@code animation_length} wins. Otherwise the longest bone channel is used, and a clip with no
+     * keyframe timing at all answers 0, which callers treat as "no period" rather than as a real one.
+     * <p>
+     * One upstream input is deliberately absent: {@code anim_time_update}, which lets an animation drive its own
+     * clock. The engine does not parse that field yet, so an animation using it is timed by its declared length here
+     * - which is also what the engine actually plays, so the schedule still matches what is on screen.
+     */
+    static double playbackLengthTicks(software.bernie.geckolib3.core.builder.Animation animation) {
+        if (animation == null) {
+            return 0.0d;
+        }
+        Double declared = animation.animationLength;
+        if (declared != null && declared > 0.0d && declared < Double.MAX_VALUE) {
+            return declared;
+        }
+        double longest = 0.0d;
+        if (animation.boneAnimations != null) {
+            for (software.bernie.geckolib3.core.keyframe.BoneAnimation bone : animation.boneAnimations) {
+                longest = Math.max(longest, channelLengthTicks(bone.rotationKeyFrames));
+                longest = Math.max(longest, channelLengthTicks(bone.positionKeyFrames));
+                longest = Math.max(longest, channelLengthTicks(bone.scaleKeyFrames));
+            }
+        }
+        return longest;
+    }
+
+    /** The total duration of one keyframe channel in ticks; the three axes share a length. */
+    private static double channelLengthTicks(
+        software.bernie.geckolib3.core.keyframe.VectorKeyFrameList<software.bernie.geckolib3.core.keyframe.KeyFrame<com.eliotlash.mclib.math.IValue>> channel) {
+        if (channel == null || channel.xKeyFrames == null || channel.xKeyFrames.isEmpty()) {
+            return 0.0d;
+        }
+        double total = 0.0d;
+        for (software.bernie.geckolib3.core.keyframe.KeyFrame<com.eliotlash.mclib.math.IValue> frame : channel.xKeyFrames) {
+            total += frame.getLengthPrimitive();
+        }
+        return total;
     }
 
     private static final class StateKey {

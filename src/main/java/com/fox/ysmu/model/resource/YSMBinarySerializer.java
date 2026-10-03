@@ -132,10 +132,35 @@ public class YSMBinarySerializer {
             writeGeometry(buf, sub.model, format);
             if (format > 26) {
                 buf.writeVarInt(0x01); // footer
-                buf.writeString(sub.identifier);
+                buf.writeString(subEntityIdentifier(sub));
             }
             index++;
         }
+    }
+
+    /**
+     * The name a sub-entity's footer carries.
+     * <p>
+     * A pack declares the entity types a projectile answers to in its {@code match} list, and the {@code match} is the
+     * only thing that says a given sub-entity is the arrow. When the declaration is the object form the parsed
+     * identifier already is that entity type, but the array form synthesises a positional name
+     * ({@code projectile_0}) - and writing that would leave the receiving client with a projectile it cannot match to
+     * any entity, so the arrow renders vanilla. The footer therefore carries the first declared match id whenever
+     * there is one.
+     * <p>
+     * Only the first is written, because the footer is a single string and widening it would change the layout that
+     * is also used to read genuine upstream {@code .ysm} files. A sub-entity covering several entity types therefore
+     * keeps all of them when it is loaded locally, and the first one when it arrives over the network.
+     */
+    private static String subEntityIdentifier(RawYsmModel.RawSubEntity sub) {
+        if (sub.matchIds != null) {
+            for (String matchId : sub.matchIds) {
+                if (matchId != null && !matchId.isEmpty()) {
+                    return matchId;
+                }
+            }
+        }
+        return sub.identifier != null ? sub.identifier : "";
     }
 
     private static void writeGeometry(YSMByteBuf buf, RawYsmModel.RawGeometry geo, int format) {

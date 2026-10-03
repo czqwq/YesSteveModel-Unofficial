@@ -139,9 +139,20 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
             new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
         data.getAnimationControllers()
             .values()
-            .forEach(
-                controller -> controller
-                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions)));
+            .forEach(controller -> {
+                controller
+                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions));
+                // A pack's `sound_effects` keyframes, which the port parsed and synced but never played. The owner is
+                // the entity behind this animatable; an NPC or a GUI preview has none and falls into the sound
+                // manager's local slot, which is also what keeps two players running the same model from sharing
+                // bookkeeping for controllers they both name `cap_controller`.
+                controller.registerSoundListener(
+                    event -> {
+                        String ctrlName = event.getController().getName();
+                        com.fox.ysmu.client.audio.YSMSoundManager.onSoundKeyframe(
+                            getPlayer(), ctrlName, event.sound, getMainModel());
+                    });
+            });
     }
 
     public ResourceLocation getMainModel() {

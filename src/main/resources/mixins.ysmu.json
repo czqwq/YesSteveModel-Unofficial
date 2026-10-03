@@ -5,7 +5,12 @@
   "refmap": "mixins.ysmu.refmap.json",
   "target": "@env(DEFAULT)",
   "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "MixinEntityArrow"
+  ],
   "client": [
-    "MixinItemRenderer"
+    "MixinItemRenderer",
+    "MixinEffectRenderer",
+    "client.MixinRenderArrow"
   ]
 }
