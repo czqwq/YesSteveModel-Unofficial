@@ -119,7 +119,7 @@ public class ModelConfigScreen extends GuiScreen {
             } else if ("checkbox".equals(type)) {
                 int id = this.nextWidgetId++;
                 this.checkboxVariables.put(id, variable);
-                this.buttonList.add(ConfigCheckBox.forLabel(id, panelX + 5, cursor + 10, title, current >= 0.5d));
+                this.buttonList.add(ConfigCheckBox.forLabel(id, panelX + 5, cursor + 10, PANEL_WIDTH, title, current >= 0.5d));
                 cursor += ROW_HEIGHT;
             } else if ("radio".equals(type)) {
                 this.captions.add(new Caption(title, panelX + 5, cursor, 0xFFF3EFE0));

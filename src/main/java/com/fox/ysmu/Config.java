@@ -5,6 +5,8 @@ import java.io.File;
 import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.common.config.Property;
 
+import com.fox.ysmu.util.ControllerUtils;
+
 public class Config {
     private static Configuration configuration;
 
@@ -23,21 +25,45 @@ public class Config {
     public static int PLAYER_POS_Y = 10;
     public static double PLAYER_SCALE = 40.0;
     public static double PLAYER_YAW_OFFSET = 5.0;
+    public static boolean SWAP_CONFIG_SIDES = false;
 
-    // OpenYSM model sync config
+    /** HUD paperdoll follow mode: 0 = vanilla (current), 1 = vanilla smooth, 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock). */
+    public static final int HUD_FOLLOW_VANILLA = 0;
+    public static final int HUD_FOLLOW_VANILLA_SMOOTH = 1;
+    public static final int HUD_FOLLOW_YSM = 2;
+    public static final int HUD_FOLLOW_YSM_SMOOTH = 3;
+    public static int HUD_FOLLOW_MODE = HUD_FOLLOW_YSM_SMOOTH;
+
+    // GUI Config
+    public static boolean GUI_ENHANCEMENTS = true;
+    public static boolean SHOW_LOADING_PROGRESS = true;
+    /** Preview grid FBO refresh mode. -1 = auto (whole-page shared budget, see
+     *  {@code PreviewRefreshPolicy}); 0 = static (only on interaction); 1-4 = refresh
+     *  every N frames. default: -1 */
+    public static int GUI_MODEL_PREVIEW_REFRESH = -1;
+    /** HUD selfie model FBO cache. When true (default), renders to an off-screen
+     *  framebuffer at an adaptive rate and blits the cached texture between refreshes.
+     *  Set to false to force every-frame rendering (no performance gain). */
+    public static boolean GUI_HUD_PREVIEW_CACHE = true;
+
+    // OpenYSM model sync config (port-specific: the port's own sync channel switch)
     public static boolean ENABLE_OPEN_YSM_SYNC_PROTOCOL = true;
-    public static int THREAD_COUNT = 4;
-    public static int BANDWIDTH_LIMIT = 0;
-    public static int PLAYER_SYNC_TIMEOUT = 60;
-    public static boolean LOW_BANDWIDTH_USAGE = false;
-    public static boolean ACCEPT_SOUND_FX = true;
 
+    // Local asset config
+    /** Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft) */
+    public static String HIGH_VERSION_GAME_PATH = "";
+    /** Asset version to use (e.g. "32"). Should match the game directory's assets/indexes/ */
+    public static String HIGH_VERSION_ASSET_VERSION = "32";
     /**
-     * Per-frame diagnostics for model sound effects: which model registered which sound, which controller fired
-     * which keyframe, and which source name a sound became. Off by default - the lines are per-keyframe.
+     * Version directory name under {@code <gamePath>/versions/} whose client jar holds
+     * textures/particles (e.g. "26.2"). Newer Minecraft versions keep textures inside the
+     * version jar instead of assets/objects; leave empty if not needed (older versions).
      */
-    public static boolean DEBUG_SOUND = false;
+    public static String HIGH_VERSION_JAR_VERSION = "26.2";
 
+    // Debug Config
+    public static boolean DEBUG_CONTROLLER = false;
+    public static boolean DEBUG_WHEEL = false;
     /**
      * The debug switches the model and animation paths gate their diagnostics on. All off by default, and every
      * site that uses one also rate-limits or deduplicates its output: without that, a single stuck projectile
@@ -50,38 +76,141 @@ public class Config {
      * </ul>
      */
     public static boolean DEBUG_MODEL_LOAD = false;
+    /** 子开关：细分 DEBUG_MODEL_LOAD 的日志域，避免大型模型库初始化时刷爆日志。
+     *  每个子开关只有在 DEBUG_MODEL_LOAD 为 true 时才生效。 */
+    public static boolean DEBUG_MODEL_SCAN = false;
+    public static boolean DEBUG_MODEL_SYNC = false;
+    public static boolean DEBUG_MODEL_PARSE = false;
+    /** 二进制 .ysm 解析细节（偏移地址/HEXDUMP/逐动画逐骨骼日志），默认关，避免刷屏。
+     *  仅在 DEBUG_MODEL_LOAD 为 true 时生效，独立于 DEBUG_MODEL_PARSE。 */
+    public static boolean DEBUG_MODEL_BINARY = false;
     public static boolean DEBUG_MODEL_RENDER = false;
     public static boolean DEBUG_ANIMATION = false;
-    public static boolean DEBUG_CONTROLLER = false;
-
-    /** {@code ysm.particle} / {@code ysm.abs_particle} diagnostics. */
+    /**
+     * Per-frame diagnostics for model sound effects: which model registered which sound, which controller fired
+     * which keyframe, and which source name a sound became. Off by default - the lines are per-keyframe.
+     */
+    public static boolean DEBUG_SOUND = false;
     public static boolean DEBUG_PARTICLE = false;
-
-    /**
-     * Debug/testing: an extra number of blocks subtracted from a particle's Y offset when it is spawned.
-     * Corrects a model whose particles sit consistently high (some are off by about two blocks).
-     */
+    /** 调试/测试用：粒子生成时从 Y 偏移额外减去的值（格）。默认 0。
+     *  用于临时校正模型粒子高度偏差（有的模型粒子偏高约 2 格）。 */
     public static double PARTICLE_Y_ADJUST = 0.0;
-
-    /** Debug/testing: force a particle's xyz offset to 0, i.e. spawn it exactly at the entity. */
+    /** 调试/测试用：粒子 xyz 偏移全部置 0（直接生成在实体位置）。 */
     public static boolean PARTICLE_ZERO_OFFSET = false;
+    public static boolean DEBUG_MERGED_ANIMATIONS = false;
 
+    // Chat message config
+    /** 进世界时显示欢迎/提示消息。 */
+    public static boolean SHOW_WELCOME_MESSAGE = true;
+    /** 在 chat 中显示服务端/客户端模型加载时间与模型加载数量。
+     *  默认关：正常时不显示；仅当有模型加载失败时才显示加载数量。 */
+    public static boolean SHOW_MODEL_LOAD_CHAT = false;
+
+    // External wearable rendering (AdventureBackpack2 backpacks/copter/jetpack etc.)
+    public static boolean RENDER_WEARABLE = true;
+    public static double WEARABLE_RENDER_SCALE = 0.8;
+
+    // Direct Buffer watchdog
+    /** Safety-net: periodically check Direct Buffer usage and GC if over threshold */
+    public static boolean ENABLE_DIRECT_BUFFER_WATCHDOG = true;
+    /** Direct Buffer GC trigger threshold in MB */
+    public static int DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = 1024;
+
+    // Texture VRAM config
+    /** Target texture dimension (px) uploaded to VRAM; 0 = disabled (full resolution).
+     *  Textures larger than the target are uniformly downscaled by a power of two
+     *  so the result lands in [target, 2*target) — e.g. target 1024 keeps 2048->1024,
+     *  and anything under 2048 passes through. Bound VRAM on large model libraries;
+     *  GeckoLib samples with normalized UVs, so an aspect-preserving resize never
+     *  shifts the mapped content. Default 0 (off): downscaling still has visual
+     *  artifacts on some models, so it is opt-in until a better
+     *  downscale strategy lands. */
+    public static int TEXTURE_TARGET_SIZE = 0;
+
+    /** GPU VRAM budget for YSM model textures in MB; 0 = disabled.
+     *  When the total VRAM footprint of uploaded YSM textures exceeds this budget,
+     *  least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so
+     *  re-upload is a cheap GPU upload — never a white model). Bounds the VRAM peak
+     *  on large model libraries instead of per-texture downscaling, which still has
+     *  visual artifacts. Roughly 24-36 typical models fit in
+     *  128-256 MB; raise it if on-screen demand regularly exceeds the budget. */
+    public static int TEXTURE_VRAM_BUDGET_MB = 256;
+
+    /** 30s 空闲卸载 GPU 纹理时，是否一并释放堆内的原始字节。
+     *  释放的字节在下次使用时由 ensureTexturesLoaded → restoreTextureData 从加密客户端
+     *  缓存重解密（与 geo/anim 懒恢复同一条已验证路径）。消除大库纹理字节的线性堆增长；
+     *  代价是闲置模型重新入场时会在渲染线程短暂解密其缓存文件。 */
+    public static boolean TEXTURE_RELEASE_BYTES_ON_IDLE = true;
+
+    /** GUI 关闭后的保护宽限期（秒）。在此期间，所有模型资源（几何/动画/纹理）
+     *  不会被空闲超时回收。默认 120 秒（2 分钟），覆盖最常见的「关闭预览再打开」场景。
+     *  设为 0 则禁用宽限期（恢复旧行为）。 */
+    public static int GUI_POST_CLOSE_GRACE_SECONDS = 120;
+
+    // Model sync config
+    public static boolean ENABLE_SYNC_PROTOCOL = true;
     /**
-     * A high-version Minecraft game directory, used to play sound ids and read particle textures that 1.7.10 does
-     * not ship (a pack may reference {@code minecraft:item.trident.throw}, which has no 1.7.10 equivalent). Empty
-     * disables the whole lookup; {@code LocalAssetProvider} reads it.
+     * 动画控制脚本（{@code @player_ctrl_<槽位>.molang}）是否每帧真正执行。
+     * <p>
+     * 关闭时只有解析期静态提取的状态→动画映射生效（旧行为）；开启后每帧求值脚本，
+     * 于是 {@code set_animation} 的动画名可以是算出来的、{@code ctrl.state_bypass}
+     * 会精确地交回内置逻辑。脚本报错或返回 bypass 时仍然回落到内置逻辑，所以开启
+     * 本身不会让"本来能动的模型"不动。用于 A/B 对比模型表现。
      */
-    public static String HIGH_VERSION_GAME_PATH = "";
-
-    /** The asset-index version to read from that directory, e.g. {@code 32}. */
-    public static String HIGH_VERSION_ASSET_VERSION = "32";
-
+    public static boolean MOLANG_CONTROL_SCRIPTS = true;
     /**
-     * The version directory under {@code <gamePath>/versions/} whose client jar holds {@code textures/particle}.
-     * Newer Minecraft versions keep those textures inside the version jar rather than in the assets index; leave
-     * empty when not needed.
+     * 具名并行槽位（{@code player.pre_parallel_<非数字后缀>} / {@code player.parallel_<...>}）
+     * 备用池大小（每族）。每个实体注册 {@code 2 × 此值} 个额外控制器，所以有上限
+     * （{@link ControllerUtils#MAX_NAMED_PARALLEL_EXTRA_SLOTS}），不是越多越好。
+     * 默认值覆盖绝大多数模型；只有当模型声明的具名槽位超过默认值时才有必要提高。
+     * 0 = 关闭具名并行槽位（池不注册，具名槽位不播放）。
      */
-    public static String HIGH_VERSION_JAR_VERSION = "26.2";
+    public static int NAMED_PARALLEL_EXTRA_SLOTS = ControllerUtils.DEFAULT_NAMED_PARALLEL_EXTRA_SLOTS;
+    /**
+     * 槽位后缀控制器（{@code player.<slot>_<后缀>}，slot ∈ {@link ControllerUtils#OPENYSM_SLOTS}）
+     * 备用池大小。官方把同一槽位下所有名字都当成独立控制器加载并按名字母序叠加，所以一个槽位
+     * 可以同时挂 {@code @player_ctrl_<slot>.molang} 控制脚本和若干 JSON 控制器；YSMU 的
+     * GeckoLib 控制器是按名字固定的（一个槽位一个），只能用一个跨槽位共享的池承载后缀控制器。
+     * 池是每个实体注册的控制器，所以有上限（{@link ControllerUtils#MAX_SLOT_EXTRA_CONTROLLERS}）；
+     * 0 = 关闭（后缀控制器不播放）。
+     */
+    public static int SLOT_EXTRA_CONTROLLERS = ControllerUtils.DEFAULT_SLOT_EXTRA_CONTROLLERS;
+    public static int THREAD_COUNT = 4;
+    public static int BANDWIDTH_LIMIT = 0;
+    public static int PLAYER_SYNC_TIMEOUT = 60;
+    public static boolean LOW_BANDWIDTH_USAGE = false;
+    public static boolean ACCEPT_SOUND_FX = true;
+    /** 玩家手动 /ysm sync 重新同步的冷却秒数：-1 = 完全拒绝，0 = 不限。 */
+    public static int RESYNC_COOLDOWN_SECONDS = 600;
+
+    // Offhand item render hiding
+    /** 隐藏副手物品渲染的总开关（第二页 GUI 开关，默认开启）。 */
+    public static boolean HIDE_OFFHAND_DEFOLIAGE_AXE = true;
+    /** 在副手中时完全不渲染的物品（格式 modid:itemname，精确匹配不区分大小写）。
+     *  影响第一人称手持渲染、第三人称模型手持物品层与 HUD 自拍模型。
+     *  默认隐藏 Extra Utilities 的除叶子斧（defoliage axe）。 */
+    public static String[] HIDDEN_OFFHAND_ITEMS = new String[] { "ExtraUtilities:defoliageAxe" };
+
+    // Animation config
+    /** 全局 GeckoLib 动画过渡时长（单位 tick，20 tick = 1 秒）。
+     *  0 = 立即切换，2 = 100ms，4 = 200ms。
+     *  仅作为默认值：若模型控制器 JSON 定义了 blend_transition 会按状态覆盖此值。 */
+    public static int ANIMATION_TRANSITION_TICKS = 4;
+
+    /** 移动动画防滑步（stride matching）总开关（默认关闭）：
+     *  按真实水平速度缩放 walk/run/sneak 等移动类动画的播放倍速，
+     *  使步态周期与位移匹配，减少脚在地面滑动的观感。
+     *  默认关闭：该功能假设每个动画循环恰好是两步（一个完整步幅），
+     *  但不少模型设计成 1 步或 3/4 步，强行匹配反而更怪，按需开启。 */
+    public static boolean ANIMATION_SPEED_MATCH = false;
+    /** 防滑步基础倍率：整体缩放防滑步播放倍速（1.0 = 各步态规范步幅）。
+     *  唯一的外部调节旋钮——所有模型动画整体偏快/偏慢时在此微调；
+     *  各步态的规范步幅是内部常量（walk/run 4.317、sneak 1.295、swim 1.727），
+     *  最终的可视化逐模型校准页（方案 C）会覆盖此值。 */
+    public static double ANIMATION_SPEED_MATCH_BASE = 1.0;
+    /** 防滑步倍速平滑响应系数（配置允许 0.05~1.0，默认 0.5；每 tick 向目标倍速逼近的比例）。
+     *  越小越平滑但反应越慢；越大反应越快但急起急停可能可见。 */
+    public static double ANIMATION_SPEED_MATCH_RESPONSE = 0.5;
 
     /**
      * 在 Mod preInit 阶段调用，用于初始化配置文件并进行首次加载。
@@ -125,26 +254,38 @@ public class Config {
         PLAYER_POS_Y = syncInt("PlayerPosY", "extra_player_render", PLAYER_POS_Y, "Player position y in screen", 0, Integer.MAX_VALUE, load);
         PLAYER_SCALE = syncDouble("PlayerScale", "extra_player_render", PLAYER_SCALE, "Player scale in screen", 8.0, 360.0, load);
         PLAYER_YAW_OFFSET = syncDouble("PlayerYawOffset", "extra_player_render", PLAYER_YAW_OFFSET, "Player yaw offset in screen", load);
+        SWAP_CONFIG_SIDES = syncBoolean("SwapConfigSides", "extra_player_render", SWAP_CONFIG_SIDES, "Swap wheel config panel and preview sides", load);
+        HUD_FOLLOW_MODE = syncInt("HudFollowMode", "extra_player_render", HUD_FOLLOW_MODE, "HUD paperdoll follow mode: 0 = vanilla, 1 = vanilla smooth (smoothed offset, no abrupt snap), 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock, default)", HUD_FOLLOW_VANILLA, HUD_FOLLOW_YSM_SMOOTH, load);
 
-        // OpenYSM model sync config values
+        // GUI config values
+        GUI_ENHANCEMENTS = syncBoolean("GuiEnhancements", "gui", GUI_ENHANCEMENTS, "Enable model selection GUI enhancements (foreground/background textures and GUI animations)", load);
+        SHOW_LOADING_PROGRESS = syncBoolean("ShowLoadingProgress", "gui", SHOW_LOADING_PROGRESS, "Show model sync progress bar overlay", load);
+        GUI_MODEL_PREVIEW_REFRESH = syncInt("GuiModelPreviewRefresh", "gui", GUI_MODEL_PREVIEW_REFRESH, "Preview grid FBO refresh. -1 = auto (whole-page shared budget), 0 = static (only on interaction), 1-4 = refresh every N frames. Higher = smoother animation but more GPU load.", -1, 4, load);
+        GUI_HUD_PREVIEW_CACHE = syncBoolean("GuiHudPreviewCache", "gui", GUI_HUD_PREVIEW_CACHE, "HUD selfie model FBO cache. Disable for every-frame rendering (no performance gain).", load);
+
+        // OpenYSM model sync config values (port-specific: the port's own sync channel switch)
         ENABLE_OPEN_YSM_SYNC_PROTOCOL = syncBoolean("EnableOpenYsmSyncProtocol", "openysm_sync", ENABLE_OPEN_YSM_SYNC_PROTOCOL, "Whether to use the appended OpenYSM hash/cache/chunk sync path before legacy fallback", load);
-        THREAD_COUNT = syncInt("ThreadCount", "openysm_sync", THREAD_COUNT, "Target worker count for the shared model sync thread pool (read by util/ThreadTools, core/max worker count; clamped to 1..32)", 1, 32, load);
-        BANDWIDTH_LIMIT = syncInt("BandwidthLimit", "openysm_sync", BANDWIDTH_LIMIT, "OpenYSM model sync bandwidth limit in bytes per second. 0 means unlimited", 0, Integer.MAX_VALUE, load);
-        PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "openysm_sync", PLAYER_SYNC_TIMEOUT, "OpenYSM model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
-        LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "openysm_sync", LOW_BANDWIDTH_USAGE, "Whether OpenYSM sync should use smaller chunks and conservative throttling", load);
-        ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "openysm_sync", ACCEPT_SOUND_FX, "Whether OpenYSM sync should accept model sound effect resources", load);
 
-        // Model sound diagnostics
-        DEBUG_SOUND = syncBoolean("DebugSound", "debug", DEBUG_SOUND, "Enable model sound cache/playback debug logging ([YSMU-SOUND])", load);
+        // Local asset config values
+        HIGH_VERSION_GAME_PATH = syncString("HighVersionGamePath", "local_assets", HIGH_VERSION_GAME_PATH, "Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft). YSMU reads sounds.json and OGG files from here to play high-version sounds that Et-Futurum doesn't cover.", load);
+        HIGH_VERSION_ASSET_VERSION = syncString("HighVersionAssetVersion", "local_assets", HIGH_VERSION_ASSET_VERSION, "Asset version to use (e.g. '32'). Must match the version subfolder under assets/indexes/ in the game directory.", load);
+        HIGH_VERSION_JAR_VERSION = syncString("HighVersionJarVersion", "local_assets", HIGH_VERSION_JAR_VERSION, "Version directory under <gamePath>/versions/ whose client jar holds textures/particles (e.g. '26.2'). Newer Minecraft versions keep textures inside the version jar; leave empty if not needed.", load);
 
-        // Model / animation diagnostics (all off by default; each site rate-limits or deduplicates)
-        DEBUG_MODEL_LOAD = syncBoolean("DebugModelLoad", "debug", DEBUG_MODEL_LOAD, "Log model file loading and sub-model discovery", load);
-        DEBUG_MODEL_RENDER = syncBoolean("DebugModelRender", "debug", DEBUG_MODEL_RENDER, "Log geometry/texture lookup results on the render path", load);
-        DEBUG_ANIMATION = syncBoolean("DebugAnimation", "debug", DEBUG_ANIMATION, "Log animation selection and timeline dispatch", load);
-        DEBUG_CONTROLLER = syncBoolean("DebugController", "debug", DEBUG_CONTROLLER, "Log controller state transitions and expression results", load);
+        // Debug config values
+        DEBUG_CONTROLLER = syncBoolean("DebugController", "debug", DEBUG_CONTROLLER, "Enable controller transition/roaming debug logging ([YSMU-CTRL])", load);
+        DEBUG_WHEEL = syncBoolean("DebugWheel", "debug", DEBUG_WHEEL, "Enable wheel GUI debug logging ([YSMU-WHEEL], [YSMU-ROAM])", load);
+        DEBUG_MODEL_LOAD = syncBoolean("DebugModelLoad", "debug", DEBUG_MODEL_LOAD, "Enable model loading/debug logging ([YSMU-MODEL]). Master switch; sub-areas are gated by DebugModelScan/Sync/Parse/Render", load);
+        DEBUG_MODEL_SCAN = syncBoolean("DebugModelScan", "debug", DEBUG_MODEL_SCAN, "Server-side model discovery/cache build logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_SYNC = syncBoolean("DebugModelSync", "debug", DEBUG_MODEL_SYNC, "Client model sync protocol logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_PARSE = syncBoolean("DebugModelParse", "debug", DEBUG_MODEL_PARSE, "Model JSON parse & registration logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_BINARY = syncBoolean("DebugModelBinary", "debug", DEBUG_MODEL_BINARY, "Binary .ysm parse detail logging: offsets/HEXDUMP/per-anim/per-bone (needs DebugModelLoad). Default off to avoid log spam on large libraries.", load);
+        DEBUG_MODEL_RENDER = syncBoolean("DebugModelRender", "debug", DEBUG_MODEL_RENDER, "Model render/arrow/bone-dump logging + geometry/animTick statistics ([YSMU-GEO-PROBE]; needs DebugModelLoad)", load);
+        DEBUG_ANIMATION = syncBoolean("DebugAnimation", "debug", DEBUG_ANIMATION, "Enable animation playback debug logging ([YSMU-ANIM])", load);
+        DEBUG_SOUND = syncBoolean("DebugSound", "debug", DEBUG_SOUND, "Enable sound cache/playback debug logging ([YSM Sound])", load);
         DEBUG_PARTICLE = syncBoolean("DebugParticle", "debug", DEBUG_PARTICLE, "Enable particle()/abs_particle() debug logging ([YSMU-PARTICLE])", load);
         PARTICLE_Y_ADJUST = syncDouble("ParticleYAdjust", "debug", PARTICLE_Y_ADJUST, "Extra Y offset subtracted from particle()/abs_particle() spawn position, in blocks (debug/testing; default 0)", -10.0, 10.0, load);
         PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
+        DEBUG_MERGED_ANIMATIONS = syncBoolean("DebugMergedAnimations", "debug", DEBUG_MERGED_ANIMATIONS, "Show __ysm_merged__ animations in the preview GUI for debugging", load);
 
         // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
         // an engine-owned switch, because the engine must not read this mod's config - the dependency direction is
@@ -152,14 +293,50 @@ public class Config {
         // own debug switches into that flag, which is what the reference branch did by hard-coding the read.
         software.bernie.geckolib3.GeckoLib.geoStatsEnabled = DEBUG_MODEL_LOAD && DEBUG_MODEL_RENDER;
 
-        // High-version local assets: sounds and particle textures 1.7.10 does not ship.
-        HIGH_VERSION_GAME_PATH = syncString("HighVersionGamePath", "local_assets", HIGH_VERSION_GAME_PATH, "Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft). YSMU reads sounds.json and OGG files from here to play high-version sounds that Et-Futurum doesn't cover.", load);
-        HIGH_VERSION_ASSET_VERSION = syncString("HighVersionAssetVersion", "local_assets", HIGH_VERSION_ASSET_VERSION, "Asset version to use (e.g. '32'). Must match the version subfolder under assets/indexes/ in the game directory.", load);
-        HIGH_VERSION_JAR_VERSION = syncString("HighVersionJarVersion", "local_assets", HIGH_VERSION_JAR_VERSION, "Version directory under <gamePath>/versions/ whose client jar holds textures/particles (e.g. '26.2'). Newer Minecraft versions keep textures inside the version jar; leave empty if not needed.", load);
+        // Chat message config values
+        SHOW_WELCOME_MESSAGE = syncBoolean("ShowWelcomeMessage", "chat", SHOW_WELCOME_MESSAGE, "Show the welcome/info message when joining a world", load);
+        SHOW_MODEL_LOAD_CHAT = syncBoolean("ShowModelLoadChat", "chat", SHOW_MODEL_LOAD_CHAT, "Show server/client model load time and model counts in chat. Off by default: hidden unless some models failed to load", load);
+
+        // Model sync config values
+        RENDER_WEARABLE = syncBoolean("RenderWearable", "compatibility", RENDER_WEARABLE, "Whether to render external wearable models (e.g. AdventureBackpack2 backpack/copter/jetpack) on YSM model's back", load);
+        WEARABLE_RENDER_SCALE = syncDouble("WearableRenderScale", "compatibility", WEARABLE_RENDER_SCALE, "Scale factor for wearable model rendering (1.0 = default)", 0.1, 5.0, load);
+        ENABLE_DIRECT_BUFFER_WATCHDOG = syncBoolean("EnableDirectBufferWatchdog", "watchdog", ENABLE_DIRECT_BUFFER_WATCHDOG, "Safety-net: periodically check Direct Buffer usage and trigger GC when over threshold", load);
+        DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = syncInt("DirectBufferWatchdogThreshold", "watchdog", DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB, "Direct Buffer GC trigger threshold in MB", 128, 8192, load);
+        ENABLE_SYNC_PROTOCOL = syncBoolean("EnableSyncProtocol", "ysm_sync", ENABLE_SYNC_PROTOCOL, "Use the unified model sync protocol (covers all model formats: folders, BOM+YSGP and legacy bare-YSGP .ysm). When disabled or version-mismatched, falls back to the legacy MD5/AES sync", load);
+        MOLANG_CONTROL_SCRIPTS = syncBoolean("MolangControlScripts", "animation", MOLANG_CONTROL_SCRIPTS, "Execute @player_ctrl_<slot>.molang animation-control scripts every frame (wiki: molang/script). When disabled only the statically extracted state->animation mapping is used", load);
+        NAMED_PARALLEL_EXTRA_SLOTS = syncInt("NamedParallelExtraSlots", "animation", NAMED_PARALLEL_EXTRA_SLOTS, "Extra pool controllers registered per parallel family (pre_parallel/parallel) to carry model-named parallel slots (player.pre_parallel_<name>). Each entity registers 2x this many extra controllers, so it is bounded; raise only if a model declares more named slots than the default. 0 disables named parallel slots.", 0, ControllerUtils.MAX_NAMED_PARALLEL_EXTRA_SLOTS, load);
+        SLOT_EXTRA_CONTROLLERS = syncInt("SlotExtraControllers", "animation", SLOT_EXTRA_CONTROLLERS, "Extra pool controllers, shared by all eight player.<slot> slots and routed per model, carrying suffix controllers such as player.pre_main_<suffix> or player.post_main_<suffix>. Upstream registers every name matching ^player\\.<slot>(_.+)?$ as its own controller, so one slot can host a control script plus several JSON controllers; each entity registers this many extra controllers, so it is bounded. Raise only if a model declares more suffixed controllers than the default. 0 disables suffix slot controllers.", 0, ControllerUtils.MAX_SLOT_EXTRA_CONTROLLERS, load);
+        THREAD_COUNT = syncInt("ThreadCount", "ysm_sync", THREAD_COUNT, "Target worker count for YSM model sync tasks", 1, 32, load);
+        BANDWIDTH_LIMIT = syncInt("BandwidthLimit", "ysm_sync", BANDWIDTH_LIMIT, "model sync bandwidth limit in bytes per second. 0 means unlimited", 0, Integer.MAX_VALUE, load);
+        PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "ysm_sync", PLAYER_SYNC_TIMEOUT, "model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
+        RESYNC_COOLDOWN_SECONDS = syncInt("ResyncCooldownSeconds", "ysm_sync", RESYNC_COOLDOWN_SECONDS,
+            "Cooldown in seconds between player-triggered /ysm sync resyncs. -1 rejects the resync command entirely; 0 = no cooldown", -1, Integer.MAX_VALUE, load);
+        LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "ysm_sync", LOW_BANDWIDTH_USAGE, "Whether sync should use smaller chunks and conservative throttling", load);
+        ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "ysm_sync", ACCEPT_SOUND_FX, "Whether sync should accept model sound effect resources", load);
+        TEXTURE_TARGET_SIZE = syncInt("TextureTargetSize", "ysm_sync", TEXTURE_TARGET_SIZE, "Target texture dimension (px) uploaded to VRAM. 0 = full resolution. Larger textures are downscaled by a power of two (result in [target, 2*target)).", 0, 8192, load);
+        TEXTURE_VRAM_BUDGET_MB = syncInt("TextureVramBudget", "ysm_sync", TEXTURE_VRAM_BUDGET_MB, "YSM model texture VRAM budget in MB. 0 = unlimited. When uploaded texture VRAM exceeds this, least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so re-upload is cheap and never white).", 0, 8192, load);
+        TEXTURE_RELEASE_BYTES_ON_IDLE = syncBoolean("TextureReleaseBytesOnIdle", "ysm_sync", TEXTURE_RELEASE_BYTES_ON_IDLE, "Release raw texture bytes from heap when a model's GPU textures idle-unload (30s). Re-decrypted from the encrypted client cache on next use (same path as geo/anim lazy reload). Eliminates the linear heap growth from texture bytes on large libraries; the first re-entry of an idle model briefly decrypts its cache file on the render thread.", load);
+        GUI_POST_CLOSE_GRACE_SECONDS = syncInt("GuiPostCloseGraceSeconds", "ysm_sync", GUI_POST_CLOSE_GRACE_SECONDS, "Grace period (seconds) after closing the model preview GUI during which idle resource eviction is suppressed. Prevents full re-load when reopening the preview shortly after closing. 0 = disabled.", 0, 600, load);
+        HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
+        HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
+        ANIMATION_TRANSITION_TICKS = syncInt("AnimationTransitionTicks", "animation", ANIMATION_TRANSITION_TICKS, "Global GeckoLib animation transition length in ticks (20 ticks = 1s). 0 = instant, 2 = 100ms, 4 = 200ms. Model-defined blend_transition overrides this per state.", 0, 40, load);
+        ANIMATION_SPEED_MATCH = syncBoolean("AnimationSpeedMatch", "animation", ANIMATION_SPEED_MATCH, "Scale locomotion animation playback rate to actual movement speed to reduce foot sliding (stride matching).", load);
+        ANIMATION_SPEED_MATCH_BASE = syncDouble("AnimationSpeedMatchBase", "animation", ANIMATION_SPEED_MATCH_BASE, "Baseline rate for stride matching playback speed (1.0 = canonical per-gait strides). Playback = base x actualSpeed x cycleTime / gaitStride. Player speed is read live each frame so potion buffs/debuffs adapt automatically. Increase if animations play too slow, decrease if too fast.", 0.25, 4.0, load);
+        ANIMATION_SPEED_MATCH_RESPONSE = syncDouble("AnimationSpeedMatchResponse", "animation", ANIMATION_SPEED_MATCH_RESPONSE, "Smoothing response per tick for the stride-match speed multiplier (0.05-1.0). Lower = smoother but slower reaction.", 0.05, 1.0, load);
 
         // 检查配置是否已更改，如果已更改，则保存
         if (configuration.hasChanged()) {
             configuration.save();
+        }
+    }
+
+    private static String[] syncStringList(String name, String category, String[] currentValue, String comment, boolean load) {
+        Property prop = configuration.get(category, name, currentValue, comment);
+        if (load) {
+            return prop.getStringList();
+        } else {
+            prop.set(currentValue);
+            return currentValue;
         }
     }
 

@@ -36,13 +36,16 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  *
  * <h3>与本移植的差异（仅测试夹具）</h3>
  * <p>参考分支在 {@code @BeforeAll} 里清空 {@code MolangParser.VARIABLES} 后调用
- * {@code AnimationRegister.registerMolangHooks()}，并用 {@code new MolangParser()} 解析 —— 它的
- * {@code ysm.*} 函数是通过 parser 上的 {@code ysmFunctionRegistrar} 注入的，所以每个新 parser 都能看到。
- * 本移植里这些函数装在引擎**共享**的那个 parser 上（{@code ClientProxy#init} 调用的
- * {@code AnimationRegister.registerVariables()}），因此这里断言的是同一个共享实例：</p>
+ * {@code AnimationRegister.registerMolangHooks()}，并用 {@code new MolangParser()} 解析。
+ * 本移植最初只把函数装在引擎**共享**的那个 parser 上，现已同样设置
+ * {@code MolangParser.ysmFunctionRegistrar}（{@code AnimationRegister.registerMolangHooks}，由
+ * {@code ClientProxy#init} 在 {@code registerVariables()} 之前调用），所以每个
+ * {@code new MolangParser()} 也能看到 {@code ysm.*} —— 与参考分支一致。
+ * 这里仍然断言共享实例，且不清 {@code VARIABLES}，原因只有一条：</p>
  * <ul>
- * <li>不清 {@code VARIABLES}：它是静态共享表，清掉会把本 JVM 里其它测试已注册的变量一并丢掉；</li>
- * <li>{@code registerVariables()} 自身有幂等保护，重复调用是安全的空操作。</li>
+ * <li>{@code VARIABLES} 是进程级静态表，清掉会把本 JVM 里其它测试已注册的变量一并丢掉；而
+ * {@code registerVariables()} 的幂等保护会让"清空后再注册"变成空操作，于是清空之后的用例
+ * 一律读到 0（同一 hazard 另见 {@code ChargeCircleScaleExpressionTest}）。</li>
  * </ul>
  * <p>测试方法体与参考分支一致，未作改动。</p>
  */
