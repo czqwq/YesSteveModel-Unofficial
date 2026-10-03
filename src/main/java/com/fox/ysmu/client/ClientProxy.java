@@ -28,6 +28,10 @@ public class ClientProxy extends CommonProxy {
         // The earliest client-only entry point: record the client thread here so the model manager's off-thread
         // install guard is meaningful from mod init, not only from the first resource reload or tick.
         ClientModelManager.markClientThread();
+        // 必须先注册 Molang 钩子：GeckoLibCache.getInstance() 首次调用即构造
+        // MolangParser（new MolangParser() 内执行 doCoreRemaps），ysm.*/ctrl.*/query.*
+        // 函数注册必须在该构造之前就位，否则运行时解析器缺失这些函数。
+        AnimationRegister.registerMolangHooks();
         AnimationRegister.registerAnimationState();
         AnimationRegister.registerVariables();
         CUSTOM_PLAYER_RENDERER = new CustomPlayerRenderer();

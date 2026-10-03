@@ -14,14 +14,24 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
 import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
+import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
+import com.fox.ysmu.client.animation.molang.CtrlArmorFunction;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
+import com.fox.ysmu.client.animation.molang.CtrlItemFunction;
 import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
+import com.fox.ysmu.client.animation.molang.EquippedEnchantmentLevelFunction;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.animation.molang.ParticleFunction;
-import com.fox.ysmu.client.animation.molang.QueryIsItemNameAnyFunction;
+import com.fox.ysmu.client.animation.molang.PerlinNoiseFunction;
+import com.fox.ysmu.client.animation.molang.QueryBlockTagFunction;
+import com.fox.ysmu.client.animation.molang.QueryDurabilityFunction;
+import com.fox.ysmu.client.animation.molang.QueryHasAnyCuriosFunction;
+import com.fox.ysmu.client.animation.molang.QueryItemNameAnyFunction;
+import com.fox.ysmu.client.animation.molang.QueryItemTagFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionFunction;
+import com.fox.ysmu.client.animation.molang.YsmEffectLevelFunction;
 import com.fox.ysmu.client.animation.molang.YsmSoundFunction;
 import com.fox.ysmu.client.animation.molang.YsmSyncFunction;
 import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
@@ -145,35 +155,9 @@ public class AnimationRegister {
         }
         molangVariablesRegistered = true;
         MolangParser parser = GeckoLibCache.getInstance().parser;
-        parser.functions.put("query.position_delta", QueryPositionDeltaFunction.class);
-        parser.functions.put("query.position", QueryPositionFunction.class);
-        parser.functions.put("query.is_item_name_any", QueryIsItemNameAnyFunction.class);
-        // ysm.particle / particle / abs_particle：OpenYSM 粒子 Molang 函数。
-        // ParticleFunction 通过 MolangStringPool 还原字符串参数（粒子 id），
-        // 实体上下文由 ParticleEffectUtil.setCurrentEntity 每帧写入。
-        parser.functions.put("ysm.particle", ParticleFunction.class);
-        // ysm.abs_particle：与 ysm.particle 成对。漏注册时整条关键帧表达式解析失败、
-        // 整个 animation 被丢弃（与 query.equipped_item_*_tag 同一条约定），
-        // 所以四个名字必须都在。ParticleFunction 按注册名里的 "abs_" 判定绝对模式。
-        parser.functions.put("ysm.abs_particle", ParticleFunction.class);
-        parser.functions.put("particle", ParticleFunction.class);
-        parser.functions.put("abs_particle", ParticleFunction.class);
-        // ysm.bone_pivot_abs：骨骼绝对枢轴（模型单位），沿父链应用完整变换。
-        // .x/.y/.z 后缀由 MolangParser.rewriteVectorFunction 重写为 _x/_y/_z 注册名。
-        parser.functions.put("ysm.bone_pivot_abs_x", BonePivotAbsFunction.class);
-        parser.functions.put("ysm.bone_pivot_abs_y", BonePivotAbsFunction.class);
-        parser.functions.put("ysm.bone_pivot_abs_z", BonePivotAbsFunction.class);
-        // A-16: upstream YSMBinding.java:190 `function("sync", new Sync())` - a pack's way to hand values to every
-        // client that can see the model; the echo runs the model's `@sync` script.
-        parser.functions.put("ysm.sync", YsmSyncFunction.class);
-        parser.functions.put("ysm.relative_block_name", YsmRelativeBlockNameFunction.class);
-        parser.functions.put("ysm.relative_block_name_any", YsmRelativeBlockNameFunction.class);
-        // A pack's own sound instructions. Upstream registers all three in YSMBinding.java:185-187; without them a
-        // pack's `sound_effects` timeline entry is a parse failure, not a silent no-op.
-        parser.functions.put("ysm.play_sound", YsmSoundFunction.Play.class);
-        parser.functions.put("ysm.stop_sound", YsmSoundFunction.Stop.class);
-        parser.functions.put("ysm.stop_all_sounds", YsmSoundFunction.StopAll.class);
-        parser.functions.put("ctrl.hold", CtrlHoldFunction.class);
+        // 函数表只有一份（见 registerFunctions）：这里装到共享 parser 上，registerMolangHooks() 再把它
+        // 装到 registrar 上供每个新建的 parser 继承。
+        registerFunctions(parser.functions);
         // fn.<name> 的函数体随模型而定（pack 的 functions/*.molang），无法静态注册一个类，交给动态解析。
         PackUserFunctions.installResolver(parser);
         // Bedrock 的布尔字面量：OpenYSM 的 pack 脚本会写 v.x=true / false，而本解析器把它们当普通变量（默认 0）。
@@ -182,6 +166,100 @@ public class AnimationRegister {
         parser.register(new LazyVariable("false", 0));
         registerQueryVariables(parser);
         registerYsmVariables(parser);
+    }
+
+    /**
+     * 注册引擎的反向控制钩子：把 YSMU 特有的 ctrl.* / query.* / ysm.* Molang 函数表交给
+     * {@code MolangParser.ysmFunctionRegistrar}（反向控制，引擎侧不引用 mod 类）。
+     * <p>
+     * 只调用一次即可（重复调用只是幂等赋同一个方法引用），运行时只读；必须在任何模型/动画加载前执行
+     * （ClientProxy.init 在 FML init 阶段，早于模型加载）：registrar 是在 {@code MolangParser} 的
+     * <b>构造器</b>里被调用的，所以设好之后，引擎自己 new 的 parser、脚本运行时的 parser、以及测试里的
+     * {@code new MolangParser()} 都会继承同一张表 —— 而不是只有 {@code GeckoLibCache} 那个共享 parser 有。
+     * <p>
+     * Register the reverse-control hook the engine exposes. The registrar runs from the MolangParser
+     * constructor, so this one assignment is what makes <em>every</em> new parser inherit YSMU's function
+     * table; putting the table on the shared parser alone ({@link #registerVariables()}) would leave the
+     * engine's own parsers - and the ported script runtime - without those names. Idempotent (it reassigns
+     * the same method reference) and read-only at runtime, and it must run before any model or animation is
+     * loaded, which {@code ClientProxy#init} guarantees.
+     */
+    public static void registerMolangHooks() {
+        MolangParser.ysmFunctionRegistrar = AnimationRegister::registerFunctions;
+    }
+
+    /**
+     * YSMU Molang 函数表 —— <b>唯一一份</b>（原 vendored doCoreRemaps() 里的那批已迁移至此）。
+     * <p>
+     * 有两个应用点，都指向这个方法：{@link #registerVariables()} 把它装到 {@code GeckoLibCache} 的共享
+     * parser 上，{@link #registerMolangHooks()} 把它装到 registrar 上，于是每个新建的 MolangParser 也都
+     * 继承同一张表。不要再把这张表内联到任何地方。
+     */
+    private static void registerFunctions(java.util.Map<String, Class<? extends com.eliotlash.mclib.math.functions.Function>> functions) {
+        // YSMU 特有 Molang 函数注册（registrar 让每个新构造的 MolangParser 都执行一次）。
+        // ctrl.* / query.* / ysm.* 说明见原 vendored doCoreRemaps()（已迁移至此）。
+        functions.put("query.position_delta", QueryPositionDeltaFunction.class);
+        functions.put("query.position", QueryPositionFunction.class);
+        // query.relative_block_has_any_tag：只支持能原生回答的标签（minecraft:replaceable），
+        // 其余返回 false —— 1.7.10 没有数据驱动的方块标签。
+        functions.put("query.relative_block_has_any_tag", QueryBlockTagFunction.class);
+        // query.is_item_name_any：按槽位取物品注册名匹配（物品标签类查询仍不支持）。
+        functions.put("query.is_item_name_any", QueryItemNameAnyFunction.class);
+        // query.max_durability / query.remaining_durability(slotType)：YSM-wiki molang/ref 2.2.1。
+        functions.put("query.max_durability", QueryDurabilityFunction.class);
+        functions.put("query.remaining_durability", QueryDurabilityFunction.class);
+        // query.equipped_item_{any_tag,all_tags}(slotType, tag...)：1.7.10 没有数据驱动的物品
+        // 标签，只回答能原生回答的（物品类型 + 矿物词典），其余 false。
+        // 必须注册：未注册函数会让整条关键帧表达式解析失败、整个动画被丢弃。
+        functions.put("query.equipped_item_any_tag", QueryItemTagFunction.class);
+        functions.put("query.equipped_item_all_tags", QueryItemTagFunction.class);
+        // ysm.perlin_noise：3D 柏林噪声（返回 [0,1]），自实现。
+        functions.put("ysm.perlin_noise", PerlinNoiseFunction.class);
+        // ysm.keyboard(键码...)：关键帧/时间轴 Molang 里的按键查询。
+        // 以前和 ctrl.* 共用恒返回 0 的 CtrlHoldFunction，导致按键驱动的模型收不到输入。
+        functions.put("ysm.keyboard", com.fox.ysmu.client.animation.molang.YsmKeyboardFunction.class);
+        // ysm.mouse(按钮...)：鼠标按钮查询（wiki 2.5.0），此前完全没有实现。
+        functions.put("ysm.mouse", com.fox.ysmu.client.animation.molang.YsmMouseFunction.class);
+        // ysm.particle / particle / abs_particle：OpenYSM 粒子 Molang 函数。
+        // ParticleFunction 通过 MolangStringPool 还原字符串参数（粒子 id），
+        // 实体上下文由 ParticleEffectUtil.setCurrentEntity 每帧写入。
+        functions.put("ysm.particle", ParticleFunction.class);
+        // ysm.abs_particle：与 ysm.particle 成对。漏注册时整条关键帧表达式解析失败、
+        // 整个 animation 被丢弃（与 query.equipped_item_*_tag 同一条约定），
+        // 所以四个名字必须都在。ParticleFunction 按注册名里的 "abs_" 判定绝对模式。
+        functions.put("ysm.abs_particle", ParticleFunction.class);
+        functions.put("particle", ParticleFunction.class);
+        functions.put("abs_particle", ParticleFunction.class);
+        // ysm.bone_pivot_abs：骨骼绝对枢轴（模型单位），沿父链应用完整变换。
+        // .x/.y/.z 后缀由 MolangParser.rewriteVectorFunction 重写为 _x/_y/_z 注册名。
+        functions.put("ysm.bone_pivot_abs_x", BonePivotAbsFunction.class);
+        functions.put("ysm.bone_pivot_abs_y", BonePivotAbsFunction.class);
+        functions.put("ysm.bone_pivot_abs_z", BonePivotAbsFunction.class);
+        // A-16: upstream YSMBinding.java:190 `function("sync", new Sync())` - a pack's way to hand values to every
+        // client that can see the model; the echo runs the model's `@sync` script.
+        functions.put("ysm.sync", YsmSyncFunction.class);
+        functions.put("ysm.relative_block_name", YsmRelativeBlockNameFunction.class);
+        functions.put("ysm.relative_block_name_any", YsmRelativeBlockNameFunction.class);
+        // ysm.equipped_enchantment_level：返回指定槽位物品上给定附魔的等级之和。
+        functions.put("ysm.equipped_enchantment_level", EquippedEnchantmentLevelFunction.class);
+        // ysm.effect_level：返回渲染实体身上给定药水效果的等级之和（1 级 = 1）。
+        functions.put("ysm.effect_level", YsmEffectLevelFunction.class);
+        // A pack's own sound instructions. Upstream registers all three in YSMBinding.java:185-187; without them a
+        // pack's `sound_effects` timeline entry is a parse failure, not a silent no-op.
+        functions.put("ysm.play_sound", YsmSoundFunction.Play.class);
+        functions.put("ysm.stop_sound", YsmSoundFunction.Stop.class);
+        functions.put("ysm.stop_all_sounds", YsmSoundFunction.StopAll.class);
+        // ysm.has_any_curios(槽位, id...)：Curios 在 1.7.10 上用前身 Baubles（GTNH 是
+        // Baubles-Expanded）实现；未安装时恒 false，槽位没有对应物时也会提示一次。
+        functions.put("ysm.has_any_curios", QueryHasAnyCuriosFunction.class);
+        functions.put("ctrl.hold", CtrlHoldFunction.class);
+        // ctrl.use / ctrl.swing：keyframe/时间轴/.molang 脚本里的真实现（控制器条件路径
+        // OpenYsmControllerExpressionEvaluator.functionValue 有同样的 hand/use/swing 分支）。
+        // ctrl.hold 仍走上面的 CtrlHoldFunction（A-06③：两条路径都汇到 InnerClassify）。
+        functions.put("ctrl.use", CtrlItemFunction.class);
+        functions.put("ctrl.swing", CtrlItemFunction.class);
+        // ctrl.armor(slot, matcher)：护甲槽匹配，只认 $物品ID 与 empty（与控制器路径同一规则）。
+        functions.put("ctrl.armor", CtrlArmorFunction.class);
     }
 
     /** One line, not one per repeat, so a caller that re-runs registration cannot spam the log. */
@@ -212,6 +290,10 @@ public class AnimationRegister {
         parser.register(new LazyVariable("query.has_rider", MolangUtils.FALSE));
         parser.register(new LazyVariable("query.head_x_rotation", 0));
         parser.register(new LazyVariable("query.head_y_rotation", 0));
+        // YSM-wiki: molang/ref 只有 head_x/head_y，没有 head_z（1.7.10 也没有实体 roll）。
+        // YSMU 扩展：用**相机 roll** 当这个值 —— 本机玩家的头部朝向与镜头一致，而原版从不写
+        // EntityRenderer.camRoll（恒 0，仅相机类 mod 会写），所以无相机 mod 时与官方行为一致。
+        parser.register(new LazyVariable("query.head_z_rotation", 0));
         parser.register(new LazyVariable("query.health", 0));
         parser.register(new LazyVariable("query.hurt_time", 0));
 
@@ -297,6 +379,12 @@ public class AnimationRegister {
         parser.register(new LazyVariable("ysm.delta_movement_length", 0));
         parser.register(new LazyVariable("ysm.shoot_item_id", 0));
 
+        // ysm.fps：注册前它在关键帧路径上会落进 newVariable() 的默认 0，而控制器路径返回 60，
+        // 同一条表达式在两条路径读到不同的值（见 FpsQuery）。显式注册（与其他 ysm.* 常量变量
+        // 同一约定）后立刻用 supplier 绑定，使其到处都是"客户端当前帧率"的实时值。
+        parser.register(new LazyVariable("ysm.fps", com.fox.ysmu.client.animation.molang.FpsQuery.FALLBACK_FPS));
+        parser.setValue("ysm.fps", com.fox.ysmu.client.animation.molang.FpsQuery::clientFps);
+
         // parser.register(new LazyVariable("ysm.first_person_mod_hide", MolangUtils.FALSE));
     }
 
@@ -337,7 +425,9 @@ public class AnimationRegister {
         parser.setValue("query.body_x_rotation", player.rotationPitch);
         parser.setValue("query.body_y_rotation", () -> MathHelper.wrapAngleTo180_float(player.rotationYaw));
         parser.setValue("query.cardinal_facing_2d", () -> MathHelper.floor_double((double) (player.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3);
-        parser.setValue("query.distance_from_camera", () -> mc.renderViewEntity.getDistanceToEntity(player));
+        // 相机到实体的距离：第三人称必须算上镜头后退（原实现在本机玩家上恒为 0，
+        // 见 CameraDistanceQuery 的类注释）。
+        parser.setValue("query.distance_from_camera", () -> CameraDistanceQuery.forPlayer(player));
         parser.setValue("query.equipment_count", () -> getEquipmentCount(player));
         parser.setValue("query.eye_target_x_rotation", () -> player.rotationPitch);
         parser.setValue("query.eye_target_y_rotation", () -> player.rotationYaw);
@@ -346,6 +436,9 @@ public class AnimationRegister {
         parser.setValue("query.has_rider", () -> MolangUtils.booleanToFloat(player.riddenByEntity != null));
         parser.setValue("query.head_x_rotation", queryValues.headYaw());
         parser.setValue("query.head_y_rotation", () -> data.headPitch);
+        // 同上：相机 roll，且只对本机玩家（远程玩家的 roll 无同步字段）。详见 CameraRollQuery。
+        parser.setValue("query.head_z_rotation", () -> com.fox.ysmu.client.animation.molang.CameraRollQuery
+            .isLocalPlayer(player) ? com.fox.ysmu.client.animation.molang.CameraRollQuery.interpolatedRoll() : 0.0d);
         parser.setValue("query.health", player::getHealth);
         parser.setValue("query.hurt_time", () -> player.hurtTime);
         parser.setValue("query.modified_distance_moved", () -> player.distanceWalkedModified);

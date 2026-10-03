@@ -139,8 +139,23 @@ public final class InnerClassify {
         if (stack == null || stack.getItem() == null) {
             return "";
         }
-        GameRegistry.UniqueIdentifier uid = GameRegistry.findUniqueIdentifierFor(stack.getItem());
-        return uid == null ? "" : uid.toString().toLowerCase(Locale.ROOT);
+        // 参考分支只判 `uid == null`，但 FML 的 findUniqueIdentifierFor 对"不在 GameData 里的物品"
+        // 不是返回 null 而是抛 NPE（GameData.getUniqueName 返回 null → UniqueIdentifier 构造器里
+        // string.split(null)）。于是任何没走 FML 注册的物品、或 GameData 尚未建好的初始化早期，
+        // 这条分类路径都会直接炸掉整个条件求值 —— 参考分支自己的单测就会踩到这一点。
+        // YSM-wiki 的语义是"认不出来就当空"，所以这里保留它的取值顺序，把这一步包起来，
+        // 失败时退回和 QueryItemNameAnyFunction 同一个注册名来源（Item.itemRegistry）。
+        try {
+            GameRegistry.UniqueIdentifier uid = GameRegistry.findUniqueIdentifierFor(stack.getItem());
+            if (uid != null) {
+                return uid.toString()
+                    .toLowerCase(Locale.ROOT);
+            }
+        } catch (Throwable ignored) {
+            // 未注册物品的预期失败，不是错误；下面的注册表回退就是它的答案。
+        }
+        String registryName = Item.itemRegistry.getNameForObject(stack.getItem());
+        return registryName == null ? "" : registryName.toLowerCase(Locale.ROOT);
     }
 
     /**
