@@ -23,6 +23,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.condition.*;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
@@ -134,6 +135,11 @@ public final class AnimationManager {
         if (Minecraft.getMinecraft()
             .isGamePaused()) {
             return PlayState.STOP;
+        }
+        // 动画控制脚本优先（pre_main / post_main / pre_hold / pre_swing / pre_use …）。
+        PlayState scriptState = applyControlScript(event, controlSlotFor(event));
+        if (scriptState != null) {
+            return scriptState;
         }
         PlayState controllerState = OpenYsmPlayerControllerRuntime.tryApply(event);
         return controllerState == null ? PlayState.STOP : controllerState;
@@ -272,6 +278,300 @@ public final class AnimationManager {
             }
         }
         return names;
+    }
+
+    /** 控制脚本动态覆盖动画名的日志（每个 模型×槽位 只打一条，避免每帧刷屏）。 */
+    private static final java.util.Set<String> LOGGED_CONTROL_SCRIPT = java.util.concurrent.ConcurrentHashMap
+        .newKeySet();
+
+    /**
+     * GeckoLib 控制器名 → wiki 的槽位名（{@code @player_ctrl_<槽位>.molang} 里那个槽位）。
+     *
+     * <p>两种命名都要认：OpenYSM 槽位形如 {@code player.pre_main} / {@code player.parallel_6}
+     * （wiki 的控制器名把 {@code .} 换成 {@code _ctrl_}），legacy 控制器形如
+     * {@code main_controller} / {@code use_controller} / {@code parallel_6_controller}。
+     * 认不出（例如具名并行备用池 {@code pre_parallel_extra_0_controller}）返回 null ——
+     * 它的槽位名要问运行时路由结果，这里不猜；{@link #controlSlotFor} 会用
+     * {@link OpenYsmPlayerControllerRuntime#namedParallelControlSlot} 把这块补上。</p>
+     */
+    @Nullable
+    static String controlSlotName(@Nullable String geckoControllerName) {
+        if (geckoControllerName == null || geckoControllerName.isEmpty()) {
+            return null;
+        }
+        // 具名并行备用池（pre_parallel_extra_N_controller / parallel_extra_N_controller）是 YSMU
+        // 的实现细节，模型里没有对应槽位名：要控制的是运行时路由到的**具名**槽位
+        // （如 parallel_6），那个名字只有 OpenYsmPlayerControllerRuntime 知道，这里不猜。
+        if (geckoControllerName.startsWith("pre_parallel_extra_")
+            || geckoControllerName.startsWith("parallel_extra_")) {
+            return null;
+        }
+        if (geckoControllerName.startsWith("player.")) {
+            return geckoControllerName.substring("player.".length());
+        }
+        if (geckoControllerName.endsWith("_controller")) {
+            return geckoControllerName.substring(0, geckoControllerName.length() - "_controller".length());
+        }
+        return null;
+    }
+
+    /**
+     * 这一帧要交给动画控制脚本的槽位名：普通槽位由 {@link #controlSlotName} 从控制器名推导；
+     * 具名并行备用池（{@code *_extra_N_controller}）的槽位名取决于**当前模型**的槽位表，
+     * 只有 {@link OpenYsmPlayerControllerRuntime#namedParallelControlSlot} 知道，在这里补齐。
+     * <p>
+     * 不补的话，模型给具名并行槽位写的 {@code @player_ctrl_<槽位>.molang} 永远拿不到控制权：
+     * 池控制器的谓词每帧先查脚本，查到的槽位名是 null，脚本阶段直接跳过。
+     */
+    @Nullable
+    static String controlSlotFor(AnimationEvent<CustomPlayerEntity> event) {
+        if (event == null || event.getController() == null) {
+            return null;
+        }
+        String name = event.getController().getName();
+        String slot = controlSlotName(name);
+        if (slot != null) {
+            return slot;
+        }
+        // 池名：解析它只为给动画控制脚本用。没开脚本、或当前模型根本没有脚本时，
+        // applyControlScript 也会直接返回 null，所以省掉这次按模型的路由（绝大多数模型走这里）。
+        if (!Config.MOLANG_CONTROL_SCRIPTS) {
+            return null;
+        }
+        CustomPlayerEntity animatable = event.getAnimatable();
+        ResourceLocation animId = animatable == null ? null : animatable.getAnimation();
+        if (animId == null
+            || !com.fox.ysmu.client.animation.molang.MolangScriptRegistry.hasScripts(animId)) {
+            return null;
+        }
+        // 槽位后缀备用池（openysm_slot_extra_N_controller）的路由（SOURCE slotExtraControlSlot）
+        // 属于槽位后缀池那一批，本仓的运行时还没有那条路（见报告），所以这里只补具名并行池。
+        return OpenYsmPlayerControllerRuntime.namedParallelControlSlot(animId, name);
+    }
+
+    /**
+     * 某个槽位的动画控制脚本本帧的决定 → {@code PlayState}；没有脚本/交回内置逻辑返回 null。
+     *
+     * <p>有决定时在这里就把动画播出去（走 {@link #playAnimation}，所以过渡时长、播放倍速、
+     * 脚本里的循环类型都会生效），调用方直接返回该 {@code PlayState}。</p>
+     */
+    @Nullable
+    static PlayState applyControlScript(AnimationEvent<CustomPlayerEntity> event, @Nullable String slot) {
+        if (!Config.MOLANG_CONTROL_SCRIPTS || event == null || slot == null || event.getAnimatable() == null) {
+            return null;
+        }
+        CustomPlayerEntity animatable = event.getAnimatable();
+        ResourceLocation animId = animatable.getAnimation();
+        if (animId == null
+            || !com.fox.ysmu.client.animation.molang.MolangScriptRegistry.hasScripts(animId)) {
+            // 绝大多数模型没有任何 .molang 脚本：一次 map 查询就退出，不做后面的动画表查询。
+            return null;
+        }
+        AnimationFile animFile = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(animId);
+        com.fox.ysmu.client.animation.molang.AnimationControlResult result =
+            com.fox.ysmu.client.animation.molang.AnimationControlScripts.evaluate(animId, slot, () -> {
+                EntityPlayer player = animatable.getPlayer();
+                return player == null ? null : new com.fox.ysmu.client.animation.controller.OpenYsmScriptScope(
+                    player, event, animId, java.util.Collections.emptyList());
+            });
+        if (result == null) {
+            return null;
+        }
+        EntityPlayer player = animatable.getPlayer();
+        if (player == null) {
+            return null;
+        }
+        com.fox.ysmu.client.animation.molang.AnimationControlResult.LoopType scriptLoop = result.loopType();
+        ControlScriptDecision decision = decideControlScript(result, animFile == null ? null : animFile.animations,
+            null, animId, slot);
+        if (decision == null) {
+            return null;
+        }
+        if (decision.stop) {
+            applyControlScriptStop(animId, slot, event, decision.reset);
+            return PlayState.STOP;
+        }
+        if (decision.animationName == null) {
+            return null;
+        }
+        ILoopType loopType = loopTypeOf(scriptLoop);
+        // wiki：若要重载当前动画，必须在 ctrl.set_animation **之前**调用 ctrl.indicate_reload ——
+        // 同名动画否则会被忽略。所以在 playAnimation 之前 markNeedsReload，让 setAnimation 的
+        // "同名但 needsAnimationReload" 分支走重载。
+        if (decision.indicateReload && event.getController() != null) {
+            event.getController()
+                .markNeedsReload();
+        }
+        PlayState state = loopType == null ? playAnimation(event, decision.animationName)
+            : playAnimation(event, decision.animationName, loopType);
+        // 过渡时长放在 playAnimation 之后：applyMolangPlaybackHints 可能用静态提取的 map 设过它，
+        // 而脚本本帧真正执行出来的值更权威。
+        if (decision.transitionSeconds != null && decision.transitionSeconds >= 0.0d
+            && event.getController() != null) {
+            event.getController().transitionLengthTicks = decision.transitionSeconds * 20.0d;
+        }
+        return state;
+    }
+
+    /** 脚本给出的循环类型 → GeckoLib 的 loop 类型；没写（null）返回 null（用动画自带的）。 */
+    @Nullable
+    private static ILoopType loopTypeOf(@Nullable com.fox.ysmu.client.animation.molang.AnimationControlResult.LoopType type) {
+        if (type == null) {
+            return null;
+        }
+        switch (type) {
+            case LOOP:
+                return ILoopType.EDefaultLoopTypes.LOOP;
+            case PLAY_ONCE:
+                return ILoopType.EDefaultLoopTypes.PLAY_ONCE;
+            case HOLD_ON_LAST_FRAME:
+                return ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME;
+            default:
+                return null;
+        }
+    }
+
+    /** 控制脚本对本帧的决定：要播哪个动画、要不要中止当前动画、要不要重置控制器状态。 */
+    static final class ControlScriptDecision {
+
+        @Nullable
+        final String animationName;
+        /** {@code state_stop} / {@code ctrl.reset}：中止当前动画（{@code PlayState.STOP}）。 */
+        final boolean stop;
+        /** {@code ctrl.reset}：同时清掉该槽位的控制器运行时状态（回到初始状态）。 */
+        final boolean reset;
+        /**
+         * 脚本**本帧**给的过渡时长（秒，{@code ctrl.set_beginning_transition_length}）；null = 没给。
+         * <p>注册期静态提取的 {@code MOLANG_TRANSITION_MAP} 只能绑定字面量动画名，动态算出来的
+         * 名字绑不上 —— 这个字段是那条路径的补充。
+         */
+        @Nullable
+        final Double transitionSeconds;
+        /**
+         * 脚本**本帧**调用了 {@code ctrl.indicate_reload}。wiki 明确要求它在
+         * {@code ctrl.set_animation} **之前**调用才生效（否则同名动画会被忽略而不是重载），
+         * 所以应用方必须先 markNeedsReload 再播。
+         */
+        final boolean indicateReload;
+
+        ControlScriptDecision(@Nullable String animationName, boolean stop, boolean reset) {
+            this(animationName, stop, reset, null, false);
+        }
+
+        ControlScriptDecision(@Nullable String animationName, boolean stop, boolean reset,
+            @Nullable Double transitionSeconds, boolean indicateReload) {
+            this.animationName = animationName;
+            this.stop = stop;
+            this.reset = reset;
+            this.transitionSeconds = transitionSeconds;
+            this.indicateReload = indicateReload;
+        }
+    }
+
+    /**
+     * 控制脚本结果 → 本帧决定（纯逻辑，便于单测）；副作用只在
+     * {@link #applyControlScriptStop} 里做。
+     *
+     * <p>规则：只在**明确的 {@code state_continue} + 具体动画名 + 该动画确实存在于模型里**时
+     * 覆盖调用方的目标；{@code state_bypass}/{@code NONE}/脚本报错/动画不存在一律返回 null，
+     * 让调用方沿用内置逻辑与静态映射 —— 开启这个功能不会把本来能动的模型弄坏。</p>
+     */
+    @Nullable
+    static ControlScriptDecision decideControlScript(
+        com.fox.ysmu.client.animation.molang.AnimationControlResult result,
+        java.util.Map<String, ?> animations, @Nullable String fallbackName, ResourceLocation animId, String slot) {
+        if (result == null) {
+            return null;
+        }
+        com.fox.ysmu.client.animation.molang.AnimationControlResult.Action action = result.action();
+        String name = result.animationName();
+        if (animations != null && name != null && !animations.containsKey(name)) {
+            // 脚本算出了一个模型里不存在的动画：不覆盖（否则看起来像"动画丢了"）。
+            if (Config.DEBUG_CONTROLLER && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|missing")) {
+                com.fox.ysmu.ysmu.LOG.info(
+                    "[YSMU-CTRLSCRIPT] {} slot '{}' set_animation('{}') but that animation is not in the file; keeping '{}'",
+                    animId, slot, name, fallbackName);
+            }
+            return null;
+        }
+        if (action == com.fox.ysmu.client.animation.molang.AnimationControlResult.Action.PAUSE) {
+            // GeckoLib 没有"暂停播放但不暂停时间轴"的原语：tick 由 AnimationProcessor 统一推进，
+            // 骨骼关键帧与 timeline/音效/粒子事件都吃同一个 tick。先按"不动内置逻辑"处理。
+            if (Config.DEBUG_CONTROLLER && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|pause")) {
+                com.fox.ysmu.ysmu.LOG.info(
+                    "[YSMU-CTRLSCRIPT] {} slot '{}' requested state_pause - GeckoLib has no pause-without-stopping-clock "
+                        + "primitive, keeping the built-in logic",
+                    animId, slot);
+            }
+            return null;
+        }
+        if (result.reset()) {
+            // wiki：ctrl.reset = 立刻重置控制器至初始状态、粗暴中止当前动画，并含 indicate_reload。
+            if (Config.DEBUG_CONTROLLER && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|reset")) {
+                com.fox.ysmu.ysmu.LOG.info(
+                    "[YSMU-CTRLSCRIPT] {} slot '{}' ctrl.reset -> aborting the current animation and resetting the "
+                        + "controller state",
+                    animId, slot);
+            }
+            return new ControlScriptDecision(null, true, true);
+        }
+        if (action == com.fox.ysmu.client.animation.molang.AnimationControlResult.Action.STOP) {
+            // wiki 说的是"平滑地停止"，但 GeckoLib 的 STOP 会把骨骼队列直接清掉、由
+            // AnimationProcessor 的 reset 分支还原初值，而那个分支当前是**瞬时**的
+            // （resetTickLength 默认 1 且无人设置；rotation/position 的 mostRecentReset*Tick
+            // 被写成 0，见那里的 TODO）。所以这里只能做到"中止"，"平滑"要改 vendored 才能做。
+            if (Config.DEBUG_CONTROLLER && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|stop")) {
+                com.fox.ysmu.ysmu.LOG.info(
+                    "[YSMU-CTRLSCRIPT] {} slot '{}' state_stop -> aborting the current animation (smooth fade-out "
+                        + "not implemented)",
+                    animId, slot);
+            }
+            return new ControlScriptDecision(null, true, false);
+        }
+        if (action != com.fox.ysmu.client.animation.molang.AnimationControlResult.Action.CONTINUE || name == null) {
+            // bypass / NONE：脚本明确要求交回内置逻辑。
+            return null;
+        }
+        if (!name.equals(fallbackName) && Config.DEBUG_CONTROLLER
+            && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|override|" + name)) {
+            if (fallbackName == null) {
+                com.fox.ysmu.ysmu.LOG.info("[YSMU-CTRLSCRIPT] {} slot '{}' -> '{}'", animId, slot, name);
+            } else {
+                com.fox.ysmu.ysmu.LOG.info(
+                    "[YSMU-CTRLSCRIPT] {} slot '{}' -> '{}' (script overrides static mapping '{}')", animId, slot,
+                    name, fallbackName);
+            }
+        }
+        return new ControlScriptDecision(name, false, false, result.transitionSeconds(),
+            result.indicateReload());
+    }
+
+    /**
+     * 应用 {@code ctrl.reset} / {@code state_stop}：中止当前动画，并（reset 时）清掉该槽位的
+     * 控制器运行时状态，让内置逻辑从初始状态重新评估。
+     */
+    private static void applyControlScriptStop(ResourceLocation animId, String slot,
+        AnimationEvent<CustomPlayerEntity> event, boolean reset) {
+        if (event != null && event.getController() != null) {
+            // wiki：ctrl.reset 包含 indicate_reload 的作用；state_stop 也一并重载，
+            // 否则下次播同一个动画会"接着上次的进度"而不像重新开始。
+            event.getController()
+                .markNeedsReload();
+        }
+        if (!reset || animId == null || event == null) {
+            return;
+        }
+        EntityPlayer player = event.getAnimatable() == null ? null : event.getAnimatable()
+            .getPlayer();
+        if (player != null) {
+            // 这里只给得出 wiki 槽位名（如 parallel_6）；clearControllerState 内部会把
+            // player. 前缀 / _controller 后缀归一化后再匹配，因此具名并行备用池承载的
+            // 槽位（运行时键是 player.parallel_6 或短名）也能被 reset 到。
+            com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime.clearControllerState(
+                player.getUniqueID(), animId, "player." + slot);
+        }
     }
 
     /**

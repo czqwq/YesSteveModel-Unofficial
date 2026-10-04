@@ -5,6 +5,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -21,6 +22,7 @@ import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
+import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
@@ -436,6 +438,53 @@ public final class OpenYsmModelSyncClient {
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
                     // own scripts (fn.<name>) can be evaluated while it renders.
                     PackUserFunctions.register(modelId, raw.functionFiles);
+                    // The same bodies are also what AnimationManager reads as *animation control scripts*
+                    // (Config.MOLANG_CONTROL_SCRIPTS -> AnimationManager.applyControlScript ->
+                    // AnimationControlScripts.evaluate -> MolangScriptRegistry.controlScript), and until this
+                    // call MolangScriptRegistry had no writer at all in src/main, so hasScripts(animId) was
+                    // always false and that path was never reached. This is the reference branch's routing,
+                    // copied from ClientModelManager.collectMolangScript
+                    // (tmp/YesSteveModel-Unofficial-perf-previewUI .../client/ClientModelManager.java:967-994):
+                    // it decides the bucket by file name. `<anything>@player_ctrl_<slot>.molang` is the control
+                    // script for that slot; `name@<event>` is the function `name` subscribed to that event;
+                    // anything else is a plain `fn.<name>` function. The reference registers under the *main*
+                    // model id, which is the id CustomPlayerEntity.getAnimation() answers with - and therefore
+                    // the id AnimationManager.applyControlScript looks the registry up by.
+                    Map<String, String> scriptFunctions = new LinkedHashMap<>();
+                    Map<String, List<String>> scriptEvents = new LinkedHashMap<>();
+                    Map<String, String> scriptControls = new LinkedHashMap<>();
+                    for (Map.Entry<String, RawYsmModel.RawDataFile> functionFile : raw.functionFiles.entrySet()) {
+                        RawYsmModel.RawDataFile functionData = functionFile.getValue();
+                        if (functionData == null || functionData.data == null) {
+                            continue;
+                        }
+                        String controlSlot = MolangScriptRegistry.controlSlotOf(functionFile.getKey());
+                        if (controlSlot != null) {
+                            // @player_ctrl_<槽位>.molang：动画控制脚本，按槽位登记（每帧由求值器执行）。
+                            String controlBody = MolangScriptRegistry.decode(functionData.data);
+                            if (controlBody != null && !controlBody.trim()
+                                .isEmpty()) {
+                                scriptControls.put(controlSlot, controlBody);
+                            }
+                            continue;
+                        }
+                        String functionName = MolangScriptRegistry.functionNameOf(functionFile.getKey());
+                        if (functionName == null) {
+                            continue;
+                        }
+                        String functionBody = MolangScriptRegistry.decode(functionData.data);
+                        if (functionBody == null || functionBody.trim()
+                            .isEmpty()) {
+                            continue;
+                        }
+                        scriptFunctions.put(functionName, functionBody);
+                        String event = MolangScriptRegistry.eventOf(functionFile.getKey());
+                        if (event != null) {
+                            scriptEvents.computeIfAbsent(event, key -> new ArrayList<>())
+                                .add(functionName);
+                        }
+                    }
+                    MolangScriptRegistry.register(mainModelId, scriptFunctions, scriptEvents, scriptControls);
                     // The model's preview_animation (the animation the selection GUI plays) and its
                     // disable_preview_rotation flag are in this payload too; without them the GUI could only show a
                     // frozen pose framed with the wrong transform.

@@ -8,12 +8,14 @@ import net.minecraft.entity.item.EntityBoat;
 import net.minecraft.entity.passive.EntityPig;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.EnumAction;
+import net.minecraft.item.ItemStack;
 import net.minecraft.util.MathHelper;
 
 import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
+import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
 
@@ -22,10 +24,414 @@ import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangParser;
 
-final class OpenYsmControllerExpressionEvaluator {
+public final class OpenYsmControllerExpressionEvaluator {
 
     private static final double TRUE = 1.0d;
     private static final double FALSE = 0.0d;
+
+    /** Cache of compiled expressions — avoids re-parsing the same string every frame. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, CompiledExpr> COMPILED_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 清理编译表达式缓存（模型重载/资源清空时调用），避免按表达式文本累积的
+     *  解析结果在长时间运行/反复重载后无限增长。 */
+    public static void clearCompiledCache() {
+        COMPILED_CACHE.clear();
+    }
+
+    /**
+     * 各控制器最近一次在条件求值中评估 any/all_animations_finished 的真实结果。
+     * key = "<geckoControllerName>|<querySuffix>"，
+     * querySuffix ∈ {any_animation_finished, all_animations_finished}。
+     *
+     * MolangParser.VARIABLES 里注册的 query.any/all_animations_finished 是静态 0
+     * （注册时的默认值），并不反映控制器条件里动态计算的结果，因此这里单独缓存
+     * 真实值，供 debug overlay / /ysm query 读取。
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Double> LAST_ANIMATION_FINISHED =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 全局"最后评估"结果（跨所有控制器），供 query.any/all_animation_finished 的 overlay 显示。 */
+    private static volatile double lastAnyAnimationFinished = FALSE;
+    private static volatile double lastAllAnimationsFinished = FALSE;
+
+    /** 读取各控制器真实动画完成状态缓存（key 见 LAST_ANIMATION_FINISHED 注释）。 */
+    public static java.util.Map<String, Double> getLastAnimationFinished() {
+        return LAST_ANIMATION_FINISHED;
+    }
+
+    /** 全局最后评估的 query.any_animation_finished 值。 */
+    public static double getLastAnyAnimationFinished() {
+        return lastAnyAnimationFinished;
+    }
+
+    /** 全局最后评估的 query.all_animations_finished 值。 */
+    public static double getLastAllAnimationsFinished() {
+        return lastAllAnimationsFinished;
+    }
+
+    /**
+     * 编译后的表达式所需的**最小环境**：只有"读变量"和"调函数"两个查询。
+     * <p>
+     * 抽成接口有两个好处：编译期只依赖这两个方法（不会顺手摸 event/player），
+     * 以及条件求值可以脱离 Minecraft 单测 —— 给一个假的 scope 就能跑真实脚本里的条件
+     * （见 {@code OpenYsmConditionEvaluationTest}）。{@link Context} 是它在游戏里的实现。
+     */
+    interface ConditionScope {
+        double variableValue(String name);
+        double functionValue(String name, List<Argument> arguments);
+    }
+
+    @FunctionalInterface
+    interface CompiledExpr {
+        double eval(ConditionScope ctx);
+    }
+
+    /** Holds a compiled argument for function calls: either a string constant or a compiled expression. */
+    static final class CompiledArg {
+        final boolean isString;
+        final String stringValue;
+        final CompiledExpr exprValue;
+        private CompiledArg(String s) { isString = true; stringValue = s; exprValue = null; }
+        private CompiledArg(CompiledExpr e) { isString = false; stringValue = null; exprValue = e; }
+        static CompiledArg ofString(String s) { return new CompiledArg(s); }
+        static CompiledArg ofExpr(CompiledExpr e) { return new CompiledArg(e); }
+        Argument toArgument(ConditionScope ctx) {
+            return isString ? Argument.string(stringValue) : Argument.number(exprValue.eval(ctx));
+        }
+    }
+
+    private static CompiledExpr compile(String expression) {
+        return COMPILED_CACHE.computeIfAbsent(expression, OpenYsmControllerExpressionEvaluator::doCompile);
+    }
+
+    /** Compile an expression string into a reusable CompiledExpr tree. */
+    private static CompiledExpr doCompile(String expr) {
+        if (StringUtils.isBlank(expr)) {
+            return ctx -> TRUE;
+        }
+        // Use a simple index-based parser that builds a CompiledExpr tree
+        int[] idx = {0};
+        CompiledExpr result = parseExpressionCompiled(expr, idx);
+        return result != null ? result : ctx -> FALSE;
+    }
+
+    /**
+     * 顶层表达式入口：支持 C 风格三元运算符 (cond?a:b)。
+     * 优先级：?: 低于 ||（条件可含 ||），then/else 分支都是完整表达式（可含 ||/?:）。
+     * 此前解析器不支持三元，条件 "(v.z_d==0?1:0)&&v.z_cs" 会在 '?' 处停住、
+     * 被截断成 "v.z_d==0"（v.z_d 未定义=0 → 恒 true），导致 14_momo 的
+     * parallel_4 首帧无条件进入"出来了"遁地状态且无法用 /ysm reset 停止。
+     */
+    private static CompiledExpr parseExpressionCompiled(String expr, int[] idx) {
+        CompiledExpr condition = parseOrCompiled(expr, idx);
+        if (condition == null) {
+            return null;
+        }
+        skipWhitespace(expr, idx);
+        if (match(expr, idx, "?")) {
+            CompiledExpr thenExpr = parseExpressionCompiled(expr, idx);
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, ":")) {
+                CompiledExpr elseExpr = parseExpressionCompiled(expr, idx);
+                CompiledExpr c = condition, t = thenExpr, e = elseExpr;
+                return ctx -> truthy(c.eval(ctx)) ? t.eval(ctx) : e.eval(ctx);
+            }
+            // 畸形三元（缺 ':'）——回落为仅条件部分，避免吞掉后续表达式
+            return condition;
+        }
+        return condition;
+    }
+
+    private static CompiledExpr parseOrCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseAndCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, "||")) {
+                CompiledExpr right = parseAndCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> truthy(l.eval(ctx)) || truthy(r.eval(ctx)) ? TRUE : FALSE;
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseAndCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseEqualityCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, "&&")) {
+                CompiledExpr right = parseEqualityCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> truthy(l.eval(ctx)) && truthy(r.eval(ctx)) ? TRUE : FALSE;
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseEqualityCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseComparisonCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, "==")) {
+                CompiledExpr right = parseComparisonCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> {
+                    double lv = l.eval(ctx);
+                    double rv = r.eval(ctx);
+                    // NaN is never equal to anything, not even itself.
+                    if (Double.isNaN(lv) || Double.isNaN(rv)) return FALSE;
+                    return nearlyEqual(lv, rv) ? TRUE : FALSE;
+                };
+            } else if (match(expr, idx, "!=")) {
+                CompiledExpr right = parseComparisonCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> !nearlyEqual(l.eval(ctx), r.eval(ctx)) ? TRUE : FALSE;
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseComparisonCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseAdditiveCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, ">=")) {
+                CompiledExpr right = parseAdditiveCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) >= r.eval(ctx) ? TRUE : FALSE;
+            } else if (match(expr, idx, "<=")) {
+                CompiledExpr right = parseAdditiveCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) <= r.eval(ctx) ? TRUE : FALSE;
+            } else if (match(expr, idx, ">")) {
+                CompiledExpr right = parseAdditiveCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) > r.eval(ctx) ? TRUE : FALSE;
+            } else if (match(expr, idx, "<")) {
+                CompiledExpr right = parseAdditiveCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) < r.eval(ctx) ? TRUE : FALSE;
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseAdditiveCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseMultiplicativeCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, "+")) {
+                CompiledExpr right = parseMultiplicativeCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) + r.eval(ctx);
+            } else if (match(expr, idx, "-")) {
+                CompiledExpr right = parseMultiplicativeCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) - r.eval(ctx);
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseMultiplicativeCompiled(String expr, int[] idx) {
+        CompiledExpr left = parseUnaryCompiled(expr, idx);
+        if (left == null) return null;
+        while (true) {
+            skipWhitespace(expr, idx);
+            if (match(expr, idx, "*")) {
+                CompiledExpr right = parseUnaryCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> l.eval(ctx) * r.eval(ctx);
+            } else if (match(expr, idx, "/")) {
+                CompiledExpr right = parseUnaryCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> { double d = r.eval(ctx); return d == 0.0d ? 0.0d : l.eval(ctx) / d; };
+            } else if (match(expr, idx, "%")) {
+                CompiledExpr right = parseUnaryCompiled(expr, idx);
+                CompiledExpr l = left, r = right;
+                left = ctx -> { double d = r.eval(ctx); return d == 0.0d ? 0.0d : l.eval(ctx) % d; };
+            } else {
+                return left;
+            }
+        }
+    }
+
+    private static CompiledExpr parseUnaryCompiled(String expr, int[] idx) {
+        skipWhitespace(expr, idx);
+        if (match(expr, idx, "!")) {
+            CompiledExpr operand = parseUnaryCompiled(expr, idx);
+            return ctx -> truthy(operand.eval(ctx)) ? FALSE : TRUE;
+        }
+        if (match(expr, idx, "-")) {
+            CompiledExpr operand = parseUnaryCompiled(expr, idx);
+            return ctx -> -operand.eval(ctx);
+        }
+        return parsePrimaryCompiled(expr, idx);
+    }
+
+    private static CompiledExpr parsePrimaryCompiled(String expr, int[] idx) {
+        skipWhitespace(expr, idx);
+        if (idx[0] >= expr.length()) {
+            return ctx -> FALSE;
+        }
+        char c = expr.charAt(idx[0]);
+        if (c == '(') {
+            idx[0]++;
+            CompiledExpr inner = parseExpressionCompiled(expr, idx);
+            match(expr, idx, ")");
+            return inner;
+        }
+        if (c == '\'' || c == '"') {
+            String s = readQuotedString(expr, idx);
+            // 空字符串返回 FALSE (0.0)，使 ctrl.x=='' 能正确表示"变量为空"。
+            // 非空字符串返回 NaN，防止 ctrl.tac_gun_type=='rifle' 在无 TacZ 时
+            // 误判为 0.0==0.0（所有 TacZ 条件动画同时播放）。
+            if (s.isEmpty()) {
+                return ctx -> FALSE;
+            }
+            return ctx -> Double.NaN;
+        }
+        if (Character.isDigit(c) || (c == '.' && idx[0] + 1 < expr.length()
+            && Character.isDigit(expr.charAt(idx[0] + 1)))) {
+            return parseNumberCompiled(expr, idx);
+        }
+        int start = idx[0];
+        String identifier = parseIdentifier(expr, idx);
+        if (identifier.isEmpty()) {
+            idx[0]++;
+            return ctx -> FALSE;
+        }
+        skipWhitespace(expr, idx);
+        if (match(expr, idx, "(")) {
+            // Function call — compile arguments
+            List<CompiledArg> compiledArgs = new ArrayList<>();
+            while (true) {
+                skipWhitespace(expr, idx);
+                if (match(expr, idx, ")")) break;
+                if (idx[0] >= expr.length()) break;
+                char ac = expr.charAt(idx[0]);
+                if (ac == '\'' || ac == '"') {
+                    String s = readQuotedString(expr, idx);
+                    compiledArgs.add(CompiledArg.ofString(s));
+                } else {
+                    String raw = readRawArgument(expr, idx);
+                    compiledArgs.add(CompiledArg.ofExpr(compile(raw)));
+                }
+                skipWhitespace(expr, idx);
+                if (!match(expr, idx, ",")) {
+                    match(expr, idx, ")");
+                    break;
+                }
+            }
+            String funcName = identifier;
+            return ctx -> {
+                List<Argument> evaluated = new ArrayList<>();
+                for (CompiledArg a : compiledArgs) {
+                    evaluated.add(a.toArgument(ctx));
+                }
+                return ctx.functionValue(funcName, evaluated);
+            };
+        }
+        // Variable reference
+        String varName = identifier;
+        return ctx -> ctx.variableValue(varName);
+    }
+
+    private static CompiledExpr parseNumberCompiled(String expr, int[] idx) {
+        int start = idx[0];
+        boolean dotSeen = false;
+        while (idx[0] < expr.length()) {
+            char c = expr.charAt(idx[0]);
+            if (Character.isDigit(c)) {
+                idx[0]++;
+            } else if (c == '.' && !dotSeen) {
+                dotSeen = true;
+                idx[0]++;
+            } else {
+                break;
+            }
+        }
+        double value = Double.parseDouble(expr.substring(start, idx[0]));
+        return ctx -> value;
+    }
+
+    // Reuse the original evaluator's static helper methods by delegating
+
+    private static void skipWhitespace(String expr, int[] idx) {
+        while (idx[0] < expr.length() && expr.charAt(idx[0]) <= ' ') {
+            idx[0]++;
+        }
+    }
+
+    private static boolean match(String expr, int[] idx, String expected) {
+        if (expr.regionMatches(idx[0], expected, 0, expected.length())) {
+            idx[0] += expected.length();
+            return true;
+        }
+        return false;
+    }
+
+    private static String parseIdentifier(String expr, int[] idx) {
+        int start = idx[0];
+        while (idx[0] < expr.length()) {
+            char c = expr.charAt(idx[0]);
+            if (Character.isLetter(c) || Character.isDigit(c) || c == '_' || c == '.') {
+                idx[0]++;
+            } else {
+                break;
+            }
+        }
+        return expr.substring(start, idx[0]);
+    }
+
+    private static String readQuotedString(String expr, int[] idx) {
+        if (idx[0] >= expr.length()) return "";
+        char quote = expr.charAt(idx[0]);
+        idx[0]++;
+        int start = idx[0];
+        while (idx[0] < expr.length() && expr.charAt(idx[0]) != quote) {
+            idx[0]++;
+        }
+        String result = expr.substring(start, idx[0]);
+        if (idx[0] < expr.length()) idx[0]++; // skip closing quote
+        return result;
+    }
+
+    private static String readRawArgument(String expr, int[] idx) {
+        int start = idx[0];
+        int depth = 0;
+        boolean quoted = false;
+        char quote = 0;
+        while (idx[0] < expr.length()) {
+            char c = expr.charAt(idx[0]);
+            if (quoted) {
+                if (c == quote) quoted = false;
+            } else if (c == '\'' || c == '"') {
+                quoted = true;
+                quote = c;
+            } else if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                if (depth == 0) break;
+                depth--;
+            } else if ((c == ',' || c == ';') && depth == 0) {
+                break;
+            }
+            idx[0]++;
+        }
+        return expr.substring(start, idx[0]);
+    }
 
     private final String expression;
     private final Context context;
@@ -37,21 +443,60 @@ final class OpenYsmControllerExpressionEvaluator {
     }
 
     static boolean evaluateBoolean(String expression, Context context) {
-        if (StringUtils.isBlank(expression)) {
-            return true;
-        }
-        return truthy(evaluateNumber(expression, context));
+        return evaluateCondition(expression, context);
     }
 
     static double evaluateNumber(String expression, Context context) {
         try {
-            OpenYsmControllerExpressionEvaluator evaluator = new OpenYsmControllerExpressionEvaluator(expression, context);
-            return evaluator.parseExpression();
+            return compile(expression).eval(context);
         } catch (RuntimeException e) {
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "expr:" + expression,
                 "Failed to evaluate OpenYSM controller expression: " + expression + " (" + e.getMessage() + ")");
+            // DEBUG_CONTROLLER 下打印完整堆栈，方便定位表达式求值的真实失败点
+            //（warnOnce 只警告一次，掩盖了每次触发的上下文）。
+            if (com.fox.ysmu.Config.DEBUG_CONTROLLER) {
+                com.fox.ysmu.ysmu.LOG.debug("Failed to evaluate OpenYSM controller expression: {}", expression, e);
+            }
             return FALSE;
+        }
+    }
+
+    /**
+     * 用给定环境求值条件表达式（空白 = true）。包内可见，便于在没有 Minecraft 的测试里
+     * 喂一个假 {@link ConditionScope}。
+     */
+    static boolean evaluateCondition(String expression, ConditionScope scope) {
+        if (StringUtils.isBlank(expression)) {
+            return true;
+        }
+        return truthy(compile(expression).eval(scope));
+    }
+
+    /**
+     * 求值 {@code .molang} 脚本里的条件（供 {@code AnimationManager} 的名称映射使用）。
+     * <p>
+     * 这里没有控制器状态机上下文（{@code state == null}），{@code v.*} 走共享作用域
+     * （脚本写的变量在 {@code MolangPhysicsRuntime}，轮盘/指令写的 roaming 变量在
+     * {@code PENDING_ROAMING}）。表达式里的 {@code ctrl.*} / {@code ysm.*} / {@code query.*}
+     * 照常按玩家状态求值。
+     * <p>
+     * 玩家或事件缺失时返回 false：条件无从判断，宁可不用替代动画，也不要凭空命中一条分支。
+     */
+    public static boolean evaluateCondition(String expression, EntityPlayer player, AnimationEvent<?> event) {
+        if (player == null || event == null) {
+            return false;
+        }
+        if (StringUtils.isBlank(expression)) {
+            return true;
+        }
+        try {
+            return evaluateCondition(expression, new Context(event, player, null));
+        } catch (RuntimeException e) {
+            OpenYsmAnimationControllerRegistry.warnOnce(
+                "molang-cond:" + expression,
+                "Failed to evaluate .molang condition: " + expression + " (" + e.getMessage() + ")");
+            return false;
         }
     }
 
@@ -364,7 +809,41 @@ final class OpenYsmControllerExpressionEvaluator {
         return -1;
     }
 
-    static final class Context {
+    /** 当前求值上下文所属的模型 id（用于 roaming 显式标记的模型维度）；
+     *  拿不到（event/animatable 缺失或非玩家实体）时返回 null，退化为全局标记。 */
+    private static net.minecraft.util.ResourceLocation currentModelId(Context ctx) {
+        if (ctx == null || ctx.event == null || ctx.event.getAnimatable() == null) {
+            return null;
+        }
+        Object animatable = ctx.event.getAnimatable();
+        if (animatable instanceof CustomPlayerEntity) {
+            return ((CustomPlayerEntity) animatable).getAnimation();
+        }
+        return null;
+    }
+
+    /**
+     * 控制器路径能回答的 {@code ctrl.*} 状态名。调试叠加层/命令的枚举与
+     * {@link #evaluateCtrlState} 的合法性检查都读这一份，避免再抄一份漏项的实现。
+     */
+    public static final java.util.List<String> CONTROLLER_STATE_NAMES = java.util.Collections.unmodifiableList(
+        java.util.Arrays.asList(
+            "idle", "death", "sleep", "swim", "climb", "climbing",
+            "ladder_up", "ladder_stillness", "ladder_down",
+            "ride", "ride_pig", "boat", "sit",
+            "elytra_fly", "fly", "swim_stand",
+            "attacked", "jump", "sneak", "sneaking", "run", "walk"));
+
+    /**
+     * 净头偏航（渲染器同口径）：{@code wrapDegrees(rotationYawHead - renderYawOffset)}。
+     * 关键帧路径的 {@code ysm.head_yaw}/{@code query.head_x_rotation} 取它的负值。
+     */
+    private static double netHeadYaw(EntityPlayer player) {
+        return net.minecraft.util.MathHelper
+            .wrapAngleTo180_float(player.rotationYawHead - player.renderYawOffset);
+    }
+
+    static final class Context implements ConditionScope {
         private final AnimationEvent<?> event;
         private final EntityPlayer player;
         private final OpenYsmPlayerControllerRuntime.RuntimeState state;
@@ -375,7 +854,8 @@ final class OpenYsmControllerExpressionEvaluator {
             this.state = state;
         }
 
-        double variableValue(String name) {
+        @Override
+        public double variableValue(String name) {
             String normalized = normalizeVariableName(name);
             if ("true".equals(normalized)) {
                 return TRUE;
@@ -404,7 +884,8 @@ final class OpenYsmControllerExpressionEvaluator {
             return FALSE;
         }
 
-        double functionValue(String name, List<Argument> arguments) {
+        @Override
+        public double functionValue(String name, List<Argument> arguments) {
             if ("ctrl.hold".equals(name)) {
                 return handMatch(arguments, false, false);
             }
@@ -421,6 +902,10 @@ final class OpenYsmControllerExpressionEvaluator {
                 "func:" + name,
                 "Unsupported OpenYSM controller function: " + name);
             return FALSE;
+        }
+
+        private static double argNumber(List<Argument> args, int index) {
+            return index < args.size() ? args.get(index).asNumber() : 0.0d;
         }
 
         private double localVariableValue(String name) {
@@ -584,6 +1069,26 @@ final class OpenYsmControllerExpressionEvaluator {
             return FALSE;
         }
 
+        /** Returns the entity's position component (0=x, 1=y, 2=z), using
+         *  partial tick interpolation.  Implements query.position(index). */
+        private double queryPositionValue(int index) {
+            if (index < 0 || index > 2 || player == null) return 0.0d;
+            // 事件脚本（@player_init / @player_update / @sync）没有 AnimationEvent，也就没有
+            // 渲染插值进度：用 1.0（当前位置）而不是 0（上一 tick 位置），否则脚本读到的是
+            // 落后一 tick 的坐标。控制器路径上仍用 event 的真实 partialTick。
+            float partialTicks = event != null ? event.getPartialTick() : 1.0f;
+            switch (index) {
+                case 0:
+                    return player.prevPosX + (player.posX - player.prevPosX) * partialTicks;
+                case 1:
+                    return player.prevPosY + (player.posY - player.prevPosY) * partialTicks;
+                case 2:
+                    return player.prevPosZ + (player.posZ - player.prevPosZ) * partialTicks;
+                default:
+                    return 0.0d;
+            }
+        }
+
         private boolean isControllerState(String name) {
             // A-09: upstream answers every `ctrl.<state>` with false while the entity has a live vehicle
             // (CtrlBinding#testCondition, client/animation/molang/CtrlBinding.java:158-162): the main controller is not
@@ -684,6 +1189,39 @@ final class OpenYsmControllerExpressionEvaluator {
             return false;
         }
 
+        /**
+         * 摆臂幅度（{@code query.limb_swing_amount} 同口径），没有 AnimationEvent 时用实际水平位移近似。
+         * <p>
+         * 事件脚本（{@code @player_init} / {@code @player_update} / {@code @sync}）没有
+         * AnimationEvent（{@code OpenYsmScriptRuntime.runEvent} 传 {@code event = null}），
+         * 而 {@code ctrl.walk} / {@code ctrl.swim} 原来直接读 {@code event.getLimbSwingAmount()}，
+         * 于是一读 {@code ctrl.*} 就 NPE，整个脚本每帧失败。水平位移与
+         * {@code horizontalSpeed()}（{@code query.ground_speed}）同源，是这些调用点能拿到的最好近似。
+         */
+        private float limbSwingAmount() {
+            if (event != null) {
+                return Math.abs(event.getLimbSwingAmount());
+            }
+            return (float) horizontalSpeed();
+        }
+
+        /** ctrl.armor('chest'|'feet'|'legs'|'head', '$物品ID'|'empty'|'#tag')。
+         *  1.7.10 无物品 tag 系统，'#tag' 恒 false（对齐 OpenYSM 语义）。 */
+        /** 与关键帧/脚本路径共用 {@code CtrlItemMatcher}，避免两条路径规则漂移。 */
+        private double armorMatch(List<Argument> arguments) {
+            String slot = arguments.size() > 0 ? arguments.get(0).asString() : "";
+            String matcher = arguments.size() > 1 ? arguments.get(1).asString() : "";
+            if (StringUtils.isBlank(matcher)) {
+                return FALSE; // OpenYSM：id 为空返回 0
+            }
+            int armorIndex = com.fox.ysmu.client.animation.molang.CtrlItemMatcher.armorSlotIndex(slot);
+            if (armorIndex < 0) {
+                return FALSE; // mainhand/offhand 不属于 ctrl.armor
+            }
+            ItemStack stack = player.inventory.armorInventory[armorIndex];
+            return com.fox.ysmu.client.animation.molang.CtrlItemMatcher.armorMatches(stack, matcher) ? TRUE : FALSE;
+        }
+
         private double handMatch(List<Argument> arguments, boolean requireUse, boolean requireSwing) {
             String hand = arguments.size() > 0 ? arguments.get(0).asString() : "mainhand";
             String matcher = arguments.size() > 1 ? arguments.get(1).asString() : "";
@@ -691,6 +1229,16 @@ final class OpenYsmControllerExpressionEvaluator {
             // cannot disagree about hands, `$id` / `#ore-dictionary` / `:kind` / `empty`, or the aliases
             // (trident/spear, fishingrod/fishing_rod, EnumAction names).
             return InnerClassify.matchesHandCondition(player, hand, matcher, requireUse, requireSwing) ? TRUE : FALSE;
+        }
+
+        /** 与关键帧/脚本路径共用 {@code CtrlItemMatcher}，避免两条路径规则漂移。 */
+        private boolean itemMatches(ItemStack stack, String matcher) {
+            return com.fox.ysmu.client.animation.molang.CtrlItemMatcher
+                .matches(stack, StringUtils.isBlank(matcher) ? "" : matcher);
+        }
+
+        private String itemId(ItemStack stack) {
+            return com.fox.ysmu.client.animation.molang.CtrlItemMatcher.itemId(stack);
         }
 
         private boolean allAnimationsFinished() {
@@ -760,6 +1308,18 @@ final class OpenYsmControllerExpressionEvaluator {
 
         String asString() {
             return string ? stringValue : Double.toString(numberValue);
+        }
+
+        double asNumber() {
+            return string ? parseStringAsNumber(stringValue) : numberValue;
+        }
+
+        private static double parseStringAsNumber(String s) {
+            try {
+                return Double.parseDouble(s);
+            } catch (NumberFormatException e) {
+                return 0.0d;
+            }
         }
     }
 }

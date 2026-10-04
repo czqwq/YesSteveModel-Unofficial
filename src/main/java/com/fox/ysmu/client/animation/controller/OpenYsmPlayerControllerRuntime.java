@@ -13,12 +13,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.condition.ConditionArmor;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
@@ -60,7 +62,7 @@ public final class OpenYsmPlayerControllerRuntime {
         }
 
         String geckoControllerName = event.getController().getName();
-        for (ControllerMatch match : resolveControllers(set, geckoControllerName)) {
+        for (ControllerMatch match : resolveControllers(set, animationId, geckoControllerName)) {
             PlayState result = tryApplyController(event, player, animationId, geckoControllerName, match);
             if (result != null) {
                 return result;
@@ -71,6 +73,61 @@ public final class OpenYsmPlayerControllerRuntime {
 
     static void clear() {
         STATES.clear();
+    }
+
+    /**
+     * 清掉某玩家某模型下**一个** OpenYSM 控制器的运行时状态（{@code ctrl.reset}）。
+     *
+     * <p>wiki: molang/script「动画控制」—— {@code ctrl.reset} 要求"立刻重置动画控制器至初始
+     * 状态"：不清这个状态机快照的话，控制器下一帧会带着 reset 之前的 state/时间戳继续走，
+     * 看起来就像 reset 没生效。</p>
+     *
+     * @param controllerName OpenYSM 控制器名（如 {@code player.main}）；null 表示清该模型下全部
+     */
+    public static void clearControllerState(UUID playerId, ResourceLocation modelId, String controllerName) {
+        if (playerId == null || modelId == null) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<StateKey, RuntimeState>> it = STATES.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<StateKey, RuntimeState> entry = it.next();
+            StateKey key = entry.getKey();
+            if (!playerId.equals(key.playerId) || !modelId.equals(key.animationId)) {
+                continue;
+            }
+            if (controllerName == null || matchesControllerName(controllerName, key.openYsmControllerName)
+                || matchesControllerName(controllerName, key.geckoControllerName)) {
+                it.remove();
+            }
+        }
+    }
+
+    /**
+     * {@code ctrl.reset} / {@code state_stop} 的控制器名匹配：调用方可能写 wiki 槽位名
+     * （{@code parallel_6}）、OpenYSM 名（{@code player.parallel_6}）或 legacy GeckoLib 名
+     * （{@code parallel_6_controller}），三者指的是同一个槽位。
+     * <p>
+     * 统一去掉 {@code player.} 前缀与 {@code _controller} 后缀再比较。**修的是 reset 路由**：
+     * 具名并行槽位的运行时键是 {@code player.parallel_6}（或短名），而 reset 只从脚本拿到槽位名
+     * {@code parallel_6} —— 按原样比较匹配不到，状态机不会回到初始状态，看起来就像 reset 没生效。
+     */
+    static boolean matchesControllerName(String requested, String candidate) {
+        if (requested == null || candidate == null) {
+            return false;
+        }
+        return normalizeControllerName(requested).equals(normalizeControllerName(candidate));
+    }
+
+    /** 控制器名归一化：去掉 {@code player.} 前缀与 {@code _controller} 后缀。 */
+    private static String normalizeControllerName(String name) {
+        String result = name;
+        if (result.startsWith("player.")) {
+            result = result.substring("player.".length());
+        }
+        if (result.endsWith("_controller")) {
+            result = result.substring(0, result.length() - "_controller".length());
+        }
+        return result;
     }
 
     private static PlayState tryApplyController(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
@@ -316,13 +373,34 @@ public final class OpenYsmPlayerControllerRuntime {
             || SWING_CONTROLLER.equals(geckoControllerName);
     }
 
-    private static List<ControllerMatch> resolveControllers(ControllerSet set, String geckoControllerName) {
+    /** 包内可见（单测直接断言"名字 → 匹配列表"）：{@link ControllerSet#routeCache} 缓存它。 */
+    static List<ControllerMatch> resolveControllers(ControllerSet set, ResourceLocation animationId,
+        String geckoControllerName) {
+        // 名字 → 匹配列表的解析只依赖这个模型的控制器表，缓存到 ControllerSet 上
+        // （set 发布后不再被改动，见 ControllerSet#routeCache 的说明）。
+        List<ControllerMatch> cached = set.routeCache.get(geckoControllerName);
+        if (cached != null) {
+            return cached;
+        }
         List<ControllerMatch> matches = new ArrayList<>();
         String preferredAnimationName = parallelAnimationName(geckoControllerName);
+        // 具名并行槽位的备用池必须先分流：它的名字也带 pre_parallel_/parallel_ 前缀，
+        // 落到下面的数字槽位解析会得到一个 -1 然后什么都不匹配。
+        NamedParallelRoute namedRoute = routeNamedParallel(animationId, geckoControllerName);
+        if (namedRoute != null) {
+            if (namedRoute.controllerKey != null) {
+                addMatch(matches, set, namedRoute.controllerKey, preferredAnimationName);
+            }
+            List<ControllerMatch> stored = matches.isEmpty() ? java.util.Collections.emptyList() : matches;
+            set.routeCache.put(geckoControllerName, stored);
+            return stored;
+        }
         for (String candidate : candidateControllerNames(geckoControllerName)) {
             addMatch(matches, set, candidate, preferredAnimationName);
         }
-        return matches;
+        List<ControllerMatch> stored = matches.isEmpty() ? java.util.Collections.emptyList() : matches;
+        set.routeCache.put(geckoControllerName, stored);
+        return stored;
     }
 
     /**
@@ -469,6 +547,107 @@ public final class OpenYsmPlayerControllerRuntime {
         }
     }
 
+    /**
+     * 具名并行槽位的备用池：{@code (player.)?<族>_extra_<i>_controller} 的第 i 个池控制器
+     * 承载该族第 i 个具名槽位（见
+     * {@link OpenYsmAnimationControllerRegistry#namedParallelSlots(ResourceLocation, String)}）。
+     * <p>
+     * 这个映射是**按当前模型**算的：换模型后同一个池下标可能承载另一个槽位，所以不能缓存
+     * "下标 → 控制器名"到池控制器上（槽位表本身按模型缓存，见注册表）。
+     *
+     * @return 路由结果；{@code null} 表示这个名字不是池控制器
+     */
+    static NamedParallelRoute routeNamedParallel(ResourceLocation animationId, String geckoControllerName) {
+        String[] pool = parseNamedParallelPoolController(geckoControllerName);
+        if (pool == null) {
+            return null;
+        }
+        String family = pool[0];
+        int index = Integer.parseInt(pool[1]);
+        java.util.List<String> slots = OpenYsmAnimationControllerRegistry.namedParallelSlots(animationId, family);
+        int poolSize = Config.NAMED_PARALLEL_EXTRA_SLOTS;
+        if (slots.size() > poolSize) {
+            // 模型声明的具名槽位比池子大：多出来的那些没有池控制器承载，永远不会播放。
+            // 只警告一次、不静默截断（提高配置项 NamedParallelExtraSlots 即可解决）。
+            OpenYsmAnimationControllerRegistry.warnOnce(
+                "parallel-extra-overflow:" + animationId + ":" + family,
+                animationId + " declares " + slots.size() + " named " + family + " slots but only "
+                    + poolSize + " extra pool controllers exist; raise Config NamedParallelExtraSlots"
+                    + " (slots=" + slots + ")");
+        }
+        String slot = index < slots.size() ? slots.get(index) : null;
+        String controlSlot = slot == null ? null : family + "_" + slot;
+        String controllerKey = slot == null ? null
+            : OpenYsmAnimationControllerRegistry.resolveParallelSlotKey(animationId, family, slot);
+        return new NamedParallelRoute(family, index, controlSlot, controllerKey, slots.size(), poolSize);
+    }
+
+    /**
+     * 池控制器本帧应该交给动画控制脚本的**槽位名**（如 {@code parallel_6} / {@code pre_parallel_表情}）。
+     * <p>
+     * {@code controlSlotName()} 对池名故意返回 null（模型给的槽位名只有这里知道），
+     * 所以 {@code AnimationManager} 在具名并行槽位上用这个方法补齐脚本路由；
+     * 该槽位只有脚本、没有 JSON 控制器时也能命中脚本。
+     *
+     * @return 槽位名；不是池控制器、或该模型没有这么多具名槽位时返回 {@code null}
+     */
+    public static String namedParallelControlSlot(ResourceLocation animationId, String geckoControllerName) {
+        NamedParallelRoute route = routeNamedParallel(animationId, geckoControllerName);
+        return route == null ? null : route.controlSlot;
+    }
+
+    /** 一个具名并行池控制器的路由结果。 */
+    static final class NamedParallelRoute {
+
+        final String family;
+        final int index;
+        /** 该池下标承载的具名槽位对应的控制脚本槽位名（{@code <族>_<后缀>}），没分到为 null。 */
+        final String controlSlot;
+        /** 该槽位解析出的 ControllerSet 键名（{@code player.<族>_<后缀>} 优先），
+         *  只有脚本、没有 JSON 控制器时为 null。 */
+        final String controllerKey;
+        /** 模型声明的具名槽位数。 */
+        final int declaredSlots;
+        /** 已注册的池控制器数量（{@code Config.NAMED_PARALLEL_EXTRA_SLOTS}）。 */
+        final int poolSize;
+
+        NamedParallelRoute(String family, int index, String controlSlot, String controllerKey,
+            int declaredSlots, int poolSize) {
+            this.family = family;
+            this.index = index;
+            this.controlSlot = controlSlot;
+            this.controllerKey = controllerKey;
+            this.declaredSlots = declaredSlots;
+            this.poolSize = poolSize;
+        }
+
+        boolean overflow() {
+            return declaredSlots > poolSize;
+        }
+    }
+
+    /** 具名并行槽位的备用池控制器名：{@code (player.)?<族>_extra_<序号>_controller}。 */
+    private static final java.util.regex.Pattern PARALLEL_EXTRA_CONTROLLER =
+        java.util.regex.Pattern.compile("^(?:player\\.)?(pre_parallel|parallel)_extra_(\\d+)_controller$");
+
+    /**
+     * 从 GeckoLib 控制器名里解析出备用池槽位 {族名, 序号字符串}；不是池控制器返回 null。
+     * <p>
+     * 池名也带 {@code pre_parallel_} / {@code parallel_} 前缀，所以必须先认出它，
+     * 否则会掉进 {@link #getParallelIndex} 的数字槽位解析（对 {@code extra_0} 抛
+     * NumberFormatException 后返回 -1，什么都不匹配）。
+     */
+    static String[] parseNamedParallelPoolController(String geckoControllerName) {
+        if (geckoControllerName == null) {
+            return null;
+        }
+        Matcher matcher = PARALLEL_EXTRA_CONTROLLER.matcher(geckoControllerName);
+        if (!matcher.matches()) {
+            return null;
+        }
+        return new String[] { matcher.group(1), matcher.group(2) };
+    }
+
     /** The prefix the engine registers scoped variables under (`ScopedMolangVariable#getName`). */
     private static final String VARIABLE_PREFIX = "v.";
 
@@ -509,7 +688,8 @@ public final class OpenYsmPlayerControllerRuntime {
         }
     }
 
-    private static final class ControllerMatch {
+    /** 包内可见：{@link OpenYsmControllerDefinitions.ControllerSet#routeCache} 缓存它，单测读 {@code controller.name}。 */
+    static final class ControllerMatch {
         private final Controller controller;
         /**
          * The clip this controller is expected to play, or {@code null} when the definition's own state picks it.

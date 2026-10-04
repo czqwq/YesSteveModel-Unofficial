@@ -1,18 +1,22 @@
 package com.fox.ysmu.model;
 
 import java.io.File;
+import java.io.IOException;
+import java.net.JarURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.SecureRandom;
-import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.stream.Stream;
 
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
@@ -49,8 +53,14 @@ public final class ServerModelManager {
     /**
      * 自定义模型所放置的文件夹
      */
-    public static final Path BUILT = FOLDER.resolve("built");
     public static final Path CUSTOM = FOLDER.resolve("custom");
+
+    /**
+     * 内置模型的运行时落点：jar 内 {@code assets/ysmu/builtin/} 的整棵树在每次 reload 时先清空本目录、再解压到这里，
+     * 随后作为与 {@link #CUSTOM} 并列的扫描根被扫描。名字与值和 SOURCE 的
+     * {@code ServerModelManager.BUILT}（{@code config/ysmu/builtin}）一致。
+     */
+    public static final Path BUILT = FOLDER.resolve("builtin");
     public static final Path EXPORT = FOLDER.resolve("export");
 
     /**
@@ -125,6 +135,37 @@ public final class ServerModelManager {
     public static final String PACK_INFO_FILE_NAME = "ysm-pack.json";
     /** 包封面图，和清单同级；它永远不是模型贴图。 */
     public static final String PACK_ICON_FILE_NAME = "ysm-pack.png";
+    /**
+     * jar 内"包根格式"内置资源的目录名：{@code assets/ysmu/builtin/}。按决策 D8 它是内置资源的**唯一**
+     * 来源根——旧位置 {@code assets/ysmu/custom/} 的逐名复制已退役，jar 里那份拷贝不再被读取。
+     * 注意它和运行时目录 {@link #BUILT}（{@code config/ysmu/builtin}）不是一回事。
+     */
+    private static final String BUILTIN_PACK_RESOURCE_ROOT = "builtin";
+
+    /**
+     * 缺省动画文件（{@code main/arm/extra.animation.json}）的实际位置，供所有"模型自己没带这份动画"的回退使用。
+     * <p>
+     * M1/D7：内置 default 从 {@code config/ysmu/custom/default} 搬到 {@code config/ysmu/builtin/default}，而且它是
+     * 现代 {@code ysm.json} 包——动画在包的 {@code animations/} 子目录里（{@code ysm.json} 的
+     * {@code files.player.animation.*} 就是这么指的）。所以老位置在新装机器上不存在，而
+     * {@code builtin/default} 的**根目录**下也没有任何 {@code *.animation.json}。
+     * <p>
+     * 这与 SOURCE 的差别值得写下来：SOURCE 只在 {@code RawYsmModelAdapter.readDefaultAnimation}
+     * （{@code :1238-1249}）加了一条 {@code BUILT.resolve("default").resolve(fileName)} 的回退，那条路径在本仓
+     * 永远不命中——{@code builtin/default} 下没有根级动画文件；它的 {@code FolderFormat.getBytes} 更是完全没有
+     * 内置回退。本方法把这条规则收在一处，两个 format 类与 adapter 共用，避免三份各写各的路径。
+     * <p>
+     * 顺序仍是"用户目录优先"：旧安装（或在 {@code custom/default} 放了自己那份的玩家）继续用自己的，只有它不
+     * 存在时才落到内置包。返回的 Path 不保证存在，调用方各自决定"读不到就抛"还是"读不到就用空动画"。
+     */
+    public static Path defaultAnimationFile(String fileName) {
+        Path legacy = CUSTOM.resolve("default").resolve(fileName);
+        if (Files.isRegularFile(legacy)) {
+            return legacy;
+        }
+        Path builtin = BUILT.resolve("default").resolve("animations").resolve(fileName);
+        return Files.isRegularFile(builtin) ? builtin : legacy;
+    }
 
     /** 该目录是否是 OpenYSM 包根（含 {@code ysm-pack.json}），即"装模型的文件夹"而不是模型本身。 */
     public static boolean isPackRoot(Path dir) {
@@ -171,10 +212,10 @@ public final class ServerModelManager {
     public static void reloadPacks() {
         clearModelCaches();
         createConfigDirectories();
-        // 先补齐 blacklist.txt(首次运行时创建),再复制内置模型,这样用户预先放好的规则在第一次
-        // reload 就能生效。
+        // 先补齐 blacklist.txt(首次运行时创建)。
         initBlacklistFile();
-        copyBuiltInModels();
+        // M1：内置模型只有 assets/ysmu/builtin/ 一个来源根，每次 reload 先清空 config/ysmu/builtin 再整树解压（决策 D7/D8）。
+        extractBuiltinModels();
         initPassword();
         initOpenYsmServerIndex();
         initBuiltNoticeFile();
@@ -204,78 +245,23 @@ public final class ServerModelManager {
         createFolder(CACHE_CLIENT);
     }
 
-    private static void copyBuiltInModels() {
-        // M-04:blacklist.txt 现在真的生效（此前只创建文件、没有任何读取点）。
-        List<Pattern> blacklist = readBlacklistPatterns();
-        if (!blacklist.isEmpty()) {
-            ysmu.LOG.info("Loaded {} built-in model blacklist rule(s) from blacklist.txt", blacklist.size());
-        }
-        // 内置模型仍然强行覆盖 config/ysmu/custom（AGENTS.md 的 Model and Resource Rules 明确
-        // 要求"runtime reload path intentionally overwrites the built-in copies"）；本轮只加黑名单，
-        // 不改变覆盖策略，也不迁移到 built/（那需要同步改 AGENTS.md 并动 client 侧的默认模型加载）。
-        copyDefaultModel(blacklist);
-        copyWineFoxModel(blacklist);
-        copyVanillaModel(blacklist);
-    }
-
-    /**
-     * M-04:读取 {@code config/ysmu/blacklist.txt} 的正则规则，口径与参考实现一致：
-     * 每行一个正则，{@code #} 开头为注释，匹配 {@code assets/ysmu/custom/<模型目录>/}。
-     */
-    private static List<Pattern> readBlacklistPatterns() {
-        List<Pattern> patterns = new ArrayList<>();
-        Path blacklistFile = FOLDER.resolve("blacklist.txt");
-        if (!Files.isRegularFile(blacklistFile)) {
-            return patterns;
-        }
-        try {
-            for (String line : Files.readAllLines(blacklistFile, StandardCharsets.UTF_8)) {
-                String rule = line.trim();
-                if (rule.isEmpty() || rule.startsWith("#")) {
-                    continue;
-                }
-                try {
-                    patterns.add(Pattern.compile(rule));
-                } catch (PatternSyntaxException e) {
-                    ysmu.LOG.warn("Ignoring invalid regular expression in blacklist.txt: {}", rule, e);
-                }
-            }
-        } catch (Exception e) {
-            ysmu.LOG.warn("Failed to read {}", blacklistFile, e);
-        }
-        return patterns;
-    }
-
-    /**
-     * 与参考实现 {@code OpenYSM/.../ServerModelManager.processBlacklist} 相同的路径口径。
-     * {@code default} 模型不可被禁用：本模组的兜底路径直接依赖它
-     * （{@code FolderFormat}/{@code YsmFormat}/{@code RawYsmModelAdapter.readDefaultAnimation}、
-     * {@code ClientModelManager:389}）。
-     */
-    private static boolean isBlacklisted(List<Pattern> blacklist, String modelDirectory) {
-        if (blacklist.isEmpty() || "default".equals(modelDirectory)) {
-            return false;
-        }
-        String matchPath = "assets/" + ysmu.MODID + "/custom/" + modelDirectory + "/";
-        for (Pattern rule : blacklist) {
-            if (rule.matcher(matchPath)
-                .find()) {
-                ysmu.LOG.info("Skipping built-in model {} because blacklist rule '{}' matched", modelDirectory, rule);
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static void rebuildModelCaches() {
         // M-18:单个模型/单个扫描器失败不得让整次 reload 中断；每一步单独兜底。
         // 包清单先扫：它只读 ysm-pack.json/png，既不影响下面的模型登记，也让 GUI 的文件夹格子在模型到达前
         // 就已有名字与封面。
-        runCacheStep("packs (built)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+        //
+        // M1/D9:扫描顺序就是重复 modelId 的胜负规则——三个扫描器登记同一个 id 时都是无条件 put，所以
+        // "后扫的赢"。builtin 排在 custom 之后，于是同名模型最终登记的一定是内置那份。最典型的是 default：
+        // config/ysmu/custom/default 是旧安装残留的扁平模型（它没有 ysm.json，M-21 那条"目录带 ysm.json
+        // 且 id 已在 CACHE_NAME_INFO 里就整棵跳过"的豁免对它不成立，FolderFormat 会照常登记它），
+        // config/ysmu/builtin/default 才是新的 ysm.json 包。顺序反过来会让残留的 legacy 版本覆盖内置版本，
+        // 使 CACHE_NAME_INFO["default"] 与 OPEN_YSM_SYNC_INFO["default"] 指向两个不同的模型。
         runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
-        runCacheStep("OpenYSM (built)", () -> OpenYsmFormat.cacheAllModels(BUILT));
         runCacheStep("OpenYSM (custom)", () -> OpenYsmFormat.cacheAllModels(CUSTOM));
         runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
+        runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+        runCacheStep("OpenYSM (builtin)", () -> OpenYsmFormat.cacheAllModels(BUILT));
+        runCacheStep("legacy (builtin)", () -> cacheAllModels(BUILT));
     }
 
     private static void runCacheStep(String name, Runnable step) {
@@ -289,149 +275,90 @@ public final class ServerModelManager {
     }
 
     /**
-     * 内置模型解压的目标目录。当用户把同名目录换成 OpenYSM 包（含 {@link #PACK_INFO_FILE_NAME}）时返回
-     * {@code null}，表示本次不要写内置文件：包根本身不是模型，往里面塞 {@code main.json}/{@code arm.json}
-     * 只会在用户的包目录里留下一个和包同名的旧模型残骸（这正是 {@code custom/wine_fox} 出现
-     * "文件夹格 + 同名模型格"的原因）。
+     * 清空运行时目录 {@link #BUILT}（{@code config/ysmu/builtin}）后，把 jar 内 {@code assets/ysmu/builtin/} 的
+     * 整棵树解压进去，与 SOURCE 的 {@code ServerModelManager.extractBuiltinModels} 同一形状：解压整棵树，而不是
+     * 逐个模型、逐个文件列举（决策 D7）。
+     *
+     * <p>树里两类顶层条目都在这里落地：{@code builtin/misc} 是包根（{@code ysm-pack.json} 加六个旧扁平模型
+     * 目录 {@code 1_alex} … {@code 6_wine_fox}），{@code builtin/default} 是现代 {@code ysm.json} 包。
+     * 它们随后由 {@link #rebuildModelCaches} 的三个扫描器分别认领。目标目录不区分"包根"与"模型目录"，
+     * 也没有"用户替换过的目录"这种例外：{@code config/ysmu/builtin} 的内容每轮都由模组自己重写。</p>
+     *
+     * <p>与 SOURCE 同一形状：SOURCE 先 {@code FileUtils.cleanDirectory(BUILT)} 再解压（{@code :440-446}），这里也
+     * 先清空目标目录，避免 jar 里被删除的内置文件以残留形式留在 {@code config/ysmu/builtin} 下、下次 reload 仍被
+     * 扫到并登记一个已经不再随 jar 发布的模型。</p>
+     *
+     * <p>清空是安全的，因为 {@link #BUILT} 不是用户数据：它是模组自己的解压落点（迁到这里的目录，早前版本不
+     * 存在），它的 {@code notice.txt} 也明确写着内容每轮都会被 {@code assets/ysmu/builtin} 覆盖、玩家自己的模型
+     * 应放 {@link #CUSTOM}。{@link #CUSTOM} 是用户目录，绝不清理。</p>
      */
-    private static Path builtInModelTarget(String modelDirectory) {
-        Path target = CUSTOM.resolve(modelDirectory);
-        if (isPackRoot(target)) {
-            ysmu.LOG.info(
-                "Skipping built-in model {}: {} is an OpenYSM pack root ({} present), so the pack owns this directory",
-                modelDirectory,
-                target,
-                PACK_INFO_FILE_NAME);
-            return null;
+    private static void extractBuiltinModels() {
+        // 只清 BUILT：custom 是用户数据，另一个 built（旧的孤儿 notice 目录）也刻意不动。
+        if (Files.isDirectory(BUILT)) {
+            try {
+                FileUtils.cleanDirectory(BUILT.toFile());
+            } catch (IOException e) {
+                ysmu.LOG.warn("Failed to clean built-in model directory {}", BUILT, e);
+            }
         }
-        createFolder(target);
-        return target;
+        createFolder(BUILT);
+        // 尾斜杠与 SOURCE 一致：jar 里以目录条目（"assets/ysmu/builtin/"）存在，带斜杠才能解析成目录 URL。
+        String prefix = getCustomFiles(BUILTIN_PACK_RESOURCE_ROOT) + "/";
+        URL url = ysmu.class.getResource(prefix);
+        if (url == null) {
+            // 裁剪过的资源：没有内置树可解压，不是错误。
+            return;
+        }
+        try {
+            if ("jar".equals(url.getProtocol())) {
+                // 条目归属的 jar 从 JarURLConnection 取：SOURCE 切 url.getPath() 的 "file:" 前缀，
+                // 在 Windows 上会得到 "/E:/..." 这种非法盘符路径。
+                JarURLConnection connection = (JarURLConnection) url.openConnection();
+                connection.setUseCaches(false);
+                try (JarFile jar = connection.getJarFile()) {
+                    String entryPrefix = prefix.substring(1);
+                    Enumeration<JarEntry> entries = jar.entries();
+                    while (entries.hasMoreElements()) {
+                        JarEntry entry = entries.nextElement();
+                        String name = entry.getName();
+                        if (entry.isDirectory() || !name.startsWith(entryPrefix)) {
+                            continue;
+                        }
+                        copyBuiltinPackResource(name.substring(entryPrefix.length()));
+                    }
+                }
+            } else if ("file".equals(url.getProtocol())) {
+                // 开发环境：资源就在文件系统上。
+                Path sourceRoot = new File(url.toURI()).toPath();
+                if (Files.isDirectory(sourceRoot)) {
+                    try (Stream<Path> stream = Files.walk(sourceRoot)) {
+                        stream.filter(Files::isRegularFile)
+                            .forEach(
+                                source -> copyBuiltinPackResource(
+                                    sourceRoot.relativize(source)
+                                        .toString()
+                                        .replace('\\', '/')));
+                    }
+                }
+            }
+            ysmu.LOG.info("Extracted built-in model resources from {} into {}", prefix, BUILT);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to extract built-in model resources from {}", prefix, e);
+        }
     }
 
-    private static void copyDefaultModel(List<Pattern> blacklist) {
-        Path defaultPath = builtInModelTarget("default");
-        if (defaultPath == null) {
-            return;
-        }
-
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/default/main.json"), defaultPath, MAIN_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/default/arm.json"), defaultPath, ARM_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/default/default.png"), defaultPath, "default.png");
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/default/blue.png"), defaultPath, "blue.png");
+    /**
+     * 复制 {@code assets/ysmu/builtin/} 下的一个文件，{@code relativePath} 相对该目录；落点是
+     * {@code config/ysmu/builtin/<relativePath>}，即整棵树的镜像。
+     */
+    private static void copyBuiltinPackResource(String relativePath) {
+        Path target = BUILT.resolve(relativePath);
+        createFolder(target.getParent());
         GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/default/main.animation.json"),
-            defaultPath,
-            MAIN_ANIMATION_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/default/arm.animation.json"),
-            defaultPath,
-            ARM_ANIMATION_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/default/extra.animation.json"),
-            defaultPath,
-            EXTRA_ANIMATION_FILE_NAME);
-
-        if (isBlacklisted(blacklist, "default_boy")) {
-            return;
-        }
-        Path defaultBoyPath = builtInModelTarget("default_boy");
-        if (defaultBoyPath == null) {
-            return;
-        }
-
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/default_boy/main.json"),
-            defaultBoyPath,
-            MAIN_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/default_boy/arm.json"), defaultBoyPath, ARM_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/default_boy/red.png"), defaultBoyPath, "red.png");
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/default_boy/blue.png"), defaultBoyPath, "blue.png");
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/default_boy/main.animation.json"),
-            defaultBoyPath,
-            MAIN_ANIMATION_FILE_NAME);
-    }
-
-    private static void copyVanillaModel(List<Pattern> blacklist) {
-        copySteveModel(blacklist);
-        copyAlexModel(blacklist);
-        copyQinglukaModel(blacklist);
-    }
-
-    private static void copySteveModel(List<Pattern> blacklist) {
-        if (isBlacklisted(blacklist, "steve")) {
-            return;
-        }
-        Path stevePath = builtInModelTarget("steve");
-        if (stevePath == null) {
-            return;
-        }
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/steve/main.json"), stevePath, MAIN_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/steve/arm.json"), stevePath, ARM_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/steve/tartaric_acid.png"), stevePath, "tartaric_acid.png");
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/steve/main.animation.json"),
-            stevePath,
-            MAIN_ANIMATION_FILE_NAME);
-    }
-
-    private static void copyAlexModel(List<Pattern> blacklist) {
-        if (isBlacklisted(blacklist, "alex")) {
-            return;
-        }
-        Path alexPath = builtInModelTarget("alex");
-        if (alexPath == null) {
-            return;
-        }
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/main.json"), alexPath, MAIN_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/arm.json"), alexPath, ARM_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/alex/gsl.png"), alexPath, "gsl.png");
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/alex/main.animation.json"),
-            alexPath,
-            MAIN_ANIMATION_FILE_NAME);
-    }
-
-    private static void copyQinglukaModel(List<Pattern> blacklist) {
-        if (isBlacklisted(blacklist, "qingluka")) {
-            return;
-        }
-        Path qinglukaPath = builtInModelTarget("qingluka");
-        if (qinglukaPath == null) {
-            return;
-        }
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/qingluka/main.json"), qinglukaPath, MAIN_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/qingluka/arm.json"), qinglukaPath, ARM_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/qingluka/texture.png"), qinglukaPath, "texture.png");
-    }
-
-    private static void copyWineFoxModel(List<Pattern> blacklist) {
-        if (isBlacklisted(blacklist, "wine_fox")) {
-            return;
-        }
-        Path wineFoxPath = builtInModelTarget("wine_fox");
-        if (wineFoxPath == null) {
-            return;
-        }
-
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/wine_fox/main.json"), wineFoxPath, MAIN_MODEL_FILE_NAME);
-        GetJarResources
-            .copyYesSteveModelFile(getCustomFiles("custom/wine_fox/arm.json"), wineFoxPath, ARM_MODEL_FILE_NAME);
-        GetJarResources.copyYesSteveModelFile(getCustomFiles("custom/wine_fox/skin.png"), wineFoxPath, "skin.png");
-        GetJarResources.copyYesSteveModelFile(
-            getCustomFiles("custom/wine_fox/main.animation.json"),
-            wineFoxPath,
-            MAIN_ANIMATION_FILE_NAME);
+            getCustomFiles(BUILTIN_PACK_RESOURCE_ROOT + "/" + relativePath),
+            target.getParent(),
+            target.getFileName()
+                .toString());
     }
 
     private static void cacheAllModels(Path rootPath) {
@@ -502,11 +429,9 @@ public final class ServerModelManager {
         try {
             String content = "# Yes Steve Model built-in model blacklist\n"
                 + "# One Java regular expression per line. Lines starting with # are comments.\n"
-                + "# Rules are matched with find() against assets/ysmu/custom/<model directory>/ ,\n"
-                + "# for example: assets/ysmu/custom/(steve|alex)/\n"
-                + "# A matching built-in model is not copied into config/ysmu/custom on reload.\n"
-                + "# Already extracted copies are left alone: delete the directory by hand if you blacklist\n"
-                + "# a model that was extracted earlier.\n"
+                + "# NOT CONSULTED YET: built-in models now come from assets/ysmu/builtin and are extracted\n"
+                + "# into config/ysmu/builtin on every reload, so there is no per-name copy left to skip.\n"
+                + "# Your own models live in config/ysmu/custom and are never touched.\n"
                 + "# The default model cannot be disabled: the mod's fallback paths load their animations\n"
                 + "# and geometry from it.\n";
             FileUtils.writeStringToFile(blacklistFile.toFile(), content, StandardCharsets.UTF_8);
@@ -518,11 +443,12 @@ public final class ServerModelManager {
     private static void initBuiltNoticeFile() {
         Path noticeFile = BUILT.resolve("notice.txt");
         try {
-            String content = "OpenYSM built-in model staging directory.\n"
-                + "This phase creates the directory for the new scanner; legacy built-ins are still copied to custom.\n";
+            String content = "OpenYSM built-in model directory.\n"
+                + "Its contents are overwritten from assets/ysmu/builtin on every reload;\n"
+                + "put your own models in config/ysmu/custom instead.\n";
             FileUtils.writeStringToFile(noticeFile.toFile(), content, StandardCharsets.UTF_8);
         } catch (Exception e) {
-            ysmu.LOG.warn("Failed to write OpenYSM built directory notice", e);
+            ysmu.LOG.warn("Failed to write OpenYSM builtin directory notice", e);
         }
     }
 

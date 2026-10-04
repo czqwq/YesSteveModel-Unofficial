@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -44,7 +45,10 @@ import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.model.resource.RawYsmModelAdapter;
+import com.fox.ysmu.model.resource.YSMFolderDeserializer;
 import com.fox.ysmu.model.resource.YsmControllerResources;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelFiles;
 import com.fox.ysmu.util.GsonHelper;
@@ -1489,13 +1493,27 @@ public class ClientModelManager {
             }
         });
         animations.put(id, main);
-        try {
-            OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values());
-        } catch (Throwable failure) {
-            // The animation set above is already installed, and the registry already handles a broken controller file
-            // per file, so this only catches something escaping that - an Error. Letting it through would make the
-            // caller report the whole model as failed when its animations are in fact usable.
-            ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
+        // The reference gates controller registration on the model actually declaring controller files
+        // (REF ClientModelManager.java:690 `if (!bundle.controllerFiles.isEmpty())`). Without that gate every
+        // built-in model gains a ControllerSet: the registry synthesises one controller per parallel animation
+        // name, and the built-in `default` pack declares no controller/ at all while its main.animation.json
+        // still defines pre_parallel0..7 and parallel0..7. Those 16 slots would leave the raw
+        // playLoopAnimation path for the OpenYSM state machine. The registry cleared a stale set for this id
+        // through the empty-file call; clearRuntimeModelCaches clears the whole registry per sync, and a
+        // re-registration of the same id carries the same payload, so nothing goes stale here.
+        if (!controllerFiles.isEmpty()) {
+            try {
+                // animationNames is the animation set installed just above: main.animations, i.e. the model's
+                // own animations plus the built-in defaults merged in at :1483-1487. That is the port's
+                // counterpart of the `resourceAdapter.getAnimations(model, assets)` map OpenYSM's
+                // ParallelProcessor scans (ParallelControllerDiscovery.java:45).
+                OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values(), main.animations.keySet());
+            } catch (Throwable failure) {
+                // The animation set above is already installed, and the registry already handles a broken controller file
+                // per file, so this only catches something escaping that - an Error. Letting it through would make the
+                // caller report the whole model as failed when its animations are in fact usable.
+                ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
+            }
         }
         // The projectile controllers live under the projectile's own sub-model id, which is also the id its geometry
         // and its AnimationFile are registered under.
@@ -1567,8 +1585,36 @@ public class ClientModelManager {
     }
 
     public static void loadDefaultModel() {
+        // M1/D7:内置 default 现在是 config/ysmu/builtin/default 下的现代 ysm.json 包，config/ysmu/custom 只是用户
+        // 自己的根目录，新装机器上并没有 custom/default；仅按旧位置读会让这个方法在全新安装上直接抛
+        // FileNotFoundException，DEFAULT_ANIMATION_FILE 于是永远是空的。形状照 SOURCE
+        // ClientModelManager:1319-1348：先试旧布局，再回退到内置包。
+        ModelData data = null;
         try {
-            ModelData data = FolderFormat.getModelData(ServerModelManager.CUSTOM, "default");
+            data = FolderFormat.getModelData(ServerModelManager.CUSTOM, "default");
+        } catch (IOException e) {
+            ysmu.LOG.info("Legacy default model not found at CUSTOM/default, trying the built-in OpenYSM pack...");
+        }
+        if (data == null) {
+            // 新装机器走的就是这一支。
+            Path builtinDefault = ServerModelManager.BUILT.resolve("default");
+            if (Files.isDirectory(builtinDefault)) {
+                try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(builtinDefault)) {
+                    RawYsmModel raw = deserializer.deserialize();
+                    raw.modelId = "default";
+                    // SOURCE 在 :1336-1340 手动把 default_texture 填进它自己的 DEFAULT_TEXTURE 表，因为它这条路径
+                    // 绕开了会登记该字段的 OpenYSM 同步路径。本端不需要这一步：RawYsmModelAdapter 把
+                    // default_texture 写进几何的 ysm_default_texture，下面的 registerAll(eager) -> publishGeo 会
+                    // 照常把它读进 DECLARED_DEFAULT_TEXTURES。
+                    if (RawYsmModelAdapter.isBridgeable(raw)) {
+                        data = RawYsmModelAdapter.toLegacyModelData(raw, "default");
+                    }
+                } catch (Exception e2) {
+                    ysmu.LOG.warn("Failed to load default model from the built-in OpenYSM pack", e2);
+                }
+            }
+        }
+        if (data != null) {
             data.getAnimation()
                 .forEach((name, bytes) -> {
                     AnimationFile animationFile = getAnimationFile(new String(bytes, StandardCharsets.UTF_8));
@@ -1577,9 +1623,8 @@ public class ClientModelManager {
             // Eager: this is the substitute every not-yet-built model is drawn with, so it has to exist before any
             // other model asks for it.
             ClientModelManager.registerAll(data, true);
-        } catch (IOException e) {
-            ysmu.LOG.warn("Failed to load default model", e);
-            e.printStackTrace();
+        } else {
+            ysmu.LOG.warn("Failed to load default model from any format");
         }
     }
 

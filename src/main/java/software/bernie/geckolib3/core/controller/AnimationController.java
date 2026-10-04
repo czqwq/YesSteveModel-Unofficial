@@ -1,0 +1,1539 @@
+/*
+ * Copyright (c) 2020.
+ * Author: Bernie G. (Gecko)
+ */
+// TODO AnimationController 尚未检查完
+package software.bernie.geckolib3.core.controller;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.apache.commons.lang3.tuple.Pair;
+
+import com.eliotlash.mclib.math.IValue;
+
+import software.bernie.geckolib3.core.AnimationState;
+import software.bernie.geckolib3.core.ConstantValue;
+import software.bernie.geckolib3.core.IAnimatable;
+import software.bernie.geckolib3.core.IAnimatableModel;
+import software.bernie.geckolib3.core.PlayState;
+import software.bernie.geckolib3.core.builder.Animation;
+import software.bernie.geckolib3.core.builder.AnimationBuilder;
+import software.bernie.geckolib3.core.builder.ILoopType;
+import software.bernie.geckolib3.core.builder.ILoopType.EDefaultLoopTypes;
+import software.bernie.geckolib3.core.easing.EasingManager;
+import software.bernie.geckolib3.file.AnimationFile;
+import software.bernie.geckolib3.resource.GeckoLibCache;
+import software.bernie.geckolib3.core.easing.EasingType;
+import software.bernie.geckolib3.core.event.CustomInstructionKeyframeEvent;
+import software.bernie.geckolib3.core.event.ParticleKeyFrameEvent;
+import software.bernie.geckolib3.core.event.SoundKeyframeEvent;
+import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.core.keyframe.AnimationPoint;
+import software.bernie.geckolib3.core.keyframe.AnimationPointQueue;
+import software.bernie.geckolib3.core.keyframe.BoneAnimation;
+import software.bernie.geckolib3.core.keyframe.BoneAnimationQueue;
+import software.bernie.geckolib3.core.keyframe.EventKeyFrame;
+import software.bernie.geckolib3.core.keyframe.KeyFrame;
+import software.bernie.geckolib3.core.keyframe.KeyFrameLocation;
+import software.bernie.geckolib3.core.keyframe.ParticleEventKeyFrame;
+import software.bernie.geckolib3.core.keyframe.VectorKeyFrameList;
+import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
+import software.bernie.geckolib3.core.processor.IBone;
+import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
+import software.bernie.geckolib3.core.util.Axis;
+
+/**
+ * The type Animation controller.
+ *
+ * @param <T> the type parameter
+ */
+public class AnimationController<T extends IAnimatable> {
+
+    static List<ModelFetcher<?>> modelFetchers = new ArrayList<>();
+    /**
+     * The Entity.
+     */
+    protected T animatable;
+    /**
+     * The animation predicate, is tested in every process call (i.e. every frame)
+     */
+    protected IAnimationPredicate<T> animationPredicate;
+
+    /**
+     * The name of the animation controller
+     */
+    private final String name;
+
+    protected AnimationState animationState = AnimationState.Stopped;
+
+    /**
+     * How long it takes to transition between animations
+     */
+    public double transitionLengthTicks;
+
+    /**
+     * The sound listener is called every time a sound keyframe is encountered (i.e.
+     * every frame)
+     */
+    private ISoundListener<T> soundListener;
+
+    /**
+     * The particle listener is called every time a particle keyframe is encountered
+     * (i.e. every frame)
+     */
+    private IParticleListener<T> particleListener;
+
+    /**
+     * The custom instruction listener is called every time a custom instruction
+     * keyframe is encountered (i.e. every frame)
+     */
+    private ICustomInstructionListener<T> customInstructionListener;
+    public List emitters;
+    public boolean isJustStarting = false;
+    public int particleUpdatesPerSecond = 20;
+
+    public static void addModelFetcher(ModelFetcher<?> fetcher) {
+        modelFetchers.add(fetcher);
+    }
+
+    public static void removeModelFetcher(ModelFetcher<?> fetcher) {
+        Objects.requireNonNull(fetcher);
+        modelFetchers.remove(fetcher);
+    }
+
+    /**
+     * An AnimationPredicate is run every render frame for ever AnimationController.
+     * The "test" method is where you should change animations, stop animations,
+     * restart, etc.
+     */
+    @FunctionalInterface
+    public interface IAnimationPredicate<P extends IAnimatable> {
+
+        /**
+         * An AnimationPredicate is run every render frame for ever AnimationController.
+         * The "test" method is where you should change animations, stop animations,
+         * restart, etc.
+         *
+         * @return CONTINUE if the animation should continue, STOP if it should stop.
+         */
+        PlayState test(AnimationEvent<P> event);
+    }
+
+    /**
+     * Sound Listeners are run when a sound keyframe is hit. You can either return
+     * the SoundEvent and geckolib will play the sound for you, or return null and
+     * handle the sounds yourself.
+     */
+    @FunctionalInterface
+    public interface ISoundListener<A extends IAnimatable> {
+
+        /**
+         * Sound Listeners are run when a sound keyframe is hit. You can either return
+         * the SoundEvent and geckolib will play the sound for you, or return null and
+         * handle the sounds yourself.
+         */
+        void playSound(SoundKeyframeEvent<A> event);
+    }
+
+    /**
+     * Particle Listeners are run when a sound keyframe is hit. You need to handle
+     * the actual playing of the particle yourself.
+     */
+    @FunctionalInterface
+    public interface IParticleListener<A extends IAnimatable> {
+
+        /**
+         * Particle Listeners are run when a sound keyframe is hit. You need to handle
+         * the actual playing of the particle yourself.
+         */
+        void summonParticle(ParticleKeyFrameEvent<A> event);
+    }
+
+    /**
+     * Custom instructions can be added in blockbench by enabling animation effects
+     * in Animation - Animate Effects. You can then add custom instruction keyframes
+     * and use them as timecodes/events to handle in code.
+     */
+    @FunctionalInterface
+    public interface ICustomInstructionListener<A extends IAnimatable> {
+
+        /**
+         * Custom instructions can be added in blockbench by enabling animation effects
+         * in Animation - Animate Effects. You can then add custom instruction keyframes
+         * and use them as timecodes/events to handle in code.
+         */
+        void executeInstruction(CustomInstructionKeyframeEvent<A> event);
+    }
+
+    /**
+     * YSMU: narrow per-controller playback clock probe.
+     * <p>
+     * Unlike {@link ICustomInstructionListener} (which is bound to GeckoLib's own
+     * keyframe list and fires at GeckoLib's dispatch point), this listener is called
+     * exactly once per running frame for the animation currently being evaluated,
+     * <em>after</em> the time update (animationSpeed, {@code anim_time_update}, loop
+     * wrap and HOLD clamp) and <em>before</em> bone evaluation. That is the only
+     * point at which {@code tick} is the animation's final playback time for the
+     * frame, which is what the YSMU timeline scheduler needs.
+     * <p>
+     * The listener receives the animation instance being evaluated, so a listener
+     * that belongs to a different controller state (or to a controller that was
+     * retired by a model switch) can ignore the callback by identity.
+     */
+    @FunctionalInterface
+    public interface ITimelinePlaybackListener {
+
+        /**
+         * @param animation the animation instance whose playback position is
+         *                  reported (identity, never null)
+         * @param tick      the final playback tick of this frame
+         * @param delta     exact forward distance since the previous report, in ticks
+         * @param wrapped   true when the tick was wrapped by a loop this frame
+         */
+        void onTimelinePlayback(Animation animation, double tick, double delta, boolean wrapped);
+
+        /** A listener that ignores every callback, used to retire a timeline. */
+        ITimelinePlaybackListener NONE = new ITimelinePlaybackListener() {
+
+            @Override
+            public void onTimelinePlayback(Animation animation, double tick, double delta, boolean wrapped) {
+                // intentionally empty
+            }
+        };
+    }
+
+    private final HashMap<String, BoneAnimationQueue> boneAnimationQueues = new HashMap<>();
+    private final List<BoneAnimationQueue> activeBoneAnimationQueues = new ArrayList<>();
+        // YSMU perf: Pre-built bone name → IBone map — populated once per process() call,
+    // reused by both the transition and running branches to avoid a second
+    // HashMap build and to enable lazy BoneAnimationQueue creation.
+    private Map<String, IBone> boneNameToBone = new HashMap<>();
+    // YSMU: wiki「并行动画」——`parallel` 族是"特殊的混合动画"，旋转与低优先级层**相加**
+    // （"这个混合仅会混合旋转，不会混合位移和缩放"；OpenYSM 对 parallel 注册 deprecatedMode=true，
+    // 走 `vector3f.add(value)`）。由 CustomPlayerEntity 在注册 parallel 族控制器时打开，
+    // AnimationProcessor 据此决定写回 rotation 时是累加还是覆盖。
+    // 注意 pre_parallel 族**不是**叠加语义（它优先级最低、被主动画覆盖），不要一起打开。
+    private boolean additiveRotation;
+    // YSMU: tickOffset for animation frame time tracking
+    public double tickOffset;
+    // YSMU: the final playback tick of the frame currently being processed
+    // (animationSpeed applied, anim_time_update resolved, loop wrapped, HOLD
+    // clamped). It is assigned inside processCurrentAnimation() AFTER the time
+    // update and BEFORE bone evaluation, which is the first point where it is the
+    // value GeckoLib is actually about to evaluate the bones with.
+    private double syncTick;
+    // YSMU: the exact forward distance the playback clock travelled since the
+    // previous report, measured in the same tick units as syncTick. It is the
+    // position's own advance, except across a loop wrap where the position restarts
+    // and the raw elapsed playback time is used instead; a seek/restart is reported
+    // as delta 0 with a new position.
+    private double syncDelta;
+    // YSMU: the raw adjusted tick of the previous report, used only to detect a loop
+    // wrap and to re-anchor; -1 means "re-anchor on the next report".
+    private double lastSyncActualTick = -1.0d;
+    // YSMU: whether processCurrentAnimation() emitted a playback report this frame.
+    // The re-anchor below must key off "no report happened", not off a comparison with
+    // the raw process() tick — since a loop wrap moves tickOffset, the adjusted tick and
+    // the raw seek tick differ for every later frame, which used to re-anchor them all
+    // (delta 0 forever, i.e. the timeline froze after the first loop).
+    private boolean syncReportedThisFrame;
+    // YSMU: listener notified once per frame from processCurrentAnimation() after
+    // the time update and before bone evaluation; the YSMU timeline scheduler uses
+    // it to dispatch on the real playback clock.
+    private ITimelinePlaybackListener timelinePlaybackListener;
+    public Queue<Animation> animationQueue = new LinkedList<>();
+    public Animation currentAnimation;
+    public AnimationBuilder currentAnimationBuilder = new AnimationBuilder();
+    public boolean shouldResetTick = false;
+    private final HashMap<String, BoneSnapshot> boneSnapshots = new HashMap<>();
+    // YSMU: justStopped/justStartedTransition — fix PLAY_ONCE restart detection
+    private boolean justStopped = false;
+    protected boolean justStartedTransition = false;
+    /**
+     * The tick a {@link PlayState#PAUSE} began at, or {@code NaN} when the controller is not paused; see
+     * {@code process}.
+     */
+    private double pausedTick = Double.NaN;
+    public Function<Double, Double> customEasingMethod;
+    // YSMU: needsAnimationReload — signals rebuild when same builder is re-submitted
+    protected boolean needsAnimationReload = false;
+    // YSMU: animationSpeed — external control for pause/freeze (used by animation preview screen)
+    public double animationSpeed = 1D;
+    // YSMU: anim_time_update — Bedrock 风格逐动画自定义时间推进
+    /** 上一次计算出的动画时间（tick）；-1 = 未初始化（新动画/重启时重置）。 */
+    private double lastAnimTimeTick = -1;
+    /** 计算 anim_time_update 时的动画实例（动画切换时重置 lastAnimTimeTick）。 */
+    private Animation lastAnimTimeAnimation;
+    /** 上一帧 actualTick（用于计算 query.delta_time）。 */
+    private double lastActualTick = -1;
+    /** anim_time_update 表达式解析缓存（按表达式文本，全局共享）。 */
+    private static final ConcurrentHashMap<String, MolangExpression> ANIM_TIME_UPDATE_CACHE = new ConcurrentHashMap<>();
+
+    /** 清理 anim_time_update 表达式解析缓存（模型重载/资源清空时调用），
+     *  避免模型反复重载后按表达式文本累积的解析结果无限增长。 */
+    public static void clearAnimTimeUpdateCache() {
+        ANIM_TIME_UPDATE_CACHE.clear();
+    }
+    private final Set<EventKeyFrame<?>> executedKeyFrames = new HashSet<>();
+
+    /**
+     * This method sets the current animation with an animation builder. You can run
+     * this method every frame, if you pass in the same animation builder every
+     * time, it won't restart. Additionally, it smoothly transitions between
+     * animation states.
+     */
+    public void setAnimation(AnimationBuilder builder) {
+        // YSMU: Handle same-builder resubmission — restart PLAY_ONCE when Stopped,
+        // or restart LOOP when currentAnimation was lost (e.g. after cache clear).
+        if (builder != null && !builder.getRawAnimationList()
+            .isEmpty()) {
+            String animName = builder.getRawAnimationList().get(0).animationName;
+            boolean animChanged = !builder.getRawAnimationList()
+                .equals(this.currentAnimationBuilder.getRawAnimationList());
+            if (builder.getRawAnimationList()
+                .equals(this.currentAnimationBuilder.getRawAnimationList()) && !this.needsAnimationReload) {
+                // Only re-arm the reload while Stopped (replay) or Running with a lost
+                // animation.  During an in-flight Transitioning the transition branch
+                // will dequeue the queued animation itself; re-arming here would make
+                // every same-builder setAnimation call restart the transition forever.
+                if (animationState == AnimationState.Stopped
+                    || (animationState != AnimationState.Transitioning
+                        && builder.getRawAnimationList()
+                            .get(builder.getRawAnimationList().size() - 1).loopType
+                            == ILoopType.EDefaultLoopTypes.LOOP && currentAnimation == null)) {
+                    needsAnimationReload = true;
+                }
+            }
+        }
+        // END YSMU
+        IAnimatableModel<T> model = getModel(this.animatable);
+        if (model != null) {
+            if (builder == null || builder.getRawAnimationList()
+                .size() == 0) {
+                animationState = AnimationState.Stopped;
+                // YSMU: the playback clock stopped; the next running report re-anchors.
+                this.lastSyncActualTick = -1.0d;
+            } else if (!builder.getRawAnimationList()
+                .equals(currentAnimationBuilder.getRawAnimationList()) || needsAnimationReload) {
+                    AtomicBoolean encounteredError = new AtomicBoolean(false);
+                    // Convert the list of animation names to the actual list, keeping track of the
+                    // loop boolean along the way
+                    LinkedList<Animation> animations = builder.getRawAnimationList()
+                        .stream()
+                        .map((rawAnimation) -> {
+                            Animation animation = model.getAnimation(rawAnimation.animationName, animatable);
+                            // YSMU: Fallback removed — scanning ALL files in GeckoLibCache
+                            // leaks per-model custom animations (e.g. another model's attack_1)
+                            // into unrelated models, causing bone name mismatches.
+                            // Each model must provide its own animations; the default
+                            // model's animations are injected by YSMU's AnimationManager
+                            // before calling setAnimation.
+                            if (animation == null) {
+                                System.out
+                                    .printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                                encounteredError.set(true);
+                            }
+                            if (animation != null && rawAnimation.loopType != null) {
+                                animation.loop = rawAnimation.loopType;
+                            }
+                            return animation;
+                        })
+                        .collect(Collectors.toCollection(LinkedList::new));
+
+                    if (encounteredError.get()) {
+                        return;
+                    } else {
+                        animationQueue = animations;
+                    }
+                    currentAnimationBuilder = builder;
+
+                    // Always clear stale currentAnimation when a new animation is queued,
+                    // so that process() can dequeue it.  Without this, a Running
+                    // controller (e.g. playing "idle") keeps the old currentAnimation
+                    // when setAnimation queues the next animation, and the Transitioning
+                    // branch skips dequeuing because tick != 0, leaving the new
+                    // animation stuck in the queue forever.
+                    // The one-frame delay before the new animation starts is handled
+                    // by the Transitioning→Running transition check in process() which
+                    // polls from the queue when currentAnimation is null.
+                    this.currentAnimation = null;
+                    resetEventKeyFrames();
+
+                    // Reset the adjusted tick to 0 on next animation process call
+                    shouldResetTick = true;
+                    this.animationState = AnimationState.Transitioning;
+                    justStartedTransition = true;
+                    needsAnimationReload = false;
+                    // YSMU: a fresh animation starts its own clock; re-anchor the
+                    // playback report so the first frame reports delta 0.
+                    this.lastSyncActualTick = -1.0d;
+                }
+        }
+    }
+
+    public boolean setAnimationPreservingTick(AnimationBuilder builder, double absoluteTick, double elapsedTick) {
+        IAnimatableModel<T> model = getModel(this.animatable);
+        if (model == null || builder == null || builder.getRawAnimationList()
+            .isEmpty()) {
+            return false;
+        }
+        AtomicBoolean encounteredError = new AtomicBoolean(false);
+        LinkedList<Animation> animations = builder.getRawAnimationList()
+            .stream()
+            .map((rawAnimation) -> {
+                Animation animation = model.getAnimation(rawAnimation.animationName, animatable);
+                // Cross-model fallback removed — see setAnimation() for rationale.
+                if (animation == null) {
+                    System.out.printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                    encounteredError.set(true);
+                }
+                if (animation != null && rawAnimation.loopType != null) {
+                    animation.loop = rawAnimation.loopType;
+                }
+                return animation;
+            })
+            .collect(Collectors.toCollection(LinkedList::new));
+        if (encounteredError.get() || animations.isEmpty()) {
+            return false;
+        }
+        // YSMU: remember what was playing and how far it actually got before this
+        // swap. The incoming variant may only skip the sound keyframes the outgoing
+        // animation really played (see carrySoundKeyFramesPassed).
+        Animation outgoing = this.currentAnimation;
+        double outgoingPosition = this.animationSpeed == 0.0D
+            ? 0.0D
+            : this.animationSpeed * Math.max(0.0D, absoluteTick - this.tickOffset);
+        this.animationQueue = animations;
+        this.currentAnimationBuilder = builder;
+        this.currentAnimation = this.animationQueue.poll();
+        this.tickOffset = absoluteTick - Math.max(0.0D, elapsedTick);
+        this.shouldResetTick = false;
+        this.animationState = AnimationState.Running;
+        this.justStartedTransition = false;
+        this.justStopped = false;
+        this.needsAnimationReload = false;
+        // Do NOT call resetEventKeyFrames() here — this method preserves the
+        // animation tick position when switching between conditional animation
+        // variants within the same state (e.g. sword_attack_01 → sword_attack_run1
+        // when the player starts/stops running while swinging).  Resetting would
+        // clear executedKeyFrames, causing sound keyframes at tick 0.0 to re-fire
+        // even though the playback position is already past them.  New Animation
+        // objects create distinct EventKeyFrame instances, so old keyframes in the
+        // set do not prevent new ones from executing at their appropriate ticks.
+        // Those fresh instances are the remaining hole: the incoming variant's own
+        // tick-0 sound keyframe is not in the set either, so it fires immediately
+        // even though this swing already played its sound.
+        carrySoundKeyFramesPassed(outgoing, outgoingPosition);
+        // YSMU: the variant switch keeps the playback position but the listener must
+        // re-anchor to the new animation instead of measuring a cross-animation jump
+        // (the merged copy may have a different length, so a raw position delta would
+        // look like a seek). The kept position is reported as the next anchor.
+        this.lastSyncActualTick = -1.0d;
+        return this.currentAnimation != null;
+    }
+
+    /**
+     * YSMU: carries the "this sound already played" state across a preserved-tick
+     * variant switch.
+     * <p>{@link #setAnimationPreservingTick} keeps the playback position when a
+     * controller state swaps between its conditional animation entries — an attack
+     * state moving from its standing entry to its walking or running entry
+     * ({@code sword_idle_attack_01} → {@code sword_attack_run1}), all of which
+     * author the swing sound at tick 0.0. The incoming animation owns fresh
+     * {@code EventKeyFrame} instances, so nothing in {@code executedKeyFrames}
+     * stops its tick-0 sound from firing again mid-swing.
+     * <p>Only sound keyframes the <em>outgoing</em> animation actually executed
+     * behind the kept position are carried over. Two cases must not be suppressed:
+     * the frame after a state entry, where the runtime re-enters this path because
+     * its "active animation list" bookkeeping was not updated on the entry frame
+     * (there the outgoing animation never got to run its keyframes), and a variant
+     * whose predecessor had no sound at all (then the incoming sound has not been
+     * heard yet and should play).
+     */
+    private void carrySoundKeyFramesPassed(Animation outgoing, double position) {
+        if (this.currentAnimation == null || outgoing == null || position <= 0.0D
+            || this.currentAnimation.soundKeyFrames == null
+            || this.currentAnimation.soundKeyFrames.isEmpty()
+            || outgoing.soundKeyFrames == null) {
+            return;
+        }
+        boolean outgoingSoundPlayed = false;
+        for (EventKeyFrame<String> soundKeyFrame : outgoing.soundKeyFrames) {
+            if (soundKeyFrame.getStartTick() < position
+                && this.executedKeyFrames.contains(soundKeyFrame)) {
+                outgoingSoundPlayed = true;
+                break;
+            }
+        }
+        if (!outgoingSoundPlayed) {
+            return;
+        }
+        for (EventKeyFrame<String> soundKeyFrame : this.currentAnimation.soundKeyFrames) {
+            if (soundKeyFrame.getStartTick() < position) {
+                this.executedKeyFrames.add(soundKeyFrame);
+            }
+        }
+    }
+
+    /**
+     * By default Geckolib uses the easing types of every keyframe. If you want to
+     * override that for an entire AnimationController, change this value.
+     */
+    public EasingType easingType = EasingType.NONE;
+
+    /**
+     * Instantiates a new Animation controller. Each animation controller can run
+     * one animation at a time. You can have several animation controllers for each
+     * entity, i.e. one animation to control the entity's size, one to control
+     * movement, attacks, etc.
+     *
+     * @param animatable            The entity
+     * @param name                  Name of the animation controller
+     *                              (move_controller, size_controller,
+     *                              attack_controller, etc.)
+     * @param transitionLengthTicks How long it takes to transition between
+     *                              animations (IN TICKS!!)
+     */
+    public AnimationController(T animatable, String name, float transitionLengthTicks,
+        IAnimationPredicate<T> animationPredicate) {
+        this.animatable = animatable;
+        this.name = name;
+        this.transitionLengthTicks = transitionLengthTicks;
+        this.animationPredicate = animationPredicate;
+        tickOffset = 0.0d;
+    }
+
+    /**
+     * Instantiates a new Animation controller. Each animation controller can run
+     * one animation at a time. You can have several animation controllers for each
+     * entity, i.e. one animation to control the entity's size, one to control
+     * movement, attacks, etc.
+     *
+     * @param animatable            The entity
+     * @param name                  Name of the animation controller
+     *                              (move_controller, size_controller,
+     *                              attack_controller, etc.)
+     * @param transitionLengthTicks How long it takes to transition between
+     *                              animations (IN TICKS!!)
+     * @param easingtype            The method of easing to use. The other
+     *                              constructor defaults to no easing.
+     */
+    public AnimationController(T animatable, String name, float transitionLengthTicks, EasingType easingtype,
+        IAnimationPredicate<T> animationPredicate) {
+        this.animatable = animatable;
+        this.name = name;
+        this.transitionLengthTicks = transitionLengthTicks;
+        this.easingType = easingtype;
+        this.animationPredicate = animationPredicate;
+        tickOffset = 0.0d;
+    }
+
+    /**
+     * Instantiates a new Animation controller. Each animation controller can run
+     * one animation at a time. You can have several animation controllers for each
+     * entity, i.e. one animation to control the entity's size, one to control
+     * movement, attacks, etc.
+     *
+     * @param animatable            The entity
+     * @param name                  Name of the animation controller
+     *                              (move_controller, size_controller,
+     *                              attack_controller, etc.)
+     * @param transitionLengthTicks How long it takes to transition between
+     *                              animations (IN TICKS!!)
+     * @param customEasingMethod    If you want to use an easing method that's not
+     *                              included in the EasingType enum, pass your
+     *                              method into here. The parameter that's passed in
+     *                              will be a number between 0 and 1. Return a
+     *                              number also within 0 and 1. Take a look at
+     *                              {@link EasingManager}
+     */
+    public AnimationController(T animatable, String name, float transitionLengthTicks,
+        Function<Double, Double> customEasingMethod, IAnimationPredicate<T> animationPredicate) {
+        this.animatable = animatable;
+        this.name = name;
+        this.transitionLengthTicks = transitionLengthTicks;
+        this.customEasingMethod = customEasingMethod;
+        this.easingType = EasingType.CUSTOM;
+        this.animationPredicate = animationPredicate;
+        tickOffset = 0.0d;
+    }
+
+    /**
+     * Gets the controller's name.
+     *
+     * @return the name
+     */
+    public String getName() {
+        return name;
+    }
+
+    /** YSMU: 见 {@link #additiveRotation}。由宿主在注册 `parallel` 族控制器时打开。 */
+    public AnimationController<T> setAdditiveRotation(boolean additive) {
+        this.additiveRotation = additive;
+        return this;
+    }
+
+    /** YSMU: 该控制器的 rotation 是否与低优先级层相加（`parallel` 族）。 */
+    public boolean isAdditiveRotation() {
+        return this.additiveRotation;
+    }
+
+    /**
+     * Gets the current animation. Can be null
+     *
+     * @return the current animation
+     */
+
+    public Animation getCurrentAnimation() {
+        return currentAnimation;
+    }
+
+    /**
+     * Returns the current state of this animation controller.
+     */
+    public AnimationState getAnimationState() {
+        return animationState;
+    }
+
+    /**
+     * Gets the current animation's bone animation queues.
+     *
+     * @return the bone animation queues
+     */
+    public HashMap<String, BoneAnimationQueue> getBoneAnimationQueues() {
+        return boneAnimationQueues;
+    }
+
+    public List<BoneAnimationQueue> getActiveBoneAnimationQueues() {
+        return activeBoneAnimationQueues;
+    }
+
+    /**
+     * Registers a sound listener.
+     */
+    public void registerSoundListener(ISoundListener<T> soundListener) {
+        this.soundListener = soundListener;
+    }
+
+    /**
+     * Registers a particle listener.
+     */
+    public void registerParticleListener(IParticleListener<T> particleListener) {
+        this.particleListener = particleListener;
+    }
+
+    /**
+     * Registers a custom instruction listener.
+     */
+    public void registerCustomInstructionListener(ICustomInstructionListener<T> customInstructionListener) {
+        this.customInstructionListener = customInstructionListener;
+    }
+
+    /**
+     * This method is called every frame in order to populate the animation point
+     * queues, and process animation state logic.
+     *
+     * @param tick                   The current tick + partial tick
+     * @param event                  The animation test event
+     * @param boneByName             当前模型的"骨骼名 -> IBone"索引（由 AnimationProcessor 按模型
+     *                               维护并整体换掉，控制器直接复用，不再每帧自己从骨骼表重建）
+     * @param boneSnapshotCollection The bone snapshot collection
+     */
+    public void process(double tick, AnimationEvent<T> event, Map<String, IBone> boneByName,
+        HashMap<String, Pair<IBone, BoneSnapshot>> boneSnapshotCollection, MolangParser parser,
+        boolean crashWhenCantFindBone) {
+        parser.setValue("query.life_time", tick / 20);
+        if (currentAnimation != null) {
+            IAnimatableModel<T> model = getModel(this.animatable);
+            if (model != null) {
+                Animation animation = model.getAnimation(currentAnimation.animationName, this.animatable);
+                // Cross-model fallback removed — see setAnimation() for rationale.
+                if (animation != null) {
+                    ILoopType loop = currentAnimation.loop;
+                    currentAnimation = animation;
+                    currentAnimation.loop = loop;
+                }
+            }
+        }
+
+        double actualTick = tick;
+        boolean tickWasReset = false;
+        double afterReset = adjustTick(tick);
+        if (afterReset == 0.0D && tick != 0.0D) {
+            tickWasReset = true;
+        }
+        tick = afterReset;
+        // Transition period has ended, reset the tick and set the animation to running.
+        // NOTE: this must compare the ADJUSTED tick (elapsed since the transition
+        // started), not the raw `tick` argument.  The raw value is a global seek
+        // counter (manager.tick + renderPartialTicks) that is almost always
+        // >= transitionLengthTicks after the first few ticks of play, so the old
+        // pre-adjustTick check fired on the very first transition frame and flipped
+        // straight to Running — the Transitioning blend branch never ran and no
+        // transition was ever visible.  adjustTick() resets tickOffset to the
+        // current raw tick on the first transition frame (shouldResetTick=true)
+        // and returns the elapsed time on later frames, which is exactly how long
+        // the current transition has been running.
+        if (animationState == AnimationState.Transitioning && tick >= transitionLengthTicks) {
+            this.shouldResetTick = true;
+            animationState = AnimationState.Running;
+            // Ensure currentAnimation is set from the queue if not already
+            if (this.currentAnimation == null && this.animationQueue.size() != 0) {
+                this.currentAnimation = this.animationQueue.poll();
+            }
+        }
+        if (animationState == AnimationState.Running) {
+            tick = adjustTick(actualTick);
+            // If the first adjustTick performed a reset (shouldResetTick was true),
+            // the second adjustTick should not undo it — it returned the original
+            // actualTick because shouldResetTick was already cleared.  In that case,
+            // honour the reset and keep tick at 0 so the animation starts from the
+            // beginning (e.g. after a setAnimation triggered by a Stopped→Running
+            // transition).
+            if (tickWasReset) {
+                tick = 0.0D;
+            }
+        }
+
+        assert tick >= 0 : "GeckoLib: Tick was less than zero";
+
+        // YSMU: `tick` here is still the predicate-time value. It is NOT the final
+        // playback time for this frame — processCurrentAnimation() may replace it
+        // from anim_time_update and/or wrap it for the loop / clamp it for HOLD.
+        // The timeline scheduler must not read it from this point; the definitive
+        // report is emitted inside processCurrentAnimation() below.
+        // This tests the animation predicate
+        this.timelinePlaybackListener = ITimelinePlaybackListener.NONE;
+        PlayState playState = this.testAnimationPredicate(event);
+        if (playState == PlayState.STOP || (currentAnimation == null && animationQueue.size() == 0)) {
+            // The animation should transition to the model's initial state
+            animationState = AnimationState.Stopped;
+            justStopped = true;
+            // YSMU: Clear bone animation queues when the controller stops.
+            // Without this, stale queues from the last non-STOP frame persist
+            // and their animation points continue to override bones set by
+            // other controllers (e.g. cap_controller's "hover" pose lingers
+            // after the hover ends, corrupting the main controller's preview
+            // animation).
+            // 只需要倒掉待消费的点：queue 对象本身留着下帧复用（见 createInitialQueues）。
+            discardPendingPoints();
+            // YSMU: no playback while stopped; the next running frame re-anchors.
+            this.lastSyncActualTick = -1.0d;
+            return;
+        }
+
+        // Defer queue creation until we know the controller is active (not STOP).
+        // This saves 13%+ overhead for idle controllers that return STOP from
+        // their predicate (e.g. OpenYSM slot controllers with no matching definition).
+        createInitialQueues(boneByName);
+        if (justStartedTransition && (shouldResetTick || justStopped)) {
+            justStopped = false;
+            tick = adjustTick(actualTick);
+        } else if (currentAnimation == null && this.animationQueue.size() != 0) {
+            this.shouldResetTick = true;
+            this.animationState = AnimationState.Transitioning;
+            justStartedTransition = true;
+            needsAnimationReload = false;
+            tick = adjustTick(actualTick);
+        } else {
+            if (animationState != AnimationState.Transitioning) {
+                animationState = AnimationState.Running;
+            }
+        }
+
+        // A-07: while the predicate asks to hold this frame, keep evaluating at the tick the pause began. Rebuilding
+        // the queues from that same tick applies exactly the values the bones already carry, so the pose neither
+        // advances nor drifts back to rest - which is what "hold the hand pose while that hand swings" means. Upstream
+        // holds it a different way, by discarding the queued bone animation for the frame
+        // (geckolib3/core/controller/CodedAnimationController.java:87-91); this port has no such separate queue, so it
+        // stops the clock instead. A controller with nothing playing has nothing to hold, and that case stopped above.
+        if (playState == PlayState.PAUSE) {
+            if (Double.isNaN(pausedTick)) {
+                pausedTick = tick;
+            }
+            tick = pausedTick;
+        } else {
+            pausedTick = Double.NaN;
+        }
+
+        // Handle transitioning to a different animation (or just starting one)
+        if (animationState == AnimationState.Transitioning) {
+            // Just started transitioning, so set the current animation to the first one.
+            // Only dequeue when currentAnimation is actually missing: on later frames
+            // tick can legitimately be 0 (a leftover shouldResetTick from the previous
+            // setAnimation call), and re-polling an already-consumed queue here would
+            // null a valid currentAnimation.  A nulled currentAnimation then re-arms
+            // setAnimation's needsAnimationReload loop, trapping the controller in a
+            // perpetual Transitioning (tick stuck below transitionLengthTicks) with
+            // bones frozen at the transition-start pose — the "HUD model has no
+            // walk/swing animation" bug seen with shaders + first person + FBO off.
+            if ((tick == 0 || isJustStarting) && this.currentAnimation == null) {
+                justStartedTransition = false;
+                this.currentAnimation = animationQueue.poll();
+                resetEventKeyFrames();
+                saveSnapshotsForAnimation(currentAnimation, boneSnapshotCollection);
+            }
+            if (currentAnimation != null) {
+                setAnimTime(parser, 0);
+                // Reuse boneNameToBone map built by createInitialQueues instead
+                // of building a second HashMap from modelRendererList.
+                for (BoneAnimation boneAnimation : currentAnimation.boneAnimations) {
+                    BoneAnimationQueue boneAnimationQueue = getOrCreateQueue(boneAnimation.boneName);
+                    BoneSnapshot boneSnapshot = this.boneSnapshots.get(boneAnimation.boneName);
+                    IBone first = this.boneNameToBone.get(boneAnimation.boneName);
+                    if (first == null) {
+                        if (crashWhenCantFindBone) {
+                            throw new RuntimeException("Could not find bone: " + boneAnimation.boneName);
+                        } else {
+                            continue;
+                        }
+                    }
+                    markActiveBoneAnimationQueue(boneAnimationQueue);
+                    BoneSnapshot initialSnapshot = first.getInitialSnapshot();
+                    assert boneSnapshot != null : "Bone snapshot was null";
+
+                    VectorKeyFrameList<KeyFrame<IValue>> rotationKeyFrames = boneAnimation.rotationKeyFrames;
+                    VectorKeyFrameList<KeyFrame<IValue>> positionKeyFrames = boneAnimation.positionKeyFrames;
+                    VectorKeyFrameList<KeyFrame<IValue>> scaleKeyFrames = boneAnimation.scaleKeyFrames;
+
+                    // Adding the initial positions of the upcoming animation, so the model
+                    // transitions to the initial state of the new animation
+                    if (!rotationKeyFrames.xKeyFrames.isEmpty()) {
+                        AnimationPoint xPoint = getAnimationPointAtTick(rotationKeyFrames.xKeyFrames, 0, true, Axis.X);
+                        AnimationPoint yPoint = getAnimationPointAtTick(rotationKeyFrames.yKeyFrames, 0, true, Axis.Y);
+                        AnimationPoint zPoint = getAnimationPointAtTick(rotationKeyFrames.zKeyFrames, 0, true, Axis.Z);
+                        boneAnimationQueue.rotationXQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.rotationValueX - initialSnapshot.rotationValueX,
+                                xPoint.animationStartValue));
+                        boneAnimationQueue.rotationYQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.rotationValueY - initialSnapshot.rotationValueY,
+                                yPoint.animationStartValue));
+                        boneAnimationQueue.rotationZQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.rotationValueZ - initialSnapshot.rotationValueZ,
+                                zPoint.animationStartValue));
+                        xPoint.recycle();
+                        yPoint.recycle();
+                        zPoint.recycle();
+                    }
+
+                    if (!positionKeyFrames.xKeyFrames.isEmpty()) {
+                        AnimationPoint xPoint = getAnimationPointAtTick(positionKeyFrames.xKeyFrames, 0, false, Axis.X);
+                        AnimationPoint yPoint = getAnimationPointAtTick(positionKeyFrames.yKeyFrames, 0, false, Axis.Y);
+                        AnimationPoint zPoint = getAnimationPointAtTick(positionKeyFrames.zKeyFrames, 0, false, Axis.Z);
+                        boneAnimationQueue.positionXQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.positionOffsetX,
+                                xPoint.animationStartValue));
+                        boneAnimationQueue.positionYQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.positionOffsetY,
+                                yPoint.animationStartValue));
+                        boneAnimationQueue.positionZQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.positionOffsetZ,
+                                zPoint.animationStartValue));
+                        xPoint.recycle();
+                        yPoint.recycle();
+                        zPoint.recycle();
+                    }
+
+                    if (!scaleKeyFrames.xKeyFrames.isEmpty()) {
+                        AnimationPoint xPoint = getAnimationPointAtTick(scaleKeyFrames.xKeyFrames, 0, false, Axis.X);
+                        AnimationPoint yPoint = getAnimationPointAtTick(scaleKeyFrames.yKeyFrames, 0, false, Axis.Y);
+                        AnimationPoint zPoint = getAnimationPointAtTick(scaleKeyFrames.zKeyFrames, 0, false, Axis.Z);
+                        boneAnimationQueue.scaleXQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.scaleValueX,
+                                xPoint.animationStartValue));
+                        boneAnimationQueue.scaleYQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.scaleValueY,
+                                yPoint.animationStartValue));
+                        boneAnimationQueue.scaleZQueue.add(
+                            AnimationPoint.obtain(
+                                null,
+                                tick,
+                                transitionLengthTicks,
+                                boneSnapshot.scaleValueZ,
+                                zPoint.animationStartValue));
+                        xPoint.recycle();
+                        yPoint.recycle();
+                        zPoint.recycle();
+                    }
+                }
+            }
+        } else if (getAnimationState() == AnimationState.Running) {
+            // Actually run the animation
+            processCurrentAnimation(tick, actualTick, parser, crashWhenCantFindBone);
+        }
+    }
+
+    private void setAnimTime(MolangParser parser, double tick) {
+        parser.setValue("query.anim_time", tick / 20);
+    }
+
+    private IAnimatableModel<T> getModel(T animatable) {
+        for (ModelFetcher<?> modelFetcher : modelFetchers) {
+            IAnimatableModel<T> model = (IAnimatableModel<T>) modelFetcher.apply(animatable);
+            if (model != null) {
+                return model;
+            }
+        }
+        System.out.printf(
+            "Could not find suitable model for animatable of type %s. Did you register a Model Fetcher?%n",
+            animatable.getClass());
+        return null;
+    }
+
+    protected PlayState testAnimationPredicate(AnimationEvent<T> event) {
+        return this.animationPredicate.test(event);
+    }
+
+    // At the beginning of a new transition, save a snapshot of the model's
+    // rotation, position, and scale values as the initial value to lerp from
+    private void saveSnapshotsForAnimation(Animation animation,
+        HashMap<String, Pair<IBone, BoneSnapshot>> boneSnapshotCollection) {
+        // Pre-build a set of bone animation names to avoid stream().anyMatch() per snapshot
+        java.util.Set<String> animBoneNames = java.util.Collections.emptySet();
+        if (animation != null && animation.boneAnimations != null) {
+            animBoneNames = new java.util.HashSet<>();
+            for (software.bernie.geckolib3.core.keyframe.BoneAnimation ba : animation.boneAnimations) {
+                animBoneNames.add(ba.boneName);
+            }
+        }
+        for (Pair<IBone, BoneSnapshot> snapshot : boneSnapshotCollection.values()) {
+            if (!animBoneNames.isEmpty() && animBoneNames.contains(snapshot.getLeft().getName())) {
+                    this.boneSnapshots.put(
+                        snapshot.getLeft()
+                            .getName(),
+                        new BoneSnapshot(snapshot.getRight()));
+                }
+            }
+        }
+
+    private void processCurrentAnimation(double tick, double actualTick, MolangParser parser,
+        boolean crashWhenCantFindBone) {
+        assert currentAnimation != null;
+        boolean wrappedThisFrame = false;
+        this.syncReportedThisFrame = false;
+        // YSMU: anim_time_update — 逐动画自定义时间推进（Bedrock 风格）。
+        // 表达式每帧求值，返回动画时间（秒）；query.anim_time = 上一帧时间，
+        // query.delta_time = 本帧时间增量（秒）。未提供该字段时走默认时间推进。
+        boolean customTime = currentAnimation.animTimeUpdate != null
+            && !currentAnimation.animTimeUpdate.isEmpty();
+        if (customTime) {
+            if (this.lastAnimTimeAnimation != currentAnimation) {
+                this.lastAnimTimeAnimation = currentAnimation;
+                this.lastAnimTimeTick = -1;
+            }
+            double prevSeconds = this.lastAnimTimeTick >= 0 ? this.lastAnimTimeTick / 20.0 : 0.0;
+            double deltaSeconds = actualTick - this.lastActualTick;
+            if (deltaSeconds <= 0.0 || deltaSeconds > 1.0) {
+                deltaSeconds = 1.0 / 20.0; // 兜底：一 tick
+            }
+            this.lastActualTick = actualTick;
+            parser.setValue("query.anim_time", prevSeconds);
+            parser.setValue("query.delta_time", deltaSeconds);
+            try {
+                MolangExpression expr = ANIM_TIME_UPDATE_CACHE.computeIfAbsent(
+                    currentAnimation.animTimeUpdate.toLowerCase(Locale.ROOT),
+                    s -> {
+                        try {
+                            return parser.parseExpression(s);
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    });
+                if (expr != null) {
+                    double newSeconds = expr.get();
+                    if (newSeconds < 0.0) {
+                        newSeconds = 0.0;
+                    }
+                    tick = newSeconds * 20.0;
+                }
+            } catch (Exception ignored) {
+                // 表达式出错：回退到默认时间推进
+            }
+        } else {
+            // 非 anim_time_update 动画：query.delta_time 固定为 1 tick（1/20 秒）。
+            // 否则会残留上一个 anim_time_update 动画设置的真实增量值，导致
+            // 普通动画关键帧 Molang 引用 query.delta_time 时读到陈旧/跨动画的值。
+            parser.setValue("query.delta_time", 1.0 / 20.0);
+        }
+        // Preserve the evaluated pre-wrap position: raw wall-time deltas are not
+        // equivalent when anim_time_update or animationSpeed changes.
+        double timelineUnwrappedTick = tick;
+        // Animation has ended
+        if (tick >= currentAnimation.animationLength) {
+            if (currentAnimation.loop == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
+                tick = Math.max(0.0D, currentAnimation.animationLength);
+            } else if (!currentAnimation.loop.isRepeatingAfterEnd()) {
+                processKeyFrameEvents(currentAnimation.animationLength);
+                resetEventKeyFrames();
+                // YSMU: report the terminal tick before the state leaves Running, so a
+                // timeline on a PLAY_ONCE animation still sees its final position
+                // (otherwise the last events before the stop would be skipped).
+                reportTimelinePlayback(currentAnimation.animationLength, currentAnimation.animationLength, false);
+                // Pull the next animation from the queue
+                Animation peek = animationQueue.peek();
+                if (peek == null) {
+                    // No more animations left, stop the animation controller
+                    this.animationState = AnimationState.Stopped;
+                    this.lastSyncActualTick = -1.0d;
+                    return;
+                } else {
+                    // Otherwise, set the state to transitioning and start transitioning to the next
+                    // animation next frame
+                    this.animationState = AnimationState.Transitioning;
+                    shouldResetTick = true;
+                    currentAnimation = this.animationQueue.peek();
+                }
+            } else {
+                processKeyFrameEvents(currentAnimation.animationLength);
+                resetEventKeyFrames();
+                tick = wrapLoopTick(actualTick, tick, currentAnimation.animationLength);
+                wrappedThisFrame = true;
+            }
+        }
+        if (customTime) {
+            this.lastAnimTimeTick = tick;
+        }
+        // YSMU: definitive playback report for this frame. Everything above (loop
+        // wrap, HOLD clamp, anim_time_update) has already resolved `tick`, and bone
+        // evaluation below has not run yet — the timeline scheduler dispatches here.
+        reportTimelinePlayback(tick, wrappedThisFrame ? timelineUnwrappedTick : tick, wrappedThisFrame);
+        setAnimTime(parser, tick);
+        processKeyFrameEvents(tick);
+
+        // Loop through every boneanimation in the current animation and process the
+        // values
+        List<BoneAnimation> boneAnimations = currentAnimation.boneAnimations;
+        for (BoneAnimation boneAnimation : boneAnimations) {
+            BoneAnimationQueue boneAnimationQueue = getOrCreateQueue(boneAnimation.boneName);
+            if (boneAnimationQueue == null) {
+                if (crashWhenCantFindBone) {
+                    throw new RuntimeException("Could not find bone: " + boneAnimation.boneName);
+                } else {
+                    continue;
+                }
+            }
+            markActiveBoneAnimationQueue(boneAnimationQueue);
+
+            VectorKeyFrameList<KeyFrame<IValue>> rotationKeyFrames = boneAnimation.rotationKeyFrames;
+            VectorKeyFrameList<KeyFrame<IValue>> positionKeyFrames = boneAnimation.positionKeyFrames;
+            VectorKeyFrameList<KeyFrame<IValue>> scaleKeyFrames = boneAnimation.scaleKeyFrames;
+
+            if (!rotationKeyFrames.xKeyFrames.isEmpty()) {
+                boneAnimationQueue.rotationXQueue
+                    .add(getAnimationPointAtTick(rotationKeyFrames.xKeyFrames, tick, true, Axis.X));
+                boneAnimationQueue.rotationYQueue
+                    .add(getAnimationPointAtTick(rotationKeyFrames.yKeyFrames, tick, true, Axis.Y));
+                boneAnimationQueue.rotationZQueue
+                    .add(getAnimationPointAtTick(rotationKeyFrames.zKeyFrames, tick, true, Axis.Z));
+            }
+
+            if (!positionKeyFrames.xKeyFrames.isEmpty()) {
+                boneAnimationQueue.positionXQueue
+                    .add(getAnimationPointAtTick(positionKeyFrames.xKeyFrames, tick, false, Axis.X));
+                boneAnimationQueue.positionYQueue
+                    .add(getAnimationPointAtTick(positionKeyFrames.yKeyFrames, tick, false, Axis.Y));
+                boneAnimationQueue.positionZQueue
+                    .add(getAnimationPointAtTick(positionKeyFrames.zKeyFrames, tick, false, Axis.Z));
+            }
+
+            if (!scaleKeyFrames.xKeyFrames.isEmpty()) {
+                boneAnimationQueue.scaleXQueue
+                    .add(getAnimationPointAtTick(scaleKeyFrames.xKeyFrames, tick, false, Axis.X));
+                boneAnimationQueue.scaleYQueue
+                    .add(getAnimationPointAtTick(scaleKeyFrames.yKeyFrames, tick, false, Axis.Y));
+                boneAnimationQueue.scaleZQueue
+                    .add(getAnimationPointAtTick(scaleKeyFrames.zKeyFrames, tick, false, Axis.Z));
+            }
+        }
+        if (this.transitionLengthTicks == 0 && shouldResetTick && this.animationState == AnimationState.Transitioning) {
+            this.currentAnimation = animationQueue.poll();
+        }
+        // YSMU: a frame that ends in Transitioning (a non-looping animation handing
+        // over to the next one) may not report a playback delta. Re-anchor here so the
+        // next report measures from the state it actually resumes at instead of counting
+        // the whole hand-over frame as forward playback. Use the per-frame report flag:
+        // comparing against the raw process() tick would differ from the adjusted tick
+        // on every frame after a loop wrap and re-anchor them all.
+        if (!this.syncReportedThisFrame) {
+            this.lastSyncActualTick = -1.0d;
+        }
+    }
+
+    private double wrapLoopTick(double actualTick, double tick, double animationLength) {
+        if (animationLength <= 0.0D) {
+            this.tickOffset = actualTick;
+            this.shouldResetTick = false;
+            return 0.0D;
+        }
+        double wrappedTick = tick % animationLength;
+        if (Double.isNaN(wrappedTick) || Double.isInfinite(wrappedTick)) {
+            wrappedTick = 0.0D;
+        }
+        this.tickOffset = this.animationSpeed == 0.0D ? actualTick : actualTick - wrappedTick / this.animationSpeed;
+        this.shouldResetTick = false;
+        return wrappedTick;
+    }
+
+    private void processKeyFrameEvents(double tick) {
+        if (soundListener != null) {
+            for (EventKeyFrame<String> soundKeyFrame : currentAnimation.soundKeyFrames) {
+                if (!this.executedKeyFrames.contains(soundKeyFrame) && tick >= soundKeyFrame.getStartTick()) {
+                    SoundKeyframeEvent<T> event = new SoundKeyframeEvent<>(
+                        this.animatable,
+                        tick,
+                        soundKeyFrame.getEventData(),
+                        this);
+                    soundListener.playSound(event);
+
+                    this.executedKeyFrames.add(soundKeyFrame);
+                }
+            }
+        }
+
+        if (particleListener != null) {
+            for (ParticleEventKeyFrame particleEventKeyFrame : currentAnimation.particleKeyFrames) {
+                if (!this.executedKeyFrames.contains(particleEventKeyFrame)
+                    && tick >= particleEventKeyFrame.getStartTick()) {
+                    ParticleKeyFrameEvent<T> event = new ParticleKeyFrameEvent<>(
+                        this.animatable,
+                        tick,
+                        particleEventKeyFrame.effect,
+                        particleEventKeyFrame.locator,
+                        particleEventKeyFrame.script,
+                        this);
+                    particleListener.summonParticle(event);
+
+                    this.executedKeyFrames.add(particleEventKeyFrame);
+                }
+            }
+        }
+
+        if (customInstructionListener != null) {
+            for (EventKeyFrame<String> customInstructionKeyFrame : currentAnimation.customInstructionKeyframes) {
+                if (!this.executedKeyFrames.contains(customInstructionKeyFrame)
+                    && tick >= customInstructionKeyFrame.getStartTick()) {
+                    CustomInstructionKeyframeEvent<T> event = new CustomInstructionKeyframeEvent<>(
+                        this.animatable,
+                        tick,
+                        customInstructionKeyFrame.getEventData(),
+                        this);
+                    customInstructionListener.executeInstruction(event);
+
+                    this.executedKeyFrames.add(customInstructionKeyFrame);
+                }
+            }
+        }
+    }
+
+    // Helper method to populate all the initial animation point queues
+    private void createInitialQueues(Map<String, IBone> boneByName) {
+        if (boneNameToBone != boneByName) {
+            // 换了模型（或首次）：旧队列绑的是上一个模型的 IBone，不能跨模型复用。
+            // 名字索引由 AnimationProcessor 按当前模型维护（模型切换时才换），这里整体换上即可。
+            // 旧实现每帧、每个控制器都把整张骨骼表重新 put 进一个 HashMap
+            // （预览页 13 个模型各十来个控制器，实测 self 624 ms + HashMap.clear 176 ms）。
+            // BoneAnimationQueue 仍然是懒创建：只有真的被动画引用到的骨骼才会有队列。
+            discardPendingPoints();
+            boneAnimationQueues.clear();
+            boneNameToBone = boneByName;
+            return;
+        }
+        // 同一个模型：queue 对象（每骨骼 1 个 + 9 条 LinkedList）留着下一帧继续用。
+        // 旧实现每帧 clear() 整张表再逐个懒创建，于是每帧都要重新 new 一遍 ——
+        // 实测堆里同时躺着 539,173 个 BoneAnimationQueue 与 4,852,557 条
+        // AnimationPointQueue（= 539,173 × 9），全是等 GC 的垃圾，占了 Eden 的一大块。
+        // 真正需要清空的只有"上一帧没被 AnimationProcessor poll 走的动画点"，而那只可能
+        // 出现在上一帧的活跃骨骼上，所以只处理 activeBoneAnimationQueues 就够了。
+        discardPendingPoints();
+    }
+
+    /** Detach geometry without restarting animation clocks or retiring timeline events. */
+    public void releaseBoneReferences(Map<String, IBone> index) {
+        if (index != null && boneNameToBone != index) return;
+        discardPendingPoints();
+        boneAnimationQueues.clear();
+        boneNameToBone = java.util.Collections.emptyMap();
+        boneSnapshots.clear();
+    }
+
+    /** Called only when the animation resource/session itself is retired. */
+    public void releaseAnimationResources() {
+        releaseBoneReferences(null);
+        animationQueue.clear();
+        currentAnimation = null;
+        lastAnimTimeAnimation = null;
+        lastAnimTimeTick = -1;
+        lastActualTick = -1;
+        currentAnimationBuilder = new AnimationBuilder();
+        if (kfCache != null) kfCache.clear();
+        currentKeyFrame = null;
+        executedKeyFrames.clear();
+        timelinePlaybackListener = ITimelinePlaybackListener.NONE;
+        lastSyncActualTick = -1.0d;
+        animationState = AnimationState.Stopped;
+        needsAnimationReload = true;
+        shouldResetTick = true;
+    }
+
+    /** 倒掉上一帧没被消费的动画点，把 AnimationPoint 还回对象池；queue 对象本身保留复用。 */
+    private void discardPendingPoints() {
+        for (int i = 0, size = activeBoneAnimationQueues.size(); i < size; i++) {
+            recycleQueue(activeBoneAnimationQueues.get(i));
+        }
+        activeBoneAnimationQueues.clear();
+    }
+
+    private static void recycleQueue(BoneAnimationQueue queue) {
+        recycle(queue.rotationXQueue);
+        recycle(queue.rotationYQueue);
+        recycle(queue.rotationZQueue);
+        recycle(queue.positionXQueue);
+        recycle(queue.positionYQueue);
+        recycle(queue.positionZQueue);
+        recycle(queue.scaleXQueue);
+        recycle(queue.scaleYQueue);
+        recycle(queue.scaleZQueue);
+    }
+
+    private static void recycle(AnimationPointQueue queue) {
+        AnimationPoint point;
+        while ((point = queue.poll()) != null) {
+            point.recycle();
+        }
+    }
+
+    /** Ensures a BoneAnimationQueue exists for the given bone name, creating
+     *  one lazily if needed.  Returns the queue, or null if the bone name is
+     *  not in the current model renderer list. */
+    private BoneAnimationQueue getOrCreateQueue(String boneName) {
+        BoneAnimationQueue q = boneAnimationQueues.get(boneName);
+        if (q == null) {
+            IBone bone = boneNameToBone.get(boneName);
+            if (bone != null) {
+                q = new BoneAnimationQueue(bone);
+                boneAnimationQueues.put(boneName, q);
+            }
+        }
+        return q;
+    }
+
+    private void markActiveBoneAnimationQueue(BoneAnimationQueue boneAnimationQueue) {
+        if (boneAnimationQueue != null && !activeBoneAnimationQueues.contains(boneAnimationQueue)) {
+            activeBoneAnimationQueues.add(boneAnimationQueue);
+        }
+    }
+
+    // Used to reset the "tick" everytime a new animation starts, a transition
+    // starts, or something else of importance happens
+    public double adjustTick(double tick) {
+        if (shouldResetTick) {
+            if (getAnimationState() == AnimationState.Transitioning) {
+                this.tickOffset = tick;
+            } else if (getAnimationState() == AnimationState.Running) {
+                this.tickOffset = tick;
+            }
+            shouldResetTick = false;
+            return 0;
+        } else {
+            // assert tick - this.tickOffset >= 0;
+            return animationSpeed * Math.max(tick - tickOffset, 0.0D);
+        }
+    }
+
+    // Helper method to transform the current keyframe into an AnimationPoint
+    private AnimationPoint getAnimationPointAtTick(List<KeyFrame<IValue>> frames, double tick, boolean isRotation,
+        Axis axis) {
+        findCurrentKeyFrame(frames, tick);
+        KeyFrame<IValue> currentFrame = currentKeyFrame;
+        double startValue = currentFrame.getStartValueDouble();
+        double endValue = currentFrame.getEndValueDouble();
+
+        if (isRotation) {
+            // Primitive-inlined values were pre-converted by JsonKeyFrameUtils;
+            // Molang-expression values need runtime conversion.
+            if (!currentFrame.isStartPrimitive()) {
+                startValue = Math.toRadians(startValue);
+                if (axis == Axis.X || axis == Axis.Y) {
+                    startValue *= -1;
+                }
+            }
+            if (!currentFrame.isEndPrimitive()) {
+                endValue = Math.toRadians(endValue);
+                if (axis == Axis.X || axis == Axis.Y) {
+                    endValue *= -1;
+                }
+            }
+        }
+
+        return AnimationPoint.obtain(currentFrame, currentKeyFrameTick, currentFrame.getLengthPrimitive(), startValue,
+            endValue);
+    }
+
+    /** Cache entry for {@link #getCurrentKeyFrameLocation} — remembers the last
+     *  returned keyframe index and its cumulative end time so that subsequent
+     *  calls (with monotonically increasing tick) can skip the linear scan from
+     *  index 0 and start from the cached position instead. */
+    private static final class KfCacheEntry {
+        int index;
+        double cumulativeTime;
+        double ageInTicks;
+        KfCacheEntry() {}
+        KfCacheEntry(int index, double cumulativeTime, double ageInTicks) {
+            set(index, cumulativeTime, ageInTicks);
+        }
+        void set(int index, double cumulativeTime, double ageInTicks) {
+            this.index = index;
+            this.cumulativeTime = cumulativeTime;
+            this.ageInTicks = ageInTicks;
+        }
+    }
+    private java.util.IdentityHashMap<List<KeyFrame<IValue>>, KfCacheEntry> kfCache;
+
+    /** {@link #findCurrentKeyFrame} 的两个结果。写成字段而不是每帧 new 一个
+     *  {@code KeyFrameLocation} —— 堆快照里同时躺着 173 万个，全是这一处造的垃圾。 */
+    private KeyFrame<IValue> currentKeyFrame;
+    private double currentKeyFrameTick;
+
+    /**
+     * 定位 {@code ageInTicks} 落在哪个关键帧，结果写进 {@link #currentKeyFrame} /
+     * {@link #currentKeyFrameTick}（当前关键帧 + 该帧内已经过的时间）。
+     *
+     * <p>用一份可变的"当前帧位置"而不是每次返回新对象：调用方
+     * （{@link #getAnimationPointAtTick}）每帧每通道都要问一次，而且拿到后立刻就
+     * 用掉，没有重入的可能。
+     *
+     * <p>Uses a per-list index cache to avoid re-scanning from index 0 every call
+     * — tick increases monotonically within a running animation, so we can
+     * start from the last known position and only scan forward.
+     **/
+    void findCurrentKeyFrame(List<KeyFrame<IValue>> frames, double ageInTicks) {
+        if (kfCache != null) {
+            KfCacheEntry cached = kfCache.get(frames);
+            if (cached != null) {
+                if (ageInTicks < cached.ageInTicks) {
+                    // tick went backwards (animation looped) — clear this entry
+                    kfCache.remove(frames);
+                } else if (ageInTicks < cached.cumulativeTime) {
+                    // Same keyframe as last call — return immediately
+                    KeyFrame<IValue> frame = frames.get(cached.index);
+                    double prevTotal = cached.cumulativeTime - frame.getLengthPrimitive();
+                    double tick = ageInTicks - prevTotal;
+                    // 手里已经有这个 entry 了，直接改它。原来写的是
+                    // kfCache.computeIfAbsent(frames, k -> new KfCacheEntry()).set(...) —— 又查一次表、
+                    // 又分配一个 lambda（实测 Map.computeIfAbsent 独占客户端线程 9.2ms/s）。
+                    cached.set(cached.index, cached.cumulativeTime, ageInTicks);
+                    currentKeyFrame = frame;
+                    currentKeyFrameTick = tick;
+                    return;
+                } else {
+                    // Moved to a later keyframe — scan from cached index + 1
+                    double totalTimeTracker = cached.cumulativeTime;
+                    for (int i = cached.index + 1; i < frames.size(); i++) {
+                        KeyFrame<IValue> frame = frames.get(i);
+                        double newTotal = totalTimeTracker + frame.getLengthPrimitive();
+                        if (newTotal > ageInTicks) {
+                            double tick = ageInTicks - totalTimeTracker;
+                            cached.set(i, newTotal, ageInTicks);
+                            currentKeyFrame = frame;
+                            currentKeyFrameTick = tick;
+                            return;
+                        }
+                        totalTimeTracker = newTotal;
+                    }
+                    // Past all frames — return last
+                    int last = frames.size() - 1;
+                    cached.set(last, totalTimeTracker, ageInTicks);
+                    currentKeyFrame = frames.get(last);
+                    currentKeyFrameTick = ageInTicks;
+                    return;
+                }
+            }
+        }
+
+        // Full scan from beginning (first call, or after loop)
+        // 走到这里说明 kfCache 里没有 frames 这一项（cached == null，或刚被 remove），
+        // 所以直接 put 新 entry 即可：computeIfAbsent 在这里只会多跑一次必然落空的查找。
+        double totalTimeTracker = 0;
+        for (int i = 0; i < frames.size(); i++) {
+            KeyFrame<IValue> frame = frames.get(i);
+            totalTimeTracker += frame.getLengthPrimitive();
+            if (totalTimeTracker > ageInTicks) {
+                double tick = ageInTicks - (totalTimeTracker - frame.getLengthPrimitive());
+                if (kfCache == null) {
+                    kfCache = new java.util.IdentityHashMap<>();
+                }
+                kfCache.put(frames, new KfCacheEntry(i, totalTimeTracker, ageInTicks));
+                currentKeyFrame = frame;
+                currentKeyFrameTick = tick;
+                return;
+            }
+        }
+        int last = frames.size() - 1;
+        if (kfCache == null) {
+            kfCache = new java.util.IdentityHashMap<>();
+        }
+        kfCache.put(frames, new KfCacheEntry(last, totalTimeTracker, ageInTicks));
+        currentKeyFrame = frames.get(last);
+        currentKeyFrameTick = ageInTicks;
+    }
+
+    /** 旧的"返回一个新对象"取法，保留给测试；生产路径见 {@link #findCurrentKeyFrame}。 */
+    KeyFrameLocation<KeyFrame<IValue>> getCurrentKeyFrameLocation(List<KeyFrame<IValue>> frames,
+        double ageInTicks) {
+        findCurrentKeyFrame(frames, ageInTicks);
+        return new KeyFrameLocation<>(currentKeyFrame, currentKeyFrameTick);
+    }
+
+    private void resetEventKeyFrames() {
+        this.executedKeyFrames.clear();
+    }
+
+    public void markNeedsReload() {
+        this.needsAnimationReload = true;
+    }
+
+    public void clearAnimationCache() {
+        this.currentAnimationBuilder = new AnimationBuilder();
+    }
+
+    public double getAnimationSpeed() {
+        return animationSpeed;
+    }
+
+    /**
+     * YSMU: report this frame's final playback position to the registered timeline
+     * listener. Called from {@link #processCurrentAnimation} after the time update
+     * and before bone evaluation (and once more at the terminal tick before a
+     * non-looping animation leaves Running).
+     * <p>
+     * The forward distance is the playback position's own advance, so it stays exact
+     * when {@link #animationSpeed} changes between frames and when
+     * {@code anim_time_update} drives the clock; only a loop wrap (where the position
+     * restarts) falls back to the raw elapsed playback time so the distance is never
+     * negative. A report that re-anchors (new animation, restart, resume) carries
+     * delta 0 with the new position, which the consumer treats as a rebase instead of
+     * a replay. Exceptions from the listener never break playback.
+     */
+    private void reportTimelinePlayback(double tick, double actualTick, boolean wrapped) {
+        double delta = 0.0d;
+        if (this.lastSyncActualTick >= 0.0d) {
+            if (wrapped) {
+                // The position restarted at the wrap, so the forward distance is the
+                // raw elapsed playback time, not the position difference.
+                double playbackDelta = actualTick - this.syncTick;
+                if (Double.isFinite(playbackDelta) && playbackDelta > 0.0d) {
+                    delta = playbackDelta;
+                }
+            } else {
+                // No wrap: the position difference IS the forward distance, and it
+                // stays exact even when animationSpeed changed between the two frames
+                // (a raw time difference times the new speed would not).
+                double tickDelta = tick - this.syncTick;
+                if (Double.isFinite(tickDelta) && tickDelta > 0.0d) {
+                    delta = tickDelta;
+                }
+            }
+        }
+        if (!Double.isFinite(delta) || delta < 0.0d) {
+            delta = 0.0d;
+        }
+        this.syncTick = tick;
+        this.syncDelta = delta;
+        this.lastSyncActualTick = actualTick;
+        this.syncReportedThisFrame = true;
+        ITimelinePlaybackListener listener = this.timelinePlaybackListener;
+        if (listener != null && listener != ITimelinePlaybackListener.NONE) {
+            try {
+                listener.onTimelinePlayback(currentAnimation, tick, delta, wrapped);
+            } catch (RuntimeException ignored) {
+                // A broken timeline must not take the animation down with it.
+                this.timelinePlaybackListener = ITimelinePlaybackListener.NONE;
+            }
+        }
+    }
+
+    /**
+     * YSMU: installs (or retires, with {@link ITimelinePlaybackListener#NONE}) the
+     * timeline playback listener. There is at most one listener per controller, so
+     * a model switch that retires the old runtime cannot leave a stale listener
+     * dispatching another model's timeline.
+     */
+    public void setTimelinePlaybackListener(ITimelinePlaybackListener listener) {
+        this.timelinePlaybackListener = listener == null ? ITimelinePlaybackListener.NONE : listener;
+    }
+
+    public ITimelinePlaybackListener getTimelinePlaybackListener() {
+        return this.timelinePlaybackListener;
+    }
+
+    /**
+     * YSMU: the final playback tick reported for the frame being evaluated. See
+     * {@link #reportTimelinePlayback}. Read-only probe; it does not mutate
+     * controller state.
+     */
+    public double getSyncTick() {
+        return syncTick;
+    }
+
+    /**
+     * YSMU: the exact forward playback distance since the previous report, in ticks
+     * and before loop wrapping (see {@link #reportTimelinePlayback}).
+     */
+    public double getSyncDelta() {
+        return syncDelta;
+    }
+
+    public void setAnimationSpeed(double animationSpeed) {
+        this.animationSpeed = animationSpeed;
+    }
+
+    @FunctionalInterface
+    public interface ModelFetcher<T> extends Function<IAnimatable, IAnimatableModel<T>> {
+    }
+}

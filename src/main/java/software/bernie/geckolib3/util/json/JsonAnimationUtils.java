@@ -1,0 +1,515 @@
+/*
+ * Copyright (c) 2020.
+ * Author: Bernie G. (Gecko)
+ */
+
+package software.bernie.geckolib3.util.json;
+
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import com.eliotlash.mclib.math.IValue;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+
+import software.bernie.geckolib3.core.builder.Animation;
+import software.bernie.geckolib3.core.builder.ILoopType;
+import software.bernie.geckolib3.core.keyframe.BoneAnimation;
+import software.bernie.geckolib3.core.keyframe.EventKeyFrame;
+import software.bernie.geckolib3.core.keyframe.ParticleEventKeyFrame;
+import software.bernie.geckolib3.core.keyframe.VectorKeyFrameList;
+import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.file.GeckoJsonException;
+import software.bernie.geckolib3.util.AnimationUtils;
+
+/**
+ * Helper for parsing the bedrock json animation format and finding certain
+ * elements
+ */
+@SuppressWarnings({ "rawtypes", "unchecked" })
+public class JsonAnimationUtils {
+
+    /**
+     * Gets the "animations" object as a set of maps consisting of the name of the
+     * animation and the inner json of the animation.
+     *
+     * @param json The root json object
+     * @return The set of map entries where the string is the name of the animation
+     *         and the JsonElement is the actual animation
+     */
+    public static Set<Map.Entry<String, JsonElement>> getAnimations(JsonObject json) {
+        if (json == null || !json.has("animations") || json.get("animations").isJsonNull()) {
+            // Some models put non-animation JSON (controllers, molang, etc.) in the
+            // animation map. Defensively return an empty set instead of NPE.
+            return new java.util.LinkedHashSet<>();
+        }
+        JsonObject animations = json.getAsJsonObject("animations");
+        if (animations == null) {
+            return new java.util.LinkedHashSet<>();
+        }
+        return getObjectListAsArray(animations);
+    }
+
+    /**
+     * Gets the "bones" object from an animation json object.
+     *
+     * @param json The animation json
+     * @return The set of map entries where the string is the name of the group name
+     *         in blockbench and the JsonElement is the object, which has all the
+     *         position/rotation/scale keyframes
+     */
+    public static List<Map.Entry<String, JsonElement>> getBones(JsonObject json) {
+        JsonObject bones = json.getAsJsonObject("bones");
+        return bones == null ? new ArrayList<>() : new ArrayList<>(getObjectListAsArray(bones));
+    }
+
+    /**
+     * Gets rotation key frames.
+     *
+     * @param json The "bones" json object
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the rotation keyframes.
+     */
+    public static Set<Map.Entry<String, JsonElement>> getRotationKeyFrames(JsonObject json) {
+        JsonElement rotationObject = json.get("rotation");
+        if (rotationObject.isJsonArray()) {
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", rotationObject.getAsJsonArray()));
+        }
+        if (rotationObject.isJsonPrimitive()) {
+            JsonPrimitive primitive = rotationObject.getAsJsonPrimitive();
+            Gson gson = new Gson();
+            JsonElement jsonElement = gson.toJsonTree(Arrays.asList(primitive, primitive, primitive));
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", jsonElement));
+        }
+        Set<Map.Entry<String, JsonElement>> output = Sets.newLinkedHashSet();
+        if (rotationObject.isJsonObject()) {
+            JsonObject jsonObject = rotationObject.getAsJsonObject();
+            for (Map.Entry<String, JsonElement> entrySet : jsonObject.entrySet()) {
+                if (entrySet.getValue()
+                    .isJsonObject()) {
+                    JsonObject valueObject = entrySet.getValue()
+                        .getAsJsonObject();
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
+                    }
+                } else {
+                    output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                }
+            }
+        }
+        return output;
+    }
+
+    /**
+     * Gets position key frames.
+     *
+     * @param json The "bones" json object
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the position keyframes.
+     */
+    public static Set<Map.Entry<String, JsonElement>> getPositionKeyFrames(JsonObject json) {
+        JsonElement positionObject = json.get("position");
+        if (positionObject.isJsonArray()) {
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", positionObject.getAsJsonArray()));
+        }
+        if (positionObject.isJsonPrimitive()) {
+            JsonPrimitive primitive = positionObject.getAsJsonPrimitive();
+            Gson gson = new Gson();
+            JsonElement jsonElement = gson.toJsonTree(Arrays.asList(primitive, primitive, primitive));
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", jsonElement));
+        }
+        Set<Map.Entry<String, JsonElement>> output = Sets.newLinkedHashSet();
+        if (positionObject.isJsonObject()) {
+            JsonObject jsonObject = positionObject.getAsJsonObject();
+            for (Map.Entry<String, JsonElement> entrySet : jsonObject.entrySet()) {
+                if (entrySet.getValue()
+                    .isJsonObject()) {
+                    JsonObject valueObject = entrySet.getValue()
+                        .getAsJsonObject();
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
+                    }
+                } else {
+                    output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                }
+            }
+        }
+        return output;
+    }
+
+    /**
+     * Gets scale key frames.
+     *
+     * @param json The "bones" json object
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the scale keyframes.
+     */
+    public static Set<Map.Entry<String, JsonElement>> getScaleKeyFrames(JsonObject json) {
+        JsonElement scaleObject = json.get("scale");
+        if (scaleObject.isJsonArray()) {
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", scaleObject.getAsJsonArray()));
+        }
+        if (scaleObject.isJsonPrimitive()) {
+            JsonPrimitive primitive = scaleObject.getAsJsonPrimitive();
+            Gson gson = new Gson();
+            JsonElement jsonElement = gson.toJsonTree(Arrays.asList(primitive, primitive, primitive));
+            return ImmutableSet.of(new AbstractMap.SimpleEntry("0", jsonElement));
+        }
+        Set<Map.Entry<String, JsonElement>> output = Sets.newLinkedHashSet();
+        if (scaleObject.isJsonObject()) {
+            JsonObject jsonObject = scaleObject.getAsJsonObject();
+            for (Map.Entry<String, JsonElement> entrySet : jsonObject.entrySet()) {
+                if (entrySet.getValue()
+                    .isJsonObject()) {
+                    JsonObject valueObject = entrySet.getValue()
+                        .getAsJsonObject();
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
+                    }
+                } else {
+                    output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                }
+            }
+        }
+        return output;
+    }
+
+    /**
+     * Gets sound effect frames.
+     *
+     * @param json The animation json
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the sound effect keyframes.
+     */
+    public static ArrayList<Map.Entry<String, JsonElement>> getSoundEffectFrames(JsonObject json) {
+        JsonObject sound_effects = json.getAsJsonObject("sound_effects");
+        return sound_effects == null ? new ArrayList<>() : new ArrayList<>(getObjectListAsArray(sound_effects));
+    }
+
+    /**
+     * Gets particle effect frames.
+     *
+     * @param json The animation json
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the particle effect keyframes.
+     */
+    public static ArrayList<Map.Entry<String, JsonElement>> getParticleEffectFrames(JsonObject json) {
+        JsonObject particle_effects = json.getAsJsonObject("particle_effects");
+        return particle_effects == null ? new ArrayList<>() : new ArrayList<>(getObjectListAsArray(particle_effects));
+    }
+
+    /**
+     * Gets custom instruction key frames.
+     *
+     * @param json The animation json
+     * @return The set of map entries where the string is the keyframe time (not
+     *         sure why the format stores the times as a string) and the JsonElement
+     *         is the object, which has all the custom instruction keyframes.
+     */
+    public static ArrayList<Map.Entry<String, JsonElement>> getCustomInstructionKeyFrames(JsonObject json) {
+        JsonObject custom_instructions = json.getAsJsonObject("timeline");
+        return custom_instructions == null ? new ArrayList<>()
+            : new ArrayList<>(getObjectListAsArray(custom_instructions));
+    }
+
+    private static JsonElement getObjectByKey(Set<Map.Entry<String, JsonElement>> json, String key)
+        throws GeckoJsonException {
+        return json.stream()
+            .filter(
+                x -> x.getKey()
+                    .equals(key))
+            .findFirst()
+            .orElseThrow(() -> new GeckoJsonException("Could not find key: " + key))
+            .getValue();
+    }
+
+    /**
+     * Gets an animation by name.
+     *
+     * @param animationFile the animation file
+     * @param animationName the animation name
+     * @return the animation
+     * @throws GeckoJsonException the json exception
+     */
+    public static Map.Entry<String, JsonElement> getAnimation(JsonObject animationFile, String animationName)
+        throws GeckoJsonException {
+        return new AbstractMap.SimpleEntry(animationName, getObjectByKey(getAnimations(animationFile), animationName));
+    }
+
+    /**
+     * The animation format bedrock/blockbench uses is bizarre, and exports arrays
+     * of objects as plain parameters in a parent object, so this method undos it
+     *
+     * @param json The json to convert (pass in the parent object or the list of
+     *             objects)
+     * @return The set of map entries where the string is the object key and the
+     *         JsonElement is the actual object
+     */
+    public static Set<Map.Entry<String, JsonElement>> getObjectListAsArray(JsonObject json) {
+        return json.entrySet();
+    }
+
+    /**
+     * This is the central method that parses an animation and converts it to an
+     * Animation object with all the correct keyframe times and extra metadata.
+     *
+     * @param element The animation json
+     * @param parser
+     * @return The newly constructed Animation object
+     * @throws ClassCastException    Throws this exception if the JSON is formatted
+     *                               incorrectly
+     * @throws IllegalStateException Throws this exception if the JSON is formatted
+     *                               incorrectly
+     */
+    public static Animation deserializeJsonToAnimation(Map.Entry<String, JsonElement> element, MolangParser parser)
+        throws ClassCastException, IllegalStateException {
+        Animation animation = new Animation();
+        JsonObject animationJsonObject = element.getValue()
+            .getAsJsonObject();
+
+        // Set some metadata about the animation
+        animation.animationName = element.getKey();
+        JsonElement animation_length = animationJsonObject.get("animation_length");
+        animation.animationLength = animation_length == null ? null
+            : AnimationUtils.convertSecondsToTicks(animation_length.getAsDouble());
+        animation.boneAnimations = new ArrayList();
+        animation.loop = ILoopType.fromJson(animationJsonObject.get("loop"));
+
+        // Handle parsing sound effect keyframes
+        ArrayList<Map.Entry<String, JsonElement>> soundEffectFrames = getSoundEffectFrames(animationJsonObject);
+        if (soundEffectFrames != null) {
+            for (Map.Entry<String, JsonElement> keyFrame : soundEffectFrames) {
+                animation.soundKeyFrames.add(
+                    new EventKeyFrame(
+                        Double.parseDouble(keyFrame.getKey()) * 20,
+                        keyFrame.getValue()
+                            .getAsJsonObject()
+                            .get("effect")
+                            .getAsString()));
+            }
+        }
+
+        // Handle parsing particle effect keyframes
+        ArrayList<Map.Entry<String, JsonElement>> particleKeyFrames = getParticleEffectFrames(animationJsonObject);
+        if (particleKeyFrames != null) {
+            for (Map.Entry<String, JsonElement> keyFrame : particleKeyFrames) {
+                JsonObject object = keyFrame.getValue()
+                    .getAsJsonObject();
+                JsonElement effect = object.get("effect");
+                JsonElement locator = object.get("locator");
+                JsonElement pre_effect_script = object.get("pre_effect_script");
+                animation.particleKeyFrames.add(
+                    new ParticleEventKeyFrame(
+                        Double.parseDouble(keyFrame.getKey()) * 20,
+                        effect == null ? "" : effect.getAsString(),
+                        locator == null ? "" : locator.getAsString(),
+                        pre_effect_script == null ? "" : pre_effect_script.getAsString()));
+            }
+        }
+
+        // Handle parsing custom instruction keyframes
+        ArrayList<Map.Entry<String, JsonElement>> customInstructionKeyFrames = getCustomInstructionKeyFrames(
+            animationJsonObject);
+        if (customInstructionKeyFrames != null) {
+            for (Map.Entry<String, JsonElement> keyFrame : customInstructionKeyFrames) {
+                animation.customInstructionKeyframes.add(
+                    new EventKeyFrame(
+                        Double.parseDouble(keyFrame.getKey()) * 20,
+                        instructionString(keyFrame.getValue())));
+            }
+        }
+
+        // The list of all bones being used in this animation, where String is the name
+        // of the bone/group, and the JsonElement is the
+        List<Map.Entry<String, JsonElement>> bones = getBones(animationJsonObject);
+        for (Map.Entry<String, JsonElement> bone : bones) {
+            BoneAnimation boneAnimation = new BoneAnimation();
+            boneAnimation.boneName = bone.getKey();
+
+            JsonObject boneJsonObj = bone.getValue()
+                .getAsJsonObject();
+            try {
+                Set<Map.Entry<String, JsonElement>> scaleKeyFramesJson = getScaleKeyFrames(boneJsonObj);
+                boneAnimation.scaleKeyFrames = JsonKeyFrameUtils
+                    .convertJsonToKeyFrames(new ArrayList<>(scaleKeyFramesJson), parser);
+            } catch (Exception e) {
+                // No scale key frames found
+                boneAnimation.scaleKeyFrames = new VectorKeyFrameList<>();
+            }
+
+            try {
+                Set<Map.Entry<String, JsonElement>> positionKeyFramesJson = getPositionKeyFrames(boneJsonObj);
+                boneAnimation.positionKeyFrames = JsonKeyFrameUtils
+                    .convertJsonToKeyFrames(new ArrayList<>(positionKeyFramesJson), parser);
+            } catch (Exception e) {
+                // No position key frames found
+                boneAnimation.positionKeyFrames = new VectorKeyFrameList<>();
+            }
+
+            try {
+                Set<Map.Entry<String, JsonElement>> rotationKeyFramesJson = getRotationKeyFrames(boneJsonObj);
+                boneAnimation.rotationKeyFrames = JsonKeyFrameUtils
+                    .convertJsonToRotationKeyFrames(new ArrayList<>(rotationKeyFramesJson), parser);
+            } catch (Exception e) {
+                // No rotation key frames found
+                boneAnimation.rotationKeyFrames = new VectorKeyFrameList<>();
+            }
+
+            animation.boneAnimations.add(boneAnimation);
+        }
+        if (animation.animationLength == null) {
+            animation.animationLength = calculateLength(animation.boneAnimations);
+        } else {
+            // 长度必须覆盖关键帧跨度。Bedrock 的"阶梯关键帧" `{"pre":…,"post":…}` 在
+            // JsonKeyFrameUtils 里被展开成两个间隔 1e-7 秒的关键帧；如果阶梯正好在动画末尾，
+            // 关键帧跨度就比 JSON 里的 animation_length 大 2e-6 tick。采样 tick 会被钳到
+            // animation_length，从而落在最后一段阶梯**内部**（约 2% 处）："停在最后一帧"永远
+            // 拿不到 post 值，而是插值出 ~0.02 倍的结果。
+            // 实例：某弹射物把箭身缩放到 0.8 的阶梯放在 post_main 末尾，实测只剩 0.015 ——
+            // 整套光效骨骼被压到 2%，看起来像"动画没生效、模型停在绑定姿势"。
+            // 把长度抬到至少等于跨度即可：tick 钳到跨度末端，最后一段正好插值到 post。
+            double keyFrameSpan = calculateLength(animation.boneAnimations);
+            // calculateLength 用 Double.MAX_VALUE 表示"一个关键帧都没有"（纯 timeline 动画），
+            // 那种动画的长度不能被改写。
+            if (keyFrameSpan > 0 && keyFrameSpan < Double.MAX_VALUE) {
+                animation.animationLength = Math.max(animation.animationLength, keyFrameSpan);
+            }
+        }
+
+        return animation;
+    }
+
+    private static String instructionString(JsonElement element) {
+        if (element instanceof JsonArray) {
+            // YSMU：YSM 允许 timeline 写成字符串数组（官方 Bedrock 是单表达式）。数组元素之间用
+            // ";" **加换行** 拼接，不能只用 ";"：元素里可以有 C 风格行注释，而"注释吃到行尾"的
+            // 语义需要换行才能终止 —— 没有换行时第一个 `//` 会把后面所有语句全部吃掉
+            // （实测一条 21959 字符的 timeline 被剥成空串，模型 Molang 一行都不执行）。
+            StringBuilder out = new StringBuilder();
+            JsonArray array = element.getAsJsonArray();
+            for (int i = 0; i < array.size(); i++) {
+                if (i > 0) {
+                    out.append(";\n");
+                }
+                out.append(array.get(i).getAsString());
+            }
+            return out.toString();
+        }
+        return element.getAsString();
+    }
+
+    private static double calculateLength(List<BoneAnimation> boneAnimations) {
+        double longestLength = 0;
+        for (BoneAnimation animation : boneAnimations) {
+            double xKeyframeTime = animation.rotationKeyFrames.getLastKeyframeTime();
+            double yKeyframeTime = animation.positionKeyFrames.getLastKeyframeTime();
+            double zKeyframeTime = animation.scaleKeyFrames.getLastKeyframeTime();
+            longestLength = maxAll(longestLength, xKeyframeTime, yKeyframeTime, zKeyframeTime);
+        }
+        return longestLength == 0 ? Double.MAX_VALUE : longestLength;
+    }
+
+    static List<IValue> convertJsonArrayToList(JsonArray array) {
+        return new Gson().fromJson(array, ArrayList.class);
+    }
+
+    public static double maxAll(double... values) {
+        double max = 0;
+        for (double value : values) {
+            max = Math.max(value, max);
+        }
+        return max;
+    }
+}

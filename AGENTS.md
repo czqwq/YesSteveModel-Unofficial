@@ -4,7 +4,7 @@
 
 YSMU is a Minecraft Forge 1.7.10 mod that ports Yes Steve Model/OpenYSM-style player models back to 1.7.10. The mod id is `ysmu`, the root package is `com.fox.ysmu`, and the Forge entry point is `src/main/java/com/fox/ysmu/ysmu.java`.
 
-The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, and enables Jabel modern Java syntax while still targeting JVM 8. Runtime/development dependencies are declared in `dependencies.gradle`; the GeckoLib engine is consumed from `libs/` as a separate mod.
+The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, and enables Jabel modern Java syntax while still targeting JVM 8. Runtime/development dependencies are declared in `dependencies.gradle`. The GeckoLib 3 animation engine is **vendored into this repository** under `src/main/java/{software,com/eliotlash,net/geckominecraft}` as a one-time source snapshot; it is not an external mod and not a jar in `libs/`. See `PROVENANCE.md`.
 
 The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
 
@@ -115,18 +115,26 @@ shape, or record why 1.7.10 or the port's own architecture cannot.
 
 GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:
 
-- **GeckoLib** (mod id `geckolib`): `E:\IDEA\Geckolib`, symlinked into this workspace as `tmp/Geckolib`.
+- **GeckoLib** (mod id `geckolib`): `E:\IDEA\Geckolib`, symlinked into this workspace as `tmp/Geckolib`. The
+  engine is **vendored into this repository** as a one-time source snapshot under `src/main/java/{software,
+  com/eliotlash,net/geckominecraft}`, so it is no longer a mod YSMU depends on and no longer a jar in `libs/`.
+  Its `@Mod` was removed and the engine now ships inside the YSMU jar. `PROVENANCE.md` records where the snapshot
+  came from and the ownership rule that follows; `E:\IDEA\Geckolib` is no longer a copy to sync from.
 - **YSMU**: this repository.
 - **Touhou Little Maid**: `E:\IDEA\TouhouLittleMaid`, with its 1.20 reference source under `tmp/TouhouLittleMaid-1.20`.
 
 Any of the three may be changed at any time. A feature must never be blocked, simplified, half-done or
 duplicated merely because the code that would implement it lives in another of the three repositories. If the
-cleanest implementation belongs there, change it there and say so in the ExecPlan.
+cleanest implementation belongs there, change it there and say so in the ExecPlan. For the vendored engine the
+"other repository" is no longer the place to change it: those three trees are third-party compatibility code
+**owned by this repository** now, so an engine change is made here, and it must be as narrow as the defect and
+recorded as a deviation from the snapshot (see `PROVENANCE.md`).
 
 The rule that must survive is a **runtime** property, not an editing restriction:
 
-- Each mod must still load and run without the others installed. `geckolib` is the exception: it is YSMU's
-  engine and YSMU declares `required-after:geckolib`.
+- Each mod must still load and run without the others installed. YSMU is now self-contained: it needs no
+  `geckolib` mod at runtime, and a `geckolib-*.jar` in the mods folder must be deleted because FML's single class
+  loader would otherwise see two copies of `software.bernie.geckolib3`.
 - YSMU and Touhou Little Maid stay optional to each other at runtime, and both already degrade cleanly when
   the other is absent (a mod-id probe plus a reflective bridge). That is one way to keep the property, not a
   ban on the two being compiled against each other. When a feature is genuinely better served by a
@@ -148,11 +156,11 @@ When writing complex features or significant refactors, use an ExecPlan (as desc
 - `src/main/java/com/fox/ysmu/event`: GTNHLib event subscribers for common player sync and client rendering events.
 - `src/main/java/com/fox/ysmu/compat`: optional-mod compatibility wrappers. Keep Backhand and similar direct calls behind these wrappers.
 - `src/main/java/com/fox/ysmu/mixin`: Mixins only. `gradle.properties` restricts Mixins to package `com.fox.ysmu.mixin`.
-- `libs/geckolib-5.09.52.417-dev.jar`: the GeckoLib 3 engine for 1.7.10, consumed as a separate mod (mod id `geckolib`) instead of being vendored. FML has a single class loader, so two copies of `software.bernie.geckolib3` would silently shadow each other. `dependencies.gradle` puts this jar on the compile, test and dev-runtime classpaths; players install GeckoLib's reobfuscated release jar next to YSMU.
+- `src/main/java/software`, `src/main/java/com/eliotlash`, `src/main/java/net/geckominecraft`: the vendored GeckoLib 3 engine (327 files: 275/48/4). Third-party compatibility code owned by this repository - keep engine edits narrow and record every deviation. The trees are byte-identical to the snapshot except `software/bernie/geckolib3/GeckoLib.java`, whose `@Mod` and `preInit` were removed. See `PROVENANCE.md`.
 - `src/main/resources/assets/ysmu/custom`: built-in model assets copied into `config/ysmu/custom` during reload.
 - `src/main/resources/assets/ysmu/lang`: `en_US.lang` and `zh_CN.lang`. Keep new translation keys in sync.
 - `src/main/resources/mixins.ysmu.json`: Mixin config. Currently only `MixinItemRenderer` is listed as a client Mixin.
-- `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). GeckoLib ships its own jar's ATs.
+- `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). The engine's own two accesses are already in this file, because the engine ships inside this jar.
 - `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
 
 ## Minecraft and Forge Sources
@@ -177,7 +185,7 @@ Client rendering cancels vanilla `RenderPlayerEvent.Pre` in `ClientEventHandler`
 
 The HUD "extra player" overlay (`ClientEventHandler.renderSelfGuiPlayer`, a preview render) draws that same local player through the same renderer and therefore the same `AnimationData`, so one frame reaches `AnimationController.process` twice for one entity at one `seekTime`. The engine must stay idempotent under that: the second process may not drop the animation a transition is moving to (`AnimationController.process` only polls `animationQueue` when it is non-empty). When it did, the controller never left `AnimationState.Transitioning` and the model rendered the transition's first frame forever - which appears as "walking animates but sprinting does not, in third person only", because in first person the HUD overlay is the only pass. See `.agent/phase7-geckolib-dependency.md`; `AnimationControllerTransitionTest` guards it.
 
-GeckoLib is a required separate mod (`dependencies = "required-after:geckolib"`). Where the engine needs host knowledge it goes through an interface, and YSMU implements it: `CustomPlayerEntity` implements `IMolangPhysicsScope` so `software.bernie.geckolib3.core.molang.MolangPhysicsRuntime` can key its per-frame MoLang scope, and `ClientEventHandler` pushes remote animation variables into the engine's `core.molang.RemoteAnimationVariables`. YSMU no longer ships a Molang physics runtime of its own.
+The engine is **vendored**, not a required separate mod, and `ysmu.java` therefore no longer declares `dependencies = "required-after:geckolib"`. Where the engine needs host knowledge it goes through an interface, and YSMU implements it: `CustomPlayerEntity` implements `IMolangPhysicsScope` so `software.bernie.geckolib3.core.molang.MolangPhysicsRuntime` can key its per-frame MoLang scope, and `ClientEventHandler` pushes remote animation variables into the engine's `core.molang.RemoteAnimationVariables`. YSMU no longer ships a Molang physics runtime of its own.
 
 ## Model and Resource Rules
 
@@ -209,7 +217,7 @@ The OpenYSM sync cache is named from the model's own sha256 plus `ModelCacheWrit
 
 ## Compatibility Notes
 
-Runtime prerequisites are UniMixins, GTNHLib and the separate `geckolib` mod. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
+Runtime prerequisites are UniMixins and GTNHLib. The animation engine is part of this mod, so a `geckolib-*.jar` must not be installed alongside it. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
 
 Use `@EventBusSubscriber` from GTNHLib for event subscribers following the existing pattern. Client-only subscribers should specify `side = Side.CLIENT`.
 
@@ -223,7 +231,7 @@ On Windows PowerShell, read UTF-8 files with `-Encoding UTF8`; otherwise Chinese
 
 Modern Java syntax is enabled by Jabel, and the code already uses pattern variables. The produced mod still targets JVM 8, so avoid Java 9+ library APIs unless the project already provides or shades them.
 
-Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. The GeckoLib animation engine lives in its own repository now, so engine fixes belong there rather than here.
+Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. The GeckoLib animation engine is **vendored into this repository** (`src/main/java/software`, `src/main/java/com/eliotlash`, `src/main/java/net/geckominecraft`). Those trees are third-party compatibility code owned by this repository, so an engine fix is made here - keep the edit as narrow as the defect, do not refactor or re-style the vendored code around it, and record every deviation from the snapshot in `.agent/` and in `PROVENANCE.md`. `E:\IDEA\Geckolib` is the source of the snapshot only and is no longer a copy to sync from.
 
 When adding user-facing text, update both `en_US.lang` and `zh_CN.lang`. When adding config fields, update `Config`, the relevant GUI screen if applicable, and translation keys.
 

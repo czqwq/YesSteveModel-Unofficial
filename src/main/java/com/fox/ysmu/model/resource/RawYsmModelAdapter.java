@@ -1,9 +1,9 @@
 package com.fox.ysmu.model.resource;
 
 import static com.fox.ysmu.model.ServerModelManager.ARM_ANIMATION_FILE_NAME;
-import static com.fox.ysmu.model.ServerModelManager.CUSTOM;
 import static com.fox.ysmu.model.ServerModelManager.EXTRA_ANIMATION_FILE_NAME;
 import static com.fox.ysmu.model.ServerModelManager.MAIN_ANIMATION_FILE_NAME;
+import static com.fox.ysmu.model.ServerModelManager.defaultAnimationFile;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -836,7 +836,11 @@ public final class RawYsmModelAdapter {
     }
 
     private static byte[] readDefaultAnimation(String fileName) throws IOException {
-        Path defaultPath = CUSTOM.resolve("default").resolve(fileName);
+        // SOURCE 在这里（:1238-1249）加的回退是 BUILT/default/<fileName>，那条路径在本仓永远不命中：内置
+        // default 现在是现代 ysm.json 包，动画在 builtin/default/animations/ 下，根目录只有 ysm.json 与
+        // models|textures|avatar|lang。实际解析见 ServerModelManager.defaultAnimationFile（先 custom/default，
+        // 再 builtin/default/animations）。
+        Path defaultPath = defaultAnimationFile(fileName);
         if (Files.isRegularFile(defaultPath)) {
             return Files.readAllBytes(defaultPath);
         }
