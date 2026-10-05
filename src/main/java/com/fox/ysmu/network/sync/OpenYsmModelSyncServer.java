@@ -45,6 +45,16 @@ public final class OpenYsmModelSyncServer {
      */
     private static final int PACK_ICON_BUDGET_BYTES = 8 * 1024;
     private static final Map<UUID, PlayerSyncState> SYNC_STATES = Maps.newConcurrentMap();
+    /**
+     * The last player-triggered {@code /ysm sync} per player, for the {@link Config#RESYNC_COOLDOWN_SECONDS} rate
+     * limit. Ported from the reference branch's {@code network/sync/OpenYsmModelSyncServer.java:65}; the cooldown
+     * applies only to the command, never to the join-time round ({@code C2SVersionCheck17} -> {@link #startSync}).
+     * <p>
+     * The reference drops the entry on logout from its {@code CommonEventHandler}; this tree's logout hook
+     * ({@code event/CommonEventHandler.java:92-96}) is outside this task's files, so an entry survives a relog for
+     * the cooldown's duration. Recorded in {@code .agent/phase39-ysm-subcommands.md}.
+     */
+    private static final Map<UUID, Long> LAST_RESYNC = Maps.newConcurrentMap();
 
     private OpenYsmModelSyncServer() {}
 
@@ -150,6 +160,67 @@ public final class OpenYsmModelSyncServer {
     public static void clear(UUID playerId) {
         if (playerId != null) {
             SYNC_STATES.remove(playerId);
+        }
+    }
+
+    /** {@link #requestResync} answer codes. Ported verbatim from the reference branch's
+     *  {@code network/sync/OpenYsmModelSyncServer.java:68-71}. */
+    public static final int RESYNC_OK = 0;
+    public static final int RESYNC_COOLDOWN = 1;
+    public static final int RESYNC_DISABLED = 2;
+    public static final int RESYNC_FAILED = 3;
+
+    /**
+     * A player's own {@code /ysm sync} request: start one fresh model-sync round, rate limited by
+     * {@link Config#RESYNC_COOLDOWN_SECONDS} (-1 refuses the command outright, 0 disables the limit, &gt;0 is a
+     * per-player cooldown).
+     * <p>
+     * Ported from the reference branch's {@code network/sync/OpenYsmModelSyncServer.java:74-96}. The limit lives on
+     * the server because the client is not trusted - a player can spam the command, and each round is server uplink.
+     * The answer codes let {@code YsmCommand.processSync} name the reason in chat.
+     *
+     * @return {@link #RESYNC_OK}, {@link #RESYNC_COOLDOWN}, {@link #RESYNC_DISABLED} or {@link #RESYNC_FAILED}
+     */
+    public static int requestResync(EntityPlayerMP player) {
+        if (player == null) {
+            return RESYNC_FAILED;
+        }
+        int cooldownSeconds = Config.RESYNC_COOLDOWN_SECONDS;
+        if (cooldownSeconds < 0) {
+            return RESYNC_DISABLED;
+        }
+        UUID playerId = player.getUniqueID();
+        long now = System.currentTimeMillis();
+        if (cooldownSeconds > 0) {
+            Long last = LAST_RESYNC.get(playerId);
+            if (last != null && now - last < cooldownSeconds * 1000L) {
+                return RESYNC_COOLDOWN;
+            }
+        }
+        LAST_RESYNC.put(playerId, now);
+        return startSync(player) ? RESYNC_OK : RESYNC_FAILED;
+    }
+
+    /** Seconds left of a player's resync cooldown, for the command's message; 0 when not on cooldown. Ported from the
+     *  reference branch's {@code network/sync/OpenYsmModelSyncServer.java:98-110}. */
+    public static long resyncRemainingSeconds(UUID playerId) {
+        int cooldownSeconds = Config.RESYNC_COOLDOWN_SECONDS;
+        if (cooldownSeconds <= 0 || playerId == null) {
+            return 0L;
+        }
+        Long last = LAST_RESYNC.get(playerId);
+        if (last == null) {
+            return 0L;
+        }
+        long remaining = cooldownSeconds - (System.currentTimeMillis() - last) / 1000L;
+        return Math.max(0L, remaining);
+    }
+
+    /** Drops a player's resync cooldown. The reference calls this from its logout handler
+     *  ({@code network/sync/OpenYsmModelSyncServer.java:112-117}); see {@link #LAST_RESYNC} for this tree's gap. */
+    public static void clearResyncCooldown(UUID playerId) {
+        if (playerId != null) {
+            LAST_RESYNC.remove(playerId);
         }
     }
 

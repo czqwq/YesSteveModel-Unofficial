@@ -93,6 +93,11 @@ public class CommonEventHandler {
         if (event.player instanceof EntityPlayerMP) {
             LAST_MOTION_STATES.remove(event.player.getUniqueID());
             OpenYsmModelSyncServer.clear(event.player.getUniqueID());
+            // The /ysm sync rate limit is per session, not per UUID for the lifetime of the server: the reference
+            // drops a player's cooldown from this same logout handler
+            // (network/sync/OpenYsmModelSyncServer.java:112-117 is the method, called from its CommonEventHandler), so
+            // a relog does not inherit the cooldown of the session that ended.
+            OpenYsmModelSyncServer.clearResyncCooldown(event.player.getUniqueID());
             ModelGuiApi.clearSelectionGrants(event.player);
         }
     }

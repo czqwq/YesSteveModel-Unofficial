@@ -36,9 +36,16 @@ public final class NetworkHandler {
      * ({@code S2CRoamingState}). Sending either to an older peer would hit FML's unknown-discriminator path, which
      * disconnects rather than ignores, so the pair has to fail the handshake instead. See
      * {@code .agent/phase15-roaming-variables.md}.</li>
+     * <li>4: the three {@code /ysm} subcommand packets of {@code .agent/phase39-ysm-subcommands.md}, clientbound ids
+     * 32 ({@code SyncGamePath}), 33 ({@code SetWelcomeConfig}) and 34 ({@code ShowBufferInfo}). These are the first
+     * additions that a command <em>sends</em> on demand, so the same unknown-discriminator rule applies as in
+     * version 3: a peer that does not know the id is disconnected by FML, and the handshake has to reject the pair
+     * first with a readable message. (The earlier debug ids 23/26/27/31 arrived with senders in
+     * {@code .agent/phase35-debug-command-senders.md} without a bump; that omission is closed by this entry rather
+     * than repeated.)</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 3;
+    public static final int NETWORK_PROTOCOL = 4;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -129,15 +136,40 @@ public final class NetworkHandler {
      * neighbours.
      * <p>
      * All four are behind {@code Config.DEBUG_MOLANG_OVERLAY} (default off); registration itself is unconditional
-     * because the ids are part of the wire protocol, but no handler does anything while the switch is off and this
-     * tree registers no sender for them at all. That last point is why {@link #NETWORK_PROTOCOL} is not bumped: the
-     * protocol version exists to stop a peer from *receiving* an id it does not know (FML disconnects on an unknown
-     * discriminator), and nothing here sends one.
+     * because the ids are part of the wire protocol, but no handler does anything while the switch is off.
+     * <p>
+     * This paragraph used to end with "and this tree registers no sender for them at all. That last point is why
+     * {@link #NETWORK_PROTOCOL} is not bumped". The senders arrived in {@code .agent/phase35-debug-command-senders.md}
+     * without a bump, so an older peer could have been disconnected by {@code /ysm debug} on an id it does not know;
+     * version 4 (see {@link #NETWORK_PROTOCOL}) now covers both that and the three packets below.
      */
     private static final int CLIENTBOUND_QUERY_MOLANG_VAR = 23;
     private static final int CLIENTBOUND_EVAL_MOLANG = 26;
     private static final int CLIENTBOUND_RESET_MOLANG = 27;
     private static final int CLIENTBOUND_SET_DEBUG_OVERLAY = 31;
+
+    /**
+     * The three {@code /ysm} subcommand packets of {@code .agent/phase39-ysm-subcommands.md}: {@code /ysm
+     * setgamepath} ({@link com.fox.ysmu.network.message.SyncGamePath}), {@code /ysm welcome}
+     * ({@link com.fox.ysmu.network.message.SetWelcomeConfig}) and {@code /ysm buffer}
+     * ({@link com.fox.ysmu.network.message.ShowBufferInfo}).
+     * <p>
+     * The reference branch numbers these 20/21/22, and both of its first two numbers are already spent here on a
+     * different pairing (20 is this tree's {@code S2CRoamingState}, 21 its {@code S2CMolangSync}), so the reference's
+     * numbers cannot be preserved. The three ids are therefore appended after the highest clientbound id in use (31):
+     * 32, 33 and 34, in the order setgamepath / welcome / buffer. The ids that are free below them - 22, 24, 25, 28
+     * and 29 - are left alone on purpose: 22 is the reference's {@code ShowBufferInfo}, 24/25 its
+     * {@code S2CSyncIndexChunk17} / {@code SpawnParticleCommand} and 29 its {@code S2CMolangSync}, all of which a
+     * later batch may port under their own numbers. Nothing existing is renumbered or reused.
+     * <p>
+     * All three are server to client: the command forwards work that only the client can do (update its own config
+     * and asset provider, toggle its own welcome flag, read its own JVM's buffer pools), exactly like
+     * {@code S2CPlaySound} / {@code S2CSetDebugOverlay}. Each handler is registered {@link Side#CLIENT} and each
+     * opens with the same receiving-side guard.
+     */
+    private static final int CLIENTBOUND_SYNC_GAME_PATH = 32;
+    private static final int CLIENTBOUND_SET_WELCOME_CONFIG = 33;
+    private static final int CLIENTBOUND_SHOW_BUFFER_INFO = 34;
 
     public static void init() {
         registerServerboundMessages();
@@ -293,6 +325,22 @@ public final class NetworkHandler {
             S2CSetDebugOverlay.Handler.class,
             S2CSetDebugOverlay.class,
             CLIENTBOUND_SET_DEBUG_OVERLAY,
+            Side.CLIENT);
+        // The /ysm subcommand packets. See CLIENTBOUND_SYNC_GAME_PATH above for the ids and why they are appended.
+        CHANNEL.registerMessage(
+            SyncGamePath.Handler.class,
+            SyncGamePath.class,
+            CLIENTBOUND_SYNC_GAME_PATH,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            SetWelcomeConfig.Handler.class,
+            SetWelcomeConfig.class,
+            CLIENTBOUND_SET_WELCOME_CONFIG,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            ShowBufferInfo.Handler.class,
+            ShowBufferInfo.class,
+            CLIENTBOUND_SHOW_BUFFER_INFO,
             Side.CLIENT);
     }
 

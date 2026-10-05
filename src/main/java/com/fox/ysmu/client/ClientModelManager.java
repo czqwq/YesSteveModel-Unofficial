@@ -249,12 +249,14 @@ public class ClientModelManager {
      * Port-specific addition, with a port-specific reason: the reference's
      * {@code loadLegacyModelData} ({@code ClientModelManager.java:1484-1508}) re-reads both the
      * legacy ({@code EncryptTools.decryptModel}) and the OpenYSM format, and the reference calls
-     * it from every provider {@code load}. This port only has the OpenYSM half
-     * ({@link #loadRawModelFromCache}, {@code :1981-2008}) because the model → cache-file
-     * association for the legacy channel is recorded inside {@code network/message/RequestLoadModel},
-     * which this task may not edit. Registering a geometry the reload cannot restore would mean
-     * evicting it into a permanent fallback to the built-in default, so the eviction must not
-     * adopt those models at all — see {@code .agent/phase32-asset-eviction-subsystem.md}.
+     * it from every provider {@code load}. This port's {@link #loadLegacyModelData} is that bridge
+     * minus the legacy channel ({@link #loadRawModelFromCache}, {@code :2200-2227}) because the
+     * model → cache-file association for the legacy channel is recorded inside
+     * {@code network/message/RequestLoadModel}, which this task may not edit. Registering a
+     * geometry or an animation the reload cannot restore would mean evicting it into a permanent
+     * fallback to the built-in default, so the eviction must not adopt those models at all — see
+     * {@code .agent/phase32-asset-eviction-subsystem.md} and
+     * {@code .agent/phase40-eviction-members.md} (the animation half uses this same gate).
      */
     public static boolean hasReloadableClientCache(@Nullable ResourceLocation modelOrSubId) {
         if (modelOrSubId == null) {
@@ -1212,6 +1214,9 @@ public class ClientModelManager {
         }
         ModelData data = takePendingAnimations(mainId);
         if (data == null) {
+            // Nothing parked: either this model's animations are already installed, or it declares none of its own
+            // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
+            keepAnimationsResident(mainId);
             return;
         }
         try {
@@ -1222,6 +1227,93 @@ public class ClientModelManager {
             // payload is gone either way, so the model simply has no animation file of its own for this connection -
             // the same outcome it had before installation became lazy, where the one attempt happened at registration.
             ysmu.LOG.warn("Failed to register animations for model {}", mainId, failure);
+            // A failed install must not be adopted: the eviction would then hold an entry the reload cannot
+            // restore into the state a successful install would have produced.
+            return;
+        }
+        // Reference wiring, adapted to this port's lazy install. The reference hands the file it just installed to
+        // the asset framework at the same moment (reference ClientModelManager.java:644, inside applyPreParsed) and
+        // its AssetManager.tick() touches exactly this entry to pin the built-in default (reference
+        // AssetManager.java:81-82). Two gates, the same pair as publishGeo's: the switch, and the port-specific
+        // reloadability test documented on hasReloadableClientCache - a payload this port cannot re-read must never
+        // be adopted by a cache whose whole job is to evict it. What is cached is the animation map itself, i.e. the
+        // install rule's own input, and not the whole ModelData: the geometry and texture bytes that also ride in
+        // it are dropped at install in this port and must not be kept alive for the rest of the session.
+        if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(mainId)) {
+            com.fox.ysmu.client.asset.AssetManager.registerAnim(mainId, data.getAnimation());
+        }
+    }
+
+    /**
+     * The animation half of {@link #ensureGeometry}'s anti-eviction seam: a model whose animations were evicted must
+     * get them back, and one that is being drawn must not be evicted at all.
+     * <p>
+     * Called from {@link #ensureAnimations}, which {@code CustomPlayerModel.getAnimation} reaches on every animation
+     * lookup - i.e. once per drawn model per frame - and which is the port's single animation choke point, exactly as
+     * {@code ensureGeometry} is for geometry. The reference instead asks at each render site
+     * ({@code CustomPlayerEntity.java:198}, {@code RenderUtil.java:193}); one seam does the same job here.
+     * <p>
+     * Why the {@code managesAnimations} test rather than the engine cache alone: geometry has the invariant that a
+     * published model's geometry is in {@code GeckoLibCache}, so "the cache has no geometry" means "it was evicted".
+     * Animations have no such invariant - a model that declares no animations of its own legitimately has no file and
+     * falls back to the built-in default ({@code CustomPlayerEntity.getAnimation()} answers
+     * {@code DEFAULT_MAIN_ANIMATION} on a miss), and asking for a reload there would decrypt the whole payload to
+     * install clips it already falls back to. {@link com.fox.ysmu.client.asset.AssetManager#managesAnimations} is
+     * the record of "this subsystem adopted this model", which survives the eviction that drops the cache entry.
+     * <p>
+     * Both calls are gated on the switch, and the reloadability test is repeated because the "model to cache file"
+     * association can be dropped by a disconnect between the adoption and this call; a stale adoption then goes
+     * quiet instead of starting a load that is bound to fail.
+     */
+    private static void keepAnimationsResident(ResourceLocation mainId) {
+        if (!com.fox.ysmu.client.asset.AssetManager.isEnabled()
+            || !com.fox.ysmu.client.asset.AssetManager.managesAnimations(mainId)
+            || !hasReloadableClientCache(mainId)) {
+            return;
+        }
+        if (GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(mainId) == null) {
+            com.fox.ysmu.client.asset.AssetManager.anim(mainId)
+                .get();
+        } else {
+            com.fox.ysmu.client.asset.AssetManager.anim(mainId)
+                .touch();
+        }
+    }
+
+    /**
+     * Re-installs one model's animations after the per-domain files were released from the engine cache.
+     * <p>
+     * Client thread only, called from the asset framework's apply phase
+     * ({@code client/asset/provider/AnimationProvider#apply}). It is deliberately <em>not</em> a second
+     * implementation of this port's install rule: it calls {@link #registerAnimations} - the same private pipeline
+     * the first install ran, and the only thing that produces the two per-domain files ({@link AnimationDomain}),
+     * the per-domain default fallback and the conditions and controllers that go with them.
+     * <p>
+     * The reference's provider can be narrower because its model has one merged animation file: its
+     * {@code apply} only puts that file into {@code GeckoLibCache} (reference {@code provider/AnimationProvider.java:27-34}).
+     * A merged file cannot express this port's two domains - it is the defect {@code AnimationDomain} exists to fix -
+     * so the reload replays the rule with the animation map the provider just re-read. See
+     * {@code .agent/phase40-eviction-members.md}.
+     *
+     * @param animations the payload's animation file map, exactly as {@link ModelData#getAnimation()} returns it
+     */
+    public static void reinstallAnimations(@Nullable ResourceLocation mainId, @Nullable Map<String, byte[]> animations) {
+        if (mainId == null || animations == null || animations.isEmpty()) {
+            return;
+        }
+        if (!isClientThread()) {
+            // Same reason as ensureAnimations: this writes the engine's caches and several per-domain tables, and
+            // the apply phase that calls it runs on the client thread.
+            return;
+        }
+        try {
+            registerAnimations(mainId, animations);
+        } catch (Throwable failure) {
+            // Same guard as ensureAnimations': the payload is the freshly re-read one, so a failure here leaves the
+            // model on the built-in default fallback rather than taking down the client thread's task queue.
+            ysmu.LOG.warn("Failed to re-register animations for model {}", mainId, failure);
         }
     }
 
@@ -2137,15 +2229,45 @@ public class ClientModelManager {
     }
 
     /**
+     * 后台线程：把一个模型在加密客户端缓存里的 payload 重新解密并桥接成 legacy {@link ModelData}。
+     * 不写任何缓存。
+     * <p>
+     * 这是参考分支 {@code loadLegacyModelData}（参考 {@code ClientModelManager.java:1484-1508}）在本仓的
+     * 等价物，只是本仓只有 OpenYSM 那半边：legacy（{@code EncryptTools} + 同步密码）通道的
+     * 「模型 → 缓存文件」关联记在 {@code network/message/RequestLoadModel}，而那个事实就是
+     * {@link #hasReloadableClientCache} 这个采纳门所依据的东西（见它的说明）。几何与动画两个 provider 的
+     * {@code load} 都走这一个桥，与参考的 {@code GeoModelProvider}/{@code AnimationProvider} 共用
+     * {@code loadLegacyModelData} 是同一个形状。
+     *
+     * @param mainModelId 主模型 id（如 "ysmu:model_id/main"）
+     * @return 桥接后的 payload；缺失、无法解密或无法桥接时返回 null
+     */
+    @Nullable
+    public static ModelData loadLegacyModelData(ResourceLocation mainModelId) {
+        if (mainModelId == null) {
+            return null;
+        }
+        com.fox.ysmu.model.resource.pojo.RawYsmModel raw = loadRawModelFromCache(mainModelId);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to bridge cached model data for {}: {}", mainModelId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 后台线程：从加密客户端缓存重解析单个 sub-model 的几何。
      * 不写任何缓存；由 {@link com.fox.ysmu.client.asset.AssetManager} /
      * {@code provider.GeoModelProvider} 在主线程 apply。
      * <p>
-     * Reference {@code ClientModelManager.java:1616-1637}. The port cannot use the reference's
-     * {@code loadLegacyModelData} ({@code :1484-1508}) — see
-     * {@link #hasReloadableClientCache} — so the payload comes from
-     * {@link #loadRawModelFromCache} and is bridged with the same
-     * {@code RawYsmModelAdapter.toLegacyModelData} call the port's own sync path uses. The
+     * Reference {@code ClientModelManager.java:1616-1637}. The payload comes from
+     * {@link #loadLegacyModelData}, which is the reference's own bridge minus the legacy channel this
+     * port cannot re-read (see {@link #hasReloadableClientCache}), and it is the same call
+     * {@code provider/AnimationProvider} makes. The
      * sub-model lookup is the reference's own rule ({@code ModelIdUtil.getSubModelId(baseId, key)}
      * compared to {@code geoId}) and this port's {@link #buildGeo} is the same bake
      * {@code publishGeo} installs, so a reloaded geometry is byte-for-byte the object the
@@ -2165,16 +2287,8 @@ public class ClientModelManager {
         // "ysmu:model/main/main") and miss the CACHED_MODEL_MD5 entry — silently
         // failing every background reload (vanilla hand / missing model after idle).
         ResourceLocation baseId = ModelIdUtil.getParentModelId(geoId);
-        ResourceLocation mainId = ModelIdUtil.getMainId(baseId);
-        com.fox.ysmu.model.resource.pojo.RawYsmModel raw = loadRawModelFromCache(mainId);
-        if (raw == null) {
-            return null;
-        }
-        ModelData data;
-        try {
-            data = RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
-        } catch (Exception e) {
-            ysmu.LOG.warn("Failed to bridge cached model data for {}: {}", mainId, e.getMessage());
+        ModelData data = loadLegacyModelData(ModelIdUtil.getMainId(baseId));
+        if (data == null) {
             return null;
         }
         Map<String, byte[]> modelBytes = data.getModel();

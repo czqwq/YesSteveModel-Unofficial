@@ -2,6 +2,7 @@ package com.fox.ysmu.command;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -14,26 +15,35 @@ import net.minecraft.command.CommandException;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.command.PlayerNotFoundException;
 import net.minecraft.command.WrongUsageException;
+import net.minecraft.event.ClickEvent;
 import net.minecraft.util.ChatComponentTranslation;
+import net.minecraft.util.ChatStyle;
 import net.minecraft.util.ChunkCoordinates;
 import net.minecraft.util.IChatComponent;
 import net.minecraft.world.World;
 
 import org.junit.jupiter.api.Test;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.network.message.PacketEvalMolang;
 import com.fox.ysmu.network.message.PacketQueryMolangVar;
 import com.fox.ysmu.network.message.PacketResetMolang;
 import com.fox.ysmu.network.message.S2CSetDebugOverlay;
+import com.fox.ysmu.network.message.SetWelcomeConfig;
+import com.fox.ysmu.network.message.ShowBufferInfo;
+import com.fox.ysmu.network.message.SyncGamePath;
+import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
 
 /**
- * {@code /ysm debug <query|eval|overlay>} and {@code /ysm reset <selector>}: argument parsing, the refusal paths, tab
- * completion and the permission baseline.
+ * The server-side {@code /ysm} surface: argument parsing, the refusal paths, tab completion, the permission model and
+ * the packet directions - {@code /ysm help}, {@code play}, {@code setgamepath}, {@code buffer}, {@code welcome},
+ * {@code sync} and the already-ported {@code debug}/{@code reset}/{@code playsound}.
  * <p>
  * Every message the command emits is a {@link ChatComponentTranslation} whose translation happens when the chat box
  * renders it, so the dispatch is observable in a unit JVM through the translation <em>key</em> and its format args -
  * no client language table is touched. The pure decisions (which names a query carries, which expression an eval
- * carries, which overlay mode a third argument selects) are driven directly, because their effects leave through
+ * carries, which overlay mode a third argument selects, which animation name a play carries, which value a welcome
+ * carries, which feedback key a resync code maps to) are driven directly, because their effects leave through
  * {@code NetworkHandler.CHANNEL.sendTo} and a unit JVM has no channel.
  * <p>
  * <b>What a unit JVM cannot drive</b>, recorded rather than approximated:
@@ -41,16 +51,21 @@ import com.fox.ysmu.network.message.S2CSetDebugOverlay;
  * <li>the happy path that actually sends a packet: it needs an {@code EntityPlayerMP}, and
  * {@code EntityPlayerMP(MinecraftServer, WorldServer, GameProfile, ItemInWorldManager)} dereferences a live
  * {@code WorldServer.provider} and {@code MinecraftServer.getConfigurationManager()} in its constructor, so a player
- * cannot be fabricated here. The tests below therefore pin every step up to the send and the {@code instanceof
- * EntityPlayerMP} refusals (which a plain sender does reach).</li>
+ * cannot be fabricated here (and neither can a plain {@code EntityPlayer}: its constructor dereferences
+ * {@code World.isRemote} and {@code World.getSpawnPoint()}, {@code EntityPlayer.java:163-176}). The tests below
+ * therefore pin every step up to the send and the {@code instanceof EntityPlayerMP} refusals (which a plain sender
+ * does reach).</li>
  * <li>the level-4 re-check inside {@code processDebug}: it is a call on the {@code EntityPlayerMP}, i.e. on the same
- * unfabricatable object. Only the command's level-2 baseline is asserted here.</li>
+ * unfabricatable object. Only the command's level-2 baseline and the in-body per-subcommand gate are asserted here.</li>
+ * <li>the player clause of {@code canCommandSenderUseCommand}: it tests {@code instanceof EntityPlayer}, and no
+ * {@code EntityPlayer} can be constructed without a {@code World}. Its other clause - the inherited level-2 rule for
+ * non-player senders - is asserted.</li>
  * </ul>
  */
 class YsmCommandTest {
 
     /** Records what the command sends back, without a client or a world. */
-    private static final class RecordingSender implements ICommandSender {
+    private static class RecordingSender implements ICommandSender {
 
         private final List<IChatComponent> messages = new ArrayList<>();
 
@@ -104,6 +119,24 @@ class YsmCommandTest {
         private String singleKey() {
             ChatComponentTranslation translation = singleTranslation();
             return translation == null ? null : translation.getKey();
+        }
+
+        /** The translation key of the n-th message, for the multi-line branches (help's summary). */
+        private String keyAt(int index) {
+            IChatComponent message = this.messages.get(index);
+            if (message instanceof ChatComponentTranslation) {
+                return ((ChatComponentTranslation) message).getKey();
+            }
+            return null;
+        }
+    }
+
+    /** A non-player sender that denies every permission level; pins which subcommands the in-body gate exempts. */
+    private static final class DenyingSender extends RecordingSender {
+
+        @Override
+        public boolean canCommandSenderUseCommand(int permissionLevel, String command) {
+            return false;
         }
     }
 
@@ -299,9 +332,16 @@ class YsmCommandTest {
     // ---------------------------------------------------------------------------------------------------------------
 
     @Test
-    void tabCompletionOffersThePortedSubcommandsAtTheFirstArgument() {
+    void tabCompletionOffersEveryPortedSubcommandAtTheFirstArgument() {
         List<?> all = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "" });
-        assertEquals(4, all.size());
+        // The reference's own list and order (reference YsmCommand:44-45), now that all ten exist here. Every name is
+        // asserted individually, not just counted, so a renamed or dropped subcommand cannot pass as "same size".
+        assertEquals(10, all.size());
+        String[] expected = { "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset",
+            "sync", "help" };
+        for (String name : expected) {
+            assertTrue(all.contains(name), name + " must be offered at argument 1");
+        }
         assertTrue(all.contains("reload"));
         assertTrue(all.contains("playsound"));
         assertTrue(all.contains("debug"));
@@ -406,14 +446,15 @@ class YsmCommandTest {
     }
 
     @Test
-    void theFourPortedPacketsAreClientboundSoTheServerIsTheSender() throws Exception {
+    void everyPortedCommandPacketIsClientboundSoTheServerIsTheSender() throws Exception {
         // Direction, read off each handler rather than assumed: every one of these guards on
         // `if (ctx.side != Side.CLIENT) return null;` (see the sources cited in the ExecPlan), so only a server can
         // have sent one - which is why YsmCommand is its sender. The check reads the compiled handler's constant pool:
         // a class that never mentions the Side enum, or never mentions its CLIENT constant, cannot carry that guard.
         // Pinned here because reversing a registration's side would silently make these subcommands no-ops.
         for (Class<?> packet : new Class<?>[] { PacketQueryMolangVar.class, PacketEvalMolang.class,
-            PacketResetMolang.class, S2CSetDebugOverlay.class }) {
+            PacketResetMolang.class, S2CSetDebugOverlay.class, SyncGamePath.class, SetWelcomeConfig.class,
+            ShowBufferInfo.class }) {
             Class<?> handler = null;
             for (Class<?> nested : packet.getDeclaredClasses()) {
                 if (nested.getSimpleName()
@@ -433,6 +474,248 @@ class YsmCommandTest {
                 pool.contains("CLIENT"),
                 handler + " must still reference Side.CLIENT, i.e. still be answered on the client");
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm help
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void helpWithoutAnArgumentListsEverySubcommandAndTheWelcomeOffHint() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "help" });
+
+        // The title, the ten summaries in the reference's own order (reference YsmCommand:172-182), then the
+        // clickable welcome-off line (:183-188).
+        assertEquals(12, sender.count());
+        assertEquals("commands.yes_steve_model.help.title", sender.keyAt(0));
+        String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset",
+            "debug", "ysmclient" };
+        for (int i = 0; i < topics.length; i++) {
+            assertEquals("commands.yes_steve_model.help.line." + topics[i], sender.keyAt(1 + i));
+        }
+        assertEquals("commands.yes_steve_model.help.welcome_off", sender.keyAt(11));
+    }
+
+    @Test
+    void helpWithAKnownTopicPrintsItsUsageAndDescription() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "help", "reload" });
+
+        assertEquals(3, sender.count());
+        assertEquals("commands.yes_steve_model.help.detail.title", sender.keyAt(0));
+        assertEquals("commands.yes_steve_model.help.detail.reload.usage", sender.keyAt(1));
+        assertEquals("commands.yes_steve_model.help.detail.reload.desc", sender.keyAt(2));
+        ChatComponentTranslation title = (ChatComponentTranslation) sender.messages.get(0);
+        assertEquals("reload", title.getFormatArgs()[0], "the title names the requested topic");
+    }
+
+    @Test
+    void helpWithAnUnknownTopicNamesItInsteadOfGuessing() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "help", "bogus" });
+
+        assertEquals(1, sender.count());
+        ChatComponentTranslation message = (ChatComponentTranslation) sender.messages.get(0);
+        assertEquals("commands.yes_steve_model.help.unknown", message.getKey());
+        assertEquals("bogus", message.getFormatArgs()[0]);
+    }
+
+    @Test
+    void everyAdvertisedTopicHasDetailKeysAndIsMatchedCaseInsensitively() {
+        String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset",
+            "debug", "ysmclient" };
+        for (String topic : topics) {
+            assertTrue(YsmCommand.isKnownHelpTopic(topic), topic + " must be a known topic");
+            RecordingSender sender = new RecordingSender();
+            new YsmCommand().processCommand(sender, new String[] { "help", topic.toUpperCase(java.util.Locale.ROOT) });
+            assertEquals(3, sender.count(), topic + " in upper case must still resolve to its detail lines");
+            assertEquals("commands.yes_steve_model.help.detail." + topic + ".usage", sender.keyAt(1));
+        }
+        // "help" is not one of its own topics (the reference's list, :156-159), and neither is a non-subcommand.
+        assertFalse(YsmCommand.isKnownHelpTopic("help"));
+        assertFalse(YsmCommand.isKnownHelpTopic("bogus"));
+        assertFalse(YsmCommand.isKnownHelpTopic(""));
+    }
+
+    @Test
+    void theWelcomeOffHintCarriesTheCommandItAdvertises() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "help" });
+
+        ChatComponentTranslation off = (ChatComponentTranslation) sender.messages.get(11);
+        ChatStyle style = off.getChatStyle();
+        assertNotNull(style.getChatClickEvent(), "the hint line must be clickable, as the reference makes it");
+        assertEquals(ClickEvent.Action.RUN_COMMAND, style.getChatClickEvent()
+            .getAction());
+        assertEquals("/ysm welcome off", style.getChatClickEvent()
+            .getValue());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // the permission model of the new subcommands
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void theLevelZeroSubcommandsReachTheirOwnRefusalInsteadOfThePermissionGate() {
+        // help is handled before the gate (reference :101-105) and setgamepath/welcome/buffer/sync are exempt from it
+        // (:109-113). Each of the four then demands a player, which is what proves the gate did not swallow the
+        // branch: a denied permission would have been "commands.generic.permission" instead.
+        RecordingSender helpSender = new DenyingSender();
+        new YsmCommand().processCommand(helpSender, new String[] { "help" });
+        assertEquals(12, helpSender.count(), "help must run for a sender that denies every permission level");
+
+        for (String sub : new String[] { "setgamepath", "welcome", "buffer", "sync" }) {
+            CommandException exception = assertThrows(
+                CommandException.class,
+                () -> new YsmCommand().processCommand(new DenyingSender(), new String[] { sub }),
+                sub + " must be exempt from the level-2 gate");
+            assertEquals(
+                "commands.generic.player.notFound",
+                exception.getMessage(),
+                sub + " must reach its own player requirement");
+        }
+    }
+
+    @Test
+    void theLevelTwoSubcommandsStillHitTheGateForASenderThatDeniesIt() {
+        // reload/play/playsound/debug/reset keep the inherited level-2 rule, re-checked inside processCommand because
+        // canCommandSenderUseCommand now lets players through to it (reference :109-113). The refusal also proves
+        // that none of them ran: with a denied sender processReload never touches the model directory.
+        for (String sub : new String[] { "reload", "play", "playsound", "debug", "reset" }) {
+            CommandException exception = assertThrows(
+                CommandException.class,
+                () -> new YsmCommand().processCommand(new DenyingSender(), new String[] { sub }));
+            assertEquals(
+                "commands.generic.permission",
+                exception.getMessage(),
+                sub + " must stay behind the level-2 gate");
+        }
+    }
+
+    @Test
+    void thePortedPlayerSubcommandsRefuseANonPlayer() {
+        for (String sub : new String[] { "play", "setgamepath", "buffer", "welcome", "sync" }) {
+            CommandException exception = assertThrows(
+                CommandException.class,
+                () -> new YsmCommand().processCommand(new RecordingSender(), new String[] { sub, "x" }));
+            assertEquals(
+                "commands.generic.player.notFound",
+                exception.getMessage(),
+                sub + " must refuse a sender that is not a player");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // the extractable decisions of the new subcommands
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void aPlayNameIsTheRemainderRejoinedWithEveryQuoteStripped() {
+        assertEquals("wave", YsmCommand.parsePlayAnimationName(new String[] { "play", "wave" }));
+        assertEquals(
+            "my anim",
+            YsmCommand.parsePlayAnimationName(new String[] { "play", "my", "anim" }),
+            "an animation name the shell split at spaces is re-joined");
+        assertEquals("wave", YsmCommand.parsePlayAnimationName(new String[] { "play", "\"wave\"" }));
+        assertEquals(
+            "wave",
+            YsmCommand.parsePlayAnimationName(new String[] { "play", "wa\"ve" }),
+            "the reference removes every quote, not only a surrounding pair (:203)");
+        assertEquals("", YsmCommand.parsePlayAnimationName(new String[] { "play" }));
+    }
+
+    @Test
+    void aGamePathIsTheSecondArgumentAndTheEmptySpellingsClearIt() {
+        assertEquals("C:/x/.minecraft", YsmCommand.parseGamePath(new String[] { "setgamepath", "C:/x/.minecraft" }));
+        assertEquals(
+            "",
+            YsmCommand.parseGamePath(new String[] { "setgamepath" }),
+            "without a path there is nothing to read");
+        assertEquals(
+            "",
+            YsmCommand.parseGamePath(new String[] { "setgamepath", "\"\"" }),
+            "a quoted empty path clears the setting (reference :292-294)");
+        assertEquals("", YsmCommand.parseGamePath(new String[] { "setgamepath", "''" }));
+        assertEquals("D:/minecraft", YsmCommand.parseGamePath(new String[] { "setgamepath", "D:/minecraft" }));
+    }
+
+    @Test
+    void aGamePathVersionFallsBackToTheConfiguredOne() {
+        assertEquals("1.21", YsmCommand.parseGamePathVersion(new String[] { "setgamepath", "C:/x", "1.21" }));
+        assertEquals(
+            Config.HIGH_VERSION_ASSET_VERSION,
+            YsmCommand.parseGamePathVersion(new String[] { "setgamepath", "C:/x" }),
+            "a missing version keeps the configured asset version, as the reference does (:289)");
+    }
+
+    @Test
+    void aWelcomeValueIsOffOnlyForItsThreeSpellings() {
+        assertFalse(YsmCommand.parseWelcomeValue(new String[] { "welcome", "off" }));
+        assertFalse(YsmCommand.parseWelcomeValue(new String[] { "welcome", "OFF" }));
+        assertFalse(YsmCommand.parseWelcomeValue(new String[] { "welcome", "0" }));
+        assertFalse(YsmCommand.parseWelcomeValue(new String[] { "welcome", "false" }));
+        // The reference has no rejection branch: a missing argument and any other word - "on" included - mean on.
+        assertTrue(YsmCommand.parseWelcomeValue(new String[] { "welcome" }));
+        assertTrue(YsmCommand.parseWelcomeValue(new String[] { "welcome", "on" }));
+        assertTrue(YsmCommand.parseWelcomeValue(new String[] { "welcome", "bogus" }));
+    }
+
+    @Test
+    void theWelcomeAndResyncFeedbackKeysFollowTheirDecisions() {
+        assertEquals("commands.yes_steve_model.welcome.on", YsmCommand.welcomeMessageKey(true));
+        assertEquals("commands.yes_steve_model.welcome.off", YsmCommand.welcomeMessageKey(false));
+
+        assertEquals(
+            "commands.yes_steve_model.sync.resync.started",
+            YsmCommand.resyncMessageKey(OpenYsmModelSyncServer.RESYNC_OK));
+        assertEquals(
+            "commands.yes_steve_model.sync.resync.cooldown",
+            YsmCommand.resyncMessageKey(OpenYsmModelSyncServer.RESYNC_COOLDOWN));
+        assertEquals(
+            "commands.yes_steve_model.sync.resync.disabled",
+            YsmCommand.resyncMessageKey(OpenYsmModelSyncServer.RESYNC_DISABLED));
+        assertEquals(
+            "commands.yes_steve_model.sync.resync.failed",
+            YsmCommand.resyncMessageKey(OpenYsmModelSyncServer.RESYNC_FAILED));
+        assertEquals(
+            "commands.yes_steve_model.sync.resync.failed",
+            YsmCommand.resyncMessageKey(42),
+            "an unknown code takes the reference's else branch, not a fourth message");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // tab completion for the new subcommands
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void tabCompletionOffersTheNewSubcommandsArguments() {
+        List<?> path = new YsmCommand()
+            .addTabCompletionOptions(new RecordingSender(), new String[] { "setgamepath", "" });
+        assertEquals(1, path.size());
+        assertEquals("<path>", path.get(0));
+
+        List<?> version = new YsmCommand()
+            .addTabCompletionOptions(new RecordingSender(), new String[] { "setgamepath", "C:/x", "" });
+        assertEquals(1, version.size());
+        assertEquals("[version]", version.get(0));
+
+        List<?> modes = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "welcome", "" });
+        assertEquals(2, modes.size());
+        assertTrue(modes.contains("on"));
+        assertTrue(modes.contains("off"));
+
+        List<?> filtered = new YsmCommand()
+            .addTabCompletionOptions(new RecordingSender(), new String[] { "welcome", "of" });
+        assertEquals(1, filtered.size());
+        assertEquals("off", filtered.get(0));
+
+        // The reference has no completion branch for help's topic argument, so it stays null rather than guessing.
+        assertNull(new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "help", "" }));
     }
 
     /** The compiled bytes of {@code type}, straight from the test classpath. */

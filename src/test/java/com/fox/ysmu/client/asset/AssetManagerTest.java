@@ -1,10 +1,15 @@
 package com.fox.ysmu.client.asset;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import net.minecraft.util.ResourceLocation;
 
@@ -14,11 +19,13 @@ import org.junit.jupiter.api.Test;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.asset.provider.AnimationProvider;
 import com.fox.ysmu.client.asset.provider.GeoModelProvider;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
+import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
@@ -273,5 +280,159 @@ class AssetManagerTest {
         model.onModelReleased(geo);
 
         assertNull(model.getCurrentModel(), "onModelReleased must drop the strong reference to the released geometry");
+    }
+
+    // ── The animation half ────────────────────────────────────────────────
+    // The reference's ANIM cache is keyed by the model's mainId and holds the merged AnimationFile its provider
+    // rebuilds (reference AssetManager.java:43-44, :54-56). This port's install produces one file per domain, so the
+    // cached value is the animation map that install consumes and the provider replays the install rule - see
+    // .agent/phase40-eviction-members.md. What the facade's own tests can pin is therefore the same set of properties
+    // the geometry half is pinned on: switch-off inertness, the idle rule, the default pin, and the provider's
+    // release/weight contract.
+
+    /** Mirrors the geometry tests' helper: one animation file is enough for the map to count as non-empty. */
+    private static Map<String, byte[]> animationMap(String name) {
+        Map<String, byte[]> animations = new LinkedHashMap<>();
+        animations.put("main.animation.json", ("{\"animations\":{\"" + name + "\":{}}}").getBytes(StandardCharsets.UTF_8));
+        return animations;
+    }
+
+    private static ResourceLocation armIdOf(ResourceLocation mainId) {
+        return ModelIdUtil.getArmId(ModelIdUtil.getParentModelId(mainId));
+    }
+
+    private static Map<ResourceLocation, AnimationFile> engineAnimations() {
+        return GeckoLibCache.getInstance()
+            .getAnimations();
+    }
+
+    /**
+     * The animation half of {@link #switchOffRegistersAndReleasesNothing}: off means the ANIM cache is as inert as
+     * the geometry one, including {@link AssetManager#registerAnim}, which must not adopt an entry a later
+     * {@code get()} would start a load for.
+     */
+    @Test
+    void switchOffRegistersAndReleasesNoAnimations() {
+        Config.ENABLE_IDLE_ASSET_EVICTION = false;
+        ResourceLocation mainId = new ResourceLocation("ysmu", "anim_switchoff/main");
+        ResourceLocation armId = armIdOf(mainId);
+        engineAnimations().put(mainId, new AnimationFile());
+        engineAnimations().put(armId, new AnimationFile());
+        try {
+            AssetManager.registerAnim(mainId, animationMap("anim_switchoff"));
+            assertEquals(0, AssetManager.animSize(), "with the switch off nothing may be registered");
+            assertFalse(AssetManager.managesAnimations(mainId), "and nothing may be adopted for eviction");
+
+            AssetManager.tick(System.currentTimeMillis() + 10L * IDLE_UNLOAD_MS);
+            assertNotNull(
+                engineAnimations().get(mainId),
+                "with the switch off no animation may be released");
+
+            AssetManager.clearAll();
+            assertNotNull(engineAnimations().get(mainId), "with the switch off clearAll must not release anything");
+
+            AssetManager.release(mainId);
+            assertNotNull(engineAnimations().get(mainId), "with the switch off release() must not release anything");
+        } finally {
+            engineAnimations().remove(mainId);
+            engineAnimations().remove(armId);
+        }
+    }
+
+    /**
+     * An animation payload idle past the window is released, both per-domain files leave the engine cache (only
+     * releasing the main one would leave the first-person arm's file behind and make this half of the release a
+     * no-op), and the facade still remembers the model so the seam can ask for it back.
+     */
+    @Test
+    void idleAnimationPastTheWindowIsReleasedFromBothDomainsAndLeavesTheEngineCache() {
+        ResourceLocation mainId = new ResourceLocation("ysmu", "anim_idle/main");
+        ResourceLocation armId = armIdOf(mainId);
+        AnimationFile mainFile = new AnimationFile();
+        AnimationFile armFile = new AnimationFile();
+        engineAnimations().put(mainId, mainFile);
+        engineAnimations().put(armId, armFile);
+        AssetManager.registerAnim(mainId, animationMap("anim_idle"));
+        assertEquals(1, AssetManager.animSize());
+
+        AssetManager.tick(System.currentTimeMillis() + IDLE_UNLOAD_MS + 1L);
+
+        assertEquals(0, AssetManager.animSize(), "an animation payload idle past the window is released");
+        assertNull(
+            engineAnimations().get(mainId),
+            "AnimationProvider.release must remove the model's own domain file from GeckoLibCache");
+        assertNull(
+            engineAnimations().get(armId),
+            "and the first-person domain file with it - the two are one cache entry here");
+        assertTrue(
+            AssetManager.anim(mainId)
+                .isPending(),
+            "after the release the handle is no longer READY - a later get() would reload it");
+        assertTrue(
+            AssetManager.managesAnimations(mainId),
+            "and the adoption record survives the eviction: that is what lets the seam tell an evicted model apart "
+                + "from one that never had animations of its own");
+    }
+
+    /**
+     * The built-in fallback model's animations must never be collected either - its payload is read from
+     * {@code builtin/}, never from the encrypted client cache, so a release could not be undone (reference
+     * {@code AssetManager.java:81-82}). This is the animation half of
+     * {@link #theDefaultModelIsPinnedAgainstIdleEviction}.
+     */
+    @Test
+    void theDefaultModelsAnimationsArePinnedAgainstIdleEviction() {
+        ResourceLocation defaultMain = ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID));
+        ResourceLocation otherMain = new ResourceLocation("ysmu", "anim_pinned_other/main");
+        engineAnimations().put(defaultMain, new AnimationFile());
+        engineAnimations().put(otherMain, new AnimationFile());
+        AssetManager.registerAnim(defaultMain, animationMap("default"));
+        AssetManager.registerAnim(otherMain, animationMap("anim_pinned_other"));
+        assertEquals(2, AssetManager.animSize());
+
+        AssetManager.tick(System.currentTimeMillis() + IDLE_UNLOAD_MS + 1L);
+
+        assertNotNull(
+            engineAnimations().get(defaultMain),
+            "the built-in default model's animations must survive the idle scan");
+        assertNull(
+            engineAnimations().get(otherMain),
+            "and the scan must still collect an ordinary idle model in the same pass");
+    }
+
+    /**
+     * The provider half of the animation cache: {@code DROP_HEAP} removes both of the model's per-domain files (the
+     * reference has one merged file under the mainId, so its provider removes one - reference
+     * {@code provider/AnimationProvider.java:37-43}), while {@code GPU_ONLY} leaves the heap entry alone; and the
+     * weight is the cached animation map's own byte count, which is the port's substitute for the reference's clip
+     * count because the cached value is the install rule's input (see {@link AnimationProvider}).
+     */
+    @Test
+    void animationProviderReleaseRemovesBothDomainsAndHonoursGpuOnly() {
+        AnimationProvider provider = new AnimationProvider();
+        ResourceLocation mainId = new ResourceLocation("ysmu", "anim_provider/main");
+        ResourceLocation armId = armIdOf(mainId);
+        AnimationFile mainFile = new AnimationFile();
+        AnimationFile armFile = new AnimationFile();
+        engineAnimations().put(mainId, mainFile);
+        engineAnimations().put(armId, armFile);
+        Map<String, byte[]> animations = animationMap("anim_provider");
+
+        provider.release(mainId, animations, ReleaseMode.GPU_ONLY);
+        assertSame(mainFile, engineAnimations().get(mainId), "GPU_ONLY must keep the heap entry");
+        assertSame(armFile, engineAnimations().get(armId), "GPU_ONLY must keep the first-person domain entry as well");
+
+        provider.release(mainId, animations, ReleaseMode.DROP_HEAP);
+        assertNull(engineAnimations().get(mainId), "DROP_HEAP must remove the model's own domain file");
+        assertNull(engineAnimations().get(armId), "DROP_HEAP must remove the first-person domain file too");
+
+        assertEquals(ReleaseMode.DROP_HEAP, provider.defaultReleaseMode(), "animation eviction drops the heap");
+        assertEquals(0L, provider.weight(mainId, null), "a missing animation map weighs nothing");
+        assertEquals(
+            animations.values()
+                .iterator()
+                .next().length,
+            provider.weight(mainId, animations),
+            "the animation map's own bytes are its weight");
     }
 }

@@ -2,9 +2,11 @@ package com.fox.ysmu.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -43,6 +45,21 @@ class ClientModelManagerEvictionSupportTest {
     private static final ResourceLocation WIRED_UNRELOADABLE =
         new ResourceLocation(ysmu.MODID, "eviction_wiring_unreloadable");
 
+    /** The animation half's own ids; see {@link #installAnimationProbe}. */
+    private static final ResourceLocation ANIMATIONS_OFF = new ResourceLocation(ysmu.MODID, "eviction_anim_off");
+    private static final ResourceLocation ANIMATIONS_ON = new ResourceLocation(ysmu.MODID, "eviction_anim_on");
+    private static final ResourceLocation ANIMATIONS_UNRELOADABLE =
+        new ResourceLocation(ysmu.MODID, "eviction_anim_unreloadable");
+    private static final ResourceLocation ANIMATIONS_NEVER_ADOPTED =
+        new ResourceLocation(ysmu.MODID, "eviction_anim_never_adopted");
+
+    /**
+     * One animation set with no keyframes, which is enough for the payload to count as non-empty and be parked; the
+     * parse of it is `ClientModelManagerAnimationInstallTest`'s subject, not this class's.
+     */
+    private static final String ANIMATION_JSON = "{\"format_version\":\"1.8.0\",\"animations\":"
+        + "{\"probe_idle\":{\"loop\":true,\"animation_length\":1.0,\"bones\":{}}}}";
+
     @AfterEach
     void restoreTheShippedDefaults() {
         // Release whatever the wiring test adopted, while the switch is still on, so the entry count does not
@@ -59,6 +76,31 @@ class ClientModelManagerEvictionSupportTest {
         Config.ENABLE_IDLE_ASSET_EVICTION = false;
         Config.GUI_POST_CLOSE_GRACE_SECONDS = 120;
         ClientModelManager.setGuiOpen(false);
+    }
+
+    /**
+     * The animation probes' own teardown.
+     * <p>
+     * {@link AssetManager#clearAll} while the switch is on is what releases their adopted entries (and clears the
+     * adoption record with them); the engine's animation cache is dropped by hand as well, because an install writes
+     * one file per domain under the model's {@code main} and {@code arm} ids and neither may be left behind for
+     * another test class in this JVM.
+     */
+    @AfterEach
+    void releaseAdoptedAnimationProbes() {
+        Config.ENABLE_IDLE_ASSET_EVICTION = true;
+        AssetManager.clearAll();
+        Config.ENABLE_IDLE_ASSET_EVICTION = false;
+        for (ResourceLocation model : new ResourceLocation[] { ANIMATIONS_OFF, ANIMATIONS_ON, ANIMATIONS_UNRELOADABLE,
+            ANIMATIONS_NEVER_ADOPTED }) {
+            ClientModelManager.MODELS.remove(model);
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .remove(ModelIdUtil.getMainId(model));
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .remove(ModelIdUtil.getArmId(model));
+        }
     }
 
     /**
@@ -192,5 +234,105 @@ class ClientModelManagerEvictionSupportTest {
             AssetManager.geo(wiredMain)
                 .isPending(),
             "and the adopted entry is READY, so a later get() returns it instead of reloading");
+    }
+
+    /** A payload with one animation set and no geometry; see {@link #ANIMATION_JSON}. */
+    private static ModelData animationPayload(ResourceLocation model) {
+        Map<String, byte[]> animations = new LinkedHashMap<>();
+        animations.put("main.animation.json", ANIMATION_JSON.getBytes(StandardCharsets.UTF_8));
+        return new ModelData(
+            model.getResourcePath(),
+            Type.FOLDER,
+            new LinkedHashMap<>(),
+            new LinkedHashMap<>(),
+            animations);
+    }
+
+    /**
+     * Registers a probe payload through the real path and installs its animations the way the engine does.
+     * <p>
+     * The install is the choke point {@code CustomPlayerModel.getAnimation} drives
+     * ({@code ClientModelManager.ensureAnimations}), so calling it here is the engine's own first request for one of
+     * this model's animations - which is when the port parses the parked payload and installs the per-domain files.
+     *
+     * @return its {@code main} id
+     */
+    private static ResourceLocation installAnimationProbe(ResourceLocation model) {
+        ClientModelManager.registerAll(animationPayload(model), false);
+        ResourceLocation mainId = ModelIdUtil.getMainId(model);
+        ClientModelManager.ensureAnimations(mainId);
+        return mainId;
+    }
+
+    /**
+     * The animation half of the wiring test above, through the same real path: the install adopts the payload for
+     * eviction only when the switch is on <em>and</em> the payload can be re-read, and the install really did put the
+     * model's own per-domain files where the engine reads them.
+     * <p>
+     * The mid case is the port-specific safety gate again: this port has no legacy reload path, so a model whose
+     * payload cannot be re-read must not be adopted - the eviction could never put its clips back.
+     */
+    @Test
+    void aModelsAnimationsAreAdoptedOnlyWhenTheSwitchIsOnAndThePayloadIsReloadable() {
+        int before = AssetManager.animSize();
+
+        Config.ENABLE_IDLE_ASSET_EVICTION = false;
+        installAnimationProbe(ANIMATIONS_OFF);
+        assertEquals(before, AssetManager.animSize(), "with the switch off the install must not adopt anything");
+        assertFalse(AssetManager.managesAnimations(ModelIdUtil.getMainId(ANIMATIONS_OFF)));
+
+        Config.ENABLE_IDLE_ASSET_EVICTION = true;
+        ClientModelManager.rememberOpenYsmModelCache(ANIMATIONS_ON, "0123456789abcdef0123456789abcdef");
+        ResourceLocation wiredMain = installAnimationProbe(ANIMATIONS_ON);
+        assertEquals(before + 1, AssetManager.animSize(), "an installed, reloadable animation payload is adopted");
+        assertTrue(AssetManager.managesAnimations(wiredMain));
+        assertNotNull(
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .get(wiredMain),
+            "the install put the model's own file under its main id");
+        assertNotNull(
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .get(ModelIdUtil.getArmId(ANIMATIONS_ON)),
+            "and the first-person domain's file under its arm id");
+
+        installAnimationProbe(ANIMATIONS_UNRELOADABLE);
+        assertEquals(
+            before + 1,
+            AssetManager.animSize(),
+            "a model with no reloadable cache entry must not be adopted - the eviction could not restore it");
+    }
+
+    /**
+     * The adoption record is what keeps the animation seam from starting a reload for a model this subsystem never
+     * took over.
+     * <p>
+     * This is the case the geometry seam does not have: a model that declares no animations of its own has no file in
+     * the engine cache, which is exactly the state an eviction leaves behind, so "the cache has no file" alone would
+     * make every such model decrypt its whole payload to install clips it already falls back to. The assertion that
+     * proves nothing was asked for is the entry count: {@code AssetCache.get} on an absent key registers an entry
+     * (through {@code computeIfAbsent}) before it submits the load, so an unchanged count means no load was started -
+     * and no background thread was handed {@code Minecraft.func_152344_a}, which a unit JVM does not have.
+     */
+    @Test
+    void anAnimationLookupForAModelTheSubsystemNeverAdoptedStartsNoReload() {
+        Config.ENABLE_IDLE_ASSET_EVICTION = true;
+        ClientModelManager.rememberOpenYsmModelCache(ANIMATIONS_NEVER_ADOPTED, "0123456789abcdef0123456789abcdef");
+        ResourceLocation mainId = ModelIdUtil.getMainId(ANIMATIONS_NEVER_ADOPTED);
+        int before = AssetManager.animSize();
+        assertTrue(ClientModelManager.hasReloadableClientCache(mainId), "the model is reloadable...");
+
+        // The model declares no animations of its own, so its normal state is the built-in default fallback and the
+        // engine's cache holds no file for it. Nothing was ever installed, so nothing was ever adopted.
+        ClientModelManager.ensureAnimations(mainId);
+
+        assertEquals(before, AssetManager.animSize(), "nothing may be registered for a model this subsystem never adopted");
+        assertFalse(AssetManager.managesAnimations(mainId));
+        assertNull(
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .get(mainId),
+            "... and no reload may have been started for it");
     }
 }

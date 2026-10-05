@@ -12,11 +12,14 @@ import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.event.ClickEvent;
+import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.client.event.*;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.Tags;
 import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
@@ -47,6 +50,43 @@ public class ClientEventHandler {
 
     private static boolean EXTRA_PLAYER = false;
     private static boolean pendingModelLoad;
+    /**
+     * Whether the join-world welcome message has already been shown in this client session. Ported from the reference
+     * branch's {@code client/ClientEventHandler.java:53} ({@code private static boolean welcomeShown = false;}), whose
+     * comment reads "Whether the welcome message has been shown this session".
+     * <p>
+     * <b>One deliberate difference from the reference:</b> the reference writes this field {@code true} at
+     * {@code :194} and <b>never writes it false anywhere</b> (grep of its whole tree finds only the declaration, the
+     * {@code !welcomeShown} test and that one assignment), so there it means "once per client launch" - switching
+     * servers in the same launch never shows the message again, which also makes {@code /ysm welcome on} unobservable
+     * after the first join. This port resets it from {@link #clearClientRuntimeState()}, the port's single
+     * disconnect/exit cleanup (called by both {@code PlayerLoggedOutEvent} and
+     * {@code ClientDisconnectionFromServerEvent}), which is the behaviour the reference's own comment describes. See
+     * {@code .agent/phase39-ysm-subcommands.md}.
+     */
+    private static boolean welcomeShown = false;
+
+    /**
+     * The read half of the once-per-session welcome rule (reference {@code ClientEventHandler.java:193}:
+     * {@code Config.SHOW_WELCOME_MESSAGE && !welcomeShown}).
+     * <p>
+     * Package private rather than inlined into {@code onClientPlayerJoinWorld} so the rule - and the reset it depends
+     * on - can be driven without a client: {@code ClientSessionStateResetTest} pins the whole lifecycle through this
+     * method and {@link #setWelcomeShown(boolean)}. The behaviour is the reference's; only the seam is the port's.
+     */
+    static boolean shouldShowWelcome() {
+        return Config.SHOW_WELCOME_MESSAGE && !welcomeShown;
+    }
+
+    /**
+     * The single writer of {@link #welcomeShown}: {@code true} from the join block that just showed the message,
+     * {@code false} from the disconnect cleanup. The reference writes the field directly in the join path and never
+     * resets it; the seam exists so both writes have one owner and can be unit-tested (see
+     * {@link #shouldShowWelcome()}).
+     */
+    static void setWelcomeShown(boolean shown) {
+        welcomeShown = shown;
+    }
 
     @SubscribeEvent
     public static void onTextureStitchEventPost(TextureStitchEvent.Post event) {
@@ -122,6 +162,29 @@ public class ClientEventHandler {
         // 调用的正是同一个 ClientModelManager.sendSyncModelMessage()（network/message/RequestSyncModel.java:29-31），
         // 所以这里再主动触发一次只会让同一批模型在 legacy 通道上被同步/注册两遍。
         // 客户端仍保留一条兜底入口：PlayerModelScreen.initGui 在模型列表为空时补发一次（见那里的注释）。
+        // The welcome/info message (reference client/ClientEventHandler.java:192-216), once per session: the guard is
+        // shouldShowWelcome() and the flag is consumed before the client is touched, exactly as the reference orders it
+        // (:193-195). The reference builds the clickable line from hard-coded Chinese/English chosen by
+        // Minecraft.getLanguageManager(); this repository sends every user-facing line through a translation key, so
+        // the language branch is the language file and the whole line is one ChatComponentTranslation carrying the
+        // /ysm help click event - the same shape YsmCommand.processHelp gives its welcome_off line.
+        if (shouldShowWelcome()) {
+            setWelcomeShown(true);
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc != null && mc.thePlayer != null) {
+                mc.thePlayer.addChatMessage(
+                    new ChatComponentTranslation("commands.yes_steve_model.welcome", Tags.VERSION));
+                if (Config.HIGH_VERSION_GAME_PATH == null || Config.HIGH_VERSION_GAME_PATH.isEmpty()) {
+                    mc.thePlayer.addChatMessage(
+                        new ChatComponentTranslation("commands.yes_steve_model.welcome.sound_hint"));
+                }
+                ChatComponentTranslation helpHint = new ChatComponentTranslation(
+                    "commands.yes_steve_model.welcome.help_hint");
+                helpHint.getChatStyle()
+                    .setChatClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ysm help"));
+                mc.thePlayer.addChatMessage(helpHint);
+            }
+        }
     }
 
     @SubscribeEvent
@@ -334,9 +397,10 @@ public class ClientEventHandler {
      * 客户端断开/退出的统一清理入口（只由上面的两个断开事件调用：{@code PlayerLoggedOutEvent}
      * 与 {@link FMLNetworkEvent.ClientDisconnectionFromServerEvent}；join 路径不调用）。
      * <p>
-     * 清 7 项：模型连接态、远端动画查询、远端动作状态、引擎侧远端 MoLang 变量、NPC 覆盖表、
+     * 清 8 项：模型连接态、远端动画查询、远端动作状态、引擎侧远端 MoLang 变量、NPC 覆盖表、
      * 宿主推送的动画剪辑表，以及 {@link AnimationManager#clearPlayerState()} 里的两张 per-player
-     * 进度表（{@code swingProgressByPlayer}/{@code useDurationByPlayer}，ExecPlan 的 A-11，由 t33 交付）。
+     * 进度表（{@code swingProgressByPlayer}/{@code useDurationByPlayer}，ExecPlan 的 A-11，由 t33 交付）、
+     * 客户端音效与音源，最后是进服欢迎消息的一次性标志 {@link #welcomeShown}（见该字段的 javadoc）。
      * 该方法本身幂等（MANAGER 未创建时判空跳过、其余是 ConcurrentHashMap.clear()），
      * 与本方法上面的两个 Remote* 清理重复但互为 no-op。
      */
@@ -355,6 +419,10 @@ public class ClientEventHandler {
         // server that just went away, so leaving them would keep the previous server's audio going and keep a
         // stale owner table alive across the next join.
         com.fox.ysmu.client.audio.YSMSoundManager.clear();
+        // The once-per-session welcome flag belongs to the session that just ended, so the next join shows the
+        // message again - the state the reference's own field comment ("this session", client/ClientEventHandler.java:53)
+        // describes but never implements, because it never writes the field false. See the field's javadoc.
+        setWelcomeShown(false);
     }
 
     private static boolean isVanillaPlayer(ResourceLocation modelId) {

@@ -428,3 +428,76 @@ commands.yes_steve_model.debug.eval.usage=Usage: /ysm debug eval <expression>  (
 commands.yes_steve_model.debug.unknown=Unknown debug subcommand: %s. Use: query | eval | overlay
 commands.yes_steve_model.reset.usage=Usage: /ysm reset <player|@a|@p>  - or use /ysmclient reset for yourself.
 commands.yes_steve_model.reset.done=Reset Molang variables for %s player(s).
+
+# /ysm help | play | setgamepath | buffer | welcome | sync - the rest of the command surface
+# (YsmCommand.processHelp / processPlay / processSetGamePath / processBuffer / processWelcome / processSync).
+# Same command family as the block above, so the same convention: plain text, no § colour codes and no [YSM]
+# prefix, because these lines are emitted server-side and also have to be readable in the server console.
+# Two exceptions, both printed by the client and never by the server, so they keep the client-chat prefix and
+# colours: the message.yes_steve_model.buffer.* group at the end (ShowBufferInfo) and the three
+# commands.yes_steve_model.welcome / .sound_hint / .help_hint lines below, which the join-world handler in
+# client/ClientEventHandler.java prints in the local player's chat. The command's own feedback
+# commands.yes_steve_model.welcome.on / .off stays plain text with the rest, because the server prints it.
+commands.yes_steve_model.play.no_data=Cannot play animation: player data not found.
+commands.yes_steve_model.play.not_found=Animation %s not found in current model.
+commands.yes_steve_model.play.done=Play: %s
+commands.yes_steve_model.setgamepath.usage=/ysm setgamepath <path> [version]
+commands.yes_steve_model.setgamepath.example=Example: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.setgamepath.none=No game path configured.
+commands.yes_steve_model.setgamepath.current=Current game path: %s
+commands.yes_steve_model.setgamepath.version=Asset version: %s
+commands.yes_steve_model.setgamepath.set=Game path set to: %s
+commands.yes_steve_model.setgamepath.cleared=Game path cleared.
+commands.yes_steve_model.setgamepath.local_notice=Changes are local only. Reconnect or reload models if needed.
+commands.yes_steve_model.buffer.querying=Querying buffer info...
+commands.yes_steve_model.welcome.on=Welcome message enabled.
+commands.yes_steve_model.welcome.off=Welcome message disabled.
+# The join-world welcome block (client-side; see the block comment above). %s is Tags.VERSION.
+commands.yes_steve_model.welcome=§6§l[§aYSMU§6§l] §rWelcome! You are running §eysmu %s§r. To change the YSM model, press Alt+Y
+commands.yes_steve_model.welcome.sound_hint=§6§l[§aYSMU§6§l] §7To enable missing sound effects (e.g. trident, goat horn), use §e/ysm setgamepath <path> [version]§7 to point to your modern Minecraft directory.
+commands.yes_steve_model.welcome.help_hint=§7Click §a§n[here]§r§7 or type §e/ysm help§7 to see all commands.
+commands.yes_steve_model.sync.resync.started=Resyncing models from the server...
+commands.yes_steve_model.sync.resync.cooldown=Resync is on cooldown. Try again in %s seconds.
+commands.yes_steve_model.sync.resync.disabled=Resync is disabled on this server.
+commands.yes_steve_model.sync.resync.failed=Resync could not be started (sync protocol disabled or not ready).
+commands.yes_steve_model.help.title=Help - use /ysm help <subcommand> for details
+commands.yes_steve_model.help.line.reload=  /ysm reload - rebuild the server-side model cache and resync every player (OP)
+commands.yes_steve_model.help.line.play=  /ysm play <animation> - play an animation of your current model (OP)
+commands.yes_steve_model.help.line.playsound=  /ysm playsound <name> - play a cached model sound (OP)
+commands.yes_steve_model.help.line.buffer=  /ysm buffer - print this client's buffer and heap usage (everyone)
+commands.yes_steve_model.help.line.setgamepath=  /ysm setgamepath <path> [version] - set the local game path for missing sounds/textures (everyone)
+commands.yes_steve_model.help.line.welcome=  /ysm welcome <on|off> - toggle the join welcome message (everyone)
+commands.yes_steve_model.help.line.sync=  /ysm sync - resync your own models (everyone)
+commands.yes_steve_model.help.line.reset=  /ysm reset [<player|@a|@p>] - reset Molang variables (OP)
+commands.yes_steve_model.help.line.debug=  /ysm debug <query|overlay|eval> - debug queries / overlay / eval (ADMIN)
+commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset> - load local models / reset Molang vars (everyone)
+commands.yes_steve_model.help.welcome_off=  Click [/ysm welcome off] or type it to stop the join welcome message
+commands.yes_steve_model.help.unknown=Unknown subcommand: %s. Use /ysm help to list all commands.
+commands.yes_steve_model.help.detail.title=Command: %s
+commands.yes_steve_model.help.detail.reload.usage=  Usage: /ysm reload
+commands.yes_steve_model.help.detail.reload.desc=  Rebuild the server-side model cache and resync all players. Example: /ysm reload
+commands.yes_steve_model.help.detail.play.usage=  Usage: /ysm play <animation>
+commands.yes_steve_model.help.detail.play.desc=  Play the named animation on your current model (server-authoritative). Example: /ysm play wave
+commands.yes_steve_model.help.detail.playsound.usage=  Usage: /ysm playsound <name>
+commands.yes_steve_model.help.detail.playsound.desc=  Play one of the model sounds cached in memory. Example: /ysm playsound trident
+commands.yes_steve_model.help.detail.buffer.usage=  Usage: /ysm buffer
+commands.yes_steve_model.help.detail.buffer.desc=  Print this client's direct-buffer, mapped-buffer and heap usage. Example: /ysm buffer
+commands.yes_steve_model.help.detail.setgamepath.usage=  Usage: /ysm setgamepath <path> [version]
+commands.yes_steve_model.help.detail.setgamepath.desc=  Point YSMU to a modern Minecraft directory to load missing sounds/textures. Client-side only. Example: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.help.detail.welcome.usage=  Usage: /ysm welcome <on|off>
+commands.yes_steve_model.help.detail.welcome.desc=  Toggle the join welcome message. Example: /ysm welcome off
+commands.yes_steve_model.help.detail.sync.usage=  Usage: /ysm sync
+commands.yes_steve_model.help.detail.sync.desc=  Restart the model sync for yourself (rate limited by ResyncCooldownSeconds). Example: /ysm sync
+commands.yes_steve_model.help.detail.reset.usage=  Usage: /ysm reset <player|@a|@p>
+commands.yes_steve_model.help.detail.reset.desc=  Reset Molang variable state of other players (roaming vars, frame physics, v.* leftovers) back to model defaults without reloading models. For yourself use /ysmclient reset. Supports vanilla selectors. Example: /ysm reset @a
+commands.yes_steve_model.help.detail.debug.usage=  Usage: /ysm debug <query|overlay|eval> [args]
+commands.yes_steve_model.help.detail.debug.desc=  Debug tooling: query Molang variables, toggle the debug overlay, or evaluate a Molang expression. Examples: /ysm debug query q.is_on_ground, /ysm debug eval math.floor(3.7)
+commands.yes_steve_model.help.detail.ysmclient.usage=  Usage: /ysmclient <load|reset>
+commands.yes_steve_model.help.detail.ysmclient.desc=  Client-side commands, no server needed. /ysmclient load registers locally scanned models (config/ysmu/custom + builtin) visible only to you; /ysmclient reset resets your Molang variables back to model defaults without reloading models. Example: /ysmclient load
+
+# ShowBufferInfo (/ysm buffer): printed in the issuing client's own chat by the client half, so this group keeps
+# the client-chat prefix and colours used by the other client-side message keys.
+message.yes_steve_model.buffer.direct=§6§l[§aYSM§6§l]§r §eDirect Buffer§r: §b%s MB§r used (§7%s buffers§r, cap §7%s MB§r)
+message.yes_steve_model.buffer.mapped=§6§l[§aYSM§6§l]§r §eMapped Buffer§r: §b%s MB§r
+message.yes_steve_model.buffer.heap=§6§l[§aYSM§6§l]§r §eHeap§r: §b%s MB§r / §b%s MB§r
+message.yes_steve_model.buffer.error=§6§l[§aYSM§6§l]§r §cError reading buffer info: %s
