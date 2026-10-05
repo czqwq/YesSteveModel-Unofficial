@@ -18,13 +18,21 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * Runs the MoLang statements carried by OpenYSM animation timelines / custom instruction keyframes.
  *
  * <p>
- * A-06①: the 1.7.10 runtime only registers the math functions, {@code ysm.first_order}/{@code ysm.second_order}/
- * {@code ysm.bone_*} (engine side), plus {@code query.position_delta} and {@code ctrl.hold} (host side). OpenYSM's
- * other instructions - {@code ctrl.set_animation}/{@code ctrl.reset}/..., {@code ysm.play_sound}/{@code particle}/...
- * - have no implementation here, and used to surface only as a generic "Failed to execute ..." line after
- * {@code MathBuilder} threw "Function 'x' couldn't be found!". The names are now diagnosed once per function name,
- * <b>after</b> the instruction really failed - a name probed before parsing reports functions the parser supports
- * through a rewrite (the vector bone queries) as missing, which is the false positive this ordering removes.
+ * A-06①: when this diagnosis was written, the 1.7.10 runtime only registered the math functions,
+ * {@code ysm.first_order}/{@code ysm.second_order}/{@code ysm.bone_*} (engine side), plus
+ * {@code query.position_delta} and {@code ctrl.hold} (host side); OpenYSM's other instructions -
+ * {@code ctrl.set_animation}/{@code ctrl.reset}/..., {@code ysm.play_sound}/{@code particle}/... - had no
+ * implementation here and surfaced only as a generic "Failed to execute ..." line after {@code MathBuilder} threw
+ * "Function 'x' couldn't be found!". <b>That is no longer the state of the table</b>: the host registers
+ * {@code ctrl.*}, {@code query.*} and {@code ysm.*} in {@code AnimationRegister.registerFunctions} (plus the
+ * {@code ctrl.set_animation}/{@code set_beginning_transition_length}/{@code reset}/{@code indicate_reload} entries
+ * in {@code CtrlScriptBinding.register}), and the engine registers {@code math.*} and the
+ * {@code ysm.bone_*}/{@code ysm.first_order}/{@code ysm.second_order}/{@code bone_color|transparency|glow} family in
+ * {@code MolangParser.doCoreRemaps}. The names are diagnosed once per function name, <b>after</b> the instruction
+ * really failed - a name probed before parsing reports functions the parser supports through a rewrite (the vector
+ * bone queries) as missing, which is the false positive this ordering removes. The warning therefore reports only
+ * names that are still genuinely absent, and it reads the registered table off the parser instead of repeating a
+ * hand-kept copy of it (the copy that used to be there outlived the registrations by several phases).
  *
  * <p>
  * Not part of this: the load-time path. A failing keyframe expression inside an animation file is handled by the
@@ -115,13 +123,27 @@ public final class MolangInstructionExecutor {
             }
             ysmu.LOG.warn(
                 "OpenYSM Molang function '{}' is not registered in the 1.7.10 runtime; instruction '{}' cannot run"
-                    + " (function not ported; registered functions are math.*, ysm.first_order, ysm.second_order,"
-                    + " ysm.bone_rot/bone_pos/bone_position/bone_scale/bone_pivot_abs either bare or with a"
-                    + " .x/.y/.z accessor, ysm.particle, ysm.play_sound/stop_sound/stop_all_sounds, query.position,"
-                    + " query.position_delta and ctrl.hold)",
+                    + " (function not ported; registered functions are {})",
                 name,
-                statement);
+                statement,
+                registeredFunctionNames(parser));
         }
+    }
+
+    /**
+     * The parser's own function table, sorted - the warning's list of what <em>is</em> available.
+     * <p>
+     * Read from the parser rather than written out here, because the hand-kept list this replaces had gone stale: it
+     * still claimed {@code ctrl.set_animation}, {@code ctrl.reset}, {@code ysm.play_sound} and {@code particle} "have
+     * no implementation here" long after {@code AnimationRegister.registerFunctions},
+     * {@code CtrlScriptBinding.register} and the engine's {@code math.*}/{@code ysm.bone_*} registrations had added
+     * them all. A derived list cannot be wrong about the table it is printed beside.
+     */
+    private static String registeredFunctionNames(MolangParser parser) {
+        if (parser == null || parser.functions == null) {
+            return "<none>";
+        }
+        return String.join(", ", new java.util.TreeSet<>(parser.functions.keySet()));
     }
 
     /**

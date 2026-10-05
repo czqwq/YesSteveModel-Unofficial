@@ -942,7 +942,10 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return handMatch(arguments, false, true);
             }
             if ("ctrl.ride".equals(name)) {
-                return player.isRiding() ? TRUE : FALSE;
+                // wiki 用法是 ctrl.ride('vehicle'|'passenger', '$实体ID')，所以这里和关键帧/脚本路径共用
+                // CtrlRideFunction（AnimationRegister:ctrl.ride，移植上游 RideCheck.java:28-72）。
+                // 以前这里只回答"是否骑乘"，于是按 wiki 写的控制器条件（例如只看被骑的是不是猪）会恒为真。
+                return rideMatch(arguments);
             }
             // ctrl.armor(slot, matcher)：helper（armorMatch）一直在，缺的只是这一条转发，
             // 于是关键帧/脚本路径（AnimationRegister:268 CtrlArmorFunction）能答、控制器条件恒 0。
@@ -1688,6 +1691,19 @@ public final class OpenYsmControllerExpressionEvaluator {
             }
             ItemStack stack = player.inventory.armorInventory[armorIndex];
             return com.fox.ysmu.client.animation.molang.CtrlItemMatcher.armorMatches(stack, matcher) ? TRUE : FALSE;
+        }
+
+        /** ctrl.ride('vehicle'|'passenger', '$实体ID')；与关键帧/脚本路径共用 {@code CtrlRideFunction}。
+         *  {@code #实体标签} 那一半在 1.7.10 无对应物，恒 false（见 CtrlRideFunction 的类注释）。 */
+        private double rideMatch(List<Argument> arguments) {
+            String type = arguments.size() > 0 ? arguments.get(0).asString() : "";
+            String matcher = arguments.size() > 1 ? arguments.get(1).asString() : "";
+            if (player == null) {
+                // 没有实体（脱离帧的求值）时按假回答，不抛异常。
+                return FALSE;
+            }
+            return com.fox.ysmu.client.animation.molang.CtrlRideFunction.ridingMatches(player, type, matcher) ? TRUE
+                : FALSE;
         }
 
         private double handMatch(List<Argument> arguments, boolean requireUse, boolean requireSwing) {

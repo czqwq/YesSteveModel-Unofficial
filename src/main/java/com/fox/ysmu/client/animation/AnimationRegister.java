@@ -19,6 +19,7 @@ import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
 import com.fox.ysmu.client.animation.molang.CtrlArmorFunction;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
 import com.fox.ysmu.client.animation.molang.CtrlItemFunction;
+import com.fox.ysmu.client.animation.molang.CtrlRideFunction;
 import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.EquippedEnchantmentLevelFunction;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
@@ -33,7 +34,9 @@ import com.fox.ysmu.client.animation.molang.QueryItemNameAnyFunction;
 import com.fox.ysmu.client.animation.molang.QueryItemTagFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionFunction;
+import com.fox.ysmu.client.animation.molang.YsmDebugDumpFunction;
 import com.fox.ysmu.client.animation.molang.YsmEffectLevelFunction;
+import com.fox.ysmu.client.animation.molang.YsmModVersionFunction;
 import com.fox.ysmu.client.animation.molang.YsmSoundFunction;
 import com.fox.ysmu.client.animation.molang.YsmSyncFunction;
 import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
@@ -219,6 +222,13 @@ public class AnimationRegister {
         // 查表，查不到会抛 Function 'q.debug_output' couldn't be found!，整条关键帧表达式失效
         // （MolangQueryAbbreviationTest 覆盖）。未开动画调试模式时 MolangDebugOutput 静默丢弃。
         functions.put("query.debug_output", QueryDebugOutputFunction.class);
+        // ysm.dump_equipped_item(slotType) / ysm.dump_relative_block(x,y,z)：调试转储，恒返回 0，只在动画调试
+        // 模式下输出。另三个 dump_* 由 wiki/上游写成**裸变量**，注册在 registerYsmVariables
+        // （YsmDebugDumpFunction.registerDumpVariables）。五个名字都必须存在，否则按 wiki 写的调用是一条
+        // 解析失败（函数名）或静默 0（变量名）。
+        // SOURCE(上游 1.20): YSMBinding.java:67-71 `function("dump_equipped_item"/"dump_relative_block", …)`.
+        functions.put("ysm.dump_equipped_item", YsmDebugDumpFunction.class);
+        functions.put("ysm.dump_relative_block", YsmDebugDumpFunction.class);
         // ysm.perlin_noise：3D 柏林噪声（返回 [0,1]），自实现。
         functions.put("ysm.perlin_noise", PerlinNoiseFunction.class);
         // ysm.keyboard(键码...)：关键帧/时间轴 Molang 里的按键查询。
@@ -257,6 +267,14 @@ public class AnimationRegister {
         functions.put("ysm.equipped_enchantment_level", EquippedEnchantmentLevelFunction.class);
         // ysm.effect_level：返回渲染实体身上给定药水效果的等级之和（1 级 = 1）。
         functions.put("ysm.effect_level", YsmEffectLevelFunction.class);
+        // ysm.mod_version(modid)：返回指定模组的版本。上游返回的是**字符串**，本引擎只有 double，所以按本仓
+        // 已有的字符串机制返回 MolangStringPool 池化 id —— 与 ysm.relative_block_name 同一条路
+        // （YsmRelativeBlockNameFunction.java:50），包里 `ysm.mod_version('ysm')=='2.6.5'` 两侧因此落在同一个 id。
+        // 参考分支注册的是恒 0 桩（.../perf-previewUI/.../AnimationRegister.java:160-161），
+        // 理由是"1.7.10 模组版本是字符串、无统一数字语义" —— 那正是池化 id 要解决的问题，不是绕过它的理由。
+        // SOURCE(上游 1.20): YSMBinding.java:73 `function("mod_version", new ModVersion())`,
+        //   ModVersion.java:14-28（返回 Maven 版本字符串，validateArgumentSize == 1）。
+        functions.put("ysm.mod_version", YsmModVersionFunction.class);
         // A pack's own sound instructions. Upstream registers all three in YSMBinding.java:185-187; without them a
         // pack's `sound_effects` timeline entry is a parse failure, not a silent no-op.
         functions.put("ysm.play_sound", YsmSoundFunction.Play.class);
@@ -273,6 +291,14 @@ public class AnimationRegister {
         functions.put("ctrl.swing", CtrlItemFunction.class);
         // ctrl.armor(slot, matcher)：护甲槽匹配，只认 $物品ID 与 empty（与控制器路径同一规则）。
         functions.put("ctrl.armor", CtrlArmorFunction.class);
+        // ctrl.ride(type, matcher)：wiki 用法 `ctrl.ride('vehicle', '$minecraft:pig')` /
+        // `ctrl.ride('passenger', '$minecraft:pig')`。此前只有控制器条件路径有（且被简化成"是否骑乘"），
+        // 关键帧/时间轴查的是这张表，表里没有这个名字 —— 于是 ctrl.ride(...) 在关键帧里是解析失败、整条通道被丢弃。
+        // 参考分支注册的是恒 0 的 CtrlHoldFunction 桩（恒 0 桩，不能照抄）；这里按上游的真机制：
+        // SOURCE(上游 1.20): CtrlBinding.java:82 `function("ride", RideCheck.rideCheck())`,
+        //   functions/RideCheck.java:28-72（type = vehicle/passenger，matcher = $实体ID / #实体标签）。
+        // 1.7.10 没有实体标签管理器，所以只有 $ 那一半能回答（见 CtrlRideFunction 的类注释）。
+        functions.put("ctrl.ride", CtrlRideFunction.class);
     }
 
     /** One line, not one per repeat, so a caller that re-runs registration cannot spam the log. */
@@ -398,6 +424,13 @@ public class AnimationRegister {
         // 同一约定）后立刻用 supplier 绑定，使其到处都是"客户端当前帧率"的实时值。
         parser.register(new LazyVariable("ysm.fps", com.fox.ysmu.client.animation.molang.FpsQuery.FALLBACK_FPS));
         parser.setValue("ysm.fps", com.fox.ysmu.client.animation.molang.FpsQuery::clientFps);
+
+        // ysm.dump_mods / ysm.dump_effects / ysm.dump_biome：wiki 与上游把它们写成**裸变量**（无括号），
+        // 读一次转储一次。它们不属于函数表，所以在这里注册（与 ysm.dump_equipped_item/dump_relative_block
+        // 那两个带参函数共用 YsmDebugDumpFunction 的一份实现）。
+        // SOURCE(上游 1.20): YSMBinding.java:69-71 `var("dump_mods", …)` / `entityVar("dump_effects", …)` /
+        //   `entityVar("dump_biome", …)`.
+        YsmDebugDumpFunction.registerDumpVariables(parser);
 
         // parser.register(new LazyVariable("ysm.first_person_mod_hide", MolangUtils.FALSE));
     }

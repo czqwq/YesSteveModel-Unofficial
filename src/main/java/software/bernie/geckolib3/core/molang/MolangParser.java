@@ -155,6 +155,15 @@ public class MolangParser extends MathBuilder {
         this.functions.put("math.die_roll", this.functions.get("roll"));
         this.functions.put("math.die_roll_integer", this.functions.get("rolli"));
         this.functions.put("math.hermite_blend", this.functions.get("hermite"));
+        // 上游把同一批实现同时挂在 `math` 绑定的两个名字下（tmp/YesSteveModel-dev-1.20
+        // .../geckolib3/core/molang/builtin/MathBinding.java:46-48 `die_roll`/`die_roll_integer`/`hermite_blend`
+        // 与 :54-57 `randomi`/`roll`/`rolli`/`hermite` 指向同一批类）。这里此前只复制了长名，于是一个按上游
+        // 写的 `math.roll(...)`/`math.randomi(...)` 在 MathBuilder.createFunction 查表落空、整条表达式判死。
+        // 复用上面那张表的同一批类（不是 `remap`，那会把短名键删掉，而短名是现有 pack 在用的名字）。
+        this.functions.put("math.roll", this.functions.get("roll"));
+        this.functions.put("math.rolli", this.functions.get("rolli"));
+        this.functions.put("math.hermite", this.functions.get("hermite"));
+        this.functions.put("math.randomi", this.functions.get("randomi"));
         // math.min_angle：Bedrock/OpenYSM 单参数角度归一化（mclib 原版没有）。
         this.functions.put("math.min_angle", MinAngle.class);
         remap("exp", "math.exp");

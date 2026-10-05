@@ -92,6 +92,34 @@ the part of it that is written against this snapshot.
   (`:393-399`, colon-less form at `MolangParserImpl.java:269`); `SOURCE` splits the same way as the old port did, so
   its only form of this shape is `PackFunctionScript.java:229-309` for `.molang` files, which this mirrors. Recorded
   in `.agent/phase25-braced-molang-scopes.md`.
+- **`com/eliotlash/mclib/math/functions/utility/DieRoll.java` and `DieRollInteger.java` - the snapshot's roll loop
+  never terminated.** Both classes had `while (i < getArg(0))` with no increment and a spread of
+  `(getArg(2) - getArg(2))`, i.e. exactly 0, so `math.die_roll(...)` / `math.die_roll_integer(...)` with a roll count
+  above 0 spun forever on the client thread instead of answering a value. The bodies are now upstream's
+  (`tmp/YesSteveModel-dev-1.20` `.../geckolib3/core/molang/builtin/math/DieRoll.java:14-30` and
+  `DieRollInteger.java:14-31`, which the vendored newer MoLang VM mirrors item-for-item at
+  `software/bernie/geckolib3/molang/builtin/math/DieRoll.java`); upstream's two classes are genuinely different shapes
+  (round vs truncate, bounds float vs int, a different swap and `nextFloat` vs `nextInt`), so both were ported
+  separately. Two documented substitutions: `Math.random()` stands in for upstream's per-entity `RandomSource`, which
+  this layer has no entity to reach, and a degenerate span answers `min` instead of upstream's `nextInt(0)`. Note this
+  is a defect the **reference branch carries too** (`tmp/YesSteveModel-Unofficial-perf-previewUI/.../mclib/math/
+  functions/utility/DieRoll.java:26-28`), so it is an example of what "copy the reference implementation verbatim"
+  must not copy. Recorded in `.agent/phase27-mclib-math-defects.md`.
+- **`com/eliotlash/mclib/math/functions/classic/Sin.java` and `Cos.java` are unreachable, and stay as they are.** They
+  compute `Math.sin`/`Math.cos`, i.e. radians, which contradicts upstream's degrees
+  (`tmp/YesSteveModel-dev-1.20` `.../molang/builtin/math/Sin.java:11` `Mth.sin(arg/180f*PI)`) - but they never run:
+  `MolangParser.java:98-99` registers `SinDegrees`/`CosDegrees` under the short keys first and `:181`/`:153` +
+  `remap` (`:217-222`) remove the originals afterwards, so the live `math.sin` is
+  `software/bernie/geckolib3/core/molang/functions/SinDegrees.java:21` (`arg / 180 * PI`, degrees). Javadoc was added to
+  both classes recording that, so nobody converts them to degrees on the assumption that they are live. Recorded in
+  `.agent/phase27-mclib-math-defects.md` section 0.
+- **`MolangParser.doCoreRemaps` registers four more upstream names, one per implementation.** `math.roll`,
+  `math.rolli`, `math.hermite` and `math.randomi` (`:158-166`) are upstream's own spellings for the same four
+  implementations the `math.die_roll`/`die_roll_integer`/`hermite_blend`/`random_integer` names already use
+  (`tmp/YesSteveModel-dev-1.20` `.../molang/builtin/MathBinding.java:46-48` vs `:54-57`), and a pack written against
+  upstream lost the whole channel on the missing name. The neighbouring classes were reused rather than copied, and
+  `remap` was deliberately not used because it deletes the short keys existing packs call. Recorded in
+  `.agent/phase27-mclib-math-defects.md`.
 
 ## Where it came from
 

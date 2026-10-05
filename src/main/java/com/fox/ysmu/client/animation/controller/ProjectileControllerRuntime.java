@@ -695,12 +695,17 @@ public final class ProjectileControllerRuntime {
         if ("math.exp".equals(name) && count >= 1) {
             return Math.exp(args.get(0));
         }
+        // 上游 Ln.java:8-10 就是 Math.log（负数得 NaN）。此前这里带着参考分支的 "v<=0 → 0" 护栏，
+        // 而玩家轴 OpenYsmControllerExpressionEvaluator:1196-1198 返回 Math.log，同一个表达式在两轴上取值不同。
         if ("math.ln".equals(name) && count >= 1) {
-            return args.get(0) <= 0 ? 0.0d : Math.log(args.get(0));
+            return Math.log(args.get(0));
         }
+        // 上游 HermitBlend.java:8-11：ceil 后 floor 三次 Hermite；玩家轴
+        // OpenYsmControllerExpressionEvaluator:1201-1204 与关键帧路径的 mclib HermiteBlend 都是这个式子。
+        // 此前这里是参考分支未取整的 v*v*(3-2v)。ceil 之后 v 恒为整数，两者只在 v=0/1 相等。
         if (("math.hermite_blend".equals(name) || "math.hermite".equals(name)) && count >= 1) {
-            double value = args.get(0);
-            return value * value * (3 - 2 * value);
+            double min = Math.ceil(args.get(0));
+            return Math.floor(3.0d * min * min - 2.0d * min * min * min);
         }
         if ("math.pow".equals(name) && count >= 2) {
             return Math.pow(args.get(0), args.get(1));

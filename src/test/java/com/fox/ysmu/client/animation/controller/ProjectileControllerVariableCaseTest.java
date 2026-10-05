@@ -187,4 +187,46 @@ class ProjectileControllerVariableCaseTest {
             activeAnimations(),
             "variable.<name> is the same variable as v.<name>, as it is everywhere else in the runtime");
     }
+
+    /**
+     * 弹射物求值器的 {@code math.*} 分支也要按**上游**取值（{@code tmp/YesSteveModel-dev-1.20
+     * .../builtin/math/HermitBlend.java:8-11} 与 {@code Ln.java:8-10}），与玩家轴
+     * {@code OpenYsmControllerExpressionEvaluator} 一致。
+     *
+     * <p>修复前这里带着参考分支的两处不同实现：{@code math.hermite_blend} 是未取整的 {@code v*v*(3-2v)}、
+     * {@code math.ln} 对 {@code v<=0} 返回 0，于是同一条控制器条件在弹射物轴上与在玩家轴上取值不同
+     * （{@code ProjectileControllerRuntime.evaluateFunction} 与
+     * {@code OpenYsmControllerExpressionEvaluator.mathValue}）。</p>
+     *
+     * <p>判据是状态机的**转移结果**（{@link #activeAnimations()}）：求值器是私有的，条件文本才是它的公开
+     * 入口——条件成立则选到 {@code guard} 状态，不成立则停在初始状态。</p>
+     */
+    @Test
+    void theProjectileAxisUsesUpstreamMathSemantics() {
+        // 三个子用例各自重新登记控制器，先清掉上一个子用例/上一个用例留下的状态机，判据才只是本次求值的结果。
+        ProjectileControllerRuntime.clear();
+        // 上游 HermitBlend：ceil(0.2)=1 → floor(3-2)=1，所以 1==1 成立；参考分支的 0.2*0.2*(3-0.4)=0.104 不成立。
+        registerGroundGuard("math.hermite_blend(0.2)==1");
+        assertEquals(
+            Collections.singletonList(GROUND_CLIP),
+            activeAnimations(),
+            "math.hermite_blend must round like upstream, not evaluate the raw cubic");
+
+        // 上游 Ln：Math.log(1)=0。两条护栏（v<=0→0 与 Math.log）在 1.0 上同值，所以这里另取一个只在
+        // "取对数" 与 "恒返回 0" 之间有区别的输入：Math.log(e)=1。
+        ProjectileControllerRuntime.clear();
+        registerGroundGuard("math.ln(math.e)>0.999");
+        assertEquals(
+            Collections.singletonList(GROUND_CLIP),
+            activeAnimations(),
+            "math.ln must be Math.log, not a constant 0");
+
+        // 负入参：上游不给护栏，Math.log(-1) 是 NaN，NaN 的任一比较都是假——所以条件不成立。
+        ProjectileControllerRuntime.clear();
+        registerGroundGuard("math.ln(-1)<0");
+        assertEquals(
+            Collections.singletonList(FLIGHT_CLIP),
+            activeAnimations(),
+            "an upstream math.ln has no v<=0 guard, so Math.log(-1) is NaN and the guard is false");
+    }
 }

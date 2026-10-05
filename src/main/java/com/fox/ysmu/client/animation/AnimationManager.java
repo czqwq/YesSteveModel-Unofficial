@@ -36,6 +36,7 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.util.ModelIdUtil;
 import com.google.common.collect.Lists;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -230,17 +231,59 @@ public final class AnimationManager {
 
     /**
      * Plays one of the three preview channels, but only on a preview entity: a model in the world never gets its
-     * preview channels applied, and a channel that the model does not define (or the {@code empty} sentinel) stops the
+     * preview channels applied, and a channel the model does not define (or the {@code empty} sentinel) stops the
      * controller instead of asking the engine for a missing animation.
+     * <p>
+     * <b>Port-specific addition, port-specific reason.</b> The reference branch's GUI preview hand-over is unguarded
+     * too ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/AnimationManager.java:623-625}
+     * {@code playGuiPreviewAnimation} -> {@code playAnimation}, called from its {@code :918-926}, where
+     * {@code hasPreviewAnimation()} only tests for blankness), so this is not a shape copied from upstream. The port
+     * added its own partial guard, {@code ModelPreviewRegistry#isPlayable}
+     * ({@code client/gui/ModelPreviewRegistry.java:114-124}), and it is partial by construction: it answers
+     * {@code true} for every non-blank name that is not the literal {@code empty}, and the only channel that is
+     * checked before it is handed over is the model's declared {@code preview_animation}. That name is the pack's own
+     * string ({@code model/resource/YSMFolderDeserializer.java:171} -> {@code
+     * client/sync/OpenYsmModelSyncClient.java:488-493} -> {@code ModelPreviewRegistry.accept:40-55}), falls back to
+     * {@code idle} when undeclared ({@code ModelPreviewRegistry.previewFor:73-76}) and is copied onto the preview
+     * entity without an existence test ({@code ModelPreviewAnimationState.configure:59-68}, {@code :61-62}). This is
+     * audit {@code tmp/unguarded-animation-names.md} §2.2, site C-2: a manifest {@code preview_animation} left over
+     * from another model (or a pack whose models share one manifest) reaches
+     * {@code AnimationController#setAnimation} and takes its early return
+     * ({@code software/bernie/geckolib3/core/controller/AnimationController.java:345-358}), which prints
+     * "Could not load animation: &lt;name&gt;. Is it missing?" once per frame and returns before updating
+     * {@code currentAnimationBuilder} ({@code :362}), so the controller re-evaluates the same builder as "changed"
+     * forever and the tile shows whatever it was showing.
+     * <p>
+     * The hover and focus channels are safe by a different route - they can only ever be {@code hover}/{@code
+     * hover_fadeout}/{@code focus} or {@code empty}, and the first three are only configured when
+     * {@code ModelPreviewRegistry.hasHover/hasFocus} found them ({@code ModelPreviewAnimationState.configure:52-55})
+     * - which is exactly why the check below has to cover the preview channel rather than lean on that reasoning.
+     * <p>
+     * The guard itself is the same question {@code ModelPreviewRegistry} already asks for the sibling
+     * {@code hover}/{@code focus} channels, asked through the registry's own file lookup
+     * ({@code client/gui/ModelPreviewRegistry.java:126-133}) rather than through a second copy of it.
      */
     private static PlayState playPreviewChannel(AnimationEvent<CustomPlayerEntity> event, String animationName) {
         CustomPlayerEntity animatable = event.getAnimatable();
         if (animatable.getPlayer() != null || animatable.getMainModel() == null) {
             return PlayState.STOP;
         }
+        // The file to ask is the one the engine will read for this animatable - CustomPlayerEntity#getAnimation,
+        // which is what CustomPlayerModel#getAnimationFileLocation hands the renderer
+        // (client/model/CustomPlayerModel.java:128-133). It is deliberately NOT getMainModel(): that answers the
+        // built-in default while the requested model's geometry is not yet in the engine's cache
+        // (CustomPlayerEntity.java:236-242), i.e. a different file from the one this hand-over feeds - a GUI tile whose
+        // model has not been built yet would then be refused its own preview_animation.
         net.minecraft.util.ResourceLocation modelId = com.fox.ysmu.util.ModelIdUtil
-            .getModelIdFromMainId(animatable.getMainModel());
+            .getModelIdFromMainId(getAnimationId(event));
         if (!com.fox.ysmu.client.gui.ModelPreviewRegistry.isPlayable(modelId, animationName)) {
+            return PlayState.STOP;
+        }
+        // isPlayable is the port's own sentinel check and answers true for any other non-blank name, so the name is
+        // still only a pack's word at this point. Ask the model's real animation set - the lookup
+        // ModelPreviewRegistry already performs for the sibling hover/focus channels
+        // (client/gui/ModelPreviewRegistry.java:126-133) - before handing the name over.
+        if (!com.fox.ysmu.client.gui.ModelPreviewRegistry.hasAnimation(modelId, animationName)) {
             return PlayState.STOP;
         }
         return playLoopAnimation(event, animationName);
@@ -667,7 +710,12 @@ public final class AnimationManager {
             GeckoLibCache.getInstance().parser,
             player,
             event.getController(),
-            mainStateOf(player));
+            mainStateOf(player),
+            // The animation file id the engine will read for this controller's animatable
+            // (CustomPlayerModel#getAnimationFileLocation -> CustomPlayerEntity#getAnimation). `ctrl.set_animation`
+            // carries only a name, so without this the script path cannot tell a clip the model declares from one it
+            // does not - see CtrlScriptBinding.SetAnimationFunction.
+            getAnimationId(event));
         return scripted == null ? fallback.apply(event) : scripted;
     }
 
