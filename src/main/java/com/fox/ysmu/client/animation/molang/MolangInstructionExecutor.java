@@ -12,6 +12,7 @@ import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.molang.MolangException;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.expressions.MolangAssignment;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
@@ -95,6 +96,7 @@ public final class MolangInstructionExecutor {
                     continue;
                 }
                 result.get();
+                noteAssignmentOwner(result);
             } catch (Exception e) {
                 // 只有真失败了才说"这个函数没注册"：以前是在解析**前**拿字面名去查 parser.functions，
                 // 于是被 MolangParser.rewriteVectorFunction 重写掉的向量名（ysm.bone_rot('X').x 这类）
@@ -108,6 +110,24 @@ public final class MolangInstructionExecutor {
 
     public static void clearWarnings() {
         WARNED_INSTRUCTIONS.clear();
+    }
+
+    /**
+     * Records which model's timeline last wrote a global {@code v.*} name, so the debug overlay's {@code @model}
+     * column can show where a value that outlives its frame came from. This is the one producer for that column in
+     * the reference branch ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../MolangInstructionExecutor.java:340}),
+     * moved here because this port's executor has no assignment branch of its own - the engine's parser returns a
+     * {@code MolangAssignment} whose target is the variable the scope was just written through.
+     * <p>
+     * Called only after the statement really evaluated, and the engine ignores the call unless the debug feature has
+     * asked for captures, so a normal frame pays nothing for it.
+     */
+    private static void noteAssignmentOwner(IValue result) {
+        if (!(result instanceof MolangAssignment)) {
+            return;
+        }
+        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime
+            .noteGlobalVarOwner(((MolangAssignment) result).variable.getName());
     }
 
     /**

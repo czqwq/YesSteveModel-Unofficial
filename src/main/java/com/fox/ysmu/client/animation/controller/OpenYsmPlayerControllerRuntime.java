@@ -102,8 +102,43 @@ public final class OpenYsmPlayerControllerRuntime {
         return null;
     }
 
-    static void clear() {
+    /**
+     * 清掉全部玩家的控制器运行时状态。{@code MolangReset.resetAll()}（{@code /ysm reset @a} 的客户端执行体）
+     * 在 {@code client.animation.molang} 包里也要用它，所以可见性与参考分支一致放宽到 public；
+     * 行为一字未改。
+     */
+    public static void clear() {
         STATES.clear();
+    }
+
+    /**
+     * Drop animation objects on resource eviction; keep authored state and model variables.
+     *
+     * <p>Reference {@code OpenYsmPlayerControllerRuntime.java:186-196}, called from
+     * {@code AnimationProvider.release} (reference {@code provider/AnimationProvider.java:41}) so
+     * that a controller whose clip objects were just dropped re-issues its animation from the
+     * reloaded file instead of holding the builder it resolved against the evicted one.
+     *
+     * <p>Adapted to this port: the reference's body also clears {@code lastAnimationId} (the
+     * animation-file id its state last read — this port resolves the file per lookup instead of
+     * caching the id), {@code lastActiveAnimations} (its per-controller resolved-clip list) and a
+     * per-state timeline cache through its own {@code clearTimeline}; this port keeps none of
+     * those three, so there is nothing to clear there. What it does keep — and what the reload
+     * needs — is the two selection fields: {@link #applyAnimation} reads them to decide whether the
+     * controller still has the right clip, and clearing them makes the next frame re-issue it.
+     */
+    public static void releaseModelAnimations(ResourceLocation animationId) {
+        if (animationId == null) {
+            return;
+        }
+        for (Map.Entry<StateKey, RuntimeState> entry : STATES.entrySet()) {
+            if (!animationId.equals(entry.getKey().animationId)) {
+                continue;
+            }
+            RuntimeState state = entry.getValue();
+            state.lastSelectedAnimationState = "";
+            state.lastSelectedAnimation = "";
+        }
     }
 
     /**
@@ -131,6 +166,56 @@ public final class OpenYsmPlayerControllerRuntime {
                 it.remove();
             }
         }
+    }
+
+    /**
+     * 清掉某玩家**全部**控制器的运行时状态（{@code /ysmclient reset}，以及服务端 {@code /ysm reset <selector>}
+     * 转发的 {@code PacketResetMolang}）。
+     *
+     * <p>与 {@link #clearControllerState} 的分工：那个按"一个模型 + 一个控制器"清（{@code ctrl.reset} 的语义），
+     * 这个按玩家整体清（用户显式要求把帧间状态与 {@code v.*} 残留退回默认值）。调用方在客户端主线程执行
+     * （{@code MolangReset.resetSelf}）。</p>
+     */
+    public static void clearPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<StateKey, RuntimeState>> it = STATES.entrySet()
+            .iterator();
+        while (it.hasNext()) {
+            if (playerId.equals(it.next().getKey().playerId)) {
+                it.remove();
+            }
+        }
+    }
+
+    /**
+     * 重置本地玩家在某个模型上"用户显式设置"的漫游变量（{@code /ysm reset} / {@code /ysmclient reset}）。
+     *
+     * <p><b>移植注：</b>参考分支清的是它自己那张全局 {@code PENDING_ROAMING} 平坦表
+     * （{@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../RoamingVariables.java:520-539}）。本仓的漫游数据
+     * 不在控制器运行时里，而在 {@code ClientRoamingStore}（按玩家 + 模型命名空间键存，见
+     * {@code ClientRoamingStore.valuesFor}），所以这里按后者的键定位同一玩家同一模型的命名空间并删掉它的本地值 ——
+     * 不另造第二张漫游表。模型 {@code ysm.json} 里的定义（变量清单与默认值）不属于这张表，因此不会被清掉，
+     * 变量回落到模型默认值而不是消失。</p>
+     *
+     * <p>已知边界（记录，不在此处发明机制）：本仓的漫游变量以服务端为准，服务端下一次
+     * {@code S2CRoamingState} 回显同一命名空间时会把值再填回来；参考分支没有这条回显通道，所以它的
+     * {@code resetUserRoamingVars} 是终局的，这个不是。</p>
+     */
+    public static void resetUserRoamingVars(ResourceLocation modelId) {
+        net.minecraft.entity.player.EntityPlayer player = net.minecraft.client.Minecraft.getMinecraft().thePlayer;
+        if (player == null || modelId == null) {
+            return;
+        }
+        com.fox.ysmu.client.roaming.ClientRoamingStore.forget(
+            player.getUniqueID(),
+            com.fox.ysmu.client.roaming.ClientRoamingKeys.keyFor(modelId));
+    }
+
+    /** 重置**全部**玩家的用户漫游变量（{@code /ysm reset @a}）；同样只清 {@code ClientRoamingStore}。 */
+    public static void resetAllUserRoamingVars() {
+        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
     }
 
     /**

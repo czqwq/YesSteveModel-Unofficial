@@ -861,6 +861,30 @@ public final class OpenYsmControllerExpressionEvaluator {
             "attacked", "jump", "sneak", "sneaking", "run", "walk"));
 
     /**
+     * Static helper for debug queries — evaluates a {@code ctrl.*} state using only the player reference, without
+     * needing an {@link AnimationEvent} or a {@link OpenYsmPlayerControllerRuntime.RuntimeState}.
+     * <p>
+     * 必须与控制器路径**同源**：这里以前自己抄了一份判定，{@code ctrl.idle} 的排除列表漏了 {@code walk}/{@code run}
+     * （还有 fly/elytra_fly），于是叠加层和 {@code /ysm query} 在走路时显示 {@code ctrl.idle=1}，而模型看到的却是 0。
+     * YSM 的 {@code ctrl.*} 是优先级状态机 —— {@code evaluateState} 从最高优先级往下取第一个成立的谓词，run 先于
+     * walk、walk 先于 idle（idle 的谓词恒真）—— 走路时命中 walk，idle 必为 0。两套口径不一致时排查会直接走错方向。
+     * <p>
+     * 没有 {@link AnimationEvent} 时摆臂类状态退化为实际水平位移，这与控制器路径自己的做法一致
+     * （{@link Context#limbSwingAmount()} 在 event 为 null 时就走这条路），不引入新的近似。
+     *
+     * @return 状态成立 1、不成立 0；名字不是已知状态时返回 NaN（调用方据此显示"未知变量"）
+     */
+    public static double evaluateCtrlState(String name, EntityPlayer player) {
+        if (!CONTROLLER_STATE_NAMES.contains(name)) {
+            return Double.NaN;
+        }
+        if (player == null) {
+            return FALSE;
+        }
+        return new Context(null, player, null).isControllerState(name) ? TRUE : FALSE;
+    }
+
+    /**
      * 净头偏航（渲染器同口径）：{@code wrapDegrees(rotationYawHead - renderYawOffset)}。
      * 关键帧路径的 {@code ysm.head_yaw}/{@code query.head_x_rotation} 取它的负值。
      */
@@ -1154,6 +1178,13 @@ public final class OpenYsmControllerExpressionEvaluator {
          * {@code builtin/math/*.java}；与参考分支（SOURCE:695-792）不一致的地方都在下面注明，
          * 因为参考分支在几处自己改了上游的算法。</p>
          *
+         * <p>弹射物轴（{@code ProjectileControllerRuntime.evaluateFunction}）分派的同名函数不再各写一份：
+         * {@code sqrt} / {@code mod} / {@code atan} / {@code atan2} / {@code min_angle} / {@code lerprotate} /
+         * {@code clamp} / {@code random} / {@code die_roll} / {@code die_roll_integer} 的实现收在
+         * {@link ControllerMath} 一份，两轴都调它（AGENTS.md「Prefer one implementation to two」）。
+         * 只有本轴分派、弹射物轴没有分支的名字（{@code trunc} / {@code acos} / {@code asin} /
+         * {@code random_integer} / {@code randomi}）仍是这里的局部实现。</p>
+         *
          * <p>参数个数按上游的 {@code validateArgumentSize} 处理：个数不对时与"这个名字答不了"
          * 同一个结果（0），不会因为少写一个实参就抛异常。</p>
          */
@@ -1187,10 +1218,10 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("math.abs".equals(name)) {
                 return Math.abs(a);
             }
-            // 上游 Sqrt.java: Math.sqrt（负数得 NaN）；参考分支加了 "v<0 → 0" 的护栏，
-            // 这里按上游（也与关键帧路径的 mclib Sqrt 一致）。
+            // 上游 Sqrt.java:9：Math.sqrt（负数得 NaN）；参考分支加了 "v<0 → 0" 的护栏。
+            // 求值体与弹射物轴共用 ControllerMath.sqrt（同名函数在两轴上只有一个实现）。
             if ("math.sqrt".equals(name)) {
-                return Math.sqrt(a);
+                return ControllerMath.sqrt(a);
             }
             if ("math.exp".equals(name)) {
                 return Math.exp(a);
@@ -1221,21 +1252,15 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("math.asin".equals(name)) {
                 return Math.asin(a);
             }
-            // 上游 Atan.java: Math.atan → **弧度**；参考分支返回角度（Math.toDegrees），
-            // 与关键帧路径的 mclib ATan 也不一致，这里按上游。
+            // 上游 Atan.java:9：Math.atan → **弧度**；参考分支返回角度（Math.toDegrees），
+            // 与关键帧路径的 mclib ATan 也不一致。求值体与弹射物轴共用 ControllerMath.atan。
             if ("math.atan".equals(name)) {
-                return Math.atan(a);
+                return ControllerMath.atan(a);
             }
-            // 上游 MinAngle.java:4-13：归一化到 (-180, 180]（与 mclib MinAngle 同式）
+            // 上游 MinAngle.java:9-16：**一参**归一化到 (-180, 180]（>= 180 判成 -180，与 mclib
+            // classic/MinAngle 的 > 180 不同）；实现与弹射物轴共用 ControllerMath.minAngle。
             if ("math.min_angle".equals(name)) {
-                double angle = a % 360.0d;
-                if (angle >= 180.0d) {
-                    return angle - 360.0d;
-                }
-                if (angle < -180.0d) {
-                    return angle + 360.0d;
-                }
-                return angle;
+                return ControllerMath.minAngle(a);
             }
             // --- 双参数 ---
             if (size < 2) {
@@ -1244,9 +1269,10 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return oneArgumentFallback(name, a);
             }
             double b = arguments.get(1).asNumber();
-            // 上游 Mod.java:12-14：Java 取余（参考分支把负数结果折成正数）
+            // 上游 Mod.java:9：Java 取余（参考分支把负数结果折成正数）。
+            // 实现与弹射物轴共用 ControllerMath.mod。
             if ("math.mod".equals(name)) {
-                return a % b;
+                return ControllerMath.mod(a, b);
             }
             if ("math.max".equals(name)) {
                 return Math.max(a, b);
@@ -1257,16 +1283,16 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("math.pow".equals(name)) {
                 return Math.pow(a, b);
             }
-            // 上游 ATan2.java：弧度（参考分支返回角度）
+            // 上游 ATan2.java:10：弧度（参考分支返回角度）。与弹射物轴共用 ControllerMath.atan2。
             if ("math.atan2".equals(name)) {
-                return Math.atan2(a, b);
+                return ControllerMath.atan2(a, b);
             }
-            // 上游 Random.java:15-27：min/range 交换后 [min, max)。
-            // 上游用帧的 RandomSource，本仓这条路径没有对应的 RandomSource 所有者
-            // （MolangFrameContext 不带随机源），关键帧路径的 mclib Random 与参考分支都用
-            // Math.random()，这里跟随它们，不新开侧信道。
+            // 上游 Random.java:14-24：min/range 排序后 [min, max)。上游用帧的 RandomSource，本仓这条
+            // 路径没有对应的 RandomSource 所有者（MolangFrameContext 不带随机源），关键帧路径的 mclib
+            // Random 与参考分支都用 Math.random()，这里跟随它们，不新开侧信道；实现与弹射物轴共用
+            // ControllerMath.randomRange（那边此前在端点写反时返回第一个实参，是个常量）。
             if ("math.random".equals(name)) {
-                return randomInRange(a, b);
+                return ControllerMath.randomRange(a, b);
             }
             // 上游把 randomi 注册成 RandomInteger（**2 参**，MathBinding.java:54），关键帧路径同
             // (MolangParser:164 把 math.random_integer 映射到 randomi 类)；参考分支把它当 1 参
@@ -1282,9 +1308,10 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return unsupportedFunction(name);
             }
             double c = arguments.get(2).asNumber();
-            // 上游 Clamp.java:12-14 / mclib Clamp 同式
+            // 上游 Clamp.java:10-12 = Mth.clamp（a < min ? min : Math.min(a, max)）。
+            // 实现与弹射物轴共用 ControllerMath.clamp（那边此前是另一种 clamp 约定）。
             if ("math.clamp".equals(name)) {
-                return a < b ? b : Math.min(a, c);
+                return ControllerMath.clamp(a, b, c);
             }
             // 上游 Lerp.java / LerpRotate.java 直接调 mclib 的 Interpolations，
             // 这里复用同一份实现（关键帧路径的 mclib Lerp/LerpRotate 就是它）。
@@ -1292,14 +1319,16 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return com.eliotlash.mclib.utils.Interpolations.lerp((float) a, (float) b, (float) c);
             }
             if ("math.lerprotate".equals(name)) {
-                return com.eliotlash.mclib.utils.Interpolations.lerpYaw((float) a, (float) b, (float) c);
+                return ControllerMath.lerpRotate(a, b, c);
             }
-            // 上游 DieRoll.java:15-32 / DieRollInteger.java:15-33
+            // 上游 DieRoll.java:15-31 / DieRollInteger.java:15-31，与弹射物轴共用 ControllerMath：
+            // 整数形的次数是 Math.round（不是截断）、端点是 getAsInt、上界**独占**，以及本移植的
+            // 100 次护栏都在那一份实现里。
             if ("math.die_roll".equals(name) || "math.roll".equals(name)) {
-                return dieRoll(a, b, c, false);
+                return ControllerMath.dieRoll(a, b, c);
             }
             if ("math.die_roll_integer".equals(name) || "math.rolli".equals(name)) {
-                return dieRoll(a, b, c, true);
+                return ControllerMath.dieRollInteger(a, b, c);
             }
             return unsupportedFunction(name);
         }
@@ -1315,13 +1344,6 @@ public final class OpenYsmControllerExpressionEvaluator {
             return unsupportedFunction(name);
         }
 
-        /** 上游 Random.java:17-26：把两个端点排好序后取 [min, max) 内的均匀值。 */
-        private static double randomInRange(double a, double b) {
-            double min = Math.min(a, b);
-            double max = Math.max(a, b);
-            return min + Math.random() * (max - min);
-        }
-
         /**
          * 上游 RandomInteger.java:17-26 / DieRollInteger.java 的整数形态：{@code min + nextInt(span)}。
          *
@@ -1329,6 +1351,10 @@ public final class OpenYsmControllerExpressionEvaluator {
          * 时 {@code nextInt(0)} 抛 {@code IllegalArgumentException}（整条表达式失效），这里退化区间
          * 直接返回那个唯一值；随机源用 {@link Math#random()}（与关键帧路径 mclib
          * RandomInteger 和参考分支一致，原因见 {@code math.random} 的注释）。</p>
+         *
+         * <p>只服务 {@code math.random_integer} / {@code math.randomi} —— 这两个名字弹射物轴不分派，
+         * 所以它们没有 {@link ControllerMath} 里的对应项。{@code math.random} / {@code math.die_roll} /
+         * {@code math.die_roll_integer} 是两轴共有的名字，实现已经收进 {@link ControllerMath}。</p>
          */
         private static double randomInteger(double a, double b) {
             int min = (int) a;
@@ -1343,25 +1369,6 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return min;
             }
             return min + (int) (Math.random() * span);
-        }
-
-        /**
-         * {@code math.die_roll(count, min, max)} / {@code math.die_roll_integer(...)}：
-         * 上游 DieRoll.java:15-32 的求和形态。
-         *
-         * <p>唯一一处保留参考分支的做法：次数上限 100（SOURCE:760-770）。上游没有上限，而次数来自
-         * 模型数据、这段代码在渲染帧里跑 —— 一个写错次数的包会把渲染线程挂死，参考分支的护栏是有
-         * 依据的取舍，这里保留并记录。</p>
-         */
-        private static double dieRoll(double count, double min, double max, boolean integer) {
-            int rolls = integer ? (int) Math.round(count) : (int) count;
-            double low = Math.min(min, max);
-            double span = Math.abs(max - min);
-            double total = 0.0d;
-            for (int i = 0; i < rolls && i < 100; i++) {
-                total += integer ? (int) low + (int) (Math.random() * (int) span) : low + Math.random() * span;
-            }
-            return total;
         }
 
         private static double argNumber(List<Argument> args, int index) {

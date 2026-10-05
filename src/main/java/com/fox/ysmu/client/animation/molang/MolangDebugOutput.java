@@ -13,8 +13,9 @@ import software.bernie.geckolib3.core.molang.MolangStringPool;
 /**
  * {@code q.debug_output(...)} 与 {@code ysm.dump_*} 共用的调试输出通道。
  *
- * <p>YSM-wiki: molang/ref —— 这些函数"仅在动画调试模式下有效"。YSMU 现在的开关只有
- * {@link Config#DEBUG_ANIMATION}（DebugOverlay 尚未移植，见 {@link #isEnabled()}），输出同时进日志和聊天框。</p>
+ * <p>YSM-wiki: molang/ref —— 这些函数"仅在动画调试模式下有效"。YSMU 里的开关是
+ * {@link Config#DEBUG_ANIMATION} 与 {@link Config#DEBUG_MOLANG_OVERLAY} 下的 DebugOverlay
+ * （Ctrl+P，见 {@link #isEnabled()}），输出同时进日志和聊天框。</p>
  *
  * <p><b>必须限流。</b>模型作者会把 {@code q.debug_output} 写在 {@code @player_update} 脚本或
  * 每帧 timeline 里，一条消息就够刷爆聊天框；这里做 20 条/秒的令牌桶，超出部分直接丢弃，
@@ -32,8 +33,11 @@ public final class MolangDebugOutput {
 
     /** 动画调试模式是否开启。 */
     public static boolean isEnabled() {
-        // 已削减为 Config.DEBUG_ANIMATION：DebugOverlay 尚未移植，落地后在此恢复 || DebugOverlay.isActive()。
-        return Config.DEBUG_ANIMATION;
+        // 参考分支：{@code return Config.DEBUG_ANIMATION || DebugOverlay.isActive();}
+        // （tmp/YesSteveModel-Unofficial-perf-previewUI/.../MolangDebugOutput.java:37 + :9 的 import）。
+        // overlay 本身挂在默认关闭的 Config.DEBUG_MOLANG_OVERLAY 之后：开关关闭时
+        // DebugOverlay.toggle() 不会打开它，isActive() 恒为 false，所以这条腿在默认配置下不生效。
+        return Config.DEBUG_ANIMATION || com.fox.ysmu.client.gui.debug.DebugOverlay.isActive();
     }
 
     /** 每秒最多 {@value #MAX_PER_SECOND} 条的令牌桶；{@code nowSeconds} 必须单调不减。 */

@@ -119,6 +119,26 @@ public final class NetworkHandler {
      */
     private static final int CLIENTBOUND_PLAY_SOUND = 30;
 
+    /**
+     * The Molang debug-overlay cluster (see {@code .agent/phase33-m4-debug-overlay-ported.md}). Four clientbound ids,
+     * taken verbatim from the reference branch
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../network/NetworkHandler.java:44-53}), which the audit
+     * {@code .agent/phase31-m4-debug-overlay.md} verified are free here: 23, 26, 27 and 31. Nothing existing is
+     * renumbered or reused. The consumers are client-only state (MolangParser is a client singleton, the overlay
+     * touches {@code net.minecraft.client.*} and LWJGL), so each is registered {@code Side.CLIENT} like its
+     * neighbours.
+     * <p>
+     * All four are behind {@code Config.DEBUG_MOLANG_OVERLAY} (default off); registration itself is unconditional
+     * because the ids are part of the wire protocol, but no handler does anything while the switch is off and this
+     * tree registers no sender for them at all. That last point is why {@link #NETWORK_PROTOCOL} is not bumped: the
+     * protocol version exists to stop a peer from *receiving* an id it does not know (FML disconnects on an unknown
+     * discriminator), and nothing here sends one.
+     */
+    private static final int CLIENTBOUND_QUERY_MOLANG_VAR = 23;
+    private static final int CLIENTBOUND_EVAL_MOLANG = 26;
+    private static final int CLIENTBOUND_RESET_MOLANG = 27;
+    private static final int CLIENTBOUND_SET_DEBUG_OVERLAY = 31;
+
     public static void init() {
         registerServerboundMessages();
         registerClientboundMessages();
@@ -251,6 +271,28 @@ public final class NetworkHandler {
             S2CPlaySound.Handler.class,
             S2CPlaySound.class,
             CLIENTBOUND_PLAY_SOUND,
+            Side.CLIENT);
+        // The Molang debug-overlay cluster. See the id constants above for the reference branch they come from and
+        // why the ids were free; each handler is a no-op while Config.DEBUG_MOLANG_OVERLAY is off.
+        CHANNEL.registerMessage(
+            PacketQueryMolangVar.Handler.class,
+            PacketQueryMolangVar.class,
+            CLIENTBOUND_QUERY_MOLANG_VAR,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            PacketEvalMolang.Handler.class,
+            PacketEvalMolang.class,
+            CLIENTBOUND_EVAL_MOLANG,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            PacketResetMolang.Handler.class,
+            PacketResetMolang.class,
+            CLIENTBOUND_RESET_MOLANG,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            S2CSetDebugOverlay.Handler.class,
+            S2CSetDebugOverlay.class,
+            CLIENTBOUND_SET_DEBUG_OVERLAY,
             Side.CLIENT);
     }
 

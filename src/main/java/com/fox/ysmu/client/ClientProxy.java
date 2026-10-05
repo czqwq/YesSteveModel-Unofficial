@@ -83,6 +83,15 @@ public class ClientProxy extends CommonProxy {
         ExtraAnimationKey.registerKeyBindings();
         ClientRegistry.registerKeyBinding(ExtraPlayerConfigKey.EXTRA_PLAYER_RENDER_KEY);
         ClientRegistry.registerKeyBinding(PlayerModelScreenKey.PLAYER_MODEL_KEY);
+        // The Molang debug-overlay cluster is behind Config.DEBUG_MOLANG_OVERLAY (default off): with it off no command
+        // is registered, exactly like the engine capture, the overlay render hook and the four packet consumers.
+        // /ysmclient is a *client* command, so it goes to ClientCommandHandler rather than the server dispatcher -
+        // registering a client-side "ysm" would swallow every /ysm call before it could reach the server, which is
+        // why the command has a name of its own (see CommandYsmClient).
+        if (com.fox.ysmu.Config.DEBUG_MOLANG_OVERLAY) {
+            net.minecraftforge.client.ClientCommandHandler.instance
+                .registerCommand(new com.fox.ysmu.command.CommandYsmClient());
+        }
     }
 
     public static CustomPlayerRenderer getInstance() {

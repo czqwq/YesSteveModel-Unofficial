@@ -30,6 +30,38 @@ public final class MolangPhysicsRuntime {
     private static final Map<String, String> STRIPPED_NAMES = new ConcurrentHashMap<>();
 
     /**
+     * Whether {@link #end()} should copy the frame's variable scope into {@link #lastFrameVariables}, and whether
+     * {@link #noteGlobalVarOwner} keeps a writer for a {@code v.*} name. Injected by the host.
+     * <p>
+     * <b>Deliberate divergence from the reference branch.</b> Its {@code MolangPhysicsRuntime.end()}
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/molang/MolangPhysicsRuntime.java:244-250})
+     * copies the whole scope into a new {@code HashMap} on <em>every</em> model pass - a per-frame allocation on the
+     * render hot path, paid in normal play, purely so that a debug overlay and a {@code /ysm query} command can read
+     * the values afterwards. The port gates that copy behind this switch, which the host sets only while something
+     * actually needs the snapshot (the debug overlay is open, or a query/reset is in flight). With the switch off no
+     * copy, no owner bookkeeping and no allocation happen for this feature at all. The public read accessors are
+     * exactly the reference's.
+     */
+    private static volatile boolean snapshotCaptureEnabled = false;
+
+    /**
+     * The variables of the last captured scope, keyed as the scope keys them ({@code v.*}). Empty whenever
+     * {@link #snapshotCaptureEnabled} is off - see it for why this is not captured unconditionally the way the
+     * reference branch does.
+     */
+    private static Map<String, Double> lastFrameVariables = java.util.Collections.emptyMap();
+
+    /**
+     * {@code v.*} name -> the model id that last wrote it, for the debug overlay's {@code @model} column. Filled by
+     * {@link #noteGlobalVarOwner} from the open frame context; nothing writes it unless the host calls that method.
+     * <p>
+     * The engine stores the writer's <em>id</em> ({@code <domain>:<path>}), not a display name: resolving a display
+     * name needs the host's model tables, and the engine must not reference the host at all
+     * ({@code software/bernie/geckolib3/util/GeoStats.java:19}). The host formats it.
+     */
+    private static final Map<String, String> GLOBAL_VAR_OWNER = new java.util.HashMap<>();
+
+    /**
      * 弹射物（子模型）骨骼作用域：只提供"名字 → 骨骼"这一件事，供
      * {@code ysm.bone_pivot_abs()} / {@code bone_position|rotation|scale()} 使用。
      *
@@ -150,6 +182,16 @@ public final class MolangPhysicsRuntime {
     }
 
     public static void end() {
+        // Divergence from the reference branch: its end() unconditionally copies the scope into a new HashMap here,
+        // on every model pass (tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/molang/
+        // MolangPhysicsRuntime.java:244-250). That is a per-frame allocation on the render hot path, paid in normal
+        // play, purely so a debug overlay and /ysm query can read the values afterwards - which is why this port
+        // gates the copy behind snapshotCaptureEnabled (see it) instead of copying it.
+        if (snapshotCaptureEnabled) {
+            FrameContext context = CURRENT.get();
+            lastFrameVariables = context == null ? java.util.Collections.<String, Double>emptyMap()
+                : new java.util.HashMap<>(context.state.variables);
+        }
         CURRENT.remove();
     }
 
@@ -158,7 +200,85 @@ public final class MolangPhysicsRuntime {
         // 追踪矩阵按"模型主 id + 骨名"缓存：资源重载 / 登出后旧模型的矩阵必须一起丢掉，
         // 否则刷新出来的模型首帧会先读到上一个模型的骨骼位置（SOURCE clear() 同样清它）。
         CAPTURED_BONE_MATRIX.clear();
+        // The snapshot and the writer table describe the models that were just dropped, so they go with them.
+        lastFrameVariables = java.util.Collections.emptyMap();
+        GLOBAL_VAR_OWNER.clear();
         CURRENT.remove();
+    }
+
+    /**
+     * Turns the per-frame variable snapshot on or off. The host calls this with {@code true} exactly while the debug
+     * overlay is open or a query/reset is in flight, so that a normal frame pays nothing for a debug-only feature;
+     * see {@link #snapshotCaptureEnabled} for the reference branch it diverges from.
+     */
+    public static void setSnapshotCaptureEnabled(boolean enabled) {
+        snapshotCaptureEnabled = enabled;
+    }
+
+    /** Whether {@link #end()} currently copies the frame scope; see {@link #snapshotCaptureEnabled}. */
+    public static boolean isSnapshotCaptureEnabled() {
+        return snapshotCaptureEnabled;
+    }
+
+    /**
+     * The variables of the last captured scope ({@code v.*} keys, as the scope keys them); never {@code null},
+     * possibly empty. This is the only place the values an animation wrote into its frame scope can be read from
+     * after the frame ended: {@code MolangParser.VARIABLES} holds {@link ScopedMolangVariable}s, whose registered
+     * value is the construction default 0 once no frame context is open.
+     */
+    public static Map<String, Double> getLastFrameVariables() {
+        return lastFrameVariables;
+    }
+
+    /** One variable of the last captured scope, or {@code null} if that scope did not set it. */
+    public static Double getLastFrameVariable(String name) {
+        return lastFrameVariables.get(name);
+    }
+
+    /** Drops the last captured scope, so the debug overlay reflects a reset immediately instead of one frame late. */
+    public static void clearLastFrameSnapshot() {
+        lastFrameVariables = java.util.Collections.emptyMap();
+    }
+
+    /**
+     * Drops every per-scope state belonging to one player, for {@code /ysm reset} and for a logout: without it a
+     * {@code (player, model)} scope - and the variables its timeline assigned - outlives the player it belonged to.
+     */
+    public static void clearPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<ScopeKey, ScopeState>> iterator = STATES.entrySet()
+            .iterator();
+        while (iterator.hasNext()) {
+            if (playerId.equals(iterator.next().getKey().entityId)) {
+                iterator.remove();
+            }
+        }
+    }
+
+    /**
+     * The model ({@code <domain>:<path>}) that last wrote {@code name}, or {@code null} when nothing recorded one.
+     * The host formats it for display; see {@link #GLOBAL_VAR_OWNER} for why the engine does not.
+     */
+    public static String getGlobalVarSource(String name) {
+        return name == null ? null : GLOBAL_VAR_OWNER.get(name);
+    }
+
+    /**
+     * Records the open frame's model as the writer of the {@code v.*} entry {@code varName}; a no-op outside a frame
+     * context. The host calls this for a timeline assignment. Like the snapshot itself it records only while the
+     * debug feature is on, so a normal frame pays nothing.
+     */
+    public static void noteGlobalVarOwner(String varName) {
+        if (varName == null || !snapshotCaptureEnabled) {
+            return;
+        }
+        FrameContext context = CURRENT.get();
+        if (context == null || context.modelId == null) {
+            return;
+        }
+        GLOBAL_VAR_OWNER.put(varName, context.modelId.toString());
     }
 
     public static double firstOrder(int nameId, double input, double response) {

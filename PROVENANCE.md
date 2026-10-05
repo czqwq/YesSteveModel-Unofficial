@@ -120,6 +120,26 @@ the part of it that is written against this snapshot.
   upstream lost the whole channel on the missing name. The neighbouring classes were reused rather than copied, and
   `remap` was deliberately not used because it deletes the short keys existing packs call. Recorded in
   `.agent/phase27-mclib-math-defects.md`.
+- **`software/bernie/geckolib3/core/molang/MolangPhysicsRuntime.java` - the debug-overlay accessors, with the
+  per-frame snapshot made demand-driven.** The port's debug overlay needs the same view of the last frame's `v.*`
+  scope that the reference branch's host-side `MolangPhysicsRuntime` provides, so the engine gained
+  `getLastFrameVariables()`, `getLastFrameVariable(String)`, `clearLastFrameSnapshot()`, `clearPlayer(UUID)`,
+  `getGlobalVarSource(String)`, `noteGlobalVarOwner(String)` (the last writes the `GLOBAL_VAR_OWNER` table its single
+  producer fills - `MolangInstructionExecutor` on a `MolangAssignment`, the reference's own producer at
+  `.../MolangInstructionExecutor.java:340`), plus `setSnapshotCaptureEnabled`/`isSnapshotCaptureEnabled`, and `clear()`
+  now drops the snapshot and the owner table with the scope it already cleared. **The one deliberate divergence:**
+  the reference copies the whole scope into a new `HashMap` in `end()` **unconditionally, every frame**
+  (`tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/molang/MolangPhysicsRuntime.java:244-250`) -
+  a per-frame allocation paid in normal play, purely for a debug overlay and a `/ysm query`. The port copies only
+  while capture is demanded (`Config.DEBUG_MOLANG_OVERLAY && (queryCaptureRequested || DebugOverlay.isActive())`, one
+  predicate in `MolangDebugSnapshot.refreshCaptureDemand()`), so a default install allocates nothing; a query issued
+  between frames requests a capture and defers its read one hop, so it never reads a stale map. Three of the
+  reference's members were deliberately **not** added: `getModelDisplayName` stays host-side
+  (`client/debug/MolangDebugSnapshot.modelDisplayName` over `ModelIdUtil`) because the engine must not reference the
+  host - the engine's own `GeoStats.java:19` records that rule - and `getGlobalScopedValue` /
+  `isGlobalVarReadable` / `noteUnscopedGlobalVarWrite` are omitted because they need
+  `ScopedMolangVariable.globalFallback` / `unscopedWriteSink`, which this tree never wires; adding them would be dead
+  code. Recorded in `.agent/phase33-m4-debug-overlay-ported.md`.
 
 ## Where it came from
 

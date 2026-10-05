@@ -271,6 +271,23 @@ public class ClientEventHandler {
         }
     }
 
+    /**
+     * The Molang debug overlay's render hook, on the reference branch's shape
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/ClientEventHandler.java:299-308}: a
+     * {@code RenderGameOverlayEvent.Post} subscriber on {@code ElementType.ALL}, i.e. after every other overlay so the
+     * table sits on top).
+     * <p>
+     * This tree had no {@code Post} subscriber at all - its HUD selfie preview runs on {@code Pre}/{@code HOTBAR}
+     * ({@link #onRenderScreen} above), which this method deliberately does not touch. The overlay is only active while
+     * {@code Config.DEBUG_MOLANG_OVERLAY} is on, because {@code DebugOverlay.toggle()} refuses to open otherwise.
+     */
+    @SubscribeEvent
+    public static void onRenderDebugOverlay(RenderGameOverlayEvent.Post event) {
+        if (event.type != RenderGameOverlayEvent.ElementType.ALL) return;
+        if (!com.fox.ysmu.client.gui.debug.DebugOverlay.isActive()) return;
+        com.fox.ysmu.client.gui.debug.DebugOverlay.render(event.resolution);
+    }
+
     @SubscribeEvent
     public static void onKeyboardInput(InputEvent.KeyInputEvent event) {
         Minecraft mc = Minecraft.getMinecraft();

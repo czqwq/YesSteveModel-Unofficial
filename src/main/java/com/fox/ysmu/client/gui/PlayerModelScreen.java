@@ -108,6 +108,10 @@ public class PlayerModelScreen extends GuiScreen {
 
     @Override
     public void initGui() {
+        // Suppress idle asset eviction while this preview is open (reference PlayerModelScreen.java:117).
+        // Only the AssetManager subsystem reads this flag, and that subsystem no-ops while
+        // Config.ENABLE_IDLE_ASSET_EVICTION is off.
+        ClientModelManager.setGuiOpen(true);
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
         // Entering the screen replays every tile's preview animation from its first frame, like re-opening the
@@ -365,7 +369,7 @@ public class PlayerModelScreen extends GuiScreen {
                 0x777777);
         }
 
-        String pageInfo = String.format("%d/%d", this.browser.page() + 1, this.browser.maxPage() + 1);
+        String pageInfo = "%d/%d".formatted(this.browser.page() + 1, this.browser.maxPage() + 1);
         this.drawString(fontRendererObj, pageInfo, x + 138 + (282 - fontRendererObj.getStringWidth(pageInfo)) / 2, y + 223 - fontRendererObj.FONT_HEIGHT / 2, 0xF3EFE0);
 
         String debugInfo = String.format("%s-%s", "1.7.10", Tags.VERSION);
@@ -490,6 +494,9 @@ public class PlayerModelScreen extends GuiScreen {
      */
     @Override
     public void onGuiClosed() {
+        // Start the post-close grace window during which idle asset eviction stays suppressed
+        // (reference PlayerModelScreen.java:464).
+        ClientModelManager.setGuiOpen(false);
         int grantId = this.target.getGrantId();
         if (grantId != -1) {
             ysmu.LOG.debug("Model selection GUI closed, revoking grant for entity {}", grantId);

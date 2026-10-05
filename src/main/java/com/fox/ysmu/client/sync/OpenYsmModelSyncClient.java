@@ -26,12 +26,14 @@ import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.model.format.OpenYsmSyncInfo;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
 import com.fox.ysmu.model.resource.YSMBinaryDeserializer;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.C2SCompleteFeedback17;
 import com.fox.ysmu.network.message.C2SModelSyncPayload17;
+import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
@@ -78,8 +80,9 @@ public final class OpenYsmModelSyncClient {
     private static byte[] key1;
     private static byte[] lastKey;
     // volatile: serverKey/clientKey are written by the packet-processing (pool) thread and read back from other
-    // threads - clientKey and currentCacheFolderName now also by ClientModelManager.loadRawModelFromCache /
-    // rememberOpenYsmModelCache on the playback and client threads. Same field modifiers as the reference branch.
+    // threads - clientKey by readClientCacheToClearBytes (ClientModelManager.loadRawModelFromCache, playback
+    // thread), the two folder/key fields by resetConnectionState on the disconnect thread. The publish path itself
+    // reads neither any more: it carries the values in a CacheContext. Same field modifiers as the reference branch.
     private static volatile byte[] serverKey;
     private static volatile byte[] clientKey;
     private static volatile String currentCacheFolderName;
@@ -230,7 +233,7 @@ public final class OpenYsmModelSyncClient {
                 cacheHitCount++;
                 byte[] cachedBytes = FileUtils.readFileToByteArray(cachedFile);
                 byte[] clearBytes = YsmCrypt.read(cachedBytes, clientKey);
-                if (parseAndRegisterModel(clearBytes, context)) {
+                if (parseAndRegisterModel(clearBytes, context, currentCacheContext())) {
                     loadedModelsCount++;
                 }
                 ysmu.LOG.info("OpenYSM client cache hit for {} ({})", modelId, context.uuid);
@@ -309,7 +312,7 @@ public final class OpenYsmModelSyncClient {
             context.fileBuffer = null;
 
             byte[] clearBytes = YsmCrypt.read(clientCacheBytes, clientKey);
-            if (parseAndRegisterModel(clearBytes, context)) {
+            if (parseAndRegisterModel(clearBytes, context, currentCacheContext())) {
                 loadedModelsCount++;
                 downloadedModelsCount++;
             }
@@ -383,7 +386,8 @@ public final class OpenYsmModelSyncClient {
         }
     }
 
-    private static boolean parseAndRegisterModel(byte[] clearBytes, ServerModelContext context) {
+    private static boolean parseAndRegisterModel(byte[] clearBytes, ServerModelContext context,
+        CacheContext cacheContext) {
         try (YSMBinaryDeserializer deserializer = new YSMBinaryDeserializer(clearBytes, 32)) {
             RawYsmModel raw = deserializer.deserializeKeepOpen();
             deserializer.parseYSMFooter(raw);
@@ -430,9 +434,9 @@ public final class OpenYsmModelSyncClient {
                     // record (rememberOpenYsmModelCache) for its lazy geo/anim/texture reload; here it is
                     // what makes the sound path work at all.
                     String cacheFileName = YSMClientCache
-                        .generateCacheFileName(context.hash1, context.hash2, clientKey);
+                        .generateCacheFileName(context.hash1, context.hash2, cacheContext.contextClientKey);
                     if (cacheFileName != null) {
-                        String folder = currentCacheFolderName == null ? "0" : currentCacheFolderName;
+                        String folder = cacheContext.cacheFolderName == null ? "0" : cacheContext.cacheFolderName;
                         ClientModelManager.rememberOpenYsmModelCache(modelId, folder + "/" + cacheFileName);
                     }
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
@@ -585,27 +589,97 @@ public final class OpenYsmModelSyncClient {
             .toFile();
     }
 
+    /** 发布点这一次同步的目录名 + 客户端密钥，**按值**捕获：包处理路径在设置这两个静态字段之后
+     *  立即调用它，所以取到的就是这批字节所属那一轮的值；{@code registerLocalModel} 用自己那一族
+     *  值构造 {@link CacheContext}。见该类注释。 */
+    private static CacheContext currentCacheContext() {
+        return new CacheContext(currentCacheFolderName, clientKey);
+    }
+
     /** Decrypts a client cache file written by this session's OpenYSM sync into
      *  clear bytes using the session client key. Returns null on failure. Used by
      *  {@code ClientModelManager.loadRawModelFromCache} to re-read a model's own
      *  sound bytes on first play, after the parsed payload that carried them is gone.
-     *  <p>This port carries no local-key fallback here: it has no
-     *  {@code LocalModelLoader}/{@code registerLocalModel} path for locally-registered
-     *  models to be restored, and {@code OpenYsmModelSyncServer.createClientCacheKey}
-     *  is package-private in another package, so the reference branch's
-     *  {@code localClientKey()} has neither a caller nor a reachable implementation.
-     *  {@link #clientKey} is the key every readable cache file was written with, and it
-     *  is kept across the sync teardown for exactly this call. */
+     *  <p>Falls back to the client's own local key so locally-registered models
+     *  ({@link LocalModelLoader}) stay readable even after a real server sync
+     *  overwrote {@link #clientKey}: those files live under folder {@code "0"} and are
+     *  written with the key {@link #localClientKey()} derives from the local
+     *  server_index key ({@link #registerLocalModel}). A file the session key cannot
+     *  open makes {@link YsmCrypt#read} throw, which is what selects the fallback -
+     *  the same rule the reference branch uses
+     *  ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/sync/OpenYsmModelSyncClient.java:1094-1111}). */
     public static byte[] readClientCacheToClearBytes(byte[] cacheBytes) {
         if (cacheBytes == null) return null;
         if (clientKey != null) {
             try {
                 return YsmCrypt.read(cacheBytes, clientKey);
             } catch (Exception ignored) {
-                // fall through: this file does not belong to this session's key
+                // fall through to the local key below
+            }
+        }
+        byte[] localKey = localClientKey();
+        if (localKey != null && localKey != clientKey) {
+            try {
+                return YsmCrypt.read(cacheBytes, localKey);
+            } catch (Exception ignored) {
+                // fall through: neither key opens this file
             }
         }
         return null;
+    }
+
+    /** The client's own local cache key (derived from the local server_index key),
+     *  used for local model fallback registration. */
+    private static byte[] localClientKey() {
+        byte[] serverKey = ServerModelManager.OPEN_YSM_SERVER_KEY;
+        if (serverKey == null || serverKey.length != 56) return null;
+        return OpenYsmModelSyncServer.createClientCacheKey(serverKey);
+    }
+
+    /**
+     * 注册单个本地模型（仅自己可见），由 {@link LocalModelLoader} 调用。
+     * 复用真实同步的「服务端缓存 → transcode → 写客户端缓存 → 解密 → 解析 → apply」
+     * 路径，不经过网络。synchronized 与真实同步（processServerData 等）共用类锁，
+     * 避免本地注册与包处理交错；本地注册期间真实同步会等待，反之亦然（每个模型粒度）。
+     *
+     * <p>本地注册取自己那一族状态**值**：目录 {@code "0"}、由本地 server_index 密钥派生的
+     * {@link #localClientKey()}、以及 {@link ServerModelManager#OPEN_YSM_SERVER_KEY} 作服务端密钥。
+     * 它们随 {@link CacheContext} 传给解析路径，**不改写** {@code clientKey}/
+     * {@code currentCacheFolderName}：这两个字段是「最近一次同步发布的会话上下文」，懒加载重解密
+     * （{@link #readClientCacheToClearBytes}）还要用；而模型真正的注册是在
+     * {@code Minecraft.func_152344_a} 里稍后于客户端线程执行的，类锁覆盖不到那一刻，临时改写
+     * 只会把本地目录/密钥混进真实同步的 {@code CACHED_MODEL_MD5} 记录里（跨同步后再读静态字段
+     * 更是已被 reset 成 null）。</p>
+     *
+     * @return 模型主体注册成功（不可桥接的模型也会注册投射物/轮盘，返回 false）
+     */
+    public static synchronized boolean registerLocalModel(OpenYsmSyncInfo info, byte[] serverCacheBytes) {
+        if (info == null || serverCacheBytes == null || serverCacheBytes.length == 0) {
+            return false;
+        }
+        byte[] localKey = localClientKey();
+        if (localKey == null) {
+            return false;
+        }
+        byte[] localServerKey = ServerModelManager.OPEN_YSM_SERVER_KEY;
+        if (localServerKey == null || localServerKey.length != 56) {
+            return false;
+        }
+        final CacheContext ctx = new CacheContext("0", localKey);
+        try {
+            byte[] clientCacheBytes = YsmCrypt.transcodeServerDataToClientCache(
+                serverCacheBytes, localServerKey, ctx.contextClientKey, info.getHash1(), info.getHash2());
+            File outFile = new File(ctx.cacheDir(), ctx.cacheFileName(info.getHash1(), info.getHash2()));
+            FileUtils.writeByteArrayToFile(outFile, clientCacheBytes);
+            byte[] clearBytes = YsmCrypt.read(clientCacheBytes, ctx.contextClientKey);
+            ServerModelContext context = new ServerModelContext(
+                info.getHash1(), info.getHash2(), info.getModelId(),
+                info.isCustomSkinModel() ? 1 : 0, info.getFormat());
+            return parseAndRegisterModel(clearBytes, context, ctx);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to register local model {}: {}", info.getModelId(), e.getMessage());
+            return false;
+        }
     }
 
     private static void sendPayload(byte[] payload) {
@@ -639,6 +713,43 @@ public final class OpenYsmModelSyncClient {
         byte[] garbage = new byte[16 + RANDOM.nextInt(48)];
         RANDOM.nextBytes(garbage);
         return garbage;
+    }
+
+    /**
+     * 一次同步 / 一次本地注册的**不可变**缓存上下文：客户端缓存目录名 + 这批字节所用的客户端密钥。
+     *
+     * <p>为什么必须随工作项传递而不是在发布点读静态字段：{@link #parseAndRegisterModel} 把模型真正的
+     * 注册交给 {@code Minecraft.func_152344_a}，稍后在客户端线程上执行；而目录名/密钥的所有者可能已经
+     * 不是这一轮了 —— 同一轮里 {@code sendComplete} → {@code resetConnectionState} 会把
+     * {@code currentCacheFolderName} 置 null，下一轮同步会换掉 {@code clientKey}，本地注册则用的是
+     * 另一族值（目录 {@code "0"} 与 {@link #localClientKey()}）。读静态字段就会把别人的目录/密钥写进
+     * 模型自己的 {@code CACHED_MODEL_MD5} 记录，懒加载（{@link #readClientCacheToClearBytes}）随后
+     * 找不到这个文件。</p>
+     *
+     * <p>较参考分支的 {@code CacheContext}
+     * （{@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/sync/OpenYsmModelSyncClient.java:76-107}）
+     * 少两个字段：这一树的发布闸门是 {@code ClientModelManager.currentGeneration()} 在
+     * {@code parseAndRegisterModel} 内部就地采样的（{@code :417-426}），服务端密钥也由
+     * {@link #registerLocalModel} 在类锁内直接读取，所以这里只需要目录名与客户端密钥。</p>
+     */
+    private static final class CacheContext {
+
+        final String cacheFolderName;
+        final byte[] contextClientKey;
+
+        CacheContext(String cacheFolderName, byte[] contextClientKey) {
+            this.cacheFolderName = cacheFolderName;
+            this.contextClientKey = contextClientKey;
+        }
+
+        File cacheDir() {
+            return ServerModelManager.CACHE_CLIENT.resolve(cacheFolderName == null ? "0" : cacheFolderName)
+                .toFile();
+        }
+
+        String cacheFileName(long hash1, long hash2) {
+            return YSMClientCache.generateCacheFileName(hash1, hash2, contextClientKey);
+        }
     }
 
     private static final class ModelHash {

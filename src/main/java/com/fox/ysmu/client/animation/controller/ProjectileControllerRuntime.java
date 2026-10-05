@@ -674,8 +674,13 @@ public final class ProjectileControllerRuntime {
         if ("math.abs".equals(name) && count >= 1) {
             return Math.abs(args.get(0));
         }
+        // 下面这些 math.* 的求值体现在由 ControllerMath 持有，**两条轴都调用它**（玩家轴见
+        // OpenYsmControllerExpressionEvaluator.mathValue），所以同名函数不可能再对两轴各答一个值。
+        // 弹射物这边此前带的是参考分支的形状：负数 sqrt 归 0、欧几里得 mod、atan/atan2 转角度、
+        // min_angle 两参、lerprotate 折到 [0,360)、die_roll_integer 上界闭区间、clamp 反端点约定、
+        // random 端点写反时返回常量 —— 与玩家轴和上游都不同。上游出处逐条见 ControllerMath。
         if ("math.sqrt".equals(name) && count >= 1) {
-            return args.get(0) < 0 ? 0.0d : Math.sqrt(args.get(0));
+            return ControllerMath.sqrt(args.get(0));
         }
         if ("math.floor".equals(name) && count >= 1) {
             return Math.floor(args.get(0));
@@ -717,82 +722,53 @@ public final class ProjectileControllerRuntime {
             return Math.min(args.get(0), args.get(1));
         }
         if ("math.mod".equals(name) && count >= 2) {
-            double divisor = args.get(1);
-            if (divisor == 0.0d) {
-                return 0.0d;
-            }
-            double remainder = args.get(0) % divisor;
-            return remainder < 0 ? remainder + Math.abs(divisor) : remainder;
+            return ControllerMath.mod(args.get(0), args.get(1));
         }
         if ("math.atan2".equals(name) && count >= 2) {
-            return Math.toDegrees(Math.atan2(args.get(0), args.get(1)));
+            return ControllerMath.atan2(args.get(0), args.get(1));
         }
         if ("math.atan".equals(name) && count >= 1) {
-            return Math.toDegrees(Math.atan(args.get(0)));
+            return ControllerMath.atan(args.get(0));
         }
         if ("math.clamp".equals(name) && count >= 3) {
-            return Math.max(args.get(1), Math.min(args.get(2), args.get(0)));
+            // 上游 Clamp.java:10-12 = Mth.clamp（a < min ? min : Math.min(a, max)）。这里此前是
+            // Math.max(min, Math.min(max, a)) —— 另一种 clamp 约定，只在包把两个端点写反时不同
+            // （math.clamp(7,5,1)：上游 1，旧体 5）。玩家轴本来就是上游的形状，两轴同解见 ControllerMath.clamp。
+            return ControllerMath.clamp(args.get(0), args.get(1), args.get(2));
         }
         if ("math.lerp".equals(name) && count >= 3) {
+            // 上游 Lerp.java:10-12 调的是 mclib 的 **float** lerp（玩家轴就是那条），这里是同一个式子的
+            // double 版本。两者是精度差，不是取值分歧，所以没有收进 ControllerMath（见
+            // .agent/phase36-axis-math-repair.md「没有改的东西」）。
             return args.get(0) + (args.get(1) - args.get(0)) * args.get(2);
         }
         if ("math.random".equals(name) && count >= 2) {
-            double low = args.get(0);
-            double high = args.get(1);
-            return low >= high ? low : low + Math.random() * (high - low);
+            // 上游 Random.java:14-24：两个端点排序后取 [min, max)。这里此前是 low >= high ? low : ...，
+            // 于是包把端点写反时得到一个常量而不是随机值；玩家轴本来就排序（ControllerMath.randomRange）。
+            return ControllerMath.randomRange(args.get(0), args.get(1));
         }
-        if ("math.min_angle".equals(name) && count >= 2) {
-            double difference = (args.get(1) - args.get(0)) % 360;
-            if (difference > 180) {
-                difference -= 360;
+        // 上游 MinAngle.java:9-16 是**一参**角度归一化（validateArgumentSize == 1），不是两参差值。
+        // 弹射物这边此前是 min_angle(from,to) 的两参差值，属另一种函数形状，不是取值分歧。这里改成上游的
+        // 形状，与玩家轴（同样一参、同一份实现）一致。个数不足仍按本轴规则
+        // 回答 0 并记一条警告，不抛异常。
+        if ("math.min_angle".equals(name)) {
+            if (count < 1) {
+                return unsupportedFunction(name);
             }
-            if (difference <= -180) {
-                difference += 360;
-            }
-            return difference;
+            return ControllerMath.minAngle(args.get(0));
         }
         if ("math.lerprotate".equals(name) && count >= 3) {
-            double from = args.get(0);
-            double to = args.get(1);
-            double factor = args.get(2);
-            double difference = (to - from) % 360;
-            if (difference > 180) {
-                difference -= 360;
-            }
-            if (difference <= -180) {
-                difference += 360;
-            }
-            double result = from + difference * factor;
-            if (result >= 360) {
-                result -= 360;
-            }
-            if (result < 0) {
-                result += 360;
-            }
-            return result;
+            return ControllerMath.lerpRotate(args.get(0), args.get(1), args.get(2));
         }
         boolean dieRoll = ("math.die_roll".equals(name) || "math.roll".equals(name)) && count >= 3;
         boolean dieRollInteger = ("math.die_roll_integer".equals(name) || "math.rolli".equals(name)) && count >= 3;
         if (dieRoll || dieRollInteger) {
-            int rolls = Math.min((int) (double) args.get(0), 100);
-            double low = args.get(1);
-            double high = args.get(2);
-            double sum = 0;
-            for (int i = 0; i < rolls; i++) {
-                if (dieRollInteger) {
-                    int min = (int) low;
-                    int max = (int) high;
-                    if (min > max) {
-                        int swap = min;
-                        min = max;
-                        max = swap;
-                    }
-                    sum += min + (int) (Math.random() * (max - min + 1));
-                } else {
-                    sum += low + Math.random() * (high - low);
-                }
+            // 次数**不能**在这里先截断成 int：上游 DieRollInteger.java:15 是 Math.round（2.9 → 3 颗），
+            // DieRoll.java:15 才是 getAsInt 截断（2.9 → 2 颗）。由 ControllerMath 按名字各自处理，两轴同解。
+            if (dieRollInteger) {
+                return ControllerMath.dieRollInteger(args.get(0), args.get(1), args.get(2));
             }
-            return sum;
+            return ControllerMath.dieRoll(args.get(0), args.get(1), args.get(2));
         }
         if ("math.pi".equals(name) && count == 0) {
             return Math.PI;
@@ -800,6 +776,14 @@ public final class ProjectileControllerRuntime {
         if ("math.e".equals(name) && count == 0) {
             return Math.E;
         }
+        return unsupportedFunction(name);
+    }
+
+    /** 本轴认识的函数被用错个数时的落点：回答 0 并记一条一次性警告（见 {@link #evaluateFunction}）。 */
+    private static double unsupportedFunction(String name) {
+        OpenYsmAnimationControllerRegistry.warnOnce(
+            "func:" + name,
+            "Unsupported OpenYSM projectile controller function arity: " + name);
         return 0.0d;
     }
 

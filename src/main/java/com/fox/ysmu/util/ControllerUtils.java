@@ -86,16 +86,15 @@ public final class ControllerUtils {
      * （如 {@code player.pre_main} 与 {@code player.pre_main_mecha_mgr}）。YSMU 的 GeckoLib
      * 控制器是**按名字固定**注册的，一个槽位只有一个，所以用下面的共享备用池承载后缀控制器。
      */
-    public static final java.util.List<String> OPENYSM_SLOTS = java.util.Collections.unmodifiableList(
-        java.util.Arrays.asList(
-            "pre_main",
-            "post_main",
-            "pre_hold",
-            "post_hold",
-            "pre_swing",
-            "post_swing",
-            "pre_use",
-            "post_use"));
+    public static final java.util.List<String> OPENYSM_SLOTS = java.util.List.of(
+        "pre_main",
+        "post_main",
+        "pre_hold",
+        "post_hold",
+        "pre_swing",
+        "post_swing",
+        "pre_use",
+        "post_use");
 
     /** 槽位后缀控制器备用池的控制器名前缀（{@code openysm_slot_extra_<i>_controller}）。
      *  名字里没有模型信息：第 i 个池控制器承载当前模型第 i 个 {@code player.<slot>_<后缀>}。 */

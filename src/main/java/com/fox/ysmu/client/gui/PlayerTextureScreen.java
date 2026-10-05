@@ -99,7 +99,7 @@ public class PlayerTextureScreen extends GuiScreen {
         this.drawDefaultBackground();
         this.drawGradientRect(x, y, x + 420, y + 235, 0xff_222222, 0xff_222222);
 
-        String texturePageInfo = String.format("%d/%d", texturePage + 1, this.maxTexturePage + 1);
+        String texturePageInfo = "%d/%d".formatted(texturePage + 1, this.maxTexturePage + 1);
         this.drawString(fontRendererObj, texturePageInfo, x + 251 + (56 - fontRendererObj.getStringWidth(texturePageInfo)) / 2, y + 10, 0xF3EFE0);
 
         super.drawScreen(mouseX, mouseY, partialTick);

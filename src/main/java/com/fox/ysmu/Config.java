@@ -98,6 +98,27 @@ public class Config {
     /** 调试/测试用：粒子 xyz 偏移全部置 0（直接生成在实体位置）。 */
     public static boolean PARTICLE_ZERO_OFFSET = false;
     public static boolean DEBUG_MERGED_ANIMATIONS = false;
+    /**
+     * Master switch for the Molang debug overlay and the {@code /ysmclient} Molang commands: the full-screen
+     * {@code v.*}/{@code query.*}/{@code ctrl.*} table (Ctrl+P, or {@code S2CSetDebugOverlay}), the
+     * {@code PacketQueryMolangVar} / {@code PacketEvalMolang} / {@code PacketResetMolang} consumers, and the engine's
+     * per-frame variable snapshot. <b>Off by default</b>, even though the reference branch has no such switch and
+     * always captures: with it off no snapshot is taken, no overlay renders, no client command is registered, and the
+     * four packets' client-side handlers do nothing (see {@code MolangDebugCaptureTest}).
+     * <p>
+     * It is a <b>client opt-out, not a wire switch</b>: the server-side senders ({@code /ysm debug query|eval|overlay}
+     * and {@code /ysm reset}, {@code command/YsmCommand}) do <em>not</em> read it - neither do the reference's - so a
+     * switched-off client receives the packets and quietly ignores them.
+     * <p>
+     * <b>Divergence from the reference branch.</b> Its {@code MolangPhysicsRuntime.end()}
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/molang/MolangPhysicsRuntime.java:244-250})
+     * copies the whole {@code v.*} scope into a new {@code HashMap} on every model pass - a per-frame allocation on
+     * the render hot path, paid in normal play, purely so that this debug overlay and {@code /ysm query} can read the
+     * values afterwards. The port instead captures only while something needs it: the overlay is open, or a
+     * query/reset has asked for a capture ({@code MolangDebugSnapshot.refreshCaptureDemand}). The feature is off by
+     * default, so a default install pays neither the copy nor the overlay.
+     */
+    public static boolean DEBUG_MOLANG_OVERLAY = false;
 
     // Chat message config
     /** 进世界时显示欢迎/提示消息。 */
@@ -146,6 +167,23 @@ public class Config {
      *  不会被空闲超时回收。默认 120 秒（2 分钟），覆盖最常见的「关闭预览再打开」场景。
      *  设为 0 则禁用宽限期（恢复旧行为）。 */
     public static int GUI_POST_CLOSE_GRACE_SECONDS = 120;
+
+    /**
+     * 是否启用「空闲资源回收 → 后台重加载」子系统（{@code client/asset/}）。
+     *
+     * <p><b>默认 false，与参考分支不同</b>：参考分支根本没有这个开关，它无条件运行
+     * （参考 {@code AssetManager.java:73-94} 的 {@code tick()} 直接回收，没有前置判断）。
+     * 本移植分支把它默认关闭，因为这条路径在本仓**从未运行过**，而且它依赖的状态本仓与参考
+     * 分支并不一致 —— 一次错误的空闲判定会把正在显示的几何从 GeckoLibCache 里移走。
+     * 开启它是一次需要真机对比参考分支的刻意实验，不是默认行为；见
+     * {@code .agent/phase32-asset-eviction-subsystem.md}。
+     *
+     * <p>关闭时 {@link com.fox.ysmu.client.asset.AssetManager} 不登记任何条目、不回收、
+     * 不清空，也因此不会调用引擎的释放钩子（{@code AnimatedGeoModel#onModelReleased} /
+     * {@code AnimationProcessor#forgetModel}）。调用点统一判
+     * {@link com.fox.ysmu.client.asset.AssetManager#isEnabled()}。
+     */
+    public static boolean ENABLE_IDLE_ASSET_EVICTION = false;
 
     // Model sync config
     public static boolean ENABLE_SYNC_PROTOCOL = true;
@@ -286,6 +324,7 @@ public class Config {
         PARTICLE_Y_ADJUST = syncDouble("ParticleYAdjust", "debug", PARTICLE_Y_ADJUST, "Extra Y offset subtracted from particle()/abs_particle() spawn position, in blocks (debug/testing; default 0)", -10.0, 10.0, load);
         PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
         DEBUG_MERGED_ANIMATIONS = syncBoolean("DebugMergedAnimations", "debug", DEBUG_MERGED_ANIMATIONS, "Show __ysm_merged__ animations in the preview GUI for debugging", load);
+        DEBUG_MOLANG_OVERLAY = syncBoolean("DebugMolangOverlay", "debug", DEBUG_MOLANG_OVERLAY, "Enable the Molang debug overlay and the /ysmclient Molang commands. Off by default: while off, no per-frame variable snapshot is taken, no overlay renders, no client command is registered, and this client ignores the /ysm debug|reset packets it is sent (the senders do not read this switch)", load);
 
         // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
         // an engine-owned switch, because the engine must not read this mod's config - the dependency direction is
@@ -317,6 +356,9 @@ public class Config {
         TEXTURE_VRAM_BUDGET_MB = syncInt("TextureVramBudget", "ysm_sync", TEXTURE_VRAM_BUDGET_MB, "YSM model texture VRAM budget in MB. 0 = unlimited. When uploaded texture VRAM exceeds this, least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so re-upload is cheap and never white).", 0, 8192, load);
         TEXTURE_RELEASE_BYTES_ON_IDLE = syncBoolean("TextureReleaseBytesOnIdle", "ysm_sync", TEXTURE_RELEASE_BYTES_ON_IDLE, "Release raw texture bytes from heap when a model's GPU textures idle-unload (30s). Re-decrypted from the encrypted client cache on next use (same path as geo/anim lazy reload). Eliminates the linear heap growth from texture bytes on large libraries; the first re-entry of an idle model briefly decrypts its cache file on the render thread.", load);
         GUI_POST_CLOSE_GRACE_SECONDS = syncInt("GuiPostCloseGraceSeconds", "ysm_sync", GUI_POST_CLOSE_GRACE_SECONDS, "Grace period (seconds) after closing the model preview GUI during which idle resource eviction is suppressed. Prevents full re-load when reopening the preview shortly after closing. 0 = disabled.", 0, 600, load);
+        // Port-specific switch, default OFF: the reference branch has no such switch and always runs the
+        // eviction (reference AssetManager.java:73-94). See Config#ENABLE_IDLE_ASSET_EVICTION.
+        ENABLE_IDLE_ASSET_EVICTION = syncBoolean("EnableIdleAssetEviction", "ysm_sync", ENABLE_IDLE_ASSET_EVICTION, "Release idle model geometry from GeckoLibCache and reload it from the encrypted client cache on next use (reference branch behaviour). DEFAULT OFF AND NOT YET VALIDATED IN THIS PORT: enabling it can evict geometry the port cannot rebuild (see .agent/phase32-asset-eviction-subsystem.md). Off = the AssetManager subsystem does nothing at all.", load);
         HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
         HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
         ANIMATION_TRANSITION_TICKS = syncInt("AnimationTransitionTicks", "animation", ANIMATION_TRANSITION_TICKS, "Global GeckoLib animation transition length in ticks (20 ticks = 1s). 0 = instant, 2 = 100ms, 4 = 200ms. Model-defined blend_transition overrides this per state.", 0, 40, load);

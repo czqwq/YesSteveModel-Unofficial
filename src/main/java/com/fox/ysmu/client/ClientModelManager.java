@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
@@ -29,7 +30,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.util.*;
 
 import org.apache.commons.io.FileUtils;
@@ -44,6 +44,7 @@ import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegist
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
+import com.fox.ysmu.client.texture.ModelTextureRegistry;
 import com.fox.ysmu.client.texture.OuterFileTexture;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
@@ -172,6 +173,96 @@ public class ClientModelManager {
      *  Those files are decrypted with the session client key, not the legacy password. */
     private static final java.util.Set<ResourceLocation> OPENYSM_CACHE_FORMAT =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Whether the model preview GUI (PlayerModelScreen) is currently open.
+     * While true, all idle resource eviction (geo/anim/texture GPU + heap bytes)
+     * is suppressed to prevent re-load thrash when the user briefly closes and
+     * reopens the preview.
+     * <p>
+     * Reference {@code ClientModelManager.java:187-214}. It is only read by the
+     * {@code client/asset} eviction subsystem, which is off unless
+     * {@code com.fox.ysmu.Config.ENABLE_IDLE_ASSET_EVICTION} is turned on.
+     */
+    private static volatile boolean GUI_OPEN = false;
+    /**
+     * Timestamp (System.currentTimeMillis) of the last GUI close.
+     * Used with {@code com.fox.ysmu.Config.GUI_POST_CLOSE_GRACE_SECONDS} to suppress eviction
+     * for a grace period after the GUI closes.
+     */
+    private static volatile long GUI_CLOSE_TIME = 0L;
+
+    /**
+     * Called by {@link com.fox.ysmu.client.gui.PlayerModelScreen} on open/close.
+     * <p>
+     * Ported from the reference branch ({@code ClientModelManager.java:198-203}). It is
+     * recorded unconditionally, and no behaviour follows from the flag while the eviction
+     * subsystem is off.
+     */
+    public static void setGuiOpen(boolean open) {
+        GUI_OPEN = open;
+        if (!open) {
+            GUI_CLOSE_TIME = System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * Returns true if idle eviction should be suppressed right now: either the
+     * GUI is currently open, or it was closed within the configured grace period.
+     */
+    public static boolean isIdleEvictionSuppressed() {
+        if (GUI_OPEN) return true;
+        long graceMs = (long) com.fox.ysmu.Config.GUI_POST_CLOSE_GRACE_SECONDS * 1000L;
+        if (graceMs <= 0L) return false;
+        return System.currentTimeMillis() - GUI_CLOSE_TIME < graceMs;
+    }
+
+    /**
+     * True when {@code id} — a base id, a mainId, or any sub-model id such as
+     * {@code ysmu:default/arm} — belongs to the configured default/fallback model.
+     * <p>
+     * Used to pin the fallback's geo entries against idle eviction: the local
+     * default model is read from {@code builtin/}/{@code custom/} and never gets a
+     * {@code CACHED_MODEL_MD5} entry, so once an entry is released it can never be
+     * reloaded through the lazy asset path.
+     * <p>
+     * Reference {@code ClientModelManager.java:347} (whose body is
+     * {@code isDefaultModelBundle}, {@code :329-336}) strips the last path segment with
+     * {@code ModelIdUtil.getModelIdFromSubId}; this port has no such helper and uses
+     * {@link ModelIdUtil#getParentModelId} ({@code ModelIdUtil.java:45-52}), which is the same
+     * rule — "the model a sub-model id belongs to" — with the same behaviour for an id that has
+     * no segment to strip (it is returned unchanged).
+     */
+    public static boolean isDefaultModelId(ResourceLocation id) {
+        if (id == null) {
+            return false;
+        }
+        ResourceLocation base = ModelIdUtil.getParentModelId(id);
+        return ysmu.MODID.equals(base.getResourceDomain())
+            && com.fox.ysmu.Config.DEFAULT_MODEL_ID.equals(base.getResourcePath());
+    }
+
+    /**
+     * Whether this model's payload can be re-read from the encrypted client cache — the
+     * precondition for the lazy asset eviction's reload half.
+     * <p>
+     * Port-specific addition, with a port-specific reason: the reference's
+     * {@code loadLegacyModelData} ({@code ClientModelManager.java:1484-1508}) re-reads both the
+     * legacy ({@code EncryptTools.decryptModel}) and the OpenYSM format, and the reference calls
+     * it from every provider {@code load}. This port only has the OpenYSM half
+     * ({@link #loadRawModelFromCache}, {@code :1981-2008}) because the model → cache-file
+     * association for the legacy channel is recorded inside {@code network/message/RequestLoadModel},
+     * which this task may not edit. Registering a geometry the reload cannot restore would mean
+     * evicting it into a permanent fallback to the built-in default, so the eviction must not
+     * adopt those models at all — see {@code .agent/phase32-asset-eviction-subsystem.md}.
+     */
+    public static boolean hasReloadableClientCache(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return false;
+        }
+        ResourceLocation mainId = ModelIdUtil.getMainId(ModelIdUtil.getParentModelId(modelOrSubId));
+        return CACHED_MODEL_MD5.containsKey(mainId) && OPENYSM_CACHE_FORMAT.contains(mainId);
+    }
     /** Layout versions already reported, so an unsupported geometry format is logged once instead of 150 times. */
     private static final Map<String, Boolean> WARNED_UNSUPPORTED_LAYOUTS = Maps.newConcurrentMap();
     /**
@@ -521,6 +612,37 @@ public class ClientModelManager {
             return true;
         }
         if (GEOMETRY_READY.contains(id)) {
+            // Reference wiring, adapted to this port's single geometry choke point. The reference's
+            // render paths each ask the framework for the geometry they are about to draw
+            // (CustomPlayerRenderer.java:144 `.get()`, :166 `.touch()`, FirstPersonHandRenderer
+            // :430/:437, RenderUtil:492, ModelButton:122) and that is what keeps a live model out of
+            // the idle eviction. This port has one shared entry point for every geometry reader
+            // (world, HUD overlay and GUI tiles all come through here), so the same two answers are
+            // asked here instead of at each draw site.
+            //
+            // Both calls are gated on the switch: with it off this branch is exactly what it was.
+            // The seam only applies to an engine geometry key, i.e. a sub-model id of a model whose
+            // bare id is registered in MODELS - the readiness markers also carry the bare model id,
+            // which no publish ever puts in the engine cache, and for a model inside a pack folder
+            // that bare id still has a path segment (so the sub-name test alone would not exclude
+            // it). `touch()` is a no-op for a key the manager does not know
+            // (AssetCache.java:112-117), so an unmanaged id costs nothing; `get()` is only asked for
+            // an engine geometry key whose geometry is really missing from the cache, which is what
+            // an eviction leaves behind.
+            if (com.fox.ysmu.client.asset.AssetManager.isEnabled()
+                && !MODELS.containsKey(id)
+                && !ModelIdUtil.getSubNameFromId(id)
+                    .isEmpty()) {
+                if (GeckoLibCache.getInstance()
+                    .getGeoModels()
+                    .get(id) == null) {
+                    com.fox.ysmu.client.asset.AssetManager.geo(id)
+                        .get();
+                } else {
+                    com.fox.ysmu.client.asset.AssetManager.geo(id)
+                        .touch();
+                }
+            }
             return true;
         }
         if (GEOMETRY_FAILED.contains(id)) {
@@ -615,6 +737,17 @@ public class ClientModelManager {
      * renderer looks for it, and uploading textures - is spread over frames instead of being done in one.
      */
     public static void tick() {
+        // Reference wiring: the reference drives AssetManager.tick() from its periodic cache sweep,
+        // which runs every 60 s (reference ClientModelManager.java:1750, called from
+        // unloadUnusedCaches). This port's client tick is the equivalent hook; AssetManager
+        // rate-limits its own scan to the same order of magnitude and no-ops entirely while
+        // Config.ENABLE_IDLE_ASSET_EVICTION is off.
+        com.fox.ysmu.client.asset.AssetManager.tick();
+        // The render-thread step of the texture release mechanism: drain the cleanup events that texture holders
+        // becoming unreachable produced, then perform the releases whose grace delay has run out. Upstream drives
+        // the same call from its client tick (upstream client/event/ClientTickEvent.java:28 ->
+        // CustomTextureManager.tick, upstream :38-41). No-op when nothing is registered.
+        ModelTextureRegistry.tick();
         for (int published = 0; published < MAX_PUBLISH_PER_TICK; published++) {
             BuiltModel built = COMPLETED_BUILDS.poll();
             if (built == null) {
@@ -1250,6 +1383,15 @@ public class ClientModelManager {
             built.widthScale,
             built.extraInfo != null,
             extraAnimationNames != null ? extraAnimationNames.length : 0);
+        // Reference wiring: applyPreParsed hands every installed geometry to AssetManager
+        // (reference ClientModelManager.java:599). Gated twice for the same reason as every other
+        // AssetManager call site: with Config.ENABLE_IDLE_ASSET_EVICTION off the subsystem must do
+        // nothing at all. The reloadability test is the port-specific safety gate documented on
+        // hasReloadableClientCache: a geometry the port cannot re-read must never be adopted by a
+        // cache whose whole job is to evict it.
+        if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(built.id)) {
+            com.fox.ysmu.client.asset.AssetManager.registerGeo(built.id, built.model);
+        }
     }
 
     /**
@@ -1380,49 +1522,36 @@ public class ClientModelManager {
 
 
     /**
-     * Texture ids this client uploaded itself; see {@link #registerTexture}.
+     * Registers one texture, uploading the image the loader thread already decoded when there is one, and hands its
+     * lifecycle to {@link ModelTextureRegistry}.
      * <p>
-     * Internal to the upload bookkeeping and nothing else. It is deliberately NOT a gate on what the renderer may
-     * bind: the game's texture manager legitimately holds textures this mod never uploaded (the player's own skin for
-     * the built-in {@code steve}/{@code alex} models, another mod's textures), and upstream lets those through - the
-     * renderer resolves a model texture through the model's own list and carries anything else as an explicit render
-     * event override. In the same way, a model texture is checked against the model's own list in
-     * {@code CustomPlayerModel.textureFor}, not against this set.
+     * Texture ids this client uploaded itself used to be tracked here in {@code UPLOADED_TEXTURES}, a timestamp-free
+     * id set whose only job was to decide whether a re-registration may {@code deleteTexture}. That decision now
+     * belongs to the release mechanism, which owns the same question and needs the answer anyway:
+     * {@code CustomTextureManager.MinecraftHost} remembers, per id, whether the platform entry is this mod's own
+     * upload - the {@code loadTexture} return value is what tells the two apart - and deletes the previous GL texture
+     * only when it is. The reason the old set existed is unchanged and still honoured: an id the game mapped to its
+     * shared missing texture is not ours to delete, and deleting it would blank every missing texture in the game.
      * <p>
-     * What this set is for is the delete decision below: an id the game mapped to its shared missing texture is not
-     * ours to delete, and deleting it would blank every missing texture in the game.
-     * Kept for the life of the process on purpose: the GL textures survive a connection change, so an id that was
-     * ours stays ours.
-     */
-    private static final Set<ResourceLocation> UPLOADED_TEXTURES = ConcurrentHashMap.newKeySet();
-
-    private static void registerTexture(ResourceLocation id, byte[] data) {
-        registerTexture(id, data, null);
-    }
-
-    /**
-     * Registers one texture, uploading the image the loader thread already decoded when there is one.
+     * The set was deliberately NOT a gate on what the renderer may bind (the game's texture manager legitimately
+     * holds textures this mod never uploaded - the player's own skin for the built-in {@code steve}/{@code alex}
+     * models, another mod's textures), and neither is its replacement: a model texture is checked against the model's
+     * own list in {@code CustomPlayerModel.textureFor}, not against this bookkeeping.
      *
      * @param decoded the image prepared off-thread, or {@code null} to decode here; see {@link #buildModel}.
      */
     private static void registerTexture(ResourceLocation id, byte[] data, @Nullable BufferedImage decoded) {
-        TextureManager textureManager = Minecraft.getMinecraft()
-            .getTextureManager();
-        // R-01: loadTexture only replaces the map entry, so registering an id twice would leak the GL texture the
-        // previous OuterFileTexture uploaded and nothing would ever free it - but only an id this client really
-        // uploaded may be deleted. A texture the manager could not decode is mapped to its shared
-        // TextureUtil.missingTexture singleton, whose GL name every missing texture in the game draws with; deleting
-        // that would blank them all. loadTexture's return value is what tells the two apart.
-        if (UPLOADED_TEXTURES.contains(id)) {
-            textureManager.deleteTexture(id);
-        }
-        OuterFileTexture texture = decoded != null ? new OuterFileTexture(decoded) : new OuterFileTexture(data);
-        if (textureManager.loadTexture(id, texture)) {
-            UPLOADED_TEXTURES.add(id);
-        } else {
-            // The manager substituted the shared missing texture, so this id is not ours to delete next time.
-            UPLOADED_TEXTURES.remove(id);
-        }
+        // R-01: loadTexture only replaces the map entry, so re-registering an id twice would leak the GL texture the
+        // previous OuterFileTexture uploaded. That delete, and the "is this id ours to delete at all" decision, now
+        // live in the release mechanism: CustomTextureManager.MinecraftHost.register deletes the id's previous GL
+        // texture when the registration before it was this mod's own upload, and never when the game mapped the id to
+        // its shared missing texture - whose GL name every missing texture in the game draws with, so deleting it
+        // would blank them all. That replaces the timestamp-free ClientModelManager.UPLOADED_TEXTURES id set that
+        // used to answer exactly this question (see .agent/phase34-texture-release.md).
+        //
+        // The throw stays handled by the caller (uploadTextures): a texture that cannot be registered is not a reason
+        // to refuse the model.
+        ModelTextureRegistry.register(id, decoded != null ? new OuterFileTexture(decoded) : new OuterFileTexture(data));
     }
 
     private static void registerAnimations(ResourceLocation id, Map<String, byte[]> mapData) {
@@ -1506,7 +1635,7 @@ public class ClientModelManager {
                     id,
                     e.getClass()
                         .getSimpleName(),
-                    StringUtils.defaultString(e.getMessage()));
+                    Objects.requireNonNullElse(e.getMessage(), ""));
                 continue;
             }
             if (jsonObject == null) {
@@ -1667,7 +1796,7 @@ public class ClientModelManager {
                 projectileId,
                 e.getClass()
                     .getSimpleName(),
-                StringUtils.defaultString(e.getMessage()));
+                Objects.requireNonNullElse(e.getMessage(), ""));
             return new AnimationFile();
         }
     }
@@ -1699,7 +1828,7 @@ public class ClientModelManager {
                     animationName,
                     e.getClass()
                         .getSimpleName(),
-                    StringUtils.defaultString(e.getMessage()));
+                    Objects.requireNonNullElse(e.getMessage(), ""));
             }
         }
         return animationFile;
@@ -2007,6 +2136,61 @@ public class ClientModelManager {
         }
     }
 
+    /**
+     * 后台线程：从加密客户端缓存重解析单个 sub-model 的几何。
+     * 不写任何缓存；由 {@link com.fox.ysmu.client.asset.AssetManager} /
+     * {@code provider.GeoModelProvider} 在主线程 apply。
+     * <p>
+     * Reference {@code ClientModelManager.java:1616-1637}. The port cannot use the reference's
+     * {@code loadLegacyModelData} ({@code :1484-1508}) — see
+     * {@link #hasReloadableClientCache} — so the payload comes from
+     * {@link #loadRawModelFromCache} and is bridged with the same
+     * {@code RawYsmModelAdapter.toLegacyModelData} call the port's own sync path uses. The
+     * sub-model lookup is the reference's own rule ({@code ModelIdUtil.getSubModelId(baseId, key)}
+     * compared to {@code geoId}) and this port's {@link #buildGeo} is the same bake
+     * {@code publishGeo} installs, so a reloaded geometry is byte-for-byte the object the
+     * original build produced.
+     *
+     * @param geoId sub-model id（如 "ysmu:model_id/main"、"ysmu:model_id/arm"）
+     * @return 解析出的 GeoModel；缺失/损坏/本仓无法重载时返回 null
+     */
+    @Nullable
+    public static GeoModel parseSingleGeoFromCache(ResourceLocation geoId) {
+        if (geoId == null) {
+            return null;
+        }
+        // geoId is a sub-model id ("ysmu:model/main" or "ysmu:model/arm"). Derive the
+        // base id, then the main id for the encrypted-cache lookup. Calling
+        // getMainId(geoId) directly would append "/main" a second time (e.g.
+        // "ysmu:model/main/main") and miss the CACHED_MODEL_MD5 entry — silently
+        // failing every background reload (vanilla hand / missing model after idle).
+        ResourceLocation baseId = ModelIdUtil.getParentModelId(geoId);
+        ResourceLocation mainId = ModelIdUtil.getMainId(baseId);
+        com.fox.ysmu.model.resource.pojo.RawYsmModel raw = loadRawModelFromCache(mainId);
+        if (raw == null) {
+            return null;
+        }
+        ModelData data;
+        try {
+            data = RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to bridge cached model data for {}: {}", mainId, e.getMessage());
+            return null;
+        }
+        Map<String, byte[]> modelBytes = data.getModel();
+        if (modelBytes == null || modelBytes.isEmpty()) {
+            return null;
+        }
+        for (Map.Entry<String, byte[]> entry : modelBytes.entrySet()) {
+            ResourceLocation subId = ModelIdUtil.getSubModelId(baseId, entry.getKey());
+            if (geoId.equals(subId)) {
+                BuiltGeo built = buildGeo(subId, entry.getValue());
+                return built == null ? null : built.model;
+            }
+        }
+        return null;
+    }
+
     private static void clearRuntimeModelCaches() {
         ysmu.LOG.info(
             "YSM client clearing runtime model caches: models={}, scales={}, extraInfo={}, extraAnimations={}",
@@ -2065,6 +2249,18 @@ public class ClientModelManager {
         com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
         com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.clear();
         com.fox.ysmu.client.renderer.ArrowProjectileRenderer.clearDumpedTrees();
+        // Reference wiring: the reference releases the framework's assets at this point too
+        // (reference ClientModelManager.java:2036 `AssetManager.clearAll()`). No-op while the
+        // switch is off, in which case the caches are empty anyway.
+        com.fox.ysmu.client.asset.AssetManager.clearAll();
+        // The model textures belong to the models being dropped here, so their registrations are released with them:
+        // this is upstream's explicit release trigger (upstream CustomTextureManager.release) driven from the port's
+        // existing model-unload path, and it is what makes the holders unreachable - the reachability trigger alone
+        // could never fire, because 1.7.10's texture map keeps every registered texture alive. Each release is still
+        // delayed by CustomTextureManager.DEFAULT_REMOVAL_DELAY_TICKS on the client tick, like upstream's. Runs after
+        // the model list was cleared above, so no render site can still resolve one of these ids
+        // (CustomPlayerModel.textureFor reads MODELS). See .agent/phase34-texture-release.md.
+        ModelTextureRegistry.clear();
     }
 
     /**

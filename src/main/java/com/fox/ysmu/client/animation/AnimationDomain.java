@@ -1,7 +1,5 @@
 package com.fox.ysmu.client.animation;
 
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 import net.minecraft.util.ResourceLocation;
@@ -38,7 +36,7 @@ public final class AnimationDomain {
     public static final String FIRST_PERSON = "player/first-person";
 
     /** Both domains, in the order they are installed. */
-    public static final List<String> ALL = Collections.unmodifiableList(Arrays.asList(MAIN, FIRST_PERSON));
+    public static final List<String> ALL = List.of(MAIN, FIRST_PERSON);
 
     /**
      * The animation-set key that names the first-person domain. It is a key of the pack's own
