@@ -12,6 +12,7 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
+import com.fox.ysmu.compat.BlockingCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
 import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
 import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
@@ -25,6 +26,7 @@ import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.animation.molang.ParticleFunction;
 import com.fox.ysmu.client.animation.molang.PerlinNoiseFunction;
 import com.fox.ysmu.client.animation.molang.QueryBlockTagFunction;
+import com.fox.ysmu.client.animation.molang.QueryDebugOutputFunction;
 import com.fox.ysmu.client.animation.molang.QueryDurabilityFunction;
 import com.fox.ysmu.client.animation.molang.QueryHasAnyCuriosFunction;
 import com.fox.ysmu.client.animation.molang.QueryItemNameAnyFunction;
@@ -213,6 +215,10 @@ public class AnimationRegister {
         // 必须注册：未注册函数会让整条关键帧表达式解析失败、整个动画被丢弃。
         functions.put("query.equipped_item_any_tag", QueryItemTagFunction.class);
         functions.put("query.equipped_item_all_tags", QueryItemTagFunction.class);
+        // query.debug_output(...)：调试输出（YSM-wiki molang/ref，1.2.0）。函数名必须注册：解析期按字面名
+        // 查表，查不到会抛 Function 'q.debug_output' couldn't be found!，整条关键帧表达式失效
+        // （MolangQueryAbbreviationTest 覆盖）。未开动画调试模式时 MolangDebugOutput 静默丢弃。
+        functions.put("query.debug_output", QueryDebugOutputFunction.class);
         // ysm.perlin_noise：3D 柏林噪声（返回 [0,1]），自实现。
         functions.put("ysm.perlin_noise", PerlinNoiseFunction.class);
         // ysm.keyboard(键码...)：关键帧/时间轴 Molang 里的按键查询。
@@ -312,6 +318,7 @@ public class AnimationRegister {
         parser.register(new LazyVariable("query.is_sprinting", MolangUtils.FALSE));
         parser.register(new LazyVariable("query.is_swimming", MolangUtils.FALSE));
         parser.register(new LazyVariable("query.is_using_item", MolangUtils.FALSE));
+        parser.register(new LazyVariable("query.is_blocking", MolangUtils.FALSE));
         parser.register(new LazyVariable("query.item_in_use_duration", 0));
         parser.register(new LazyVariable("query.item_max_use_duration", 0));
         parser.register(new LazyVariable("query.item_remaining_use_duration", 0));
@@ -390,6 +397,19 @@ public class AnimationRegister {
 
     public static void setParserValue(AnimationEvent<CustomPlayerEntity> animationEvent, MolangParser parser,
         EntityModelData data, EntityPlayer player) {
+        setParserValue(animationEvent, parser, data, player, true);
+    }
+
+    /**
+     * @param humanoidHooks whether this animatable is one of upstream's humanoids, i.e. whether the two humanoid
+     *                      script hooks ({@code player_init}, {@code player_update}) belong to this tick. Upstream
+     *                      fires them from {@code CustomHumanoidEntity#preAnimationSetup} only
+     *                      ({@code client/entity/CustomHumanoidEntity.java:195-218}) and its first-person arm entity
+     *                      is a plain {@code CustomEntity}, so the arm's own per-frame tick publishes the same values
+     *                      with {@code false} - the world's tick already fired them for this frame.
+     */
+    public static void setParserValue(AnimationEvent<CustomPlayerEntity> animationEvent, MolangParser parser,
+        EntityModelData data, EntityPlayer player, boolean humanoidHooks) {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.theWorld == null) {
             return;
@@ -416,7 +436,7 @@ public class AnimationRegister {
         setStateQueryValues(parser, player, mc);
         setItemUseQueryValues(parser, player);
         setWorldQueryValues(parser, player, mc);
-        setYsmValues(animationEvent, parser, data, player, queryValues);
+        setYsmValues(animationEvent, parser, data, player, queryValues, humanoidHooks);
     }
 
     private static void setEntityQueryValues(MolangParser parser, EntityModelData data, EntityPlayer player,
@@ -469,6 +489,7 @@ public class AnimationRegister {
         parser.setValue("query.is_sprinting", () -> MolangUtils.booleanToFloat(player.isSprinting()));
         parser.setValue("query.is_swimming", () -> MolangUtils.booleanToFloat(player.isInWater()));
         parser.setValue("query.is_using_item", () -> MolangUtils.booleanToFloat(player.isUsingItem()));
+        parser.setValue("query.is_blocking", () -> MolangUtils.booleanToFloat(BlockingCompat.isBlocking(player)));
     }
 
     private static void setItemUseQueryValues(MolangParser parser, EntityPlayer player) {
@@ -487,7 +508,8 @@ public class AnimationRegister {
     }
 
     private static void setYsmValues(AnimationEvent<CustomPlayerEntity> animationEvent, MolangParser parser,
-        EntityModelData data, EntityPlayer player, RemotePlayerAnimationQueries.QueryValues queryValues) {
+        EntityModelData data, EntityPlayer player, RemotePlayerAnimationQueries.QueryValues queryValues,
+        boolean humanoidHooks) {
         parser.setValue("ysm.head_yaw", queryValues.headYaw());
         parser.setValue("ysm.head_pitch", () -> data.headPitch);
         parser.setValue("ysm.has_helmet", () -> getSlotValue(player, 4));
@@ -499,17 +521,23 @@ public class AnimationRegister {
         // PackUserFunctions#clear (called when the model caches are rebuilt) re-arms it. `player_update` runs every
         // frame and is handed "did this frame actually tick" as args[0], so a script guarding on it does not do its
         // work twice for a frame this port renders twice.
-        String hookPlayerKey = player.getUniqueID()
-            .toString();
-        ResourceLocation hookModelId = animationEvent.getAnimatable()
-            .getMainModel();
-        if (PackUserFunctions.consumeInitPending(hookPlayerKey, hookModelId)) {
-            PackUserFunctions.fireHook("player_init", hookModelId);
+        //
+        // Only the humanoid entities fire them. The first-person arm publishes the same values for its own tick
+        // (which is what its clips read) but is not a humanoid, so it passes humanoidHooks=false and the world's tick
+        // remains the one that runs a pack's `@player_update` script for this frame.
+        if (humanoidHooks) {
+            String hookPlayerKey = player.getUniqueID()
+                .toString();
+            ResourceLocation hookModelId = animationEvent.getAnimatable()
+                .getMainModel();
+            if (PackUserFunctions.consumeInitPending(hookPlayerKey, hookModelId)) {
+                PackUserFunctions.fireHook("player_init", hookModelId);
+            }
+            PackUserFunctions.fireHook(
+                "player_update",
+                hookModelId,
+                PackUserFunctions.frameTicked(hookPlayerKey, animationEvent.getAnimationTick()) ? 1.0D : 0.0D);
         }
-        PackUserFunctions.fireHook(
-            "player_update",
-            hookModelId,
-            PackUserFunctions.frameTicked(hookPlayerKey, animationEvent.getAnimationTick()) ? 1.0D : 0.0D);
 
         parser.setValue("ysm.has_mainhand", () -> getSlotValue(player, 0));
         parser.setValue("ysm.has_offhand", () -> getSlotValue(player, 5));
@@ -548,8 +576,18 @@ public class AnimationRegister {
         parser.setValue("ysm.swinging", () -> MolangUtils.booleanToFloat(player.isSwingInProgress));
         parser.setValue("ysm.swing_time", () -> player.swingProgressInt);
         parser.setValue("ysm.swinging_arm", () -> BackhandCompat.swingingArm(player) ? 0.0d : 1.0d);
-        parser.setValue("ysm.mainhand_charged_crossbow", MolangUtils.FALSE);
-        parser.setValue("ysm.offhand_charged_crossbow", MolangUtils.FALSE);
+        // TiCon 十字弩的装填状态来自物品 NBT（InfiTool.Loaded），只能按物品读，
+        // 所以主手/副手各读一次；没有 TConstruct 时 TinkersCrossbowCompat 一律返回 false
+        // (reference branch AnimationRegister.java:587-590)。
+        parser.setValue(
+            "ysm.mainhand_charged_crossbow",
+            () -> MolangUtils.booleanToFloat(
+                com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem())));
+        parser.setValue(
+            "ysm.offhand_charged_crossbow",
+            () -> MolangUtils.booleanToFloat(
+                com.fox.ysmu.compat.TinkersCrossbowCompat
+                    .isCrossbowLoaded(BackhandCompat.getOffhandItem(player))));
         parser.setValue("ysm.armor_value", player::getTotalArmorValue);
         parser.setValue("ysm.hurt_time", () -> player.hurtTime);
         parser.setValue("ysm.food_level", () -> player.getFoodStats().getFoodLevel());

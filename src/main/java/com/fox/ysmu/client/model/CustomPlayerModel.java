@@ -189,7 +189,7 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             && animatable instanceof CustomPlayerEntity customPlayer
             && customPlayer.getPlayer() != null) {
             EntityPlayer player = customPlayer.getPlayer();
-            AnimationRegister.setParserValue(animationEvent, parser, data, player);
+            AnimationRegister.setParserValue(animationEvent, parser, data, player, customPlayer.firesHumanoidHooks());
             try {
                 super.setLivingAnimations(animatable, instanceId, animationEvent);
                 this.codeAnimation(animationEvent, data, player);

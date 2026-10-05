@@ -29,18 +29,39 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Con
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.State;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Transition;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
 
 public final class OpenYsmPlayerControllerRuntime {
 
     private static final Map<StateKey, RuntimeState> STATES = new ConcurrentHashMap<>();
+    /** 调试日志的简易按标签限流表：tag → 上次打印时刻（毫秒）。{@code SOURCE:47}。 */
+    private static final Map<String, Long> DEBUG_LOG_LAST_TIME = new ConcurrentHashMap<>();
 
     private OpenYsmPlayerControllerRuntime() {}
+
+    /**
+     * 该标签现在是否可以打一条日志（同一标签最多 1000ms 一条）。SOURCE
+     * {@code OpenYsmPlayerControllerRuntime.java:77-86} 原样搬用。
+     * <p>
+     * 这是本仓"永久诊断"的那一类：{@code DEBUG_CONTROLLER} 开关 + 限流，所以它留在代码里；
+     * 调用点自己判 {@code Config.DEBUG_CONTROLLER}，本方法只管限流。
+     */
+    private static boolean allowDebugLog(String tag) {
+        long now = System.currentTimeMillis();
+        Long last = DEBUG_LOG_LAST_TIME.get(tag);
+        if (last != null && now - last < 1000) {
+            return false;
+        }
+        DEBUG_LOG_LAST_TIME.put(tag, now);
+        return true;
+    }
 
     public static PlayState tryApply(AnimationEvent<CustomPlayerEntity> event) {
         if (event == null || event.getController() == null || event.getAnimatable() == null) {
@@ -56,7 +77,17 @@ public final class OpenYsmPlayerControllerRuntime {
         // so reading the registry first would apply the *default's* controller definitions to this model.
         ClientModelManager.ensureAnimations(animatable.getMainModel());
         ResourceLocation animationId = animatable.getAnimation();
-        ControllerSet set = OpenYsmAnimationControllerRegistry.get(animationId);
+        // Upstream keeps ONE controller map per render target and hands it to both its player entity and its
+        // first-person arm entity (`PlayerModelResources.animationControllers()`, read by `PlayerControllerCollection`
+        // and `FPArmControllerCollection` through the same `ResourceAdapter.INSTANCE`:
+        // `client/controller/collections/FPArmControllerCollection.java:74-76`). The port keys this registry by
+        // animation id, and the arm's animation id is the model's `arm` id, so the arm has to be routed back to the
+        // same model's controller map - otherwise a pack's declared `fp.arm.misc` / `fp.arm.parallel_<i>` /
+        // `fp.arm.armor_<slot>` definition could never be found and the arm would only ever fall back to the coded
+        // `parallel<i>` clip. `animationId` stays the arm's own id below, which is what keeps the arm's per-controller
+        // runtime state and its animation lookups in the first-person domain.
+        ControllerSet set = OpenYsmAnimationControllerRegistry
+            .get(com.fox.ysmu.client.animation.AnimationDomain.controllerSetId(animationId));
         if (set == null) {
             return null;
         }
@@ -133,6 +164,29 @@ public final class OpenYsmPlayerControllerRuntime {
     private static PlayState tryApplyController(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
         ResourceLocation animationId, String geckoControllerName, ControllerMatch match) {
         RuntimeState runtimeState = runtimeState(player, animationId, geckoControllerName, match.controller.name);
+        // 跳过依赖未加载模组的并行控制器（如 player.parallel_3）。
+        // 没有 TacZ 时并行控制器的 transition 条件永远无法满足，
+        // 导致卡在 default 状态循环播放带有音效关键帧的动画。
+        // (reference branch OpenYsmPlayerControllerRuntime.java:378-392)
+        //
+        // 主控制器（post_main/main/base/move）不跳过——它们的非模组
+        // 相关状态（如 idle/walk/run/jump）可以正常运行，模组相关条件
+        // 自然返回 false。
+        if (!match.controller.modDependencies.isEmpty()
+            && ModDependencyRegistry.hasUnmetDependencies(match.controller.modDependencies)) {
+            // 仅跳过并行控制器，不跳过主身体控制器
+            String ctrlName = geckoControllerName;
+            boolean isParallel = ctrlName != null
+                && (ctrlName.startsWith("parallel_") || ctrlName.startsWith("pre_parallel_"));
+            if (isParallel) {
+                runtimeState.currentState = "";
+                runtimeState.lastSelectedAnimationState = "";
+                runtimeState.lastSelectedAnimation = "";
+                com.fox.ysmu.client.audio.YSMSoundManager.stopController(player, geckoControllerName);
+                event.getController().currentAnimationBuilder = new AnimationBuilder();
+                return null;
+            }
+        }
         OpenYsmControllerExpressionEvaluator.Context context = new OpenYsmControllerExpressionEvaluator.Context(
             event,
             player,
@@ -314,7 +368,13 @@ public final class OpenYsmPlayerControllerRuntime {
         // Installs the model's animations on first use; going straight to the cache would report a controller's
         // animation as missing for a model that simply has not been drawn yet.
         AnimationFile file = ClientModelManager.animationFileFor(animationId);
-        if (file == null || !file.animations.containsKey(animationName)) {
+        // 用 getAnimation() 判断存在性（而非直接查 map），使内置 "empty" 兜底也能命中：
+        // 否则 空闲 等引用 "empty" 的状态会被过滤为无动画，回到 all_animations_finished
+        // 误判的旧 bug 路径。（SOURCE OpenYsmPlayerControllerRuntime.java:706-711 —— SOURCE 把
+        // 这一步从 containsKey 改成 getAnimation，是 YsmBuiltinAnimations 兜底生效的另一半；
+        // 少了它，加载期丢弃模型自定义 "empty" 之后 containsKey("empty") 恒为 false，
+        // 引用 empty 的控制器状态会被判成"缺动画"。）
+        if (file == null || file.getAnimation(animationName) == null) {
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "missing-animation:" + animationId + ":" + animationName,
                 "OpenYSM controller selected missing animation " + animationName + " for " + animationId);
@@ -343,12 +403,81 @@ public final class OpenYsmPlayerControllerRuntime {
             .setAnimation(builder);
     }
 
+    /**
+     * Publishes this frame's {@code v.*} state into the controller and detects a new swing. Port of SOURCE
+     * {@code OpenYsmPlayerControllerRuntime.java:1506-1603}.
+     *
+     * <p>
+     * 该成员每一帧对**每个**控制器都跑一遍（SOURCE 的注释：{@code parallel_2} 这类没有
+     * {@code post_swing} 控制器的并行槽位也必须能各自发现挥动），每个控制器用自己的
+     * {@code lastSwingActive} / {@code lastSwingProgress}，所以 {@code on_exit} 写的变量不会被别的
+     * 控制器覆盖。
+     *
+     * <p>
+     * 1.7.10 的 {@code swingProgressInt} <b>递减</b>（{@code getArmSwingAnimationEnd()} → 0），
+     * 与 Bedrock 的递增相反，而"挥到一半再次点击"会把计数重置为 {@code -1} 但
+     * {@code isSwingInProgress} 保持 true（{@code EntityLivingBase#swingItem}）。所以上升沿判定
+     * 收在 {@link com.fox.ysmu.util.SwingEdge#isNewSwing} 里，两条路径共用；只比较进度值会在整段
+     * 挥动里每帧都判成"新挥动"，{@code v.swing=1} 被反复写、状态机在子状态之间弹跳。
+     *
+     * <p>
+     * 同步必须在挥动检测<b>之前</b>（SOURCE 的注释）：挥动状态的 {@code on_entry} 语句
+     * （如 {@code v.swing=0;v.swing_end=1}）直接写引擎本帧作用域，那些值跨帧留在
+     * {@link MolangPhysicsRuntime} 里；若同步在检测之后跑，就会用上一段挥动的 {@code on_entry}
+     * 值把刚写下的 {@code v.swing=1} 覆盖掉，控制器永久锁在 default 状态。
+     *
+     * <p>
+     * 1.7.10 专属的格挡分支：剑/盾右键格挡会置起 {@code isSwingInProgress}，但不应让 OpenYSM
+     * 控制器播挥动动画（依据 SOURCE {@code :1557-1566}），所以格挡期间把 {@code swing} /
+     * {@code swing_sword} 归零、并记录本帧的挥动采样，让解格挡后的第一次挥动仍被认成新沿。
+     * 上游没有对应机制：1.20 的 {@code SwingPredicate} 只看 {@code entity.swinging}，而 1.20 的
+     * 盾牌格挡不会把它置起。
+     */
     private static void prepareFrameVariables(String geckoControllerName, EntityPlayer player, RuntimeState state,
         OpenYsmControllerExpressionEvaluator.Context context) {
+        // 关键帧 Molang 与时间轴写的是引擎本帧作用域；控制器条件读的是 RuntimeState。SOURCE 这一步
+        // （:1537）把作用域里的 v.* 同步进控制器侧的表。本仓的 RuntimeState#getVariable 已经先读作用域、
+        // 再回落这张表，所以这次同步对求值结果不构成改变（见 MolangPhysicsRuntime#syncToRuntimeState 的说明）。
+        MolangPhysicsRuntime.syncToRuntimeState(state.variables);
+        // post_swing 控制器上的取值诊断（SOURCE :1538-1555，限流 1s）。
+        if (Config.DEBUG_CONTROLLER && geckoControllerName.contains("post_swing")) {
+            double postSyncAttack = state.variables.getOrDefault("attack", -999.0);
+            double postSyncSwingEnd = state.variables.getOrDefault("swing_end", -999.0);
+            if ((postSyncAttack != -999.0 || postSyncSwingEnd != -999.0) && allowDebugLog("PS-SYNC")) {
+                ysmu.LOG.info(
+                    "[YSMU-PS-SYNC] after syncToRuntimeState: attack={} swing_end={}",
+                    postSyncAttack,
+                    postSyncSwingEnd);
+            }
+            // 驱动「默认挥剑」连段的 v.qh 变量（SOURCE :1546-1555，限流 1s）。
+            if (allowDebugLog("PS-QH")) {
+                double qh = state.variables.getOrDefault("qh", Double.NaN);
+                double qh2 = state.variables.getOrDefault("qh2", Double.NaN);
+                double jump = state.variables.getOrDefault("jump", Double.NaN);
+                double vrandom = state.variables.getOrDefault("random", Double.NaN);
+                ysmu.LOG.info("[YSMU-PS-QH] qh={} qh2={} jump={} random={}", qh, qh2, jump, vrandom);
+            }
+        }
+
+        if (player == null) {
+            // 预览实体没有玩家状态，也就没有挥动可测；SOURCE 在这里也只在 player != null 时继续。
+            return;
+        }
+        if (com.fox.ysmu.compat.BlockingCompat.isBlocking(player)) {
+            // 1.7.10: 格挡中把 swing / swing_sword 归零（依据 SOURCE :1557-1566）。
+            state.lastSwingActive = player.isSwingInProgress;
+            state.lastSwingProgress = player.isSwingInProgress ? player.swingProgressInt : -1;
+            state.setVariable("swing", 0.0d);
+            state.setVariable("swing_sword", 0.0d);
+            return;
+        }
         if (isPostSwingController(geckoControllerName)) {
-            boolean newSwing = player.isSwingInProgress
-                && (!state.lastSwingActive || player.swingProgressInt < state.lastSwingProgress);
+            boolean newSwing = com.fox.ysmu.util.SwingEdge
+                .isNewSwing(player.isSwingInProgress, player.swingProgressInt, state.lastSwingProgress,
+                    state.lastSwingActive);
             if (newSwing) {
+                state.setVariable("swing", 1.0d);
+                state.setVariable("swing_end", 0.0d);
                 boolean swordSwing = OpenYsmControllerExpressionEvaluator.evaluateBoolean(
                     "ctrl.swing('mainhand', ':sword')||ctrl.swing('offhand', ':sword')",
                     context);
@@ -356,12 +485,21 @@ public final class OpenYsmPlayerControllerRuntime {
                     // A-03: written through the shared variable entry so the value lands in the same store the
                     // animation file and its timeline instructions use (see RuntimeState#setVariable).
                     state.setVariable("swing_sword", 1.0d);
-                    state.setVariable(
-                        "jump",
-                        OpenYsmControllerExpressionEvaluator.evaluateBoolean(
-                            "q.is_jumping&&(q.vertical_speed<0)",
-                            context) ? 1.0d : 0.0d);
+                    if (Config.DEBUG_CONTROLLER && allowDebugLog("CTRL-SWING-" + geckoControllerName)) {
+                        ysmu.LOG.info(
+                            "[YSMU-CTRL] {}: sword swing detected, set swing_sword=1",
+                            geckoControllerName);
+                    }
                 }
+                state.setVariable(
+                    "jump",
+                    OpenYsmControllerExpressionEvaluator.evaluateBoolean(
+                        "q.is_jumping&&(q.vertical_speed<0)",
+                        context) ? 1.0d : 0.0d);
+            } else {
+                // SOURCE :1595-1598：没有新挥动时把这两个脉冲变量收回 0，否则一次性触发会粘住。
+                state.setVariable("swing", 0.0d);
+                state.setVariable("swing_sword", 0.0d);
             }
             state.lastSwingActive = player.isSwingInProgress;
             state.lastSwingProgress = player.isSwingInProgress ? player.swingProgressInt : -1;
@@ -390,6 +528,19 @@ public final class OpenYsmPlayerControllerRuntime {
         if (namedRoute != null) {
             if (namedRoute.controllerKey != null) {
                 addMatch(matches, set, namedRoute.controllerKey, preferredAnimationName);
+            }
+            List<ControllerMatch> stored = matches.isEmpty() ? java.util.Collections.emptyList() : matches;
+            set.routeCache.put(geckoControllerName, stored);
+            return stored;
+        }
+        // 槽位后缀控制器的共享备用池：名字里没有模型信息，路由按当前模型算
+        // （wiki「动画控制器」2.6.3：同一组内的控制器按名称字母序排序后依次加载；
+        // 官方对 player.pre_main_* 这类带后缀的名字也各发一个独立控制器）。
+        if (isSlotExtraController(geckoControllerName)) {
+            OpenYsmAnimationControllerRegistry.SlotExtra slotExtra =
+                routeSlotExtra(animationId, geckoControllerName);
+            if (slotExtra != null) {
+                addMatch(matches, set, slotExtra.controllerKey, preferredAnimationName);
             }
             List<ControllerMatch> stored = matches.isEmpty() ? java.util.Collections.emptyList() : matches;
             set.routeCache.put(geckoControllerName, stored);
@@ -648,6 +799,58 @@ public final class OpenYsmPlayerControllerRuntime {
         return new String[] { matcher.group(1), matcher.group(2) };
     }
 
+    /** 槽位后缀控制器的共享备用池控制器名：{@code openysm_slot_extra_<序号>_controller}。 */
+    private static final java.util.regex.Pattern SLOT_EXTRA_CONTROLLER =
+        java.util.regex.Pattern.compile("^"
+            + java.util.regex.Pattern.quote(com.fox.ysmu.util.ControllerUtils.SLOT_EXTRA_CONTROLLER_PREFIX)
+            + "(\\d+)_controller$");
+
+    /** 名字是不是槽位后缀备用池控制器。谓词路径每帧都问，所以先用廉价的 startsWith 挡掉绝大多数。 */
+    public static boolean isSlotExtraController(String geckoControllerName) {
+        return geckoControllerName != null
+            && geckoControllerName.startsWith(com.fox.ysmu.util.ControllerUtils.SLOT_EXTRA_CONTROLLER_PREFIX)
+            && SLOT_EXTRA_CONTROLLER.matcher(geckoControllerName).matches();
+    }
+
+    /**
+     * 槽位后缀池控制器的路由：第 i 个池控制器承载当前模型第 i 个
+     * {@code player.<slot>_<后缀>}（见
+     * {@link OpenYsmAnimationControllerRegistry#slotExtraControllers}）。
+     *
+     * <p>池控制器名里没有模型信息，所以路由必须按当前模型算——与具名并行槽位同样的理由：
+     * {@code registerControllers} 对每个 animatable 只跑一次，而模型可以随时切换。</p>
+     *
+     * @return 路由到的条目；不是池控制器、或该下标在当前模型里没有对应后缀控制器时返回 {@code null}
+     */
+    public static OpenYsmAnimationControllerRegistry.SlotExtra routeSlotExtra(ResourceLocation animationId,
+        String geckoControllerName) {
+        if (animationId == null || geckoControllerName == null) {
+            return null;
+        }
+        java.util.regex.Matcher matcher = SLOT_EXTRA_CONTROLLER.matcher(geckoControllerName);
+        if (!matcher.matches()) {
+            return null;
+        }
+        int index = Integer.parseInt(matcher.group(1));
+        java.util.List<OpenYsmAnimationControllerRegistry.SlotExtra> entries =
+            OpenYsmAnimationControllerRegistry.slotExtraControllers(animationId);
+        return index < entries.size() ? entries.get(index) : null;
+    }
+
+    /**
+     * 池控制器本帧应该交给动画控制脚本的**槽位名**（{@code <slot>_<后缀>}）。
+     * <p>
+     * {@code AnimationManager.controlSlotName()} 对池名故意返回 null（模型里没有这个槽位名，
+     * 真正的名字只有这里知道），所以那里必须补上这次路由 —— 与具名并行槽位
+     * （{@link #namedParallelControlSlot}）完全同一个套路。
+     *
+     * @return 槽位名；不是池控制器、或没路由到条目时返回 {@code null}
+     */
+    public static String slotExtraControlSlot(ResourceLocation animationId, String geckoControllerName) {
+        OpenYsmAnimationControllerRegistry.SlotExtra route = routeSlotExtra(animationId, geckoControllerName);
+        return route == null ? null : route.controlSlot;
+    }
+
     /** The prefix the engine registers scoped variables under (`ScopedMolangVariable#getName`). */
     private static final String VARIABLE_PREFIX = "v.";
 
@@ -671,20 +874,34 @@ public final class OpenYsmPlayerControllerRuntime {
          * Writes {@code v.<name>} (name without the {@code v.} prefix). Prefers the engine scope; falls back to the
          * local map when no scope is open, so a controller that writes in one evaluation can still read it in the
          * next.
+         * <p>
+         * 变量名先过 {@link MolangParser#canonicalVariableName} —— 与动画文件、{@code .molang} 脚本、漫游变量
+         * 完全同一条规则；上游 1.20 的每一个标识符也都走这条小写化规则
+         * （{@code api/molang/MolangNames#identifier:29-35}）。控制器 JSON 的过渡条件按包里的字面写法读
+         * {@code v.is_Idle}，而动画文件时间轴里的 {@code v.is_Idle=1;} 是先被
+         * {@code MolangParser.parseExpression} 整体小写化（{@code lowerCaseOutsideStrings}）再存进作用域的，
+         * 于是这条轴不改写名字就会拿 {@code v.is_Idle} 去查一个只存着 {@code v.is_idle} 的表：
+         * 条件恒为假、控制器永远出不了 initial_state，动画整条不可达。
+         * 与 {@code v.roaming.C} 是同一个缺陷，见 AGENTS.md「Molang variable names are case-insensitive」。
          */
         void setVariable(String name, double value) {
-            if (!MolangPhysicsRuntime.setVariable(VARIABLE_PREFIX + name, value)) {
-                variables.put(name, value);
+            String canonical = MolangParser.canonicalVariableName(name);
+            if (!MolangPhysicsRuntime.setVariable(VARIABLE_PREFIX + canonical, value)) {
+                variables.put(canonical, value);
             }
         }
 
         /**
          * Reads {@code v.<name>} (name without the {@code v.} prefix). The engine scope wins over the local
-         * fallback, and when neither has the name {@code fallback} is returned.
+         * fallback, and when neither has the name {@code fallback} is returned. The name is canonicalised first,
+         * for the reason given on {@link #setVariable} - the local fallback map is keyed the same way, so both
+         * stores answer to every spelling Molang accepts.
          */
         double getVariable(String name, double fallback) {
-            Double local = variables.get(name);
-            return MolangPhysicsRuntime.getVariable(VARIABLE_PREFIX + name, local == null ? fallback : local);
+            String canonical = MolangParser.canonicalVariableName(name);
+            Double local = variables.get(canonical);
+            return MolangPhysicsRuntime
+                .getVariable(VARIABLE_PREFIX + canonical, local == null ? fallback : local);
         }
     }
 

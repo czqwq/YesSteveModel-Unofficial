@@ -61,6 +61,12 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         ItemStack mainHandItem = entity.getHeldItem();
         // 副手是玩家专属：BackhandCompat 读的是玩家自己的副手扩展，非玩家实体没有这一槽位，故为 null。
         ItemStack offhandItem = entity instanceof EntityPlayer player ? BackhandCompat.getOffhandItem(player) : null;
+        // 配置隐藏的副手物品（如 Extra Utilities 除叶子斧）在模型手持层也不渲染
+        // (reference branch CustomPlayerItemInHandLayer.java:86)。放在这里而不是绘制点上：本类只在
+        // 这一个地方读副手，置空后下面 `offhandItem != null` 与左臂物品绘制同时不再成立。
+        if (offhandItem != null && BackhandCompat.isHiddenOffhandItem(offhandItem)) {
+            offhandItem = null;
+        }
         if (mainHandItem != null || offhandItem != null) {
             GlStateManager.pushMatrix();
             // R-04：矩阵栈与 pop 必须成对——物品渲染抛异常时也要回滚，否则后续整帧的渲染状态会错乱。

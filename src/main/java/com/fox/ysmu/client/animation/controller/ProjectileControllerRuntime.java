@@ -634,18 +634,33 @@ public final class ProjectileControllerRuntime {
     /**
      * Reads a {@code ysm.*} variable (or any other name) out of the shared parser table. The renderer publishes the
      * projectile's own values there before the machines run.
+     * <p>
+     * The name is canonicalised through {@link MolangParser#canonicalVariableName} first - the single rule the
+     * parser's own registry, the physics scope and the player controller axis all use. A pack's condition text reaches
+     * this method <em>verbatim</em>: it is the literal from the controller JSON, tokenised as written by
+     * {@link #parseIdentifier}. The table it is looked up in, however, is keyed canonically by construction - the
+     * {@code ysm.*} names {@code AnimationRegister} registers and the renderer re-publishes here, and every name a
+     * projectile's animation timeline assigns, because {@code MolangInstructionExecutor} evaluates those through
+     * {@code MolangParser#parseExpression}, which lower-cases the statement
+     * ({@code MolangParser.java:294}, canonicalised again at {@code :398}/{@code :441}). Looking a name up as written
+     * therefore misses every non-canonical spelling of a name that <em>is</em> in the table: a timeline's
+     * {@code v.is_Idle=1;} stores {@code v.is_idle} and a condition reading {@code v.is_Idle} answers 0 forever, which
+     * is exactly the split {@code OpenYsmPlayerControllerRuntime.RuntimeState} was fixed for. It also folds the
+     * {@code q.} → {@code query.} and {@code variable.} → {@code v.} spellings the rest of the runtime accepts. See
+     * AGENTS.md "Molang variable names are case-insensitive".
      */
     private static double resolveVariable(String name) {
+        String canonical = MolangParser.canonicalVariableName(name);
         Map<String, LazyVariable> variables = MolangParser.VARIABLES;
-        if (name.startsWith("ysm.")) {
-            LazyVariable value = variables.get(name.substring(4));
+        if (canonical.startsWith("ysm.")) {
+            LazyVariable value = variables.get(canonical.substring(4));
             if (value == null) {
-                value = variables.get(name);
+                value = variables.get(canonical);
             }
             return value != null ? value.get() : 0.0d;
         }
         // v.* state is not part of a projectile's namespace; a bare name is looked up as itself.
-        LazyVariable value = variables.get(name);
+        LazyVariable value = variables.get(canonical);
         return value != null ? value.get() : 0.0d;
     }
 

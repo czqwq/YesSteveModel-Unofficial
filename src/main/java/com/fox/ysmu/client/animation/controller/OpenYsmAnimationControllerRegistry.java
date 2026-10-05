@@ -499,6 +499,29 @@ public final class OpenYsmAnimationControllerRegistry {
         }
     }
 
+    /**
+     * 测试/诊断用：这个提示键是否已经出现过（与 {@code QueryItemTagFunction.reportedTagCount()} 同类）。
+     * <p>
+     * 控制器路径上的"这个名字答不了"是一次性提示，而**答不了与"识别了但没有实体所以答 0"在数值上
+     * 无法区分**（都是 0）。单测据此反证某个名字确实被路由到了真分支，而不是落到
+     * {@code Context#unsupportedFunction}。
+     */
+    static boolean hasWarned(String key) {
+        return WARNED.contains(key);
+    }
+
+    /**
+     * 测试/诊断用：清空一次性提示日志（与 {@code QueryItemTagFunction#clearReportedTags} 同类）。
+     * <p>
+     * 日志是**整个 JVM 一份**的去重集合，而"这个名字答不了"与"名字认识、只是实参个数不对"共用
+     * 同一个 {@code func:<name>} 键（两者都经 {@code Context#unsupportedFunction} 落键）。所以
+     * 同 JVM 里先跑过的用例会把一个**真分支**的名字记进来，{@link #hasWarned} 的反证就失去意义：
+     * 断言前先复位，测的才是"本次这些调用有没有落到不支持分支"。
+     */
+    static void clearWarnings() {
+        WARNED.clear();
+    }
+
     private static void parseControllerFile(ControllerSet set, byte[] bytes) {
         JsonElement element = new JsonParser().parse(new String(bytes, StandardCharsets.UTF_8));
         if (element == null || !element.isJsonObject()) {

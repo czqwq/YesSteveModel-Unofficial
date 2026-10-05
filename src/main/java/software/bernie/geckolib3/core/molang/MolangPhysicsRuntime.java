@@ -26,6 +26,8 @@ public final class MolangPhysicsRuntime {
 
     private static final ThreadLocal<FrameContext> CURRENT = new ThreadLocal<>();
     private static final Map<ScopeKey, ScopeState> STATES = new ConcurrentHashMap<>();
+    /** {@code "v.<name>"} -> {@code "<name>"}；带缓存，因为 {@link #syncToRuntimeState} 每帧都要取裸名。 */
+    private static final Map<String, String> STRIPPED_NAMES = new ConcurrentHashMap<>();
 
     /**
      * 弹射物（子模型）骨骼作用域：只提供"名字 → 骨骼"这一件事，供
@@ -181,22 +183,80 @@ public final class MolangPhysicsRuntime {
         return context.state.physics.secondOrder(nameId, input, frequency, coefficient, response);
     }
 
+    /**
+     * Reads a variable from the open frame scope, keyed by the canonical spelling of {@code name}.
+     * <p>
+     * 这张表就是"变量名 → 值"的唯一入口，所以名字在这里过一次
+     * {@link MolangParser#canonicalVariableName}：凡是进作用域的调用方（解析器注册的
+     * {@code v.*} 变量、{@code .molang} 脚本的赋值、控制器状态机的读写）都因此看到同一个键，
+     * 不会出现一半写 {@code v.is_Idle}、一半读 {@code v.is_idle} 的分裂。
+     * 规则本身是幂等的（{@code canonicalVariableName} 小写化并把 {@code variable.}/{@code q.}
+     * 折成 {@code v.}/{@code query.}），已经规范的名字不会被改坏；上游 1.20 的
+     * {@code api/molang/MolangNames#identifier:29-35} 是同一个规则。
+     */
     public static double getVariable(String name, double fallback) {
         FrameContext context = CURRENT.get();
         if (context == null) {
             return fallback;
         }
-        Double value = context.state.variables.get(name);
+        Double value = context.state.variables.get(MolangParser.canonicalVariableName(name));
         return value == null ? fallback : value;
     }
 
+    /** Writes a variable into the open frame scope; keyed by the canonical spelling, see {@link #getVariable}. */
     public static boolean setVariable(String name, double value) {
         FrameContext context = CURRENT.get();
         if (context == null) {
             return false;
         }
-        context.state.variables.put(name, value);
+        context.state.variables.put(MolangParser.canonicalVariableName(name), value);
         return true;
+    }
+
+    /**
+     * Copies the open frame scope's {@code v.*} variables into a host-side map, stripped of the {@code v.} prefix.
+     * This is SOURCE's {@code MolangPhysicsRuntime#syncToRuntimeState}
+     * ({@code com/fox/ysmu/client/animation/molang/MolangPhysicsRuntime.java:415-461}), and its one caller is
+     * {@code OpenYsmPlayerControllerRuntime#prepareFrameVariables} ({@code SOURCE:1537}).
+     *
+     * <p>
+     * <b>移植注：在这个拓扑里它对行为是空操作，不是缺陷修复。</b> SOURCE 的 {@code RuntimeState#variables} 是
+     * 控制器条件的读取源，而关键帧 Molang 写的是这张作用域表，所以它必须同步一次才能让条件看见关键帧写的值。
+     * 本仓把读取源统一了：{@code RuntimeState#getVariable} 先问 {@link #getVariable}（本方法要拷贝的那张表）
+     * 再回落到本地 map。也就是说目标值已经按同一个键在读取路径上被优先命中，拷贝进本地 map 不会改变任何
+     * 一次求值的结果；保留它是为了让这条 SOURCE 成员在树上可见、并让本地 map 在作用域关闭后仍与作用域一致，
+     * 而不是因为这里存在 SOURCE 修掉的那个两表分裂。
+     *
+     * <p>
+     * 与 SOURCE 的一处实现差异：它只遍历 {@code ScopeState} 的"本帧/上一帧脏集"（那是它自己的一个性能
+     * 优化，因为一帧要跑十来个控制器），本仓的 {@code ScopeState} 没有脏集，所以这里整表遍历。作用域表通常
+     * 十几个键、每帧十来个控制器，代价可忽略；等这里也有了脏集，再改成增量即可。
+     */
+    public static void syncToRuntimeState(Map<String, Double> target) {
+        if (target == null) {
+            return;
+        }
+        FrameContext context = CURRENT.get();
+        if (context == null) {
+            return;
+        }
+        for (Map.Entry<String, Double> entry : context.state.variables.entrySet()) {
+            String key = entry.getKey();
+            if (!key.startsWith("v.")) {
+                continue;
+            }
+            target.put(strippedName(key), entry.getValue());
+        }
+    }
+
+    /** {@code "v.<name>"} -> {@code "<name>"}，命中缓存避免每次调用都 substring 分配。 */
+    private static String strippedName(String key) {
+        String bare = STRIPPED_NAMES.get(key);
+        if (bare == null) {
+            bare = key.substring(2);
+            STRIPPED_NAMES.put(key, bare);
+        }
+        return bare;
     }
 
     public static double boneRotation(int nameId, char axis) {

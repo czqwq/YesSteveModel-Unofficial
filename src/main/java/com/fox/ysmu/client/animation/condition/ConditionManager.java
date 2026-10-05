@@ -4,6 +4,7 @@ import java.util.Map;
 
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.animation.AnimationDomain;
 import com.google.common.collect.Maps;
 
 public class ConditionManager {
@@ -59,7 +60,26 @@ public class ConditionManager {
         ConditionNameDiagnostics.warnIfUnclassifiable(id, name);
     }
 
+    /**
+     * The armor classifier the asking animatable's own domain registered, which is the choice upstream makes by
+     * handing the two entities different managers: the player's own controllers read its {@code ConditionManager}
+     * ({@code PlayerModelResources#conditionManager}) and the first-person arm's read its {@code FPArmConditionManager}
+     * ({@code client/animation/predicate/FPArmArmorPredicate.java:36}). The port has one caller
+     * ({@code AnimationManager#findArmorAnimation}) for both families, so the domain decision lives here, keyed by the
+     * same animation-file id the registries are keyed by.
+     *
+     * @param animationFileId the animatable's animation-file id ({@code CustomPlayerEntity#getAnimation})
+     * @return the classifier, or {@code null} when this domain has no table for the model yet
+     */
+    public static ConditionArmor armorFor(ResourceLocation animationFileId) {
+        return AnimationDomain.isFirstPersonId(animationFileId) ? FPArmConditionManager.getArmor(animationFileId)
+            : getArmor(animationFileId);
+    }
+
     public static void clear() {
+        // The first-person arm's table belongs to the same models and the same connection, so the two are always
+        // dropped together; a caller clearing one and not the other would leave the arm testing a stale model's names.
+        FPArmConditionManager.clear();
         SWING.clear();
         SWING_OFFHAND.clear();
         USE_MAINHAND.clear();

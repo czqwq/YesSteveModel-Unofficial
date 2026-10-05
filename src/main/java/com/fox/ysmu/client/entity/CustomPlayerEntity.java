@@ -124,6 +124,25 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         // (PlayerControllerCollection.java:59).
         data.addAnimationController(
             new AnimationController(this, PASSENGER_CONTROLLER, 0.1f, manager.scripted(manager::predicatePassenger)));
+        // 槽位后缀控制器（player.<slot>_<后缀>）的共享备用池（SOURCE CustomPlayerEntity.java:98-110）：
+        // 位置与 SOURCE 一致——所有基槽位之后、cap_controller 之前；池控制器名里没有模型信息，
+        // 由运行时按当前模型路由。构造与具名并行池相同（manager.scripted 包装 + predicateOpenYsmSlot），
+        // 不加 .setAdditiveRotation(true)：SOURCE 的槽位后缀池没有它（只有具名并行池 parallel_extra_* 有，见下）。
+        // 数量由配置 SlotExtraControllers 决定（默认 8，上限见 ControllerUtils）。
+        for (int i = 0; i < Config.SLOT_EXTRA_CONTROLLERS; i++) {
+            data.addAnimationController(
+                new AnimationController(
+                    this,
+                    slotExtraControllerName(i),
+                    0,
+                    manager.scripted(manager::predicateOpenYsmSlot)));
+        }
+        // 轮盘动画（cap 控制器）注册在并行族**之前**（SOURCE CustomPlayerEntity.java:117-118；上游
+        // PlayerControllerCollection.java:64 的 cap 也在 :68 的 parallel 之前）。注册顺序就是应用顺序，
+        // parallel 族的旋转是"相加"（见下），必须在 cap 之后注册才能叠加到 cap 的旋转上；反过来的话
+        // cap 会以覆盖方式写回同一根骨骼，把 parallel 的旋转贡献整条抹掉。
+        data.addAnimationController(
+            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("parallel_%d_controller", i);
             String animationName = String.format("parallel%d", i);
@@ -132,7 +151,10 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     this,
                     controllerName,
                     0,
-                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
+                    manager.scripted(e -> manager.predicateParallel(e, animationName)))
+                    // wiki「并行动画」：parallel 族是特殊混合动画，**旋转相加**而不是覆盖（仅旋转，
+                    // 不含位移/缩放）。见 AnimationController#setAdditiveRotation。
+                    .setAdditiveRotation(true));
         }
         // 高优先级并行族的具名槽位，同样的固定池（parallel_* 有旋转叠加语义，
         // 池控制器走同一条 predicateOpenYsmSlot → tryApplyController 混合路径）。
@@ -142,7 +164,9 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     this,
                     String.format("parallel_extra_%d_controller", i),
                     0,
-                    manager.scripted(manager::predicateOpenYsmSlot)));
+                    manager.scripted(manager::predicateOpenYsmSlot))
+                    // SOURCE CustomPlayerEntity.java:133 同样给具名并行池打开旋转叠加。
+                    .setAdditiveRotation(true));
         }
         // 为每个盔甲槽位注册控制器，使用1-4的索引值
         for (int slotIndex = 1; slotIndex <= 4; slotIndex++) {
@@ -155,13 +179,23 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     0,
                     manager.scripted(e -> manager.predicateArmor(e, finalSlotIndex))));
         }
-        data.addAnimationController(
-            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
         // GUI preview channels, after the cap controller so a hover/focus animation wins for the bones they share.
         data.addAnimationController(
             new AnimationController(this, HOVER_CONTROLLER, 0f, manager.scripted(manager::predicateHover)));
         data.addAnimationController(
             new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
+        wireControllerListeners(data);
+    }
+
+    /**
+     * Wires the two per-controller listeners every controller of this animatable needs, once its set is complete.
+     * <p>
+     * Upstream gets both from its shared controller class, so any controller family it builds has them; the port's
+     * controller set is assembled by hand at each registration site, so a second family (the first-person arm's
+     * {@code CustomFirstPersonArmEntity#registerControllers}) has to call this too or its clips' timeline instructions
+     * and {@code sound_effects} keyframes would be parsed and then never run.
+     */
+    protected void wireControllerListeners(AnimationData data) {
         data.getAnimationControllers()
             .values()
             .forEach(controller -> {
@@ -208,12 +242,40 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public ResourceLocation getAnimation() {
-        if (GeckoLibCache.getInstance()
+        ResourceLocation animationFile = getAnimationFileId();
+        if (animationFile != null && GeckoLibCache.getInstance()
             .getAnimations()
-            .containsKey(this.mainModel)) {
-            return mainModel;
+            .containsKey(animationFile)) {
+            return animationFile;
         }
         return CustomPlayerModel.DEFAULT_MAIN_ANIMATION;
+    }
+
+    /**
+     * The animation file this animatable reads from, i.e. the domain it belongs to
+     * ({@link com.fox.ysmu.client.animation.AnimationDomain}).
+     * <p>
+     * The model proper is the main domain, which is what every existing render path wants. Upstream splits the
+     * first-person arm out into its own animatable whose animation lookup reads the {@code fp_arm} store
+     * ({@code client/entity/CustomFirstPersonArmEntity.java:90}), which is why that arm is the one override here.
+     */
+    protected ResourceLocation getAnimationFileId() {
+        return this.mainModel;
+    }
+
+    /**
+     * Whether this animatable is one of upstream's <em>humanoid</em> entities, which is the only kind whose per-frame
+     * pre-animation setup fires the two humanoid script hooks - {@code player_init} once per model and
+     * {@code player_update} every frame ({@code client/entity/CustomHumanoidEntity.java:195-218}, ported in
+     * {@code AnimationRegister#setParserValue}).
+     * <p>
+     * Upstream's first-person arm entity is a plain {@code CustomEntity}, not a {@code CustomHumanoidEntity}
+     * ({@code client/entity/CustomFirstPersonArmEntity.java:16}), so its tick publishes the MoLang values without
+     * running those hooks; firing them a second time per frame for the same player would run a pack's
+     * {@code @player_update} body once more than upstream does.
+     */
+    public boolean firesHumanoidHooks() {
+        return true;
     }
 
     public float getHeightScale() {

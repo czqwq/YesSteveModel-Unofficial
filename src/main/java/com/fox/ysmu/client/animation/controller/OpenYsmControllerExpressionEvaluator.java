@@ -17,6 +17,7 @@ import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
+import com.fox.ysmu.compat.BlockingCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
 
 import software.bernie.geckolib3.core.builder.Animation;
@@ -101,8 +102,33 @@ public final class OpenYsmControllerExpressionEvaluator {
         }
     }
 
+    /**
+     * 编译一条表达式（命中缓存则直接返回）。
+     * <p>
+     * 这里**不能**用 {@code computeIfAbsent}：函数实参是各自单独编译的（见
+     * {@link #parsePrimaryCompiled} 里的 {@code compile(raw)}），也就是编译一条函数调用会在外层
+     * 映射函数执行期间再次调用本方法；而 {@code ConcurrentHashMap#computeIfAbsent} 一旦发现同一线程
+     * 在同一个桶里重入就抛 {@code IllegalStateException("Recursive update")}。是否重入只看两个字符串
+     * 的散列是否落在同一个桶（而且只有桶为空、放了 ReservationNode 的那一条路才会抛），于是同一条模型
+     * 表达式会因为"整条表达式的文本"与它某个实参文本恰好同桶而抛异常 —— 例如整条文本
+     * {@code ysm.perlin_noise(1,2,3,4)>=0&&...} 与它的第一个实参文本 {@code 1} 都在桶 1。
+     * <p>
+     * 落到实机上的后果不对称：控制器条件走 {@code evaluateCondition} 没有 catch，异常直接从条件求值里
+     * 冒出去；{@code on_entry}/{@code on_exit} 语句走 {@code evaluateNumber}，被吞成 0 并只留一条
+     * 警告，也就是那条语句永远不生效。
+     * <p>
+     * 先 {@code get} 再 {@code putIfAbsent}，把 {@code doCompile} 放在任何桶锁之外：实参文本一定是整条
+     * 表达式的**真子串**（{@code readRawArgument} 取的是括号之间的一段），所以递归有穷；并发下最坏情况
+     * 是同一条表达式被两个线程各编译一次，两者等价（编译结果是纯的、不可变的）。
+     */
     private static CompiledExpr compile(String expression) {
-        return COMPILED_CACHE.computeIfAbsent(expression, OpenYsmControllerExpressionEvaluator::doCompile);
+        CompiledExpr cached = COMPILED_CACHE.get(expression);
+        if (cached != null) {
+            return cached;
+        }
+        CompiledExpr compiled = doCompile(expression);
+        CompiledExpr previous = COMPILED_CACHE.putIfAbsent(expression, compiled);
+        return previous != null ? previous : compiled;
     }
 
     /** Compile an expression string into a reusable CompiledExpr tree. */
@@ -878,6 +904,16 @@ public final class OpenYsmControllerExpressionEvaluator {
             if (normalized.startsWith("ysm.")) {
                 return ysmValue(normalized.substring("ysm.".length()));
             }
+            // math.pi / math.e 也可以写成**变量**（无括号）——参考分支把它放在变量分支里
+            // (SOURCE:665-670)，关键帧路径则由 mclib 的 MolangParser 注册成 LazyVariable
+            // ("math.pi"/"math.e"，见 MolangParser:158-159)。少了这两条，控制器条件里写
+            // math.pi 的模型拿到 0（并留下一条 "Unsupported ... variable" 提示）。
+            if ("math.pi".equals(normalized)) {
+                return Math.PI;
+            }
+            if ("math.e".equals(normalized)) {
+                return Math.E;
+            }
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "var:" + normalized,
                 "Unsupported OpenYSM controller variable: " + normalized);
@@ -886,6 +922,16 @@ public final class OpenYsmControllerExpressionEvaluator {
 
         @Override
         public double functionValue(String name, List<Argument> arguments) {
+            // 与变量分支同一条缩写规则：Bedrock/YSM 把 q. 当作 query. 的短写。上游把同一张
+            // QueryBinding 同时注册在 "query" 与 "q" 下（PrimaryBinding.java:32-33），本仓的关键帧
+            // 路径也早就做同一次折叠（MolangParser#createFunction → normalizeVariableName,
+            // MolangParser.java:200-208，那里的注释与本条是同一个理由）。参考分支的分支只比较
+            // "query.*" 字面量（SOURCE:793-805）—— 少了这一行，包里的短写（例如
+            // wine_fox/15_kluonoa 车辆脚本的 q.position_delta(0)）会落到"Unsupported controller
+            // function"并恒 0。
+            if (name.startsWith("q.")) {
+                name = "query." + name.substring(2);
+            }
             if ("ctrl.hold".equals(name)) {
                 return handMatch(arguments, false, false);
             }
@@ -898,10 +944,421 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("ctrl.ride".equals(name)) {
                 return player.isRiding() ? TRUE : FALSE;
             }
+            // ctrl.armor(slot, matcher)：helper（armorMatch）一直在，缺的只是这一条转发，
+            // 于是关键帧/脚本路径（AnimationRegister:268 CtrlArmorFunction）能答、控制器条件恒 0。
+            // (reference branch same file:692-694)
+            if ("ctrl.armor".equals(name)) {
+                return armorMatch(arguments);
+            }
+            // --- math.* 家族（SOURCE:695-792；上游权威路径见 mathValue 的注释）---
+            if (name.startsWith("math.")) {
+                return mathValue(name, arguments);
+            }
+            // --- query.position(axis) / query.position_delta(axis)（SOURCE:793-805）---
+            if ("query.position".equals(name) && !arguments.isEmpty()) {
+                // 复用本类已有的 queryPositionValue（渲染插值位置）：它此前只有定义、没有调用点。
+                return queryPositionValue((int) arguments.get(0).asNumber());
+            }
+            if ("query.position_delta".equals(name) && !arguments.isEmpty()) {
+                // 与关键帧路径同一个取数点：QueryPositionDeltaFunction 读 MolangFrameContext
+                // （molang/QueryPositionDeltaFunction.java:38），后者由 AnimationRegister#setParserValue
+                // （玩家，AnimationRegister.java:421）与 AnimationManager（非玩家，
+                // AnimationManager.java:710）每帧写入，都在控制器条件求值之前。
+                // 参考分支把同一个槽放在 QueryPositionDeltaFunction.delta(axis) 静态方法上
+                // (SOURCE:796-805)——本仓没有那个方法，MolangFrameContext 就是它的对应物，
+                // 这里不再新开一个侧信道。
+                return com.fox.ysmu.client.animation.molang.MolangFrameContext
+                    .getPositionDelta((int) arguments.get(0).asNumber());
+            }
+            // --- ysm.* 函数（兼容层取数点，与关键帧路径共用同一个 compat 类）---
+            // 键码是 GLFW 的（wiki），1.7.10 上要经 KeyboardCompat 换算成 LWJGL2；
+            // 多参数语义是"任一按下即真"。(reference branch same file:807-822)
+            if ("ysm.keyboard".equals(name) && arguments.size() >= 1) {
+                java.util.List<Double> codes = new java.util.ArrayList<>(arguments.size());
+                for (Argument argument : arguments) {
+                    codes.add(argument.asNumber());
+                }
+                return com.fox.ysmu.compat.KeyboardCompat.isAnyKeyDown(codes) ? TRUE : FALSE;
+            }
+            if ("ysm.mouse".equals(name) && arguments.size() >= 1) {
+                java.util.List<Double> buttons = new java.util.ArrayList<>(arguments.size());
+                for (Argument argument : arguments) {
+                    buttons.add(argument.asNumber());
+                }
+                return com.fox.ysmu.compat.KeyboardCompat.isAnyMouseButtonDown(buttons) ? TRUE : FALSE;
+            }
+            // ysm.has_any_curios(槽位, id...)：Curios 在 1.7.10 上用前身 Baubles(Baubles-Expanded)
+            // 实现，与关键帧路径共用 BaublesCompat。(reference branch same file:849-861)
+            if ("ysm.has_any_curios".equals(name) && !arguments.isEmpty()) {
+                java.util.List<String> ids = new java.util.ArrayList<>(arguments.size());
+                for (int i = 1; i < arguments.size(); i++) {
+                    String id = arguments.get(i).asString();
+                    if (id != null && !id.isEmpty()) {
+                        ids.add(id);
+                    }
+                }
+                return com.fox.ysmu.compat.BaublesCompat.hasAnyCurio(player, arguments.get(0).asString(), ids)
+                    ? TRUE
+                    : FALSE;
+            }
+            // query.equipped_item_any_tag / all_tags：标签匹配与关键帧路径共用 ItemTagMatcher，
+            // 槽位解析共用 MolangEquipmentSlots。(reference branch same file:862-889)
+            // 没有玩家（脱离帧的单测、无实体的调用点）时取不到槽位，按假处理，不再往下走。
+            if (("query.equipped_item_any_tag".equals(name) || "query.equipped_item_all_tags".equals(name))
+                && arguments.size() >= 2) {
+                if (player == null) {
+                    return FALSE;
+                }
+                String slotType = arguments.get(0).asString();
+                ItemStack stack = com.fox.ysmu.client.animation.molang.MolangEquipmentSlots.get(player, slotType);
+                if (stack == null || stack.getItem() == null) {
+                    return FALSE;
+                }
+                boolean requireAll = name.endsWith("all_tags");
+                boolean matchedAny = false;
+                int checked = 0;
+                for (int i = 1; i < arguments.size(); i++) {
+                    String tag = arguments.get(i).asString();
+                    if (tag == null || tag.isEmpty()) {
+                        continue;
+                    }
+                    checked++;
+                    boolean matched = com.fox.ysmu.client.animation.molang.ItemTagMatcher.matchesTag(stack, tag);
+                    if (matched && !requireAll) {
+                        return TRUE;
+                    }
+                    if (!matched && requireAll) {
+                        return FALSE;
+                    }
+                    matchedAny |= matched;
+                    // 与关键帧路径同一份"这个标签 1.7.10 答不了"提示，避免两条路径一条提示一条静默。
+                    com.fox.ysmu.client.animation.molang.QueryItemTagFunction.reportUnsupported(tag);
+                }
+                return requireAll && checked > 0 && matchedAny ? TRUE : FALSE;
+            }
+            // --- particle / abs_particle（副作用：生成粒子，返回 1.0/0.0） ---
+            // 参数布局与关键帧路径的 ParticleFunction 完全一致
+            // (molang/ParticleFunction.java:62-74)，连实现都汇到同一个 ParticleEffectUtil。
+            // (reference branch same file:831-848)
+            if (("particle".equals(name) || "abs_particle".equals(name)
+                || "ysm.particle".equals(name) || "ysm.abs_particle".equals(name)) && !arguments.isEmpty()) {
+                if (player == null) {
+                    return FALSE;
+                }
+                String id = arguments.get(0).asString();
+                double ox = argNumber(arguments, 1);
+                double oy = argNumber(arguments, 2);
+                double oz = argNumber(arguments, 3);
+                double dx = argNumber(arguments, 4);
+                double dy = argNumber(arguments, 5);
+                double dz = argNumber(arguments, 6);
+                double speed = argNumber(arguments, 7);
+                int count = (int) argNumber(arguments, 8);
+                // OpenYSM 默认 lifetime=20（同 ParticleFunction:71）
+                int lifetime = arguments.size() > 9 ? (int) arguments.get(9).asNumber() : 20;
+                boolean abs = name.startsWith("abs_") || name.startsWith("ysm.abs_");
+                return com.fox.ysmu.client.particle.ParticleEffectUtil.handleParticle(player, id,
+                    ox, oy, oz, dx, dy, dz, speed, count, lifetime, abs) ? TRUE : FALSE;
+            }
+            // --- ysm.* 音效函数（SOURCE:890-921，参数布局对齐上游 SoundFunction）---
+            // ysm.play_sound('id', 'sound_name', flags?, volume?, pitch?)：2~5 参数，
+            // 与本仓关键帧路径的 YsmSoundFunction.Play 同一布局（molang/YsmSoundFunction.java:24-33,
+            // 上游 authority: client/animation/molang/functions/SoundFunction.java:64-130）。
+            if ("ysm.play_sound".equals(name) && arguments.size() >= 2) {
+                if (player == null) {
+                    return FALSE;
+                }
+                String soundName = arguments.get(1).asString();
+                float volume = arguments.size() > 3 ? (float) arguments.get(3).asNumber() : 1.0f;
+                float pitch = arguments.size() > 4 ? (float) arguments.get(4).asNumber() : 1.0f;
+                // 音乐归属模型用关键帧路径同一个取数点（YsmSoundFunction.java:149）：音效名要按
+                // "声明它的模型"解析，否则会命中别的模型的同名音效。
+                com.fox.ysmu.client.audio.YSMSoundManager.playSound(player, soundName,
+                    software.bernie.geckolib3.core.molang.MolangPhysicsRuntime.getCurrentModelId(), volume, pitch);
+                // YSMSoundManager.playSound 返回 void（关键帧路径也只能回报 1），所以这里按参考分支
+                // 无条件 1.0，而不是上游 playSound(...) 的布尔结果。
+                return TRUE;
+            }
+            if ("ysm.stop_sound".equals(name) && !arguments.isEmpty()) {
+                // 与关键帧路径（YsmSoundFunction）共用同一套归属规则：缺省只停**当前实体**上下文的音效，
+                // 显式 global 参数（第二个实参非 0）才全局停止。(SOURCE:898-911)
+                if (player == null) {
+                    return FALSE;
+                }
+                String stopId = arguments.get(0).asString();
+                boolean global = arguments.size() > 1 && arguments.get(1).asNumber() != 0;
+                if (global) {
+                    com.fox.ysmu.client.audio.YSMSoundManager.stopSound(stopId);
+                } else {
+                    com.fox.ysmu.client.audio.YSMSoundManager
+                        .stopSound(com.fox.ysmu.client.audio.YSMSoundManager.ownerKey(player), stopId);
+                }
+                return TRUE;
+            }
+            if ("ysm.stop_all_sounds".equals(name)) {
+                if (player == null) {
+                    return FALSE;
+                }
+                boolean global = !arguments.isEmpty() && arguments.get(0).asNumber() != 0;
+                if (global) {
+                    com.fox.ysmu.client.audio.YSMSoundManager.stopAll();
+                } else {
+                    com.fox.ysmu.client.audio.YSMSoundManager
+                        .stopAll(com.fox.ysmu.client.audio.YSMSoundManager.ownerKey(player));
+                }
+                return TRUE;
+            }
+            // ysm.sync(v0, v1, ...)：主动同步（wiki: molang/script）。与关键帧路径的
+            // YsmSyncFunction 共用同一个发送点，这里只是把已经求值好的数值交给它。
+            // (SOURCE:823-830；上游 authority: functions/Sync.java:14-63)
+            if ("ysm.sync".equals(name) && !arguments.isEmpty()) {
+                if (player == null) {
+                    return FALSE;
+                }
+                java.util.List<Double> values = new java.util.ArrayList<>(arguments.size());
+                for (Argument argument : arguments) {
+                    values.add(argument.asNumber());
+                }
+                return com.fox.ysmu.client.animation.molang.YsmSyncFunction.request(player, values);
+            }
+            // ysm.perlin_noise(seed, x, y, z)：0-1 的 3D 柏林噪声，复用关键帧路径的实现。
+            // (SOURCE:922-929)
+            if ("ysm.perlin_noise".equals(name) && arguments.size() >= 4) {
+                return com.fox.ysmu.client.animation.molang.PerlinNoiseFunction.noise(
+                    (int) arguments.get(0).asNumber(),
+                    arguments.get(1).asNumber(),
+                    arguments.get(2).asNumber(),
+                    arguments.get(3).asNumber());
+            }
+            return unsupportedFunction(name);
+        }
+
+        /** 未知函数：一条一次性提示 + 0（两条路径共用的收尾）。 */
+        private static double unsupportedFunction(String name) {
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "func:" + name,
                 "Unsupported OpenYSM controller function: " + name);
             return FALSE;
+        }
+
+        /**
+         * {@code math.*} 家族：与关键帧路径（mclib {@code MathBuilder} + {@code MolangParser} 的
+         * {@code math.*} 重映射，MolangParser.java:131-168）和上游 {@code MathBinding}
+         * (tmp/YesSteveModel-dev-1.20 .../geckolib3/core/molang/builtin/MathBinding.java:9-58)
+         * 同一批名字。
+         *
+         * <p><b>语义按上游</b>（本仓的行为权威），逐条落在
+         * {@code builtin/math/*.java}；与参考分支（SOURCE:695-792）不一致的地方都在下面注明，
+         * 因为参考分支在几处自己改了上游的算法。</p>
+         *
+         * <p>参数个数按上游的 {@code validateArgumentSize} 处理：个数不对时与"这个名字答不了"
+         * 同一个结果（0），不会因为少写一个实参就抛异常。</p>
+         */
+        private static double mathValue(String name, List<Argument> arguments) {
+            int size = arguments.size();
+            // 常量：无参数形式（SOURCE:774-775）。变量形式见 Context#variableValue。
+            if ("math.pi".equals(name)) {
+                return Math.PI;
+            }
+            if ("math.e".equals(name)) {
+                return Math.E;
+            }
+            if (size < 1) {
+                return unsupportedFunction(name);
+            }
+            double a = arguments.get(0).asNumber();
+            // --- 单参数 ---
+            if ("math.floor".equals(name)) {
+                return Math.floor(a);
+            }
+            if ("math.round".equals(name)) {
+                return Math.round(a);
+            }
+            if ("math.ceil".equals(name)) {
+                return Math.ceil(a);
+            }
+            // 上游 Trunc.java:12-15
+            if ("math.trunc".equals(name)) {
+                return a < 0 ? Math.ceil(a) : Math.floor(a);
+            }
+            if ("math.abs".equals(name)) {
+                return Math.abs(a);
+            }
+            // 上游 Sqrt.java: Math.sqrt（负数得 NaN）；参考分支加了 "v<0 → 0" 的护栏，
+            // 这里按上游（也与关键帧路径的 mclib Sqrt 一致）。
+            if ("math.sqrt".equals(name)) {
+                return Math.sqrt(a);
+            }
+            if ("math.exp".equals(name)) {
+                return Math.exp(a);
+            }
+            // 上游 Ln.java: Math.log（参考分支加了 "v<=0 → 0" 的护栏）
+            if ("math.ln".equals(name)) {
+                return Math.log(a);
+            }
+            // 上游 HermitBlend.java:8-11：ceil 后再 floor 三次 Hermite；关键帧路径的
+            // mclib HermiteBlend 是同一个式子。参考分支用的是未取整的 v*v*(3-2v)。
+            if ("math.hermite_blend".equals(name) || "math.hermite".equals(name)) {
+                double c = Math.ceil(a);
+                return Math.floor(3.0d * c * c - 2.0d * c * c * c);
+            }
+            // 上游 Sin.java / Cos.java：入参是**角度**（与参考分支一致，与关键帧路径的
+            // mclib Sin/Cos 不一致——那对函数直接把入参当弧度用）。
+            if ("math.sin".equals(name)) {
+                return Math.sin(Math.toRadians(a));
+            }
+            if ("math.cos".equals(name)) {
+                return Math.cos(Math.toRadians(a));
+            }
+            // 上游 ACos.java / ASin.java：弧度。参考分支没有这两个名字（这里补上是为了
+            // 与上游和关键帧路径（MolangParser 重映射 acos/asin）同一集合）。
+            if ("math.acos".equals(name)) {
+                return Math.acos(a);
+            }
+            if ("math.asin".equals(name)) {
+                return Math.asin(a);
+            }
+            // 上游 Atan.java: Math.atan → **弧度**；参考分支返回角度（Math.toDegrees），
+            // 与关键帧路径的 mclib ATan 也不一致，这里按上游。
+            if ("math.atan".equals(name)) {
+                return Math.atan(a);
+            }
+            // 上游 MinAngle.java:4-13：归一化到 (-180, 180]（与 mclib MinAngle 同式）
+            if ("math.min_angle".equals(name)) {
+                double angle = a % 360.0d;
+                if (angle >= 180.0d) {
+                    return angle - 360.0d;
+                }
+                if (angle < -180.0d) {
+                    return angle + 360.0d;
+                }
+                return angle;
+            }
+            // --- 双参数 ---
+            if (size < 2) {
+                // 参考分支的 math.randomi 是**单参**形态（小于 n 的随机整数，SOURCE:777-779），
+                // 上游/关键帧路径把它当 2 参的 random_integer，所以只有 1 个实参时走这里。
+                return oneArgumentFallback(name, a);
+            }
+            double b = arguments.get(1).asNumber();
+            // 上游 Mod.java:12-14：Java 取余（参考分支把负数结果折成正数）
+            if ("math.mod".equals(name)) {
+                return a % b;
+            }
+            if ("math.max".equals(name)) {
+                return Math.max(a, b);
+            }
+            if ("math.min".equals(name)) {
+                return Math.min(a, b);
+            }
+            if ("math.pow".equals(name)) {
+                return Math.pow(a, b);
+            }
+            // 上游 ATan2.java：弧度（参考分支返回角度）
+            if ("math.atan2".equals(name)) {
+                return Math.atan2(a, b);
+            }
+            // 上游 Random.java:15-27：min/range 交换后 [min, max)。
+            // 上游用帧的 RandomSource，本仓这条路径没有对应的 RandomSource 所有者
+            // （MolangFrameContext 不带随机源），关键帧路径的 mclib Random 与参考分支都用
+            // Math.random()，这里跟随它们，不新开侧信道。
+            if ("math.random".equals(name)) {
+                return randomInRange(a, b);
+            }
+            // 上游把 randomi 注册成 RandomInteger（**2 参**，MathBinding.java:54），关键帧路径同
+            // (MolangParser:164 把 math.random_integer 映射到 randomi 类)；参考分支把它当 1 参
+            // "小于 n 的随机整数"(SOURCE:777-779)。两种形态都接受，互不冲突。
+            if ("math.random_integer".equals(name)) {
+                return randomInteger(a, b);
+            }
+            if ("math.randomi".equals(name)) {
+                return randomInteger(a, b);
+            }
+            // --- 三参数 ---
+            if (size < 3) {
+                return unsupportedFunction(name);
+            }
+            double c = arguments.get(2).asNumber();
+            // 上游 Clamp.java:12-14 / mclib Clamp 同式
+            if ("math.clamp".equals(name)) {
+                return a < b ? b : Math.min(a, c);
+            }
+            // 上游 Lerp.java / LerpRotate.java 直接调 mclib 的 Interpolations，
+            // 这里复用同一份实现（关键帧路径的 mclib Lerp/LerpRotate 就是它）。
+            if ("math.lerp".equals(name)) {
+                return com.eliotlash.mclib.utils.Interpolations.lerp((float) a, (float) b, (float) c);
+            }
+            if ("math.lerprotate".equals(name)) {
+                return com.eliotlash.mclib.utils.Interpolations.lerpYaw((float) a, (float) b, (float) c);
+            }
+            // 上游 DieRoll.java:15-32 / DieRollInteger.java:15-33
+            if ("math.die_roll".equals(name) || "math.roll".equals(name)) {
+                return dieRoll(a, b, c, false);
+            }
+            if ("math.die_roll_integer".equals(name) || "math.rolli".equals(name)) {
+                return dieRoll(a, b, c, true);
+            }
+            return unsupportedFunction(name);
+        }
+
+        /**
+         * {@code math.randomi(limit)}（参考分支的单参形态，SOURCE:777-779）：只有 2 参形态应不上时
+         * 才走这里 —— 上游/关键帧路径的 {@code randomi} 是 2 参的 {@code random_integer}。
+         */
+        private static double oneArgumentFallback(String name, double a) {
+            if ("math.randomi".equals(name)) {
+                return (int) (Math.random() * ((int) a));
+            }
+            return unsupportedFunction(name);
+        }
+
+        /** 上游 Random.java:17-26：把两个端点排好序后取 [min, max) 内的均匀值。 */
+        private static double randomInRange(double a, double b) {
+            double min = Math.min(a, b);
+            double max = Math.max(a, b);
+            return min + Math.random() * (max - min);
+        }
+
+        /**
+         * 上游 RandomInteger.java:17-26 / DieRollInteger.java 的整数形态：{@code min + nextInt(span)}。
+         *
+         * <p>两条与上游不同的地方，都是"不要照抄一个会抛异常的写法"：上游在 {@code min == max}
+         * 时 {@code nextInt(0)} 抛 {@code IllegalArgumentException}（整条表达式失效），这里退化区间
+         * 直接返回那个唯一值；随机源用 {@link Math#random()}（与关键帧路径 mclib
+         * RandomInteger 和参考分支一致，原因见 {@code math.random} 的注释）。</p>
+         */
+        private static double randomInteger(double a, double b) {
+            int min = (int) a;
+            int max = (int) b;
+            if (min > max) {
+                int swap = min;
+                min = max;
+                max = swap;
+            }
+            int span = max - min;
+            if (span <= 0) {
+                return min;
+            }
+            return min + (int) (Math.random() * span);
+        }
+
+        /**
+         * {@code math.die_roll(count, min, max)} / {@code math.die_roll_integer(...)}：
+         * 上游 DieRoll.java:15-32 的求和形态。
+         *
+         * <p>唯一一处保留参考分支的做法：次数上限 100（SOURCE:760-770）。上游没有上限，而次数来自
+         * 模型数据、这段代码在渲染帧里跑 —— 一个写错次数的包会把渲染线程挂死，参考分支的护栏是有
+         * 依据的取舍，这里保留并记录。</p>
+         */
+        private static double dieRoll(double count, double min, double max, boolean integer) {
+            int rolls = integer ? (int) Math.round(count) : (int) count;
+            double low = Math.min(min, max);
+            double span = Math.abs(max - min);
+            double total = 0.0d;
+            for (int i = 0; i < rolls && i < 100; i++) {
+                total += integer ? (int) low + (int) (Math.random() * (int) span) : low + Math.random() * span;
+            }
+            return total;
         }
 
         private static double argNumber(List<Argument> args, int index) {
@@ -983,6 +1440,9 @@ public final class OpenYsmControllerExpressionEvaluator {
                     ? TRUE
                     : FALSE;
             }
+            if ("is_blocking".equals(name)) {
+                return BlockingCompat.isBlocking(player) ? TRUE : FALSE;
+            }
             if ("health".equals(name)) {
                 return player.getHealth();
             }
@@ -1040,8 +1500,12 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("has_offhand".equals(name)) {
                 return BackhandCompat.getOffhandItem(player) != null ? TRUE : FALSE;
             }
-            if ("mainhand_charged_crossbow".equals(name) || "offhand_charged_crossbow".equals(name)) {
-                return FALSE;
+            if ("mainhand_charged_crossbow".equals(name)) {
+                return com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem()) ? TRUE : FALSE;
+            }
+            if ("offhand_charged_crossbow".equals(name)) {
+                return com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(
+                    BackhandCompat.getOffhandItem(player)) ? TRUE : FALSE;
             }
             if ("armor_value".equals(name)) {
                 return player.getTotalArmorValue();
@@ -1214,6 +1678,10 @@ public final class OpenYsmControllerExpressionEvaluator {
             if (StringUtils.isBlank(matcher)) {
                 return FALSE; // OpenYSM：id 为空返回 0
             }
+            if (player == null || player.inventory == null) {
+                // 没有实体（脱离帧的求值）取不到护甲槽：按假回答，不抛异常。
+                return FALSE;
+            }
             int armorIndex = com.fox.ysmu.client.animation.molang.CtrlItemMatcher.armorSlotIndex(slot);
             if (armorIndex < 0) {
                 return FALSE; // mainhand/offhand 不属于 ctrl.armor
@@ -1257,6 +1725,13 @@ public final class OpenYsmControllerExpressionEvaluator {
         }
 
         private boolean isFlying() {
+            if (player == null) return false;
+            // 鞘翅滑翔也算"在飞"：参考库的 isFlying 先查 EtFuturumCompat.isElytraFlying
+            // (reference branch same file:1585-1595)。少了这一下，滑翔中的玩家
+            // ctrl.fly=false 而 isJumping()=true，滑翔会被判成跳跃。
+            if (EtFuturumCompat.isElytraFlying(player)) {
+                return true;
+            }
             if (player == Minecraft.getMinecraft().thePlayer) {
                 return player.capabilities.isFlying;
             }

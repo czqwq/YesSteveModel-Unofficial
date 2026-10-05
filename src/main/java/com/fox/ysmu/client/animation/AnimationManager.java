@@ -54,6 +54,15 @@ public final class AnimationManager {
     private final Int2ObjectOpenHashMap<LinkedList<AnimationState>> data = new Int2ObjectOpenHashMap<>();
     private final Map<UUID, Integer> swingProgressByPlayer = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> useDurationByPlayer = new ConcurrentHashMap<>();
+    /**
+     * 格挡尾迹 tick 计数器（SOURCE {@code AnimationManager.java:89-96}，字段名与语义原样搬用）。
+     * <p>
+     * Battlegear2 的 shield flag ({@code battlegear2$isBlockingWithShield}) 只闪 1-2 tick，格挡标志
+     * 一消失 {@link #predicateUse} 就会走"没在使用/格挡"那条分支把 {@code use_controller} 停掉，
+     * 动画来不及播到盾牌格挡姿态。所以格挡期间每帧把这个计数器重置为 5，标志消失后由它再放行
+     * 若干帧（返回 {@link PlayState#CONTINUE}，让当前姿态继续），归零那一帧才真正停。
+     */
+    private final Map<UUID, Integer> blockingTailTicks = new ConcurrentHashMap<>();
 
     public static AnimationManager getInstance() {
         if (MANAGER == null) {
@@ -69,13 +78,14 @@ public final class AnimationManager {
      * <p>
      * Clears every per-player state this package keeps and never releases on its own:
      * <ul>
-     * <li>{@code swingProgressByPlayer} / {@code useDurationByPlayer} (this class's two progress tables, A-11)</li>
+     * <li>{@code swingProgressByPlayer} / {@code useDurationByPlayer} / {@code blockingTailTicks}
+     * (this class's three per-player tables, A-11)</li>
      * <li>{@link RemotePlayerAnimationQueries} (remote-player interpolation state)</li>
      * <li>{@link RemotePlayerMotionStates} (remote-player onGround/isFlying flags)</li>
      * </ul>
      * Idempotence: the body only empties concurrent maps
      * ({@code ConcurrentHashMap.clear()} and the two {@code RemotePlayer*}.clear() calls), it does not depend on
-     * call order, and repeating it has no effect. When {@link #MANAGER} has not been created yet the two local
+     * call order, and repeating it has no effect. When {@link #MANAGER} has not been created yet the three local
      * tables are simply skipped and the rest is still cleared.
      */
     public static void clearPlayerState() {
@@ -83,6 +93,7 @@ public final class AnimationManager {
         if (manager != null) {
             manager.swingProgressByPlayer.clear();
             manager.useDurationByPlayer.clear();
+            manager.blockingTailTicks.clear();
         }
         RemotePlayerAnimationQueries.clear();
         RemotePlayerMotionStates.clear();
@@ -306,6 +317,11 @@ public final class AnimationManager {
             || geckoControllerName.startsWith("parallel_extra_")) {
             return null;
         }
+        // 槽位后缀备用池（openysm_slot_extra_N_controller）同理：要控制的是运行时路由到的
+        // player.<slot>_<后缀>（如 pre_main_mecha_mgr），名字只有运行时路由知道。
+        if (geckoControllerName.startsWith(com.fox.ysmu.util.ControllerUtils.SLOT_EXTRA_CONTROLLER_PREFIX)) {
+            return null;
+        }
         if (geckoControllerName.startsWith("player.")) {
             return geckoControllerName.substring("player.".length());
         }
@@ -344,8 +360,10 @@ public final class AnimationManager {
             || !com.fox.ysmu.client.animation.molang.MolangScriptRegistry.hasScripts(animId)) {
             return null;
         }
-        // 槽位后缀备用池（openysm_slot_extra_N_controller）的路由（SOURCE slotExtraControlSlot）
-        // 属于槽位后缀池那一批，本仓的运行时还没有那条路（见报告），所以这里只补具名并行池。
+        // 槽位后缀备用池：名字里没有槽位名，按当前模型路由到 player.<slot>_<后缀> 对应的脚本槽位。
+        if (OpenYsmPlayerControllerRuntime.isSlotExtraController(name)) {
+            return OpenYsmPlayerControllerRuntime.slotExtraControlSlot(animId, name);
+        }
         return OpenYsmPlayerControllerRuntime.namedParallelControlSlot(animId, name);
     }
 
@@ -744,6 +762,18 @@ public final class AnimationManager {
             return PlayState.STOP;
         }
         if (checkSwingAndUse(player, false)) {
+            // TiCon 十字弩已装填 → 显示副手蓄能待机动画（参考库同一分支：
+            // reference branch AnimationManager.java:1258-1264）。
+            if (com.fox.ysmu.compat.TinkersCrossbowCompat
+                .isCrossbowLoaded(BackhandCompat.getOffhandItem(player))) {
+                PlayState charged = playIfPresent(
+                    event,
+                    "hold_offhand:charged_crossbow",
+                    ILoopType.EDefaultLoopTypes.LOOP);
+                if (charged != PlayState.STOP) {
+                    return charged;
+                }
+            }
             return playIfPresent(event, findHoldAnimation(event, player, false));
         }
         // A-07: upstream answers PAUSE here, not STOP (client/animation/predicate/OffhandPredicate.java:27-29).
@@ -762,17 +792,19 @@ public final class AnimationManager {
             return controllerState;
         }
         if (!player.isSwingInProgress && !player.isUsingItem()) {
-            // 1.7.10 has no crossbow (Items.CROSSBOW / CrossbowItem.isCharged do not exist), so the charged
-            // branches stay commented out: hold_mainhand:charged_crossbow / hold_offhand:charged_crossbow are
-            // unreachable here and ConditionNameDiagnostics reports them once per model.
-            // ItemStack mainHandItem = player.getHeldItem();
-            // if (mainHandItem.is(Items.CROSSBOW) && CrossbowItem.isCharged(mainHandItem)) {
-            // return playAnimation(event, "hold_mainhand:charged_crossbow", ILoopType.EDefaultLoopTypes.LOOP);
-            // }
-            // ItemStack offhandItem = BackhandCompat.getOffhandItem(player);
-            // if (offhandItem != null && offhandItem.is(Items.CROSSBOW) && CrossbowItem.isCharged(offhandItem)) {
-            // return playAnimation(event, "hold_offhand:charged_crossbow", ILoopType.EDefaultLoopTypes.LOOP);
-            // }
+            // 1.7.10 没有**原版**弩（Items.CROSSBOW / CrossbowItem.isCharged 不存在），但 Tinkers' Construct
+            // 的十字弩就是 1.7.10 上的那把弩：装填状态在物品 NBT（InfiTool.Loaded）里，
+            // TinkersCrossbowCompat 读它。所以蓄能待机分支不是"不可能命中"，而是走 TiCon 这一路。
+            // (reference branch AnimationManager.java:1313-1319；参考库把这条判断放在同一位置)
+            if (com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem())) {
+                PlayState charged = playIfPresent(
+                    event,
+                    "hold_mainhand:charged_crossbow",
+                    ILoopType.EDefaultLoopTypes.LOOP);
+                if (charged != PlayState.STOP) {
+                    return charged;
+                }
+            }
             if (player.fishEntity != null) {
                 // D-A5: exist-checked, so a model without `hold_mainhand:fishing` gets STOP instead of driving
                 // AnimationController#setAnimation into its "Could not load animation" branch every frame.
@@ -800,6 +832,17 @@ public final class AnimationManager {
         if (controllerState != null) {
             return controllerState;
         }
+        // 1.7.10: 剑/盾右键格挡会触发 isSwingInProgress，但不应播放挥动动画。
+        // 依据 SOURCE OpenYsmPlayerControllerRuntime.java:1557-1566：格挡期间把 swing /
+        // swing_sword 清零，不让 OpenYSM 控制器播放挥动动画；内置模型没有 OpenYSM 控制器
+        // （上面的 tryApply 返回 null），挥动只由这条 legacy 选择路径产出，所以抑制点必须在这里。
+        // 上游没有对应机制：1.20 的 SwingPredicate.java:50 只看 entity.swinging，而 1.20 的盾牌
+        // 格挡不会把它置起；1.7.10 的右键格挡会（Minecraft.java:1532 的 swingItem()）。
+        if (swingMustYieldToBlocking(com.fox.ysmu.compat.BlockingCompat.isBlocking(player))) {
+            // 连挥动沿的采样一起清掉：解格挡后第一次挥动必须被 markSwingStart 认成新沿。
+            swingProgressByPlayer.remove(player.getUniqueID());
+            return PlayState.STOP;
+        }
         if (!player.isSwingInProgress) {
             swingProgressByPlayer.remove(player.getUniqueID());
             return PlayState.STOP;
@@ -826,6 +869,26 @@ public final class AnimationManager {
         return PlayState.STOP;
     }
 
+    /**
+     * 格挡中的挥动抑制：true = 本帧 {@code swing_controller} 必须放弃挥动动画。
+     * <p>
+     * 依据 SOURCE 的抑制分支（{@code OpenYsmPlayerControllerRuntime.java:1557-1566}）：格挡期间把
+     * {@code swing} / {@code swing_sword} 清零，不让控制器播放挥动动画。上游没有对应机制
+     * （1.20 的 {@code SwingPredicate.java:50} 只看 {@code entity.swinging}），这条是 1.7.10 专属：
+     * 右键格挡会置起 {@code isSwingInProgress}（{@code Minecraft.java:1532}）。
+     * </p>
+     * <p>
+     * 做成纯谓词是为了可单测：调用点 {@link #predicateSwing} 需要完整的 {@code AnimationEvent} /
+     * {@code CustomPlayerEntity} 客户端上下文，而 {@link com.fox.ysmu.compat.BlockingCompat#isBlocking}
+     * 自己也没法在测试 JVM 里跑 —— 它的第三条兜底路径解引用 {@code Minecraft.getMinecraft()}
+     * （测试里是 null），"未格挡"那一半必然 NPE。所以 {@code SwingBlockingSuppressionTest}
+     * 锁的是这条规则本身。
+     * </p>
+     */
+    static boolean swingMustYieldToBlocking(boolean blocking) {
+        return blocking;
+    }
+
     private boolean markSwingStart(EntityPlayer player) {
         UUID playerId = player.getUniqueID();
         if (!player.isSwingInProgress) {
@@ -837,6 +900,30 @@ public final class AnimationManager {
         return previousProgress == null || currentProgress < previousProgress;
     }
 
+    /**
+     * The {@code use_controller}: the model's use pose, and - in 1.7.10 - its block pose.
+     *
+     * <p>
+     * 上游没有"格挡"这条独立分支：{@code UsePredicate.java:24-47} 只问 {@code entity.isUsingItem()}
+     * 一次，1.20 的盾牌格挡本身就是"正在使用物品"（{@code LivingEntity#startUsingItem}），
+     * 于是格挡自然落到 use 分支；挥动动画由 {@code MainhandPredicate#checkSwingAndUse:78-83} 让位。
+     * 1.7.10 没有盾牌物品类，Battlegear2 的格挡标记（以及右键兜底）可以完全不进
+     * {@code isUsingItem()}，所以"格挡也算在用物品"这一步必须显式写出来 —— 这就是 SOURCE
+     * {@code AnimationManager.java:1474-1515} 的形状：{@code isUsingItem || isBlocking}，条件动画与
+     * 回退名都用 {@code HOLD_ON_LAST_FRAME} 播（格挡是一个姿态，不是一个循环），回退名在格挡时
+     * 走 {@link #playBlockingAnimation}。
+     *
+     * <p>
+     * 与 SOURCE 的一处差异，是本树既有结构决定的，不是遗漏：回退名先过 {@link #hasAnimation} ——
+     * 本仓对每个"模型未必定义"的名字都这样判（{@link #playIfPresent} 一族）。SOURCE 直接播
+     * {@code use_mainhand}，而多数 1.7.10 模型只定义 {@code use_mainhand$<id>} 之类的条件名，
+     * 无条件播缺失名会把 {@code AnimationController#setAnimation} 打进 "Could not load animation"
+     * 分支并留下一个没有回退的控制器。名字缺失时这里返回 {@link PlayState#STOP} 并顺手清掉本帧
+     * 状态，让尾迹计数器当帧就归零 —— 与"动画结束"是同一个结尾，而不是又起一段 5 tick 空转。
+     * <p>
+     * 循环类型与 SOURCE 一致：条件动画与格挡回退是 {@code HOLD_ON_LAST_FRAME}（格挡是一个姿态），
+     * 非格挡回退保持原来的 {@code LOOP}。
+     */
     public PlayState predicateUse(AnimationEvent<CustomPlayerEntity> event) {
         EntityPlayer player = event.getAnimatable()
             .getPlayer();
@@ -847,22 +934,79 @@ public final class AnimationManager {
         if (controllerState != null) {
             return controllerState;
         }
-        if (player.isUsingItem() && !player.isPlayerSleeping()) {
-            if (markUseStart(player)) {
+        // SOURCE AnimationManager.java:1474-1477: 使用物品，或 TiCon 十字弩正在装填（1.7.10 的
+        // "拉弦"没有 isUsingItem 标志），或正在格挡；睡觉时不播。
+        boolean isUsingItem = (player.isUsingItem()
+            || com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowReloading(player.getHeldItem()))
+            && !player.isPlayerSleeping();
+        boolean isBlocking = com.fox.ysmu.compat.BlockingCompat.isBlocking(player);
+        UUID playerId = player.getUniqueID();
+
+        if (isUsingItem || isBlocking) {
+            // 格挡期间每帧重置尾迹：标志消失后再放行 5 帧（SOURCE :1487）。
+            blockingTailTicks.put(playerId, BLOCKING_TAIL_TICKS);
+
+            boolean needReset = isUsingItem && markUseStart(player);
+            if (needReset || event.getController()
+                .getAnimationState() == software.bernie.geckolib3.core.AnimationState.Stopped) {
                 event.getController().shouldResetTick = true;
                 event.getController().markNeedsReload();
                 event.getController()
                     .adjustTick(0);
             }
-            boolean isMainHand = BackhandCompat.getUsedItemHand(player);
+
+            // Battlegear2 的盾牌永远在副手，而 SOURCE :1501 的意思是"只在格挡、没有在用自己的
+            // 主手物品时才把姿态算到副手" —— 剑右键格挡（EnumAction.block 走标准使用链）仍然是主手。
+            boolean isMainHand = !isBlocking || isUsingItem ? BackhandCompat.getUsedItemHand(player) : false;
             String conditionalAnimation = findUseAnimation(event, player, isMainHand);
             if (StringUtils.isNoneBlank(conditionalAnimation)) {
-                return playAnimation(event, conditionalAnimation);
+                return playAnimation(event, conditionalAnimation, ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME);
             }
-            return playAnimation(event, isMainHand ? "use_mainhand" : "use_offhand", ILoopType.EDefaultLoopTypes.LOOP);
+            String fallbackAnim = isMainHand ? "use_mainhand" : "use_offhand";
+            if (hasAnimation(event, fallbackAnim)) {
+                return isBlocking ? playBlockingAnimation(event, fallbackAnim)
+                    : playAnimation(event, fallbackAnim, ILoopType.EDefaultLoopTypes.LOOP);
+            }
+            // 模型既没有条件名也没有回退名：没有姿态可播，当帧结束（见方法说明第①条）。
+            blockingTailTicks.remove(playerId);
+            useDurationByPlayer.remove(playerId);
+            return PlayState.STOP;
         }
-        useDurationByPlayer.remove(player.getUniqueID());
+
+        // 不使用物品也不格挡：由尾迹计数器决定何时停（SOURCE :1517-1523）。
+        int tail = blockingTailTicks.getOrDefault(playerId, 0);
+        if (tail > 0) {
+            blockingTailTicks.put(playerId, tail - 1);
+            return PlayState.CONTINUE;
+        }
+        blockingTailTicks.remove(playerId);
+        useDurationByPlayer.remove(playerId);
         return PlayState.STOP;
+    }
+
+    /**
+     * 格挡尾迹长度（tick）。SOURCE 在 {@code AnimationManager.java:1487} 直接写死 {@code 5}；
+     * 这里给它一个名字，因为上面那条"模型没有可用姿态"的提前返回也要用到同一个值。
+     */
+    private static final int BLOCKING_TAIL_TICKS = 5;
+
+    /**
+     * 播放盾牌/剑格挡姿态（SOURCE {@code AnimationManager.java:720-738}，逐行搬用）。
+     * <p>
+     * 把动画长度改成 2.0s，再以 {@code HOLD_ON_LAST_FRAME} 播放：动画播完后停在最后一帧，也就是
+     * 包作者画的格挡姿态，而不是回到第一帧或回到绑定姿势。{@code animationLength} 是引擎
+     * {@code Animation} 上的可变字段，包本身多半声明了更短的长度，格挡姿态通常画在末尾几帧上，
+     * 所以这里必须就地加长。
+     */
+    private static PlayState playBlockingAnimation(AnimationEvent<CustomPlayerEntity> event, String fallbackAnim) {
+        AnimationFile file = ensureAnimationFile(event);
+        if (file != null) {
+            software.bernie.geckolib3.core.builder.Animation animation = file.getAnimation(fallbackAnim);
+            if (animation != null) {
+                animation.animationLength = 2.0;
+            }
+        }
+        return playAnimation(event, fallbackAnim, ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME);
     }
 
     private boolean markUseStart(EntityPlayer player) {
@@ -1033,7 +1177,11 @@ public final class AnimationManager {
 
     private static String findArmorAnimation(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
         int slotIndex) {
-        ConditionArmor conditionArmor = ConditionManager.getArmor(getAnimationId(event));
+        // The table is chosen by the asking animatable's domain, which is upstream's split between
+        // `ConditionManager#getArmor` (the body's controllers) and `getFPArmConditionManager().getArmor()`
+        // (client/animation/predicate/FPArmArmorPredicate.java:36, the `fp.arm.armor_<slot>` family). The animation
+        // id is the same key those tables are registered under, so `armorFor` answers this without a second rule.
+        ConditionArmor conditionArmor = ConditionManager.armorFor(getAnimationId(event));
         return conditionArmor == null ? null : conditionArmor.doTest(player, slotIndex);
     }
 

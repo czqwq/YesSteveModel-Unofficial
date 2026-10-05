@@ -163,6 +163,13 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             this.animatable.getMainModel());
         try {
             super.doRender(entityObj, x, y, z, entityYaw, partialTicks);
+            // 渲染 AdventureBackpack2 背部可穿戴物品（直升机背包等）
+            // (reference branch CustomPlayerRenderer.java:183-188)。YSMU 取消了 RenderPlayerEvent.Pre，
+            // AdventureBackpack2 在 RenderPlayerEvent.Specials.Pre 注册的背包渲染随之不会触发，
+            // 所以在这里手工补一次；Config.RENDER_WEARABLE 是它的开关。
+            if (entityObj instanceof EntityPlayer player && com.fox.ysmu.Config.RENDER_WEARABLE) {
+                com.fox.ysmu.compat.AdventureBackpackCompat.renderWearable(player, x, y, z, partialTicks);
+            }
             // Restore the step that cancelling RenderPlayerEvent.Pre takes away with the rest of the draw.
             // RendererLivingEntity#doRender calls passSpecialRender as its own step once its matrix is popped
             // (build/rfg/minecraft-src .../RendererLivingEntity.java:295-296), and that is where a name tag is drawn

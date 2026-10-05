@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -35,7 +36,10 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.FileFileFilter;
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.client.animation.AnimationDomain;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
+import com.fox.ysmu.client.animation.controller.ModDependency;
+import com.fox.ysmu.client.animation.controller.ModDependencyRegistry;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
@@ -139,7 +143,21 @@ public class ClientModelManager {
     public static final String PROJECTILE_KEY_PREFIX = "projectile_";
     /** The key prefix a bridged projectile animation-controller file uses. */
     private static final String PROJECTILE_CONTROLLER_KEY_PREFIX = "projectile_ctrl_";
+    /**
+     * The built-in default model's animations for the main domain, i.e. the fallback a model's own set is completed
+     * from. Upstream resolves the fallback per domain ({@code defaultAnimations.fallback(domain)},
+     * {@code ModelRenderTargetLoader.java:376}), so the first-person domain has its own entry below.
+     */
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
+    /**
+     * The built-in default model's {@code fp_arm} set, the fallback for the first-person domain.
+     * <p>
+     * {@code builtin/default/animations/fp.arm.animation.json} declares {@code parallel0..7} with no bones at all,
+     * which is the control case for the domain split: as long as the default's own {@code main} clips are merged into
+     * the main domain only, those stubs can no longer replace the built-in {@code parallel0}/{@code parallel1} that
+     * drive the default model's eyes and ribbon.
+     */
+    public static AnimationFile DEFAULT_FIRST_PERSON_ANIMATION_FILE = new AnimationFile();
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
@@ -952,12 +970,16 @@ public class ClientModelManager {
      */
     static void deferAnimations(ResourceLocation modelId, ModelData data) {
         ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
-        // Anything already installed under this id belongs to the payload being replaced, so it goes first: readers
-        // that ask CustomPlayerEntity.getAnimation() without installing first (the id-only users in AnimationManager)
-        // would otherwise act on the previous payload's file until the new one happens to be installed.
-        GeckoLibCache.getInstance()
-            .getAnimations()
-            .remove(mainId);
+        // Anything already installed under either of this model's animation ids belongs to the payload being replaced,
+        // so it goes first: readers that ask CustomPlayerEntity.getAnimation() without installing first (the id-only
+        // users in AnimationManager) would otherwise act on the previous payload's file until the new one happens to
+        // be installed. Both ids, because the payload is installed as one file per domain
+        // ({@link AnimationDomain}); leaving the first-person file behind would keep the previous pack's arm clips.
+        for (String domain : AnimationDomain.ALL) {
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .remove(AnimationDomain.animationFileId(modelId, domain));
+        }
         if (data.getAnimation()
             .isEmpty()) {
             // This payload declares no animations of its own, so the model is meant to fall back to the built-in
@@ -1406,8 +1428,24 @@ public class ClientModelManager {
     private static void registerAnimations(ResourceLocation id, Map<String, byte[]> mapData) {
         Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
             .getAnimations();
-        AnimationFile main = new AnimationFile();
+        // A model's animation sets are split into *domains*, which is upstream's shape: the `fp_arm` set is the
+        // first-person arm's own set and every other set belongs to the model proper
+        // (DefaultAnimationKey.java:36-38 maps a `player` target's `fp_arm` set to `player/first-person` and
+        // everything else to `player/main`; ModelRenderTargetLoader.java:243-253 collects the files into exactly
+        // those two groups and bakes one animation store each). Installing one file per domain instead of one file
+        // for the whole payload is what stops a later set from redefining an earlier set's clip: with a single
+        // namespace, `fp_arm`'s `parallel0` (arms only, 0.2 s) replaced `main`'s (the model's body bones, 1.0 s) for
+        // every pack that ships a real first-person set, and the built-in default's own `parallel0`/`parallel1` were
+        // replaced by the empty `parallel0..7` stubs of its `fp.arm.animation.json`.
+        Map<String, AnimationFile> filesByDomain = new LinkedHashMap<>();
+        for (String domain : AnimationDomain.ALL) {
+            filesByDomain.put(domain, new AnimationFile());
+        }
         Map<String, byte[]> controllerFiles = new LinkedHashMap<>();
+        // 动画名 → 该动画**自身** JSON 引用到的可选模组 modId 集合，注册控制器后交给
+        // OpenYsmAnimationControllerRegistry.scanAnimKeyframesForDeps 展开依赖。
+        // (reference branch ClientModelManager.java:1083-1115, :700-703)
+        Map<String, Set<String>> animToModIds = new LinkedHashMap<>();
         // A projectile sub-entity's animation and controller files must NOT merge into the player's single animation
         // namespace: a pack's arrow animation set and its player set both define `parallel0`, and merging them lets
         // one overwrite the other for whichever is drawn second. Each projectile therefore gets its own AnimationFile
@@ -1478,21 +1516,73 @@ public class ClientModelManager {
                 controllerFiles.put(entry.getKey(), bytes);
                 continue;
             }
-            mergeAnimationFile(main, animationFileFromJson(jsonObject));
+            // 逐动画扫描关键帧 Molang 表达式里对可选模组控制变量（如 ctrl.tac_hold_gun）的引用：
+            // 控制器的 animation 条目可能只是裸动画名、自己不带任何 condition，引用藏在动画关键帧里。
+            // 逐动画（而不是逐文件）是必须的：某个模型的 main.animation.json 里只有 sneak/sneaking
+            // 引用 ctrl.tac_，逐文件标记会把 pre_parallel0-7/表情/衣服全部误标为 tacz 依赖，
+            // 于是 tacz 未加载时 pre_parallel_0 控制器被整体跳过（衣服/表情永不播放）。
+            // (reference branch ClientModelManager.java:1073-1115)
+            for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
+                JsonElement animationJsonElement = animationEntry.getValue();
+                if (animationJsonElement == null || !animationJsonElement.isJsonObject()) {
+                    continue;
+                }
+                String animationJson = animationJsonElement.toString();
+                for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                    if (dependency.matches(animationJson)) {
+                        animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                            .add(dependency.getModId());
+                    }
+                }
+            }
+            mergeAnimationFile(
+                filesByDomain.get(AnimationDomain.ofAnimationSet(entry.getKey())),
+                animationFileFromJson(jsonObject));
         }
-        DEFAULT_ANIMATION_FILE.animations.forEach((name, action) -> {
-            if (!main.animations.containsKey(name)) {
-                main.putAnimation(name, action);
-            }
-        });
-        main.animations.forEach((name, animation) -> {
-            try {
-                ConditionManager.addTest(id, name);
-            } catch (Exception e) {
-                ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
-            }
-        });
-        animations.put(id, main);
+        // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
+        // (`defaultAnimations.fallback(domain)`, ModelRenderTargetLoader.java:375-379): a name the model defines
+        // itself always wins, and a name it does not falls back to the default's clip for that domain.
+        for (String domain : AnimationDomain.ALL) {
+            AnimationFile target = filesByDomain.get(domain);
+            defaultAnimationFile(domain).animations.forEach((name, action) -> {
+                if (!target.animations.containsKey(name)) {
+                    target.putAnimation(name, action);
+                }
+            });
+        }
+        // Condition names are registered per domain, under the id that domain's animatable reads, which is upstream's
+        // two-store split (`ModelRenderTargetAssembler.java:53-60`: the player's own names into `conditionManager`, the
+        // `fp_arm` set's into `fpArmConditionManager`). The body's controllers look their conditional names up with the
+        // model's `main` id and the first-person arm's with the model's `arm` id
+        // (`ConditionManager#armorFor`), so each table must hold exactly its own domain's names - a name the `fp_arm`
+        // set declares is not a name the body's armor controller may play.
+        filesByDomain.get(AnimationDomain.MAIN)
+            .animations.forEach((name, animation) -> {
+                try {
+                    ConditionManager.addTest(id, name);
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
+                }
+            });
+        ResourceLocation firstPersonId = AnimationDomain.animationFileId(baseId, AnimationDomain.FIRST_PERSON);
+        filesByDomain.get(AnimationDomain.FIRST_PERSON)
+            .animations.forEach((name, animation) -> {
+                try {
+                    com.fox.ysmu.client.animation.condition.FPArmConditionManager.addTest(firstPersonId, name);
+                } catch (Exception e) {
+                    ysmu.LOG.warn(
+                        "Failed to register first-person animation condition {} for model {}",
+                        name,
+                        firstPersonId,
+                        e);
+                }
+            });
+        Set<String> installedAnimationNames = new LinkedHashSet<>();
+        for (String domain : AnimationDomain.ALL) {
+            AnimationFile file = filesByDomain.get(domain);
+            installedAnimationNames.addAll(file.animations.keySet());
+            animations.put(AnimationDomain.animationFileId(baseId, domain), file);
+        }
         // The reference gates controller registration on the model actually declaring controller files
         // (REF ClientModelManager.java:690 `if (!bundle.controllerFiles.isEmpty())`). Without that gate every
         // built-in model gains a ControllerSet: the registry synthesises one controller per parallel animation
@@ -1503,16 +1593,27 @@ public class ClientModelManager {
         // re-registration of the same id carries the same payload, so nothing goes stale here.
         if (!controllerFiles.isEmpty()) {
             try {
-                // animationNames is the animation set installed just above: main.animations, i.e. the model's
-                // own animations plus the built-in defaults merged in at :1483-1487. That is the port's
-                // counterpart of the `resourceAdapter.getAnimations(model, assets)` map OpenYSM's
-                // ParallelProcessor scans (ParallelControllerDiscovery.java:45).
-                OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values(), main.animations.keySet());
+                // animationNames is the animation set installed just above: the model's own animations plus the
+                // built-in defaults merged in, across both domains so a controller state that names a clip cannot
+                // lose its route. That is the port's counterpart of the `resourceAdapter.getAnimations(model,
+                // assets)` map OpenYSM's ParallelProcessor scans (ParallelControllerDiscovery.java:45).
+                OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values(), installedAnimationNames);
             } catch (Throwable failure) {
                 // The animation set above is already installed, and the registry already handles a broken controller file
                 // per file, so this only catches something escaping that - an Error. Letting it through would make the
                 // caller report the whole model as failed when its animations are in fact usable.
                 ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
+            }
+        }
+        // 注册之后才展开依赖：scanAnimKeyframesForDeps 查的是已经建立的 ControllerSet。
+        // (reference branch ClientModelManager.java:697-703)
+        if (!animToModIds.isEmpty()) {
+            try {
+                OpenYsmAnimationControllerRegistry.scanAnimKeyframesForDeps(id, animToModIds);
+            } catch (Throwable failure) {
+                // 依赖展开只是优化（未加载模组的控制器被跳过）；失败时控制器照常按自己的条件运行，
+                // 不能因此把整个模型的注册判为失败。
+                ysmu.LOG.warn("Failed to scan animation keyframes for mod dependencies for model {}", id, failure);
             }
         }
         // The projectile controllers live under the projectile's own sub-model id, which is also the id its geometry
@@ -1526,7 +1627,16 @@ public class ClientModelManager {
                 ysmu.LOG.warn("Failed to register projectile controllers for {}", entry.getKey(), failure);
             }
         }
-        ysmu.LOG.info("YSM client registered animations for {}: count={}", id, main.animations.size());
+        ysmu.LOG.info(
+            "YSM client registered animations for {}: count={}",
+            id,
+            filesByDomain.get(AnimationDomain.MAIN).animations.size());
+    }
+
+    /** The built-in default model's animations for one domain; see {@link AnimationDomain}. */
+    private static AnimationFile defaultAnimationFile(String domain) {
+        return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE
+            : DEFAULT_ANIMATION_FILE;
     }
 
     /** One projectile's animation file, parsed and never merged into the player's namespace. */
@@ -1618,7 +1728,9 @@ public class ClientModelManager {
             data.getAnimation()
                 .forEach((name, bytes) -> {
                     AnimationFile animationFile = getAnimationFile(new String(bytes, StandardCharsets.UTF_8));
-                    mergeAnimationFile(DEFAULT_ANIMATION_FILE, animationFile);
+                    // Domain-split like any other model's payload: the default model's own `fp_arm` set is the
+                    // first-person fallback, not one more main-domain set. See {@link AnimationDomain}.
+                    mergeAnimationFile(defaultAnimationFile(AnimationDomain.ofAnimationSet(name)), animationFile);
                 });
             // Eager: this is the substitute every not-yet-built model is drawn with, so it has to exist before any
             // other model asks for it.

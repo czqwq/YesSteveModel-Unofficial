@@ -85,76 +85,21 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
         try {
             GlStateManager.translate(x, y, z);
 
-            // TODO: entity.isPassenger() looks redundant here
-            boolean shouldSit = /* entity.isPassenger() && */ (entity.ridingEntity != null
-                && entity.ridingEntity.shouldRiderSit());
-            EntityModelData entityModelData = new EntityModelData();
-            entityModelData.isSitting = shouldSit;
-            entityModelData.isChild = entity.isChild();
+            AnimationEvent predicate = buildAnimationEvent(entity, partialTicks, this.animatable);
+            // The four locals the layer pass below needs are the event's own inputs. The two head values are carried
+            // negated inside the entity data (see buildAnimationEvent, which keeps the engine's signs), so they are
+            // negated back here rather than computed a second time.
+            EntityModelData entityModelData = (EntityModelData) predicate.getExtraData()
+                .get(0);
+            float limbSwing = predicate.getLimbSwing();
+            float limbSwingAmount = predicate.getLimbSwingAmount();
+            float netHeadYaw = -entityModelData.netHeadYaw;
+            float headPitch = -entityModelData.headPitch;
 
-            float f = Interpolations.lerpYaw(entity.prevRenderYawOffset, entity.renderYawOffset, partialTicks);
-            float f1 = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
-            float netHeadYaw = f1 - f;
-
-            // 修复头部旋转角度突变问题
-            netHeadYaw = wrapDegrees(netHeadYaw);
-
-            if (shouldSit && entity.ridingEntity instanceof EntityLivingBase livingentity) {
-                f = Interpolations
-                    .lerpYaw(livingentity.prevRenderYawOffset, livingentity.renderYawOffset, partialTicks);
-                netHeadYaw = f1 - f;
-                float f3 = wrapDegrees(netHeadYaw);
-                if (f3 < -85.0F) {
-                    f3 = -85.0F;
-                }
-
-                if (f3 >= 85.0F) {
-                    f3 = 85.0F;
-                }
-
-                f = f1 - f3;
-                if (f3 * f3 > 2500.0F) {
-                    f += f3 * 0.2F;
-                }
-
-                netHeadYaw = f1 - f;
-            }
-
-            float headPitch = Interpolations.lerp(entity.prevRotationPitch, entity.rotationPitch, partialTicks);
-            /*
-             * TODO: vanilla mobs can't sleep in beds in 1.12.2 and below if
-             * (entity.getPose() == Pose.SLEEPING) { Direction direction =
-             * entity.getBedDirection(); if (direction != null) { float f4 =
-             * entity.getEyeHeight(Pose.STANDING) - 0.1F; stack.translate((double) ((float)
-             * (-direction.getXOffset()) * f4), 0.0D, (double) ((float)
-             * (-direction.getZOffset()) * f4)); } }
-             */
             float f7 = this.handleRotationFloat(entity, partialTicks);
-            this.applyRotations(entity, f7, f, partialTicks);
+            this.applyRotations(entity, f7, this.resolveBodyYaw(entity, partialTicks, entityModelData.isSitting),
+                partialTicks);
 
-            float limbSwingAmount = 0.0F;
-            float limbSwing = 0.0F;
-            if (!shouldSit && entity.isEntityAlive()) {
-                limbSwingAmount = Interpolations.lerp(entity.prevLimbSwingAmount, entity.limbSwingAmount, partialTicks);
-                limbSwing = entity.limbSwing - entity.limbSwingAmount * (1.0F - partialTicks);
-                if (entity.isChild()) {
-                    limbSwing *= 3.0F;
-                }
-
-                if (limbSwingAmount > 1.0F) {
-                    limbSwingAmount = 1.0F;
-                }
-            }
-            entityModelData.headPitch = -headPitch;
-            entityModelData.netHeadYaw = -netHeadYaw;
-
-            AnimationEvent predicate = new AnimationEvent(
-                animatable,
-                limbSwing,
-                limbSwingAmount,
-                partialTicks,
-                !(limbSwingAmount > -0.15F && limbSwingAmount < 0.15F),
-                Collections.singletonList(entityModelData));
             GeoModel model = modelProvider.getModel(modelProvider.getModelLocation(animatable));
             if (modelProvider instanceof IAnimatableModel) {
                 ((IAnimatableModel<T>) modelProvider)
@@ -224,6 +169,103 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
         }
 
         this.passSpecialRender(entity, x, y, z);
+    }
+
+    /**
+     * The entity's body yaw for this frame, sitting-aware: the entity's own interpolated yaw, or - when a sitting
+     * entity's head is clamped against the seat it is riding - the yaw left after that clamp. This is the value
+     * {@link #applyRotations} rotates by.
+     *
+     * <p>
+     * Split out of {@link #doRender} unchanged (the same computation, with the head yaw passed in) so that the frame's
+     * event and the frame's draw cannot disagree about the body yaw. Engine edit recorded in
+     * {@code .agent/phase22-first-person-arm-pose.md} and {@code PROVENANCE.md}.
+     */
+    protected float resolveBodyYaw(EntityLivingBase entity, float partialTicks, boolean shouldSit) {
+        float f = Interpolations.lerpYaw(entity.prevRenderYawOffset, entity.renderYawOffset, partialTicks);
+        if (!shouldSit || !(entity.ridingEntity instanceof EntityLivingBase livingentity)) {
+            return f;
+        }
+        float headYaw = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
+        f = Interpolations.lerpYaw(livingentity.prevRenderYawOffset, livingentity.renderYawOffset, partialTicks);
+        float f3 = wrapDegrees(headYaw - f);
+        if (f3 < -85.0F) {
+            f3 = -85.0F;
+        }
+        if (f3 >= 85.0F) {
+            f3 = 85.0F;
+        }
+        f = headYaw - f3;
+        if (f3 * f3 > 2500.0F) {
+            f += f3 * 0.2F;
+        }
+        return f;
+    }
+
+    /**
+     * Builds the animation event for one rendered frame of {@code entity}, over {@code eventAnimatable}.
+     *
+     * <p>
+     * Extracted from {@link #doRender} unchanged so that a second animatable bound to the same entity can be ticked
+     * with the same per-frame values: the port's first-person arm is its own animatable
+     * ({@code com.fox.ysmu.client.entity.CustomFirstPersonArmEntity}) and is posed by the same event its body would
+     * get. Upstream has exactly this shape - one event builder per entity, used by both the body and the arm
+     * ({@code geckolib3/model/AnimatableEntity.java:280-339} builds it, {@code :341-390} ticks with it, and
+     * {@code client/entity/CustomFirstPersonArmEntity.java:105-108} is the arm's own setup). Engine edit recorded in
+     * {@code .agent/phase22-first-person-arm-pose.md} and {@code PROVENANCE.md}.
+     *
+     * @param eventAnimatable the animatable this event is for; the renderer's own for a world draw, the arm's own for
+     *                        a first-person arm tick
+     */
+    public AnimationEvent<T> buildAnimationEvent(EntityLivingBase entity, float partialTicks, T eventAnimatable) {
+        // TODO: entity.isPassenger() looks redundant here
+        boolean shouldSit = /* entity.isPassenger() && */ (entity.ridingEntity != null
+            && entity.ridingEntity.shouldRiderSit());
+        EntityModelData entityModelData = new EntityModelData();
+        entityModelData.isSitting = shouldSit;
+        entityModelData.isChild = entity.isChild();
+
+        float f1 = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
+        float f = this.resolveBodyYaw(entity, partialTicks, shouldSit);
+        float netHeadYaw = f1 - f;
+        if (!shouldSit || !(entity.ridingEntity instanceof EntityLivingBase)) {
+            // 修复头部旋转角度突变问题
+            netHeadYaw = wrapDegrees(netHeadYaw);
+        }
+
+        float headPitch = Interpolations.lerp(entity.prevRotationPitch, entity.rotationPitch, partialTicks);
+        /*
+         * TODO: vanilla mobs can't sleep in beds in 1.12.2 and below if
+         * (entity.getPose() == Pose.SLEEPING) { Direction direction =
+         * entity.getBedDirection(); if (direction != null) { float f4 =
+         * entity.getEyeHeight(Pose.STANDING) - 0.1F; stack.translate((double) ((float)
+         * (-direction.getXOffset()) * f4), 0.0D, (double) ((float)
+         * (-direction.getZOffset()) * f4)); } }
+         */
+
+        float limbSwingAmount = 0.0F;
+        float limbSwing = 0.0F;
+        if (!shouldSit && entity.isEntityAlive()) {
+            limbSwingAmount = Interpolations.lerp(entity.prevLimbSwingAmount, entity.limbSwingAmount, partialTicks);
+            limbSwing = entity.limbSwing - entity.limbSwingAmount * (1.0F - partialTicks);
+            if (entity.isChild()) {
+                limbSwing *= 3.0F;
+            }
+
+            if (limbSwingAmount > 1.0F) {
+                limbSwingAmount = 1.0F;
+            }
+        }
+        entityModelData.headPitch = -headPitch;
+        entityModelData.netHeadYaw = -netHeadYaw;
+
+        return new AnimationEvent<>(
+            eventAnimatable,
+            limbSwing,
+            limbSwingAmount,
+            partialTicks,
+            !(limbSwingAmount > -0.15F && limbSwingAmount < 0.15F),
+            Collections.singletonList(entityModelData));
     }
 
     /**

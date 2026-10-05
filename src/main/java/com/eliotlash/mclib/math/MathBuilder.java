@@ -147,11 +147,25 @@ public class MathBuilder {
                 if (longOperator) {
                     s = chars[i - 1] + s;
                     // 前一个字符可能在 buffer 中（标准情况），也可能已经被推入 symbols
-                    // （当 isOperator 对单字符返回 true 时，如 MolangParser 的 "="）
+                    // （当 isOperator 对单字符返回 true 时，如 MolangParser 的 "="）。
+                    // YSMU 移植偏差（vendored com.eliotlash 树）：这两条清理是"或"的关系，不能先后都跑。
+                    // 当上一个符号恰好等于前一个字符时——赋值 "=" 后面紧跟 "=="，即
+                    // `v.x = v.y==0?1:v.y`——第二条会把**不属于本次合并**的赋值号从 symbols 里删掉，
+                    // MolangParser#parseOneLine:393-396 于是认不出赋值（symbols.get(1) 不再是 "="），
+                    // 整条落到 tryTernary，条件被读成 `[v.x, v.y, ==, 0]`：两个相邻操作数之间没有运算符，
+                    // parseSymbols 走到 operationForOperator(symbols.get(lastOp))（lastOp == -1，本文件 :283）
+                    // 抛 IndexOutOfBoundsException，外层报 "Couldn't parse '<lower-cased>' expression!"，
+                    // pack 的整条 timeline 指令失效。实测形状与此吻合：失败的指令都是顶层紧跟 "=" 的三元
+                    // （`v.Right_body_x_rotation = v.Right_handsmove == 0 ?query.body_x_rotation:...`），
+                    // 而同一条 timeline 里括号内的三元正常；`=` 后面跟 `!=`/`<=`/`>=`/`??` 的也不受影响
+                    // （它们合并时前一个字符不是 "="，本条 if 不会命中）。
+                    // 上游基准没有这个形状可抄：tmp/YesSteveModel-dev-1.20 只 vendor 了 mclib 的 utils
+                    // （NOTICE.md:20），它的 MoLang 走词法分析 + Pratt 解析，`=`/`==` 是不同的 token
+                    // （molang/parser/MolangParserImpl.java:310-311），`?` 有独立优先级（:256-271），
+                    // 不存在字符级合并；所以这里只做最小修正——让两条清理互斥。
                     if (buffer.length() > 0) {
                         buffer = buffer.substring(0, buffer.length() - 1);
-                    }
-                    if (!symbols.isEmpty() && symbols.get(symbols.size() - 1).equals(chars[i - 1])) {
+                    } else if (!symbols.isEmpty() && symbols.get(symbols.size() - 1).equals(chars[i - 1])) {
                         symbols.remove(symbols.size() - 1);
                     }
                 }

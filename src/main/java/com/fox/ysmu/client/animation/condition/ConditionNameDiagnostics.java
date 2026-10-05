@@ -18,19 +18,43 @@ import com.fox.ysmu.ysmu;
  * {@code ConditionalHold/ConditionalUse/ConditionalSwing/ConditionArmor#addTest} only feed a name into the sets
  * the runtime queries when its suffix is a {@link EnumAction} name, a known {@link InnerClassify} item kind, or an
  * id/ore-dictionary form. Everything else ends up in {@code innerTest} and can never be returned by
- * {@code doExtraTest}, i.e. it is dropped silently. The repository's own built-in packs ship two such names today
- * ({@code use_mainhand:spyglass} / {@code use_offhand:spyglass} used to be two of them, and
- * {@code hold_mainhand:charged_crossbow} still is, because 1.7.10 has no crossbow).
+ * {@code doExtraTest}, i.e. it is dropped silently. The names this class exists to break are the ones with no
+ * producer at all: the built-in packs' {@code use_mainhand:spyglass} / {@code use_offhand:spyglass} used to be two of
+ * them, and the {@code <action>:<kind>_<variant>} forms a reference pack declares ({@code swing:sword_up},
+ * {@code hold_mainhand:bow_Yilumi}, ...) still are.
  *
  * <p>
- * This class changes no behaviour: {@link ConditionManager#addTest} calls it after classifying a name, and it
- * reports each (model, name) pair once, with the reason, so a pack author can see why an animation never plays.
+ * A hand predicate counts as a producer just as a classifier does, so the names one answers are not reported here:
+ * {@code hold_*:empty}, {@code hold_mainhand:fishing} and {@code hold_*:charged_crossbow} - see the note on
+ * {@link #HOLD_CHARGED_CROSSBOW_SUFFIX}.
+ *
+ * <p>
+ * All this class can see is the <em>condition</em> and <em>hand-predicate</em> routes, not every route a clip can
+ * have: a pack's own animation controller, a script, or an extra animation can play a clip whose name no classifier
+ * will ever return. The warning therefore reports what has been established - no condition classifier selects this
+ * name - rather than claiming the animation never plays at all.
+ *
+ * <p>
+ * This class decides nothing but whether a warning is printed: {@link ConditionManager#addTest} calls it after
+ * classifying a name, and it reports each (model, name) pair once, with the reason, so a pack author can see why no
+ * classifier will ever return that name.
  */
 final class ConditionNameDiagnostics {
 
-    /** The two `hold_*:` suffixes that do have a route outside the kind/EnumAction sets. */
+    /**
+     * The `hold_*:` suffixes that do have a route outside the kind/EnumAction sets, i.e. the names the hand
+     * predicates produce themselves. Upstream answers all three the same way - {@code hold_*:empty} from
+     * {@code ConditionalHold#doTest} ({@code ConditionalHold.java:72-75}), {@code hold_mainhand:fishing} from
+     * {@code MainhandPredicate.java:47-51}, and {@code hold_*:charged_crossbow} from
+     * {@code MainhandPredicate.java:44-46} / {@code OffhandPredicate.java:31-33}. The port keeps the same three
+     * routes: {@code ConditionalHold#doTest} and {@code AnimationManager#predicateMainhandHold} /
+     * {@code #predicateOffhandHold}, the last of which reaches the charged-clip branch through
+     * {@code TinkersCrossbowCompat.isCrossbowLoaded} - a TiCon crossbow with its {@code InfiTool.Loaded} NBT flag
+     * set, which is 1.7.10's crossbow.
+     */
     private static final String HOLD_EMPTY_SUFFIX = "empty";
     private static final String HOLD_FISHING_SUFFIX = "fishing";
+    private static final String HOLD_CHARGED_CROSSBOW_SUFFIX = "charged_crossbow";
 
     private static final String[] HOLD_PREFIXES = { "hold_mainhand:", "hold_offhand:" };
     private static final String[] ACTION_PREFIXES = { "use_mainhand:", "use_offhand:", "swing:", "swing_offhand:" };
@@ -52,6 +76,10 @@ final class ConditionNameDiagnostics {
      * {@code trident} is different: 1.7.10 has no vanilla trident either, and this port answers {@code spear} for a
      * trident-named item on purpose ({@code InnerClassify#getItemType} matches both keywords into one kind), so the
      * name is dead but the item is not - a pack has to write {@code :spear}.
+     * <p>
+     * A name is <em>not</em> listed here when it has a route outside the vocabulary: {@code hold_*:empty},
+     * {@code hold_mainhand:fishing} and {@code hold_*:charged_crossbow} are hand-predicate names, and a predicate is
+     * a producer exactly as a classifier is - see {@link #HOLD_CHARGED_CROSSBOW_SUFFIX}.
      * <p>
      * These are listed by name because the vocabulary check cannot see the difference: {@code trident} is a real kind
      * in {@code KNOWN_TYPE_KEYWORDS}, so {@link #isClassifiable} answers {@code true} and the pack would get no
@@ -129,9 +157,13 @@ final class ConditionNameDiagnostics {
                 unproducible);
             return;
         }
+        // "No condition classifier selects it" is what was verified; the earlier wording also claimed the animation
+        // was ignored, which is false for the names a pack's own controller states play - three of the variants a
+        // reference pack declares (`swing:sword_up` / `_down` / `_jump`) are in exactly that position.
         ysmu.LOG.warn(
             "Condition animation '{}' of model {} cannot be selected by the 1.7.10 condition classifiers: suffix '{}'"
-                + " is neither an EnumAction name nor a known item kind (see InnerClassify); the animation is ignored",
+                + " is neither an EnumAction name nor a known item kind (see InnerClassify); no classifier will ever"
+                + " return this name",
             name,
             id,
             suffixOf(name));
@@ -199,7 +231,9 @@ final class ConditionNameDiagnostics {
     }
 
     private static boolean isEmptyOrFishingOrActionOrKind(String suffix) {
-        return HOLD_EMPTY_SUFFIX.equals(suffix) || HOLD_FISHING_SUFFIX.equals(suffix) || isActionOrKind(suffix);
+        return HOLD_EMPTY_SUFFIX.equals(suffix) || HOLD_FISHING_SUFFIX.equals(suffix)
+            || HOLD_CHARGED_CROSSBOW_SUFFIX.equals(suffix)
+            || isActionOrKind(suffix);
     }
 
     private static boolean isActionOrKind(String suffix) {

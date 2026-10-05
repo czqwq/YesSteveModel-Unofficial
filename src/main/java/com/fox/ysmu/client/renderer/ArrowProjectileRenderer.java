@@ -655,9 +655,18 @@ public final class ArrowProjectileRenderer {
             .getEndValueDouble();
     }
 
-    /** Writes one projectile Molang variable into the shared parser table, registering it if absent. */
+    /**
+     * Writes one projectile Molang variable into the shared parser table, registering it if absent.
+     * <p>
+     * The name goes through {@link MolangParser#canonicalVariableName} - the same single rule
+     * {@code ProjectileControllerRuntime#resolveVariable} reads by - so the two ends of this axis cannot key the same
+     * variable differently. The four names published here are already lower-case and every other writer of the table
+     * canonicalises, so this is a no-op for them today; it is the invariant that keeps a condition spelled with the
+     * pack's own capitalisation from missing the entry this method created.
+     */
     private static void setMolangVariable(String name, double value) {
-        MolangParser.VARIABLES.computeIfAbsent(name, key -> new LazyVariable(key, () -> 0.0D))
+        String canonical = MolangParser.canonicalVariableName(name);
+        MolangParser.VARIABLES.computeIfAbsent(canonical, key -> new LazyVariable(key, () -> 0.0D))
             .set(value);
     }
 

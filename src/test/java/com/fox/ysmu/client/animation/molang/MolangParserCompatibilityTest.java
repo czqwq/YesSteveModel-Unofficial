@@ -189,6 +189,98 @@ class MolangParserCompatibilityTest {
     }
 
     @Test
+    void ternaryImmediatelyAfterAssignmentParses() throws Exception {
+        // Real timeline instructions from a pack whose `t=0` block failed with
+        // "Couldn't parse '<lower-cased>' expression!". Every failing instruction is a ternary at the top level
+        // right after `=`, and the mechanism is in breakdownChars: when it merges the `==`, the assignment `=`
+        // that happens to be the last symbol matches the character being merged and is deleted, so parseOneLine
+        // (:393-396) no longer recognises the assignment and tryTernary reads `[v.x, v.y, ==, 0]` as the
+        // condition - two adjacent operands with no operator, which reaches operationForOperator(symbols.get(-1)).
+        // The parenthesised ternaries in the same block were never affected, which is the empirical split pinned
+        // here in both directions.
+        MolangParser parser = new MolangParser();
+
+        // `v.roaming.player_size = v.roaming.player_size==0?1:v.roaming.player_size`; both branches.
+        parser.register(new LazyVariable("v.roaming.player_size", 0));
+        assertEquals(
+            1.0D,
+            parser.parseExpression("v.roaming.player_size = v.roaming.player_size==0?1:v.roaming.player_size")
+                .get(),
+            0.0D);
+        assertEquals(
+            1.0D,
+            parser.parseExpression("v.roaming.player_size")
+                .get(),
+            0.0D,
+            "condition true, so the assignment must have taken the 1 branch");
+        parser.register(new LazyVariable("v.roaming.player_size", 2));
+        assertEquals(
+            2.0D,
+            parser.parseExpression("v.roaming.player_size = v.roaming.player_size==0?1:v.roaming.player_size")
+                .get(),
+            0.0D);
+        assertEquals(
+            2.0D,
+            parser.parseExpression("v.roaming.player_size")
+                .get(),
+            0.0D,
+            "condition false, so the else branch keeps the value");
+
+        // The same shape with spaces, and the `?` glued to a bare `query.` variable rather than a call.
+        parser.register(new LazyVariable("query.body_x_rotation", 42));
+        parser.register(new LazyVariable("v.right_handsmove", 0));
+        assertEquals(
+            42.0D,
+            parser.parseExpression(
+                "v.Right_body_x_rotation = v.Right_handsmove == 0 ?query.body_x_rotation:v.Right_handsmove")
+                .get(),
+            0.0D);
+        assertEquals(
+            42.0D,
+            parser.parseExpression("v.right_body_x_rotation")
+                .get(),
+            0.0D);
+        parser.register(new LazyVariable("v.right_handsmove", 3));
+        assertEquals(
+            3.0D,
+            parser.parseExpression(
+                "v.Right_body_x_rotation = v.Right_handsmove == 0 ?query.body_x_rotation:v.Right_handsmove")
+                .get(),
+            0.0D);
+
+        // The half that already worked, from the same `t=0` block: the ternary sits inside parentheses
+        // (`v.ground_speed_count=((…) ? 1 : -1)*…`, its condition and multiplier elided in the log), so the
+        // assignment is recognised before the `==` merge can matter. It must not regress; both branches pinned.
+        parser.register(new LazyVariable("query.ground_speed", 0));
+        assertEquals(
+            -4.0D,
+            parser.parseExpression("v.ground_speed_count=((query.ground_speed>0.1) ? 1 : -1)*4")
+                .get(),
+            0.0D);
+        assertEquals(
+            -4.0D,
+            parser.parseExpression("v.ground_speed_count")
+                .get(),
+            0.0D);
+        parser.register(new LazyVariable("query.ground_speed", 1));
+        assertEquals(
+            4.0D,
+            parser.parseExpression("v.ground_speed_count=((query.ground_speed>0.1) ? 1 : -1)*4")
+                .get(),
+            0.0D);
+
+        // `!=` after an assignment was never broken by the merge (its merged first character is `!`, not `=`),
+        // so it stays pinned too - a future change to that merge must not take it out.
+        parser.register(new LazyVariable("v.merge_a", 1));
+        parser.register(new LazyVariable("v.merge_b", 0));
+        assertEquals(
+            1.0D,
+            parser.parseExpression("v.merge_neq = v.merge_a!=v.merge_b?1:2")
+                .get(),
+            0.0D);
+    }
+
+    @Test
     void bracePlaceholdersEvaluateToZeroInsteadOfKillingTheChannel() throws Exception {
         // 艾莲·乔1.4.0 writes these in the position channels of its run and walk animations - 302 expressions in all -
         // and nothing in that pack defines `data3`. '{' is an illegal character for the tokenizer, so before this the

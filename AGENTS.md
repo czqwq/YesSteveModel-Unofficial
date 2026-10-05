@@ -74,9 +74,20 @@ shape, or record why 1.7.10 or the port's own architecture cannot.
   `getRenderType` override, because the engine's default body *is* upstream's rule. `hasTranslucentVertices` is
   upstream's name from `GeoModelState:73-74`; upstream reads a native vertex count, and the port substitutes the
   host's answer from the texture about to be bound - the same input upstream's bake gets - with that substitution
-  stated in the javadoc. The first-person arm does not go through `render`, so `FirstPersonHandRenderer` applies the
-  state upstream's arm renderer gets from `CustomTranslucentRenderType`; that is where the grey single-texel back
-  faces of `wine_fox/05_magical`'s flat decals were being drawn.
+  stated in the javadoc. The first-person arm does not go through `render`, so `FirstPersonHandRenderer` asks
+  `getRenderType` the same question the world path asks - visible, not glowing, `hasTranslucentVertices` on the arm's
+  own animatable - and applies that type's state in `prepareCustomArmState`, with `render`'s own rules
+  (`IGeoRenderer.java:77-95`). The roll applies that state around a mirrored arm matrix and resets
+  `glFrontFace(GL11.GL_CCW)` afterwards, because the mirror makes the model's own front faces back faces
+  (`CustomPlayerItemInHandLayer.java:107` is the same correction for the mirrored held item).
+  History worth keeping: the arm used to hardcode upstream's *arm* answer, `CustomTranslucentRenderType` - which
+  upstream's `CustomFirstPersonArmRenderer:39` really does use unconditionally, but which in 1.20 applies itself
+  through the handed-over type and in 1.7.10 has to be applied by hand. Commit 67f8044 wrote that state as
+  `disableAlpha() + enableCull()`: for an opaque model that is the opposite of the `entityCutoutNoCull` the world
+  path draws the same geometry with, so an alpha-0 texel was not discarded (the black patch over the unlit inside of
+  the far face) and culling dropped a face of a flat or single-layer piece (the see-through holes). The grey
+  single-texel back faces of `wine_fox/05_magical`'s flat decals that culling was added for are handled by the
+  clamped texture upload (see the texture-wrap entry below), not by the arm's cull state.
   Two gaps are recorded rather than invented: 1.7.10 has no outline pass, so the glowing branch draws nothing
   (`getRenderType` returns null); and the engine keeps its port-only 0.001 inflate on a zero-thickness cube, which
   upstream does not have (`GeoBuilder.java:100-116`), because removing it would make a flat decal's two faces exactly
@@ -110,6 +121,18 @@ shape, or record why 1.7.10 or the port's own architecture cannot.
   (`RenderModelEvent`, `RenderLayerEvent`, `RegisterRenderStateModifierEvent`, `RegisterModelLocatorEvent`) with no
   readiness query at all. The port returns true for a parked model while the renderer is drawing the built-in
   default. Open: an owner decision, recorded rather than resolved.
+- **The first-person arm is posed by its own animatable, its own controller set and its own condition table.** Upstream
+  ticks a `CustomFirstPersonArmEntity` every frame
+  (`client/renderer/CustomFirstPersonArmRenderer.java:27-28`), drives it with `fp.arm.misc` / `fp.arm.parallel_<i>` /
+  `fp.arm.armor_<slot>` (`client/controller/collections/FPArmControllerCollection.java:22-32`) off a second animation
+  store and a second condition manager (`ModelRenderTargetAssembler.java:53-60`), and shares one controller map with
+  the body. The port now does the same (`CustomFirstPersonArmEntity`, `FPArmConditionManager`,
+  `AnimationDomain#controllerSetId`), because the arm's bones had never entered an `AnimationProcessor` at all and it
+  drew at its bind pose. One deliberate divergence: upstream decides which `fp.arm.*` controllers exist while it builds
+  the model's resource set and skips an animation with no bone channels
+  (`ParallelControllerDiscovery.java:64-71`), while the port registers one fixed set per animatable and routes at
+  runtime - the visible result matches, since an empty clip leaves every bone where it was. Resolved - see
+  `.agent/phase23-first-person-arm-pose.md`.
 
 ## Cross-Project Ownership
 
