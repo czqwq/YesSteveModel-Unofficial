@@ -241,6 +241,13 @@ public class AnimationRegister {
         functions.put("ysm.bone_pivot_abs_x", BonePivotAbsFunction.class);
         functions.put("ysm.bone_pivot_abs_y", BonePivotAbsFunction.class);
         functions.put("ysm.bone_pivot_abs_z", BonePivotAbsFunction.class);
+        // 无后缀的向量形式也必须注册：上面的重写只覆盖"调用的右括号紧跟着 ).x"这一种位置，
+        // 而模型会把它当普通数值用（`math.max(ysm.bone_pivot_abs('Root'),ysm.bone_pivot_abs('AllBody'))`，
+        // 见 tmp/LaPluma2.5.3/animations/main.animation.json 的 `v.bv=…` 指令）。上游在该位置返回结构体
+        // （BoneParamFunction.java:19-31 → Vec3fStruct.java:11-23），本解析器只有 double，所以这里直接注册
+        // 裸名，由 axis() 在未命名轴时取 x；引擎侧的 ysm.bone_rot/bone_pos/bone_scale 同理，注册在
+        // MolangParser.doCoreRemaps（引擎自己的表）。
+        functions.put("ysm.bone_pivot_abs", BonePivotAbsFunction.class);
         // A-16: upstream YSMBinding.java:190 `function("sync", new Sync())` - a pack's way to hand values to every
         // client that can see the model; the echo runs the model's `@sync` script.
         functions.put("ysm.sync", YsmSyncFunction.class);

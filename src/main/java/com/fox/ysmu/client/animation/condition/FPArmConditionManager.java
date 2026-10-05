@@ -45,9 +45,13 @@ public final class FPArmConditionManager {
      * condition, so this may be handed every clip name of the set, exactly as upstream hands it every key of
      * {@code fpArmAnimations}.
      *
-     * @param armId the model's {@code arm} id (the first-person domain's animation-file id)
+     * @param armId           the model's {@code arm} id (the first-person domain's animation-file id)
+     * @param declaredByModel {@code false} when the name reached this domain through the default-animation fallback
+     *                        rather than from one of the model's own files; the name is still classified, but it is
+     *                        reported against the built-in default model instead of against every inheriting model -
+     *                        see {@link ConditionNameDiagnostics#needsWarning}
      */
-    public static void addTest(ResourceLocation armId, String name) {
+    public static void addTest(ResourceLocation armId, String name, boolean declaredByModel) {
         if (armId == null || name == null) {
             return;
         }
@@ -56,7 +60,7 @@ public final class FPArmConditionManager {
         // The A-07 observability follows the name into its own domain: a first-person clip whose name no classifier
         // could ever return is reported against the arm's id, exactly as the body's names are reported against the main
         // id. Before the two tables were split, every first-person name was diagnosed as if it belonged to the body.
-        ConditionNameDiagnostics.warnIfUnclassifiable(armId, name);
+        ConditionNameDiagnostics.warnIfUnclassifiable(armId, name, declaredByModel);
     }
 
     /**

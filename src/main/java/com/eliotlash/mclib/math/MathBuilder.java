@@ -230,8 +230,54 @@ public class MathBuilder {
         return symbols;
     }
 
+    /**
+     * Resolves a unary minus that {@code breakdownChars} left as its own symbol, or {@code null} when there is none.
+     * <p>
+     * A bare {@code "-"} is at a unary position exactly when it is the first symbol or follows an operator or a
+     * comma; every other place it is the binary subtraction and must reach {@link #seekLastOperator}. The operator
+     * immediately to the left is replaced along with the minus, so precedence is not reinterpreted: for
+     * {@code v.a = -(1)*25} this evaluates {@code (-1)*25}, not {@code -(1*25)}.
+     * <p>
+     * A bare {@code "-"} can only appear before a parenthesised group, because the character loop folds a minus into
+     * the token buffer for every other follower; that is why this one shape covers what the logs show.
+     */
+    private IValue parseLeadingUnaryMinus(List<Object> symbols) throws Exception {
+        int size = symbols.size();
+        for (int i = 0; i < size; i++) {
+            if (!"-".equals(symbols.get(i))) {
+                continue;
+            }
+            boolean operandPosition = i == 0
+                || (this.isOperator(symbols.get(i - 1)) || ",".equals(symbols.get(i - 1)));
+            if (!operandPosition || i + 1 >= size) {
+                return null;
+            }
+            IValue value = new Negative(this.parseSymbols(symbols.subList(i + 1, size)));
+            if (i == 0) {
+                return value;
+            }
+            IValue left = this.parseSymbols(symbols.subList(0, i - 1));
+            return new Operator(this.operationForOperator((String) symbols.get(i - 1)), left, value);
+        }
+        return null;
+    }
+
     @SuppressWarnings("unchecked")
     public IValue parseSymbols(List<Object> symbols) throws Exception {
+        // 一元负号：`breakdownChars` 只在 token 直接跟在负号后面时把两者合进同一个 buffer
+        // （`-1`、`-v.x`、`-!v.x`）；`(` 分支却会把缓冲里的 `-` 先单独入栈，于是
+        // `-(1)/25` 的符号表是 `[-, [1], /, 25]`，`10*-(2)` 是 `[10, *, -, [2]]`。这两种形状以前都
+        // 解析失败：seekLastOperator 找到二元运算符后，左侧/右侧递归到 `[-, [1]]` 或单个 `-`，
+        // lastOp == -1，`operationForOperator(symbols.get(-1))` 抛 IndexOutOfBoundsException，
+        // 整条表达式判死。实盘形状：模型粒子的 `-(ysm.bone_pivot_abs('X').z)/25`，整条指令被丢弃。
+        // 只处理 `-`：`!` 的分离形式同样会走到这里，但取非在 valueFromObject 里已有路径，而合并形式
+        // `-!v.x` / `!-v.x` 是单个 token、不进入本方法。
+        // 上游没有这个形状：它有自己的词法器与 Pratt 解析（molang/parser/MolangParserImpl.java），
+        // 一元负号是 UnaryExpression（:156-158），不依赖字符级合并。
+        IValue leadingMinus = parseLeadingUnaryMinus(symbols);
+        if (leadingMinus != null) {
+            return leadingMinus;
+        }
         IValue ternary = this.tryTernary(symbols);
         if (ternary != null) {
             return ternary;

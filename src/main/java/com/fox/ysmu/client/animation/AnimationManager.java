@@ -139,6 +139,44 @@ public final class AnimationManager {
         if (controllerState != null) {
             return controllerState;
         }
+        return playParallelIfPresent(event, animationName);
+    }
+
+    /**
+     * 并行动画族（{@code pre_parallel0..7} / {@code parallel0..7}）这一帧的收尾：模型真的声明了
+     * {@code animationName} 才交给引擎，否则 {@link PlayState#STOP}。
+     *
+     * <p>
+     * 这一段就是 SOURCE 的收尾：{@code predicateParallel} 末尾先问
+     * {@code animationExistsInFile(animId, animationName)}，命中才 {@code playLoopAnimation}，否则
+     * {@code PlayState.STOP}（SOURCE {@code client/animation/AnimationManager.java:852-855}，判定在
+     * {@code :740-746}），注释写明理由就是 "Skip if the animation doesn't exist in the model's file to avoid
+     * GeckoLib's System.out.printf spam ("Could not load animation: ...")"（SOURCE {@code :822-823}）。
+     * 本仓的等价判定是 {@link #hasAnimation}（先 {@code ensureAnimationFile} 安装懒加载的动画文件，再查表），
+     * 所以这里复用它，没有新机制。
+     *
+     * <p>
+     * 少了这一步的后果有两层，第二层才是真正的 bug：
+     * <ol>
+     * <li>引擎那条分支会打印 "Could not load animation: parallelN. Is it missing?"；</li>
+     * <li>它在填 {@code animationQueue} 之前就 {@code return}，于是
+     * {@code currentAnimationBuilder} 不更新、{@code currentAnimation} 不被清，下一帧同样的 builder
+     * 又判定为"变了"、又走一遍同一分支 —— 每帧刷屏，控制器还停在上一次动画（或什么都没有）。</li>
+     * </ol>
+     * 8 个槽位是**按 animatable 固定注册**的（{@code CustomPlayerEntity#registerControllers} 的
+     * {@code pre_parallel%d} / {@code parallel%d}，以及第一人称手臂的同名族），而模型可以随时切换，
+     * 所以"这个模型有没有 parallelN"只能在运行时问。上游没有这个问题，因为它在构建模型资源集时只为
+     * "模型声明且非空"的 {@code parallelN} 建控制器（{@code client/controller/ParallelControllerDiscovery.java:64-71}），
+     * 永远不会向引擎要一个不存在的名字；固定池 + 运行时路由是本仓既有的分歧，存在性检查就是它对应的形状。
+     *
+     * <p>
+     * 包内可见是为了让 JUnit 能钉住这个判定：{@code predicateParallel} 本身要一个活着的
+     * {@code Minecraft}（{@link Minecraft#isGamePaused()}），普通测试 JVM 起不来。
+     */
+    static PlayState playParallelIfPresent(AnimationEvent<CustomPlayerEntity> event, String animationName) {
+        if (animationName == null || animationName.isEmpty() || !hasAnimation(event, animationName)) {
+            return PlayState.STOP;
+        }
         return playLoopAnimation(event, animationName);
     }
 

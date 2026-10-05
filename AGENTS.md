@@ -128,11 +128,26 @@ shape, or record why 1.7.10 or the port's own architecture cannot.
   store and a second condition manager (`ModelRenderTargetAssembler.java:53-60`), and shares one controller map with
   the body. The port now does the same (`CustomFirstPersonArmEntity`, `FPArmConditionManager`,
   `AnimationDomain#controllerSetId`), because the arm's bones had never entered an `AnimationProcessor` at all and it
-  drew at its bind pose. One deliberate divergence: upstream decides which `fp.arm.*` controllers exist while it builds
-  the model's resource set and skips an animation with no bone channels
+  drew at its bind pose. One deliberate divergence: upstream decides which `fp.arm.*` and `parallel_<i>` controllers
+  exist while it builds the model's resource set and skips an animation with no bone channels
   (`ParallelControllerDiscovery.java:64-71`), while the port registers one fixed set per animatable and routes at
-  runtime - the visible result matches, since an empty clip leaves every bone where it was. Resolved - see
-  `.agent/phase23-first-person-arm-pose.md`.
+  runtime. That divergence is **not** harmless, and it was shipped as one: a fixed pool asks the engine for a name the
+  current model does not declare, `AnimationController#setAnimation` returns before filling `animationQueue` and
+  before updating `currentAnimationBuilder`, so the controller keeps the old builder, re-evaluates it as changed on
+  the next frame, and prints `Could not load animation: parallelN. Is it missing?` once per frame while the controller
+  is left with no fallback - observed as `parallel0`/`parallel5`/`parallel7` repeating in a live client, and as the
+  LaPluma walk regression before it. The port's counterpart of upstream's discovery-time filter is a runtime existence
+  check at the hand-over: `AnimationManager#playParallelIfPresent` asks `hasAnimation` (which installs the model's
+  animations first, exactly as `definesAnimation` does) and answers `PlayState.STOP` when the name is absent - the
+  ending SOURCE itself uses and documents (`client/animation/AnimationManager.java:852-855`, reason at `:822-823`).
+  `ParallelAnimationExistenceGuardTest` pins it for the body and for the arm, including that the arm is asked only
+  from the `fp_arm` domain and the body only from `main`. Resolved - see `.agent/phase23-first-person-arm-pose.md`.
+  One consequence of the same split stays recorded rather than patched: the default-animation fallback is per domain
+  (`ModelRenderTargetLoader.java:375-379` with `DefaultAnimationKey.java:36-38`, where `fp_arm` alone maps to
+  `player/first-person`), so a *legacy* three-set default payload (`extra`/`main`/`arm`, i.e. one baked before
+  `animations/fp.arm.animation.json` existed) can never fill the first-person fallback, and that domain stays empty
+  until the model's own pack declares `fp_arm` or the built-in default is re-copied. Upstream has the same hole for a
+  payload that declares no `fp_arm` set, so this is the format's behaviour, not a missing port mapping.
 
 ## Cross-Project Ownership
 

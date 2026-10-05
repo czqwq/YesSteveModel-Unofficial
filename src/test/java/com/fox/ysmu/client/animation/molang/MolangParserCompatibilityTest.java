@@ -6,13 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
 
 import software.bernie.geckolib3.core.molang.LazyVariable;
+import software.bernie.geckolib3.core.molang.MolangException;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangStringPool;
 
 /**
  * Engine parser behaviour that OpenYSM packs depend on and that the 1.7.10 port got wrong. These live here (rather
@@ -35,6 +40,43 @@ class MolangParserCompatibilityTest {
         public double get() {
             return getArg(0) + 1;
         }
+    }
+
+    /**
+     * The vector bone query as this engine implements it: one class behind every registered name
+     * ({@code ysm.bone_rot}, {@code ysm.bone_rot_x}, …), answering the axis the name ends in and falling back to x for
+     * the unsuffixed form. Records the name so the {@code ).x} rewrite can be observed, and returns the bone's
+     * interned name id so the bone argument is observable too.
+     */
+    public static class VectorBoneFunction extends Function {
+
+        static String calledAs;
+
+        public VectorBoneFunction(IValue[] values, String name) throws Exception {
+            super(values, name);
+            calledAs = name;
+        }
+
+        @Override
+        public int getRequiredArguments() {
+            return 1;
+        }
+
+        @Override
+        public double get() {
+            return getArg(0);
+        }
+    }
+
+    /**
+     * The vector bone queries only work with the host table installed: the {@code _x}/{@code _y}/{@code _z} names
+     * come from {@code MolangParser.doCoreRemaps}, and the unsuffixed names from
+     * {@code AnimationRegister.registerFunctions} through the registrar hook the constructor runs. The same
+     * installation {@code ClientProxy#init} performs in game.
+     */
+    private static MolangParser parserWithHostFunctions() {
+        com.fox.ysmu.client.animation.AnimationRegister.registerMolangHooks();
+        return new MolangParser();
     }
 
     @Test
@@ -337,5 +379,295 @@ class MolangParserCompatibilityTest {
             .get(), 0.0D);
         assertEquals(6.0D, parser.parseExpression("v.tmp*2")
             .get(), 0.0D);
+    }
+
+    @Test
+    void vectorBoneFunctionIsABareStatement() throws Exception {
+        // The `.x` member access is not the only way a pack uses a vector bone query, and the rewrite in
+        // `MolangParser.rewriteVectorFunction` only fires when the call's own `)` is followed by `).<axis>`. The bare
+        // form is registered directly, and answers the axis the function falls back to - upstream hands back a struct
+        // here and this parser cannot, so the honest answer is the x component, not a parse failure.
+        MolangParser parser = parserWithHostFunctions();
+        parser.functions.put("ysm.bone_rot", VectorBoneFunction.class);
+        VectorBoneFunction.calledAs = null;
+
+        int bone = MolangStringPool.intern("bare");
+        assertEquals(bone, parser.parseExpression("ysm.bone_rot('bare')")
+            .get(), 0.0D);
+        assertEquals("ysm.bone_rot", VectorBoneFunction.calledAs, "the bare name must be what the function is called as");
+
+        // And the whole instruction as a timeline carries it, assigned to a variable and read back - the shape that
+        // used to be dropped whole.
+        assertEquals(
+            bone,
+            parser.parseExpression("v.bare_statement=ysm.bone_rot('bare');v.bare_statement")
+                .get(),
+            0.0D);
+    }
+
+    @Test
+    void vectorBoneFunctionIsAnArgumentToAnotherFunction() throws Exception {
+        // `v.bv=math.max(ysm.bone_pivot_abs('Root'),ysm.bone_pivot_abs('AllBody'));` - the log's first parse failure.
+        // Neither call has a `).x`, so the rewrite leaves both alone; before the bare names were registered this threw
+        // `Function 'ysm.bone_pivot_abs' couldn't be found!` and the whole timeline instruction was dropped.
+        MolangParser parser = parserWithHostFunctions();
+        parser.functions.put("ysm.bone_pivot_abs", VectorBoneFunction.class);
+
+        int root = MolangStringPool.intern("Root");
+        int allBody = MolangStringPool.intern("AllBody");
+        double expected = Math.max(root, allBody);
+
+        assertEquals(
+            expected,
+            parser.parseExpression("v.bv=math.max(ysm.bone_pivot_abs('Root'),ysm.bone_pivot_abs('AllBody'));v.bv")
+                .get(),
+            0.0D);
+        // The same instruction without the assignment, and with the font's own spacing.
+        assertEquals(
+            expected,
+            parser.parseExpression("math.max(ysm.bone_pivot_abs('Root'), ysm.bone_pivot_abs('AllBody'))")
+                .get(),
+            0.0D);
+    }
+
+    @Test
+    void vectorBoneFunctionMemberAccessInsideAnArgumentList() throws Exception {
+        // The log's second shape: the `.x` access sits **inside** a larger argument list
+        // (`(ysm.bone_pivot_abs('RightHandPTC').x)/25`), where the call's own `)` is still immediately followed by
+        // `).x`, so the rewrite does reach it - the instruction failed because a *second*, bare-looking name in the
+        // same expression was unregistered, and because the logged form of its z argument is `-(…)/25`, a unary minus
+        // in front of a parenthesised group (see `unaryMinusBeforeAGroupParses`). Both positions are pinned here
+        // because one expression uses both.
+        MolangParser parser = parserWithHostFunctions();
+        // Both names the rewrite can pick: `).x` becomes `ysm.bone_pivot_abs_x`, while the bare argument the same
+        // instruction writes stays `ysm.bone_pivot_abs`. The host's real class is registered for all of them, so the
+        // stub has to cover all of them too, or a rewritten call silently reaches the real function - which answers 0
+        // (no bone) with no render frame open.
+        parser.functions.put("ysm.bone_pivot_abs", VectorBoneFunction.class);
+        for (String axis : new String[] { "x", "y", "z" }) {
+            parser.functions.put("ysm.bone_pivot_abs_" + axis, VectorBoneFunction.class);
+        }
+
+        int hand = MolangStringPool.intern("RightHandPTC");
+        assertEquals(
+            hand / 25.0D,
+            parser.parseExpression("(ysm.bone_pivot_abs('RightHandPTC').x)/25")
+                .get(),
+            0.0D);
+        assertEquals("ysm.bone_pivot_abs_x", VectorBoneFunction.calledAs, "the rewrite must pick the x component name");
+
+        // The same read for the y and z components - the y one with the logged instruction's own neighbour
+        // arithmetic, the z one with the `-(…)/25` unary-minus shape.
+        assertEquals(
+            hand,
+            parser.parseExpression("ysm.bone_pivot_abs('RightHandPTC').y")
+                .get(),
+            0.0D);
+        assertEquals("ysm.bone_pivot_abs_y", VectorBoneFunction.calledAs);
+        assertEquals(
+            (hand + 3.0D) / 25.0D,
+            parser.parseExpression("(ysm.bone_pivot_abs('RightHandPTC').y+3)/25")
+                .get(),
+            0.0D);
+        assertEquals(
+            -hand / 25.0D,
+            parser.parseExpression("-(ysm.bone_pivot_abs('RightHandPTC').z)/25")
+                .get(),
+            0.0D,
+            "the unary minus applies to the group, so the result is negative");
+        assertEquals("ysm.bone_pivot_abs_z", VectorBoneFunction.calledAs);
+    }
+
+    @Test
+    void unaryMinusBeforeAGroupParses() throws Exception {
+        // `-(…)` followed by `*` or `/`. `breakdownChars` folds a minus into the token buffer for every follower
+        // except `(`, and the `(` branch pushes the buffered `-` as its own symbol, so the symbol list is
+        // `[-, [1], /, 25]`. `parseSymbols` then split at the `/`, recursed into `[-, [1]]`, found no operator
+        // (lastOp == -1) and threw IndexOutOfBoundsException from `operationForOperator(symbols.get(-1))` - the whole
+        // expression died. `-(1)` alone only worked because it has no binary operator, and `-(1)+25` / `-(1)-(2)`
+        // only worked because `+`/`-` rank below `*`/`/` in the split rule. The logged form
+        // `-(ysm.bone_pivot_abs('RightHandPTC').z)/25` is exactly the failing shape.
+        MolangParser parser = parserWithHostFunctions();
+
+        assertEquals(-0.04D, parser.parseExpression("-(1)/25")
+            .get(), 0.0D);
+        assertEquals(
+            -0.04D,
+            parser.parseExpression("-(1)/25 + 0")
+                .get(),
+            1.0E-9D,
+            "the surrounding arithmetic must keep working too");
+        // Precedence: the unary minus binds to its group, not to the rest of the expression.
+        assertEquals(-25.0D, parser.parseExpression("-(1)*25")
+            .get(), 0.0D);
+        assertEquals(-20.0D, parser.parseExpression("10*-(2)")
+            .get(), 0.0D);
+        assertEquals(-1.5D, parser.parseExpression("2*-(3)/4")
+            .get(), 0.0D);
+        // Subtraction and negative literals keep their meanings - a bare `-` is unary only in operand position, so
+        // the binary cases must not change.
+        assertEquals(7.0D, parser.parseExpression("10-3")
+            .get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("4-2")
+            .get(), 0.0D);
+        assertEquals(-6.0D, parser.parseExpression("2*-3")
+            .get(), 0.0D);
+        assertEquals(-0.04D, parser.parseExpression("-1/25")
+            .get(), 0.0D);
+        // The human-readable spacing still tokenises the same way.
+        assertEquals(7.0D, parser.parseExpression("10 - 3")
+            .get(), 0.0D);
+    }
+
+    @Test
+    void supportedVectorNamesAreNotReportedAsUnregistered() throws Exception {
+        // `MolangInstructionExecutor` reports a function it cannot answer. It must not report one this parser
+        // supports through the rewrite (the old probe compared the literal name against `parser.functions` *before*
+        // parsing, so it announced `ysm.bone_rot`/`ysm.bone_scale`/`ysm.bone_pivot_abs` as "ignored" and then ran the
+        // same instruction).
+        MolangParser parser = parserWithHostFunctions();
+
+        assertTrue(
+            MolangInstructionExecutor
+                .unregisteredFunctions(parser, "v.Right_handsmove = query.is_sprinting||query.is_jumping?90:"
+                    + "ysm.bone_rot('RightFingersContrl').x")
+                .isEmpty(),
+            "a vector name the rewrite handles is supported, not missing");
+        assertTrue(
+            MolangInstructionExecutor
+                .unregisteredFunctions(
+                    parser,
+                    "v.RightEye_Wink_Contrl_P1dot=0.1*(v.LEyes_K3*math.max(v.RightEye_Wink_Contrl,"
+                        + "(-ysm.bone_scale('RightEyesControl').y)*-1)-v.RightEye_Wink_Contrl_P1)"
+                        + "/v.LEyes_K2")
+                .isEmpty());
+        assertTrue(
+            MolangInstructionExecutor
+                .unregisteredFunctions(
+                    parser,
+                    "v.bv=math.max(ysm.bone_pivot_abs('Root'),ysm.bone_pivot_abs('AllBody'))")
+                .isEmpty(),
+            "the bare vector argument is registered too, so it is not a missing name either");
+    }
+
+    @Test
+    void genuinelyUnregisteredFunctionsAreStillReported() throws Exception {
+        // The check stays - it is what tells a pack author which instruction was dropped. A name nothing registers
+        // must still be reported, or the warning has been silenced instead of corrected.
+        MolangParser parser = parserWithHostFunctions();
+
+        assertEquals(
+            java.util.Collections.singleton("ysm.no_such_function"),
+            MolangInstructionExecutor
+                .unregisteredFunctions(parser, "ysm.no_such_function(1)+ysm.bone_rot('Arm').x"));
+        // An abbreviated query is normalised by `createFunction`, so a literal probe would call it missing; the
+        // registered `query.*` name is what decides.
+        assertTrue(
+            MolangInstructionExecutor.unregisteredFunctions(parser, "q.debug_output('lvl', 3)")
+                .isEmpty());
+    }
+
+    @Test
+    void topLevelSemicolonsStillSplitStatements() throws Exception {
+        // The `;`-separated list kept working before the brace work and must keep working after it.
+        List<String> statements = MolangParser.splitStatements("v.x = 1; v.y = 2");
+        assertEquals(2, statements.size());
+        assertEquals("v.x = 1", statements.get(0).trim());
+        assertEquals("v.y = 2", statements.get(1).trim());
+
+        MolangParser parser = new MolangParser();
+        // The list's value is the last statement's, exactly as before.
+        assertEquals(
+            2.0D,
+            parser.parseExpression("v.x = 1; v.y = 2")
+                .get(),
+            0.0D);
+        assertEquals(1.0D, parser.parseExpression("v.x").get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("v.y").get(), 0.0D);
+    }
+
+    @Test
+    void bracedBlockIsOneStatementAndRunsTheTakenBranchInOrder() throws Exception {
+        // LaPluma2.5.3's timeline writes Bedrock execution scopes (`cond?{stmt;stmt}:{stmt}`, and the colon-less
+        // `cond?{stmt;}`). Splitting on `;` at any depth cut them into fragments starting with `}` or `}:{` or `?{`,
+        // which is the client log's "Failed to execute OpenYSM timeline Molang instruction '}:{v.OutRigged_Path_X =
+        // ...'". A block is upstream's ExecutionScopeExpression, i.e. one statement unit.
+        String instruction = "v.x = cond?{v.a=1;v.b=2}:{v.a=3}";
+        List<String> statements = MolangParser.splitStatements(instruction);
+        assertEquals(1, statements.size(), "a braced block must stay one statement unit");
+        assertEquals(instruction, statements.get(0).trim());
+
+        MolangParser parser = new MolangParser();
+        parser.register(new LazyVariable("cond", 1));
+        // The block's value is its last statement (upstream ExpressionEvaluatorImpl.java:241-257), and the statements
+        // before it ran in order - so both `v.a=1` and `v.b=2` happened, and the assignment saw 2.
+        assertEquals(2.0D, parser.parseExpression(instruction).get(), 0.0D);
+        assertEquals(1.0D, parser.parseExpression("v.a").get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("v.b").get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("v.x").get(), 0.0D);
+
+        // Only the taken arm runs (upstream ExpressionEvaluatorImpl.java:393-399): the else block writes v.a=3 and
+        // leaves v.b alone.
+        parser.register(new LazyVariable("cond", 0));
+        assertEquals(3.0D, parser.parseExpression(instruction).get(), 0.0D);
+        assertEquals(3.0D, parser.parseExpression("v.a").get(), 0.0D);
+        assertEquals(2.0D, parser.parseExpression("v.b").get(), 0.0D, "the untaken block must not run");
+
+        // The statement form a pack actually writes: no assignment, and the block holds 90-character lists of them.
+        MolangParser bare = new MolangParser();
+        bare.parseExpression("v.cond=1")
+            .get();
+        assertEquals(
+            9.0D,
+            bare.parseExpression("v.cond?{v.a=9;}").get(),
+            0.0D,
+            "a colon-less `cond?{...}` is `cond?{...}:0`, so its value is the block's last statement");
+        assertEquals(9.0D, bare.parseExpression("v.a").get(), 0.0D);
+        bare.parseExpression("v.cond=0")
+            .get();
+        assertEquals(0.0D, bare.parseExpression("v.cond?{v.a=8;}").get(), 0.0D);
+        assertEquals(9.0D, bare.parseExpression("v.a").get(), 0.0D, "the false branch runs nothing");
+    }
+
+    @Test
+    @Timeout(5)
+    void blocksSpanningJoinedTimelineElementsAreStillOneUnit() throws Exception {
+        // A pack may open a block in one timeline element and close it in a later one. `JsonAnimationUtils.
+        // instructionString` joins the elements with ";\n", so the joined text really does carry `?{;` and `;;`
+        // inside the block, and the element that closes it contributes the final `};`.
+        String spanning = "v.cond?{;v.b=4;;v.c=5;};v.d=6";
+        List<String> parts = MolangParser.splitStatements(spanning);
+        assertEquals(2, parts.size());
+        assertEquals("v.cond?{;v.b=4;;v.c=5;}", parts.get(0).trim());
+        assertEquals("v.d=6", parts.get(1).trim());
+
+        MolangParser parser = new MolangParser();
+        parser.parseExpression("v.cond=1")
+            .get();
+        assertEquals(6.0D, parser.parseExpression(spanning).get(), 0.0D);
+        assertEquals(4.0D, parser.parseExpression("v.b").get(), 0.0D);
+        assertEquals(5.0D, parser.parseExpression("v.c").get(), 0.0D);
+        assertEquals(6.0D, parser.parseExpression("v.d").get(), 0.0D);
+    }
+
+    @Test
+    @Timeout(5)
+    void unbalancedBracesNeitherHangNorEscapeTheSplitter() throws Exception {
+        // An extra `}` is one statement that fails to parse. It must not push the depth negative and swallow every
+        // later `;`, which would turn a whole timeline into a single unparsable statement.
+        List<String> extraClose = MolangParser.splitStatements("v.a=1};v.b=2");
+        assertEquals(2, extraClose.size());
+        assertEquals("v.a=1}", extraClose.get(0).trim());
+
+        // An unclosed `{` keeps the rest as one statement: no exception from the splitter, and (with the timeout) no
+        // loop. The `{data3}` placeholder path is unaffected - see the test above.
+        List<String> unclosed = MolangParser.splitStatements("v.a={v.b=1;v.c=2");
+        assertEquals(1, unclosed.size());
+
+        // Such a statement is still a plain syntax error - the same MolangException every failing instruction already
+        // goes through, which MolangInstructionExecutor catches per statement. Not a hang, and not an Error.
+        MolangParser parser = new MolangParser();
+        assertThrows(MolangException.class, () -> parser.parseExpression("v.a=1}"));
+        assertThrows(MolangException.class, () -> parser.parseExpression("v.a={v.b=1;"));
     }
 }

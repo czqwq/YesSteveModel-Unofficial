@@ -49,6 +49,49 @@ the part of it that is written against this snapshot.
   (`NOTICE.md:20`), and its own lexer keeps `=` and `==` as different tokens
   (`com/elfmcys/ysm/molang/parser/MolangParserImpl.java:310-311`) with `?` at its own precedence (`:256-271`), so
   the ambiguity cannot arise there. Guarded by `MolangParserCompatibilityTest.ternaryImmediatelyAfterAssignmentParses`.
+- **`com/eliotlash/mclib/math/MathBuilder.java` - a unary minus in front of a parenthesised group failed to parse.**
+  `breakdownChars` folds a minus into the token buffer for every follower except `(`, and the `(` branch pushes the
+  buffered `-` as its own symbol, so `-(1)/25` tokenises to `[-, [1], /, 25]`. `parseSymbols` split at the `/`,
+  recursed into `[-, [1]]`, found no operator (`lastOp == -1`) and threw `IndexOutOfBoundsException` from
+  `operationForOperator(symbols.get(-1))`, killing the whole expression. `-(1)` alone worked only because it has no
+  binary operator, and `-(1)+25` / `-(1)-(2)` only because `+`/`-` rank below `*`/`/` in the split rule. The logged
+  shape is the model particle argument `-(ysm.bone_pivot_abs('X').z)/25`. Fix: `parseLeadingUnaryMinus`, called first
+  in `parseSymbols`, resolves a bare `-` that sits in operand position (first symbol, or after an operator or a comma)
+  by replacing the operator to its left along with it - so `-(1)*25` stays `(-1)*25` and the binary `10-3` is
+  untouched. **Upstream counterpart: none** - `tmp/YesSteveModel-dev-1.20` vendors no mclib math parser (`NOTICE.md:20`)
+  and its own Pratt parser has a real `UnaryExpression` (`com/elfmcys/ysm/molang/parser/MolangParserImpl.java:156-158`).
+  Guarded by `MolangParserCompatibilityTest.unaryMinusBeforeAGroupParses`.
+- **`software/bernie/geckolib3/core/molang/MolangParser.java` - the vector bone queries are registered, not only
+  rewritten.** The `).<axis>` rewrite (`rewriteVectorFunction`, reached from the `breakdown` override) matches only a
+  call whose own `)` is immediately followed by `).x`, and a pack also writes the vector form bare
+  (`math.max(ysm.bone_pivot_abs('Root'),ysm.bone_pivot_abs('AllBody'))`), which used to throw
+  `Function 'ysm.bone_pivot_abs' couldn't be found!` and kill the whole timeline instruction. The four engine-owned
+  names (`ysm.bone_rot`/`bone_pos`/`bone_position`/`bone_scale`) are now registered in `doCoreRemaps` beside their
+  `_x`/`_y`/`_z` forms (the host-owned `ysm.bone_pivot_abs` in `AnimationRegister.registerFunctions`), the
+  `axis()` of `BoneRotation`/`BonePosition`/`BoneScale` falls back to `x` when the registered name carries no axis
+  character, and `MolangParser.VECTOR_FUNCTIONS` + `isVectorFunctionName` give hosts one table to ask instead of
+  re-deriving which names the rewrite supports. **Upstream counterpart: yes, its shape** -
+  `tmp/YesSteveModel-dev-1.20` binds the same names as real functions and answers a member-access struct
+  (`YSMBinding.java:79-85`, `functions/BoneParamFunction.java:13-31`, `struct/Vec3fStruct.java:11-23`); mclib's
+  `IValue` is a bare `double`, so the member access stays a rewrite and only the bare form is answered by a
+  fallback axis, which upstream's unfinished `BoneAbsolutePivot` does not define either. Recorded in
+  `.agent/phase24-vector-bone-queries.md`.
+- **`software/bernie/geckolib3/core/molang/MolangParser.java` - a braced block is one statement, with upstream's
+  execution-scope semantics.** `splitStatements` used to split on every `;` outside a string literal, so a pack's
+  `cond?{stmt;stmt}:{stmt}` timeline block (LaPluma2.5.3's hair/camera physics, the `?{` / `}:{` fragments in the
+  client log's "Failed to execute OpenYSM timeline Molang instruction" lines) was cut into fragments starting with
+  `}` and parsed one by one, each failing; a self-contained `{stmt}` fared worse, because
+  `replaceBracePlaceholders` turned it into `0`, so the block's assignments silently never ran. It now tracks brace
+  depth and splits only at depth 0, and `parseBracedStatement` (first thing `parseOneLine` does, before mclib's
+  tokenizer) builds the block as a `MolangMultiStatement` and a braced ternary as a `MolangValue` that evaluates only
+  the arm it takes. `{data3}` stays the port's documented 0-valued placeholder. **Upstream counterpart: yes, its
+  shape** - `tmp/YesSteveModel-dev-1.20` lexes `{` (`molang/lexer/MolangLexerImpl.java:269-270`), parses it as an
+  execution scope (`molang/parser/MolangParserImpl.java:90-118`,
+  `molang/parser/ast/ExecutionScopeExpression.java:42-56`), evaluates it as an ordered sequence whose value is the
+  last statement (`molang/runtime/ExpressionEvaluatorImpl.java:241-257`) and takes only the selected ternary arm
+  (`:393-399`, colon-less form at `MolangParserImpl.java:269`); `SOURCE` splits the same way as the old port did, so
+  its only form of this shape is `PackFunctionScript.java:229-309` for `.molang` files, which this mirrors. Recorded
+  in `.agent/phase25-braced-molang-scopes.md`.
 
 ## Where it came from
 

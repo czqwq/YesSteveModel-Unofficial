@@ -32,7 +32,16 @@ import com.fox.ysmu.ysmu;
  * All this class can see is the <em>condition</em> and <em>hand-predicate</em> routes, not every route a clip can
  * have: a pack's own animation controller, a script, or an extra animation can play a clip whose name no classifier
  * will ever return. The warning therefore reports what has been established - no condition classifier selects this
- * name - rather than claiming the animation never plays at all.
+ * name - rather than claiming the animation never plays at all. One family in the log is in exactly that position:
+ * a reference pack's {@code swing:sword_up} / {@code _down} / {@code _jump} are played by its own
+ * {@code player.parallel_5} controller states, not by a classifier.
+ *
+ * <p>
+ * A name is reported against the model that <em>declares</em> it. Every model inherits the built-in default model's
+ * clips for any name it does not define itself (the default-animation fallback), so a name the default declares and
+ * no classifier can return - {@code lance} is one - would otherwise be reported once per model that merely inherits
+ * it. {@link #warnIfUnclassifiable} is told which of the two happened and stays quiet for the inheriting model, while
+ * the built-in default model's own registration still reports the name once.
  *
  * <p>
  * This class decides nothing but whether a warning is printed: {@link ConditionManager#addTest} calls it after
@@ -71,11 +80,14 @@ final class ConditionNameDiagnostics {
     private static final Set<String> WARNED = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     /**
-     * A-11: condition names whose kind no classifier here can ever produce, with the reason. The first two belong to
+     * A-11: condition names whose suffix no classifier can ever produce, with the reason. The first two belong to
      * items 1.7.10 does not have - a goat horn arrived in 1.17 and the brush in 1.20 - so there is nothing to classify.
      * {@code trident} is different: 1.7.10 has no vanilla trident either, and this port answers {@code spear} for a
      * trident-named item on purpose ({@code InnerClassify#getItemType} matches both keywords into one kind), so the
      * name is dead but the item is not - a pack has to write {@code :spear}.
+     * <p>
+     * {@code lance} is the third shape and the reason it is listed: the suffix is not a kind in <em>either</em>
+     * implementation, so this is not a mapping the port is missing - see its entry below.
      * <p>
      * A name is <em>not</em> listed here when it has a route outside the vocabulary: {@code hold_*:empty},
      * {@code hold_mainhand:fishing} and {@code hold_*:charged_crossbow} are hand-predicate names, and a predicate is
@@ -101,6 +113,28 @@ final class ConditionNameDiagnostics {
             "trident",
             "`trident` is answered as `spear` here on purpose - 1.7.10 has no vanilla trident, so InnerClassify"
                 + " treats both keywords as one kind - write `:spear` instead");
+        // `lance` is not a vocabulary gap on this port's side. Upstream's `getClassify`
+        // (client/animation/condition/InnerClassify.java:22-66) returns one of a fixed set of kind words -
+        // slashblade, sword, gohei, axe, pickaxe, shovel, hoe, shield, crossbow, bow, fishing_rod, spear,
+        // throwable_potion - and never `lance`, and the 1.20.1 UseAnim enum has no such value either, so upstream
+        // cannot select these clips for any item. The clips are nevertheless shipped by the built-in default model
+        // (tmp/YesSteveModel-dev-1.20 .../builtin/default/animations/arm.animation.json:5960, :6073, :6174, :6708,
+        // :7161, copied into this port's assets/ysmu/builtin/default/animations/arm.animation.json at the same
+        // lines), and every model inherits them through the default-animation fallback. Three of the five are
+        // byte-identical to their `spear` counterparts in that same file (hold_mainhand, hold_offhand and swing;
+        // measured by comparing the parsed clips), so `lance` is that asset's second name for the polearm pose -
+        // most likely for a modded lance item - and not a pose the port lacks. Adding a `lance` kind here would
+        // invent a mapping upstream does not have, so the honest answer is that this is unreachable content in the
+        // shipped asset, not a missing port mapping.
+        reasons.put(
+            "lance",
+            "`lance` is not a kind either implementation can produce: upstream's getClassify returns only slashblade,"
+                + " sword, gohei, axe, pickaxe, shovel, hoe, shield, crossbow, bow, fishing_rod, spear and"
+                + " throwable_potion (InnerClassify.java:22-66), and this port adds no `lance`. The clips come from the"
+                + " built-in default model's arm animations - hold_mainhand:lance, hold_offhand:lance and swing:lance"
+                + " are byte-identical to their `spear` counterparts there - and every model inherits them through the"
+                + " default-animation fallback, so this is unreachable content in the shipped asset rather than a"
+                + " missing mapping");
         return Collections.unmodifiableMap(reasons);
     }
 
@@ -133,19 +167,17 @@ final class ConditionNameDiagnostics {
     /**
      * Warns once when {@code name} is a condition name that no legacy classifier can ever return.
      *
-     * @param id   the model's animation id
-     * @param name the animation name from the model's animation file
+     * @param id              the model's animation id
+     * @param name            the animation name from the model's animation file
+     * @param declaredByModel {@code false} when the model did not declare this clip itself but inherited it from the
+     *                        built-in default model through the default-animation fallback, in which case the
+     *                        default model's own registration reports it and the inheriting model stays quiet
      */
-    static void warnIfUnclassifiable(ResourceLocation id, String name) {
-        if (name == null || name.isEmpty()) {
+    static void warnIfUnclassifiable(ResourceLocation id, String name, boolean declaredByModel) {
+        if (!needsWarning(name, declaredByModel)) {
             return;
         }
         String unproducible = unproducibleKindReason(name);
-        // A-11: a name in UNPRODUCIBLE_KINDS is "classifiable" by the vocabulary check (it lists a real 1.20 kind),
-        // yet no classifier here can ever return it - which is exactly the silent case this class exists to break.
-        if (unproducible.isEmpty() && isClassifiable(name)) {
-            return;
-        }
         if (!WARNED.add(id + "|" + name)) {
             return;
         }
@@ -159,14 +191,35 @@ final class ConditionNameDiagnostics {
         }
         // "No condition classifier selects it" is what was verified; the earlier wording also claimed the animation
         // was ignored, which is false for the names a pack's own controller states play - three of the variants a
-        // reference pack declares (`swing:sword_up` / `_down` / `_jump`) are in exactly that position.
+        // reference pack declares (`swing:sword_up` / `_down` / `_jump`) are in exactly that position, so the last
+        // clause names that route instead of leaving a reader to conclude the clip is dead.
         ysmu.LOG.warn(
             "Condition animation '{}' of model {} cannot be selected by the 1.7.10 condition classifiers: suffix '{}'"
                 + " is neither an EnumAction name nor a known item kind (see InnerClassify); no classifier will ever"
-                + " return this name",
+                + " return this name, though a pack's own animation controller state can still play the clip",
             name,
             id,
             suffixOf(name));
+    }
+
+    /**
+     * Whether a warning is due for this name, before the once-per-(model, name) memory.
+     *
+     * <p>
+     * Pure, so the decision can be pinned by a test without a logger: {@code false} when the model merely inherited
+     * the clip from the built-in default model (the default's own registration reports it once), and otherwise
+     * {@code true} only when some classifier can never produce the name.
+     *
+     * @param declaredByModel whether the model's own animation files declare this name
+     */
+    static boolean needsWarning(String name, boolean declaredByModel) {
+        if (!declaredByModel || name == null || name.isEmpty()) {
+            return false;
+        }
+        // A-11: a name in UNPRODUCIBLE_KINDS is "classifiable" by the vocabulary check (it lists a real 1.20 kind),
+        // yet no classifier here can ever return it - which is exactly the silent case this class exists to break, so
+        // the reason lookup is asked first and independently of isClassifiable.
+        return !unproducibleKindReason(name).isEmpty() || !isClassifiable(name);
     }
 
     static void clear() {

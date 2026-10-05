@@ -24,7 +24,16 @@ public class ConditionManager {
     public static Map<ResourceLocation, ConditionalVehicle> VEHICLE = Maps.newHashMap();
     public static Map<ResourceLocation, ConditionalPassenger> PASSENGER = Maps.newHashMap();
 
-    public static void addTest(ResourceLocation id, String name) {
+    /**
+     * Registers one animation name of the model proper with every classifier that may later ask for it.
+     *
+     * @param declaredByModel {@code false} when the name reached the model through the default-animation fallback
+     *                        rather than from one of the model's own files; it is still registered (a default clip is
+     *                        selectable for every model), but it is not reported against this model - the built-in
+     *                        default model's own registration reports it once. See
+     *                        {@link ConditionNameDiagnostics#needsWarning}.
+     */
+    public static void addTest(ResourceLocation id, String name, boolean declaredByModel) {
         SWING.putIfAbsent(id, new ConditionalSwing(true));
         SWING_OFFHAND.putIfAbsent(id, new ConditionalSwing(false));
         USE_MAINHAND.putIfAbsent(id, new ConditionalUse(true)); // true表示主手
@@ -56,8 +65,9 @@ public class ConditionManager {
         conditionalPassenger.addTest(name);
 
         // A-07: a name that is a condition name but has no route through any of the classifiers above would be
-        // dropped silently; report each (model, name) once, with the reason.
-        ConditionNameDiagnostics.warnIfUnclassifiable(id, name);
+        // dropped silently; report each (model, name) once, with the reason. A name the model merely inherited from
+        // the built-in default is not this model's to report - see the parameter's javadoc.
+        ConditionNameDiagnostics.warnIfUnclassifiable(id, name, declaredByModel);
     }
 
     /**

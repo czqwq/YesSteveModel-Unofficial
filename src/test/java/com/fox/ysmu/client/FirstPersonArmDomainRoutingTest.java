@@ -83,8 +83,9 @@ class FirstPersonArmDomainRoutingTest {
     void theArmReadsTheFirstPersonConditionTableAndTheBodyItsOwn() {
         ResourceLocation mainId = ModelIdUtil.getMainId(MODEL);
         ResourceLocation armId = ModelIdUtil.getArmId(MODEL);
-        ConditionManager.addTest(mainId, MAIN_CONDITION);
-        FPArmConditionManager.addTest(armId, FIRST_PERSON_CONDITION);
+        // `true`: both names are declared by the model's own files, which is the case this routing question is about.
+        ConditionManager.addTest(mainId, MAIN_CONDITION, true);
+        FPArmConditionManager.addTest(armId, FIRST_PERSON_CONDITION, true);
 
         // `addTest` creates the table for the id it was given and for nothing else, so the presence of a table is
         // exactly the question "was this model's own/other domain classified under this id".

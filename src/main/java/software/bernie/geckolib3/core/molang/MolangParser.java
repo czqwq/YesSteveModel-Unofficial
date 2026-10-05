@@ -111,6 +111,21 @@ public class MolangParser extends MathBuilder {
         this.functions.put("ysm.bone_scale_x", BoneScale.class);
         this.functions.put("ysm.bone_scale_y", BoneScale.class);
         this.functions.put("ysm.bone_scale_z", BoneScale.class);
+        // The vector form itself is a real registration, not only something the rewrite below turns into an
+        // `_x/_y/_z` name. Upstream returns a struct here and lets `.x`/`.y`/`.z` pick a member
+        // (client/animation/molang/functions/BoneParamFunction.java:19-31 + struct/Vec3fStruct.java:11-23), and the
+        // variables wiki documents the `.x/.y/.z` accessors only
+        // (https://yesstevemodel.github.io/wiki/molang/ref/). This engine's mclib parser has no struct support
+        // (`IValue` is a bare `double`), so the member access is a rewrite - but a vector call in a position the
+        // rewrite does not reach (as an argument to another function, or bare) used to fall through to
+        // `Function 'ysm.bone_scale' couldn't be found!`, which killed the whole timeline instruction. Registering
+        // the bare name makes that position fall back to the axis the function answers when no member is named -
+        // `axis()` returns 'x' unless the name's last character is a/y/z. Zero extra state: the same class the
+        // `_x` name uses reads the same bone.
+        this.functions.put("ysm.bone_rot", BoneRotation.class);
+        this.functions.put("ysm.bone_pos", BonePosition.class);
+        this.functions.put("ysm.bone_position", BonePosition.class);
+        this.functions.put("ysm.bone_scale", BoneScale.class);
 
         // Upstream's per-bone render functions, registered under the names a pack actually calls them by
         // (com/elfmcys/ysm/client/animation/molang/YSMBinding.java:82-85) rather than under the ysm. prefix the
@@ -306,11 +321,23 @@ public class MolangParser extends MathBuilder {
         return result;
     }
 
+    /**
+     * 按顶层 {@code ;} 切分语句。
+     *
+     * <p>顶层 = 不在字符串字面量里、也不在花括号执行作用域里。upstream 的左花括号是一个执行作用域
+     * （{@code molang/parser/MolangParserImpl.java:90-118}），块内的 {@code ;} 是块内语句的分隔符，
+     * 不是表达式之间的分隔符；在块内按 {@code ;} 切开会把一个块切成以右花括号开头、或由右花括号加冒号
+     * 开头、或以问号加左花括号开头的碎片，每一片都解析失败。
+     *
+     * <p>深度钳在 0：多出来的右花括号只是一条解析错误的语句，不能让深度变负而把后面所有
+     * {@code ;} 都吞掉（那会把整条 timeline 变成一句）。
+     */
     public static List<String> splitStatements(String expression) throws MolangException {
         List<String> statements = new ArrayList<>();
         StringBuilder current = new StringBuilder(expression.length());
         boolean quoted = false;
         char quote = 0;
+        int braceDepth = 0;
         for (int i = 0; i < expression.length(); i++) {
             char c = expression.charAt(i);
             if (quoted) {
@@ -324,7 +351,15 @@ public class MolangParser extends MathBuilder {
                 quoted = true;
                 quote = c;
                 current.append(c);
-            } else if (c == ';') {
+            } else if (c == '{') {
+                braceDepth++;
+                current.append(c);
+            } else if (c == '}') {
+                if (braceDepth > 0) {
+                    braceDepth--;
+                }
+                current.append(c);
+            } else if (c == ';' && braceDepth == 0) {
                 statements.add(current.toString());
                 current.setLength(0);
             } else {
@@ -336,6 +371,263 @@ public class MolangParser extends MathBuilder {
         }
         statements.add(current.toString());
         return statements;
+    }
+
+    /**
+     * OpenYSM/Bedrock 的花括号执行作用域（{@code {a;b;}}），以及以作用域为分支的三元表达式
+     * （{@code cond?{a;b}:{c}}，含无冒号的 {@code cond?{a;b;}}）。
+     *
+     * <p>upstream 的 Molang 前端有真正的作用域语法：{@code '{'} 在
+     * {@code molang/parser/MolangParserImpl.java:90-118} 被读成 {@code ExecutionScopeExpression}
+     * （{@code molang/parser/ast/ExecutionScopeExpression.java:42-56}），求值时块内表达式按顺序执行、
+     * 块的值为最后一条（{@code molang/runtime/ExpressionEvaluatorImpl.java:241-257}）；三元只执行被选中的
+     * 那一支（同文件 {@code :393-399}）；没有冒号的 {@code cond?value} 在条件为假时给 0
+     * （{@code MolangParserImpl.java:269} + {@code ExpressionEvaluatorImpl.java:105-111}）。
+     * 本端口的表达式引擎是 mclib 的 {@link MathBuilder}，分词器不认识 {@code '{'}，所以在把语句交给
+     * 分词器之前，这里按同一语义把它构造成惰性求值的 {@link MolangExpression}：块是
+     * {@link MolangMultiStatement}（顺序执行、取最后一条），三元是只在 {@code get()} 时选分支的
+     * {@link IValue}。端口自己的 {@code PackFunctionScript}（{@code com/fox/ysmu/client/animation/molang/
+     * PackFunctionScript.java:229-309}）对 {@code .molang} 函数文件用的就是这套形状。
+     *
+     * <p>不处理、保持原样的两种情况：作用域嵌在更大的算式中（如 {@code 1+{a;b}}）；以及 {@code {data3}}
+     * 这类占位符 —— 它由 {@link #replaceBracePlaceholders} 取 0（艾莲·乔1.4.0 的 302 条通道依赖它），
+     * 这里不能把它当成"块里只有一条语句"。
+     *
+     * @return 该语句的表达式；语句里没有作用域时返回 {@code null}，由原有分词路径处理
+     */
+    private MolangExpression parseBracedStatement(String expression, MolangMultiStatement currentStatement)
+        throws MolangException {
+        String trimmed = expression.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        // 赋值：`v.x = <作用域>` / `v.x = cond?{...}:{...}`。upstream 的赋值右侧就是一条普通表达式
+        // （MolangParserImpl.java:78-104 的 ASSIGN 求值），块可以出现在那里。
+        int assign = findTopLevelAssignment(trimmed);
+        if (assign > 0) {
+            String name = trimmed.substring(0, assign)
+                .trim();
+            if (!isPlainVariableName(name)) {
+                return null;
+            }
+            MolangExpression value = parseBracedStatement(trimmed.substring(assign + 1), currentStatement);
+            if (value == null) {
+                return null;
+            }
+            return new MolangAssignment(
+                this,
+                getVariable(normalizeVariableName(name), currentStatement),
+                value);
+        }
+        String body = enclosedScopeBody(trimmed);
+        if (body != null) {
+            return scopeValue(body);
+        }
+        int question = findTopLevelQuestion(trimmed);
+        if (question < 0) {
+            return null;
+        }
+        String condition = trimmed.substring(0, question)
+            .trim();
+        String rest = trimmed.substring(question + 1);
+        int colon = findTernaryColon(rest);
+        String whenTrue = (colon < 0 ? rest : rest.substring(0, colon)).trim();
+        String whenFalse = colon < 0 ? null : rest.substring(colon + 1)
+            .trim();
+        String trueBody = enclosedScopeBody(whenTrue);
+        String falseBody = whenFalse == null ? null : enclosedScopeBody(whenFalse);
+        if (trueBody == null && falseBody == null) {
+            // 两个分支都是普通表达式：这是已有的三元路径（mclib 的 tryTernary），不要抢过来。
+            return null;
+        }
+        final MolangExpression conditionValue = parseOneLine(condition, currentStatement);
+        final MolangExpression trueValue = trueBody == null ? parseOneLine(whenTrue, currentStatement)
+            : scopeValue(trueBody);
+        final MolangExpression falseValue;
+        if (whenFalse == null) {
+            falseValue = ZERO;
+        } else {
+            falseValue = falseBody == null ? parseOneLine(whenFalse, currentStatement) : scopeValue(falseBody);
+        }
+        return new MolangValue(this, new IValue() {
+
+            @Override
+            public double get() {
+                // 只执行被选中的那一支：upstream ExpressionEvaluatorImpl.java:393-399
+                return conditionValue.get() != 0 ? trueValue.get() : falseValue.get();
+            }
+        });
+    }
+
+    /**
+     * 一个执行作用域：块内语句按顺序执行，整个块的值是最后一条语句的值。
+     * <p>
+     * 对应 upstream 的 {@code ExecutionScopeExpression}
+     * （{@code molang/runtime/ExpressionEvaluatorImpl.java:241-257}：逐条求值，返回最后一条的结果）。
+     * 块内的名字解析走本块自己的 {@link MolangMultiStatement#locals}，即 upstream 的"新作用域"：
+     * 块内新建的非 {@code v.} 名字只在块内可见（{@code v.*} 与 {@code v.roaming.*} 走共享变量表，
+     * 不受影响，模型包的 timeline 用的就是它们）。
+     */
+    private MolangExpression scopeValue(String body) throws MolangException {
+        MolangMultiStatement scope = new MolangMultiStatement(this);
+        for (String statement : splitStatements(body)) {
+            String trimmed = statement.trim();
+            if (!trimmed.isEmpty()) {
+                scope.expressions.add(parseOneLine(trimmed, scope));
+            }
+        }
+        return scope;
+    }
+
+    /**
+     * 整个字符串就是一个花括号组时返回组内内容，否则返回 {@code null}。
+     * <p>
+     * 只有单个标识符的组（{@code {data3}}）不算作用域：它是本端口既有的占位符写法，由
+     * {@link #replaceBracePlaceholders} 取 0，改判会让艾莲·乔1.4.0 的 302 条通道重新解析失败。
+     */
+    private static String enclosedScopeBody(String expression) {
+        String trimmed = expression.trim();
+        if (!trimmed.startsWith("{")) {
+            return null;
+        }
+        int close = findMatchingBrace(trimmed, 0);
+        if (close != trimmed.length() - 1) {
+            return null;
+        }
+        String body = trimmed.substring(1, close);
+        return isBracePlaceholder(body) ? null : body;
+    }
+
+    private static boolean isBracePlaceholder(String body) {
+        String trimmed = body.trim();
+        return !trimmed.isEmpty() && isPlainVariableName(trimmed);
+    }
+
+    private static boolean isPlainVariableName(String name) {
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c != '_' && c != '.' && !Character.isLetterOrDigit(c)) {
+                return false;
+            }
+        }
+        return !name.isEmpty();
+    }
+
+    /** {@code name = ...} 里顶层 {@code =} 的下标；{@code ==}/{@code !=}/{@code <=}/{@code >=} 不算，没有则 -1。 */
+    private static int findTopLevelAssignment(String expression) {
+        int depth = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (isQuote(c)) {
+                i = skipString(expression, i);
+            } else if (c == '(' || c == '[' || c == '{') {
+                depth++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) {
+                    depth--;
+                }
+            } else if (c == '=' && depth == 0) {
+                char previous = i > 0 ? expression.charAt(i - 1) : 0;
+                char next = i + 1 < expression.length() ? expression.charAt(i + 1) : 0;
+                if (previous == '=' || previous == '!' || previous == '<' || previous == '>' || next == '=') {
+                    continue;
+                }
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 顶层 {@code ?} 的下标（跳过字符串与括号，{@code ??} 不算），没有则 -1。 */
+    private static int findTopLevelQuestion(String expression) {
+        int depth = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (isQuote(c)) {
+                i = skipString(expression, i);
+            } else if (c == '(' || c == '[' || c == '{') {
+                depth++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) {
+                    depth--;
+                }
+            } else if (c == '?' && depth == 0
+                && !(i + 1 < expression.length() && expression.charAt(i + 1) == '?')) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 与某个 {@code ?} 配对的顶层 {@code :} 的下标；入参是 {@code ?} 之后的剩余文本。
+     * <p>
+     * 三元从右往左结合，所以真值分支里更内层的 {@code ?} 会把它的 {@code :} 一起吃掉
+     * （upstream 也是这么读的：{@code MolangParserImpl.java:256-271}）。没有配对时返回 -1，
+     * 即无冒号的 {@code cond?value}。
+     */
+    private static int findTernaryColon(String expression) {
+        int depth = 0;
+        int nested = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (isQuote(c)) {
+                i = skipString(expression, i);
+            } else if (c == '(' || c == '[' || c == '{') {
+                depth++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) {
+                    depth--;
+                }
+            } else if (depth == 0) {
+                if (c == '?' && !(i + 1 < expression.length() && expression.charAt(i + 1) == '?')) {
+                    nested++;
+                } else if (c == ':') {
+                    if (nested == 0) {
+                        return i;
+                    }
+                    nested--;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** {@code openIndex} 处 {@code '{'} 的配对 {@code '}'} 下标；没有则 -1。 */
+    private static int findMatchingBrace(String expression, int openIndex) {
+        int depth = 0;
+        for (int i = openIndex; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (isQuote(c)) {
+                i = skipString(expression, i);
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isQuote(char c) {
+        return c == '\'' || c == '"';
+    }
+
+    /** {@code quoteIndex} 处字符串字面量的收尾引号下标；没有收尾（非法输入）时返回末尾下标。 */
+    private static int skipString(String expression, int quoteIndex) {
+        char quote = expression.charAt(quoteIndex);
+        for (int i = quoteIndex + 1; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (c == '\\') {
+                i++;
+            } else if (c == quote) {
+                return i;
+            }
+        }
+        return expression.length() - 1;
     }
 
     @Override
@@ -354,6 +646,12 @@ public class MolangParser extends MathBuilder {
             } catch (Exception e) {
                 throw new MolangException("Couldn't parse return '" + expression + "' expression!");
             }
+        }
+
+        // 花括号执行作用域 / 以作用域为分支的三元：必须在 mclib 分词之前拦下，'{' 不是合法记号。
+        MolangExpression braced = this.parseBracedStatement(expression, currentStatement);
+        if (braced != null) {
+            return braced;
         }
 
         // Handle null-coalescing operator: a ?? b
@@ -529,12 +827,38 @@ public class MolangParser extends MathBuilder {
         // 函数是按字面名在 functions 表里查的，所以这里必须把 q.xxx( 改写成 query.xxx(，
         // 否则 q.max_durability('mainhand') 这类关键帧表达式整条解析失败。
         rewritten = rewriteQueryAbbreviation(rewritten);
-        rewritten = rewriteVectorFunction(rewritten, "ysm.bone_rot", "ysm.bone_rot");
-        rewritten = rewriteVectorFunction(rewritten, "ysm.bone_pos", "ysm.bone_pos");
-        rewritten = rewriteVectorFunction(rewritten, "ysm.bone_position", "ysm.bone_position");
-        rewritten = rewriteVectorFunction(rewritten, "ysm.bone_scale", "ysm.bone_scale");
-        rewritten = rewriteVectorFunction(rewritten, "ysm.bone_pivot_abs", "ysm.bone_pivot_abs");
+        for (String vector : VECTOR_FUNCTIONS) {
+            rewritten = rewriteVectorFunction(rewritten, vector, vector);
+        }
         return rewritten;
+    }
+
+    /**
+     * The vector bone queries: a {@code ysm.bone_*('Arm')} call whose {@code .x}/{@code .y}/{@code .z} member access
+     * this engine cannot parse, because mclib's {@code IValue} is a bare {@code double}. Upstream needs no such
+     * table - it hands back a struct and the member access is a real AST node
+     * ({@code molang/parser/MolangParserImpl.java:132-150}, {@code runtime/ExpressionEvaluatorImpl.java:317-325}).
+     * <p>
+     * One table, two readers: {@link #rewriteOpenYsmExpression} rewrites the member-access form into the flat
+     * {@code _x}/{@code _y}/{@code _z} registrations, and hosts that diagnose a pack's expressions
+     * ({@code com.fox.ysmu.client.animation.molang.MolangInstructionExecutor}) ask {@link #isVectorFunctionName}
+     * so they do not report a name this step supports as "not registered".
+     */
+    public static final String[] VECTOR_FUNCTIONS = { "ysm.bone_rot", "ysm.bone_pos", "ysm.bone_position",
+        "ysm.bone_scale", "ysm.bone_pivot_abs" };
+
+    /**
+     * Whether {@code name} is the unsuffixed form of a vector bone query, i.e. a name
+     * {@link #rewriteOpenYsmExpression} handles by rewriting it (and which is also registered directly, so a position
+     * the rewrite does not reach still parses).
+     */
+    public static boolean isVectorFunctionName(String name) {
+        for (String vector : VECTOR_FUNCTIONS) {
+            if (vector.equals(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -645,6 +969,20 @@ public class MolangParser extends MathBuilder {
         return out.toString();
     }
 
+    /**
+     * Rewrites the <b>member-access</b> form of a vector bone query: a call to {@code sourceFunction} whose closing
+     * parenthesis is followed immediately by {@code ).x}/{@code ).y}/{@code ).z} becomes the flat, registered
+     * {@code <targetPrefix>_<axis>(same args)}. No regex - a literal {@code indexOf(name + "(")} plus a balanced
+     * parenthesis scan - so the match is exactly "the call's own {@code )} is the {@code } of {@code ).<axis>}".
+     * <p>
+     * That is the whole of what this step covers, and it is deliberate: a suffix appearing after anything at all
+     * ({@code ysm.bone_scale('X').y} inside {@code (-…)*-1}, say) still rewrites, because the call's own {@code )} is
+     * still the next character, while a vector call in a position with no member access - bare, or as an argument to
+     * another function ({@code math.max(ysm.bone_pivot_abs('Root'), …)}) - is not this step's business. Those
+     * positions are covered by the bare names being registered in {@link #doCoreRemaps()}, which is why a missing
+     * rewrite there is no longer a parse failure. Deleting the bare registrations without extending this method would
+     * reintroduce it.
+     */
     private static String rewriteVectorFunction(String expression, String sourceFunction, String targetPrefix) {
         String out = expression;
         for (char axis : new char[] { 'x', 'y', 'z' }) {

@@ -26,7 +26,18 @@ public class BoneRotation extends Function {
             : physics.boneRotation((int) getArg(0), axis());
     }
 
+    /**
+     * The axis this call site names: the last character of the registered name ({@code ysm.bone_rot_z} → {@code z}),
+     * or {@code x} when the name carries no axis character - the unsuffixed vector form
+     * {@code ysm.bone_rot('Arm')}, which a pack uses in a position the {@code ).x} rewrite cannot reach (upstream
+     * answers a struct there and this parser has none). Falling back rather than rejecting keeps that position
+     * working; see {@code MolangParser.VECTOR_FUNCTIONS}.
+     */
     private char axis() {
-        return this.name == null || this.name.isEmpty() ? 'x' : this.name.charAt(this.name.length() - 1);
+        if (this.name == null || this.name.isEmpty()) {
+            return 'x';
+        }
+        char axis = this.name.charAt(this.name.length() - 1);
+        return axis == 'x' || axis == 'y' || axis == 'z' ? axis : 'x';
     }
 }

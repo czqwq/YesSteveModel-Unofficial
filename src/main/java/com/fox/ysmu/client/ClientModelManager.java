@@ -1542,13 +1542,21 @@ public class ClientModelManager {
         // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
         // (`defaultAnimations.fallback(domain)`, ModelRenderTargetLoader.java:375-379): a name the model defines
         // itself always wins, and a name it does not falls back to the default's clip for that domain.
+        // Which names came from that fallback is remembered, because a name the model merely inherits is not this
+        // model's to report: the built-in default model's own registration reports it once, and without this every
+        // model that inherits an unclassifiable default clip (`hold_mainhand:lance` on all 22 wine_fox models, for
+        // one) would warn about content its own files never mention.
+        Map<String, Set<String>> inheritedFromDefault = new LinkedHashMap<>();
         for (String domain : AnimationDomain.ALL) {
             AnimationFile target = filesByDomain.get(domain);
+            Set<String> inherited = new LinkedHashSet<>();
             defaultAnimationFile(domain).animations.forEach((name, action) -> {
                 if (!target.animations.containsKey(name)) {
                     target.putAnimation(name, action);
+                    inherited.add(name);
                 }
             });
+            inheritedFromDefault.put(domain, inherited);
         }
         // Condition names are registered per domain, under the id that domain's animatable reads, which is upstream's
         // two-store split (`ModelRenderTargetAssembler.java:53-60`: the player's own names into `conditionManager`, the
@@ -1559,7 +1567,11 @@ public class ClientModelManager {
         filesByDomain.get(AnimationDomain.MAIN)
             .animations.forEach((name, animation) -> {
                 try {
-                    ConditionManager.addTest(id, name);
+                    ConditionManager.addTest(
+                        id,
+                        name,
+                        !inheritedFromDefault.get(AnimationDomain.MAIN)
+                            .contains(name));
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
                 }
@@ -1568,7 +1580,11 @@ public class ClientModelManager {
         filesByDomain.get(AnimationDomain.FIRST_PERSON)
             .animations.forEach((name, animation) -> {
                 try {
-                    com.fox.ysmu.client.animation.condition.FPArmConditionManager.addTest(firstPersonId, name);
+                    com.fox.ysmu.client.animation.condition.FPArmConditionManager.addTest(
+                        firstPersonId,
+                        name,
+                        !inheritedFromDefault.get(AnimationDomain.FIRST_PERSON)
+                            .contains(name));
                 } catch (Exception e) {
                     ysmu.LOG.warn(
                         "Failed to register first-person animation condition {} for model {}",

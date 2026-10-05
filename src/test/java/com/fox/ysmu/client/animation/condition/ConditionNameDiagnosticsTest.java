@@ -84,4 +84,89 @@ class ConditionNameDiagnosticsTest {
             assertEquals("", ConditionNameDiagnostics.unproducibleKindReason(name), name);
         }
     }
+
+    /**
+     * The same family on the built-in packs: {@code wine_fox/03_astronaut} declares {@code hold_mainhand:spear_idle},
+     * {@code hold_offhand:sword_idle}, {@code hold_mainhand:shield_end} and {@code swing:fishing_rod2} among others,
+     * and nothing references them - not a classifier (the suffix is not a kind upstream can build) and not a
+     * controller state either. So they are warned about, and the message is the generic one.
+     */
+    @Test
+    void builtInPackVariantNamesHaveNoRouteAndCarryNoNote() {
+        String[] names = { "hold_mainhand:spear_idle", "hold_mainhand:spear_not_idle", "hold_offhand:sword_idle",
+            "hold_offhand:sword_not_idle", "hold_mainhand:sword_end", "hold_mainhand:shield_end",
+            "hold_offhand:shield_end", "swing:fishing_rod2" };
+        for (String name : names) {
+            assertFalse(ConditionNameDiagnostics.isClassifiable(name), name);
+            assertEquals("", ConditionNameDiagnostics.unproducibleKindReason(name), name);
+            assertTrue(ConditionNameDiagnostics.needsWarning(name, true), name + " is still reported");
+        }
+    }
+
+    /**
+     * {@code lance} is the one suffix in the log that the port's own shipped content uses and that <em>neither</em>
+     * implementation can produce. Upstream's {@code getClassify} returns a fixed set of kind words
+     * ({@code InnerClassify.java:22-66}) and never {@code lance}, and 1.20.1's {@code UseAnim} has no such value, so
+     * there is no mapping to port - the clips are shipped by the built-in default model's arm animations
+     * ({@code builtin/default/animations/arm.animation.json}: {@code hold_mainhand:lance}, {@code hold_offhand:lance},
+     * {@code swing:lance}, {@code use_mainhand:lance}, {@code use_offhand:lance}) and every model inherits them
+     * through the default-animation fallback.
+     *
+     * <p>
+     * The reason this carries a note instead of the generic message is that the reader has to be able to tell "the
+     * port is missing a mapping" from "the shipped asset declares a clip nothing can select". It is the second, and
+     * adding a {@code lance} kind would be the invented vocabulary rule this repository forbids. The asset even shows
+     * what the author meant: {@code hold_mainhand:lance}, {@code hold_offhand:lance} and {@code swing:lance} are
+     * byte-identical to their {@code spear} counterparts in that file, so {@code lance} is that pack's second name
+     * for the polearm pose - reachable for a trident-like item through {@code :spear}, never through {@code lance}.
+     */
+    @Test
+    void lanceIsProducedByNeitherImplementationAndSaysSo() {
+        String[] names = { "hold_mainhand:lance", "hold_offhand:lance", "swing:lance", "use_mainhand:lance",
+            "use_offhand:lance" };
+        for (String name : names) {
+            assertFalse(ConditionNameDiagnostics.isClassifiable(name), name);
+            String reason = ConditionNameDiagnostics.unproducibleKindReason(name);
+            assertFalse(reason.isEmpty(), name + " must carry the `no producer in either implementation` note");
+            assertTrue(reason.contains("getClassify"), name);
+            assertTrue(reason.contains("default"), name + " must name the asset that ships the clip");
+        }
+        // Case does not matter, because a pack may write the kind either way.
+        assertFalse(ConditionNameDiagnostics.unproducibleKindReason("use_offhand:Lance").isEmpty());
+        // It is not a kind this port answers, so no vocabulary rule was added for it.
+        assertFalse(InnerClassify.isKnownTypeKeyword("lance"));
+    }
+
+    /**
+     * A name a model merely inherits from the built-in default is reported once, against the model that declares it,
+     * not once per inheriting model - which is what turned the five {@code lance} clips into 100+ warnings across the
+     * wine_fox pack. The declaring model still reports it, so nothing is silenced.
+     */
+    @Test
+    void inheritedDefaultNamesAreReportedAgainstTheDeclaringModelOnly() {
+        assertFalse(
+            ConditionNameDiagnostics.needsWarning("hold_mainhand:lance", false),
+            "an inherited default clip is not the inheriting model's to report");
+        assertTrue(
+            ConditionNameDiagnostics.needsWarning("hold_mainhand:lance", true),
+            "the built-in default model declares it, so it is still reported");
+        // The declaration flag must not silence a name the model's own files declare, including the ones that play
+        // from a controller state.
+        assertTrue(ConditionNameDiagnostics.needsWarning("swing:sword_up", true));
+        assertTrue(ConditionNameDiagnostics.needsWarning("hold_mainhand:spear_idle", true));
+        // ... nor may it start reporting names that are fine, or non-condition names.
+        assertFalse(ConditionNameDiagnostics.needsWarning("hold_mainhand:sword", true));
+        assertFalse(ConditionNameDiagnostics.needsWarning("hold_mainhand:charged_crossbow", true));
+        assertFalse(ConditionNameDiagnostics.needsWarning("idle", true));
+        assertFalse(ConditionNameDiagnostics.needsWarning(null, true));
+    }
+
+    /** A suffix nothing in either implementation knows still warns - the guard against over-silencing. */
+    @Test
+    void aTrulyUnknownSuffixStillWarns() {
+        String name = "hold_mainhand:definitely_not_a_kind";
+        assertFalse(ConditionNameDiagnostics.isClassifiable(name));
+        assertEquals("", ConditionNameDiagnostics.unproducibleKindReason(name));
+        assertTrue(ConditionNameDiagnostics.needsWarning(name, true));
+    }
 }
