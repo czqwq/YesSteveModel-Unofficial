@@ -197,7 +197,7 @@ When writing complex features or significant refactors, use an ExecPlan (as desc
 - `src/main/java/software`, `src/main/java/com/eliotlash`, `src/main/java/net/geckominecraft`: the vendored GeckoLib 3 engine (327 files: 275/48/4). Third-party compatibility code owned by this repository - keep engine edits narrow and record every deviation. The trees are byte-identical to the snapshot except `software/bernie/geckolib3/GeckoLib.java`, whose `@Mod` and `preInit` were removed. See `PROVENANCE.md`.
 - `src/main/resources/assets/ysmu/custom`: built-in model assets copied into `config/ysmu/custom` during reload.
 - `src/main/resources/assets/ysmu/lang`: `en_US.lang` and `zh_CN.lang`. Keep new translation keys in sync.
-- `src/main/resources/mixins.ysmu.json`: Mixin config. Currently only `MixinItemRenderer` is listed as a client Mixin.
+- `src/main/resources/mixins.ysmu.json`: Mixin config. It lists `MixinEntityArrow` in `mixins` and `MixinItemRenderer`, `MixinEffectRenderer`, `client.MixinRenderArrow` in `client`. Read the file rather than this line before adding one - this line said "only `MixinItemRenderer`" for several days after the other three had landed.
 - `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). The engine's own two accesses are already in this file, because the engine ships inside this jar.
 - `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
 
