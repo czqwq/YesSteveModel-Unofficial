@@ -284,6 +284,15 @@ outputs and the source tree, so editing while it runs can conflict with it or lo
 only as the **final confirmation**, once every change is finished and no other agent or subagent is
 still working in this workspace. Never start a build in the middle of a task.
 
+**A contributor's "done" is not verification, and a parse-only check is not a compile.** When a
+subagent is told not to run Gradle, all it can honestly report is that it read its own work - so the
+build it hands back must be run before its changes are believed. Measured on one batch here: eight
+files reported "done, syntax-checked" produced three compile errors in main code (a record component
+renamed on one side of a call, and a static nested type selected through a parameterized outer type)
+and five in test code (an interface method the senders never implemented, and an instance method
+called statically), and seventeen further tests failed at runtime - because a parse check sees none
+of those. Run the suite, and read the failing assertions rather than the report that says they pass.
+
 Run the narrowest task that answers the question, from the repository root:
 
 - `.\gradlew.bat compileJava` - fastest "does it still compile" check
