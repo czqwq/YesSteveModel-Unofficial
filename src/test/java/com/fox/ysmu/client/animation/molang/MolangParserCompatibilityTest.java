@@ -180,6 +180,74 @@ class MolangParserCompatibilityTest {
     }
 
     @Test
+    void nullCoalesceConsultsTheExplicitVariableLookupHook() throws Exception {
+        // 引擎声明的宿主钩子：`MolangParser.ExplicitVariableLookup`（`MolangParser.java:80-84`）。`??` 的
+        // **本意**（`MolangParser.java:666-669` 自己的注释）是"左边的变量被**显式设置过**就用它 —— 显式设为 0
+        // 也算 —— 否则用右边"。左边没有钩子时那条分支永远不成立（`userSet` 恒 false，
+        // `MolangParser.java:685-690`），于是 `a??b` 退化成 `l != 0 ? l : r`，显式设为 0 的值被当成"从未设置"。
+        //
+        // 这个用例钉的是**引擎自己那一半**，用两个桩证明"钩子的返回值真的决定分支"；至于宿主有没有把这个
+        // 钩子接到一个真值来源上，见 `.agent/phase41-controller-path-values.md` 行 30（本仓没有可接的来源，
+        // 所以它是**未接线**，不是"已修好"）。
+        MolangParser parser = new MolangParser();
+        // 探针变量：名字一次性的，避免与别的用例共用这张静态表时互撞（`parseExpression` 会整体小写化，
+        // 所以下面表达式里的写法是小写）。
+        parser.register(new LazyVariable("v.zz_coalesce_probe", 0));
+        parser.parseExpression("v.zz_coalesce_probe=0")
+            .get();
+
+        try {
+            // 钩子说"一个名字都没被显式设置过"：左边为 0 时取右边。
+            MolangParser.explicitVariableLookup = name -> false;
+            assertEquals(2.0D, parser.parseExpression("v.zz_coalesce_probe??2")
+                .get(), 0.0D);
+            // 左边非 0 时仍然取左边 —— 这一半在接线前后都必须成立。
+            parser.parseExpression("v.zz_coalesce_probe=3")
+                .get();
+            // 探针名字里含 "zz_coalesce_probe"，所以这里必须让钩子说"没有"才是"未被设置"的形态。
+            assertEquals(3.0D, parser.parseExpression("v.zz_coalesce_probe??2")
+                .get(), 0.0D);
+            // 变量被改回 0：一个诚实的"没设置过"来源也不能让非 0 分支凭空成立。
+            parser.parseExpression("v.zz_coalesce_probe=0")
+                .get();
+            assertEquals(2.0D, parser.parseExpression("v.zz_coalesce_probe??2")
+                .get(), 0.0D);
+
+            // 钩子说"这个名字被显式设置过"（哪怕值是 0）：`??` 必须答 0，而不是右边。
+            MolangParser.explicitVariableLookup = name -> "v.zz_coalesce_probe".equals(name);
+            assertEquals(
+                0.0D,
+                parser.parseExpression("v.zz_coalesce_probe??2")
+                    .get(),
+                0.0D,
+                "an explicitly-set 0 must win over the fallback - that is the whole point of the hook");
+            // 而且钩子收到的必须正是**左边表达式文本**（`MolangParser.java:688` 传的是 `leftExpr`，
+            // 已经 trim 过），不是变量的规范名、也不是整条表达式。
+            MolangParser.explicitVariableLookup = name -> {
+                assertEquals("v.zz_coalesce_probe", name, "the hook must receive the left-hand expression text");
+                return true;
+            };
+            assertEquals(0.0D, parser.parseExpression("v.zz_coalesce_probe ?? 2")
+                .get(), 0.0D);
+
+            // 左边不是变量（一个整串表达式）时钩子照旧被问；一个总说"没有"的钩子必须让它退回旧语义。
+            MolangParser.explicitVariableLookup = name -> false;
+            assertEquals(1.0D, parser.parseExpression("1??2")
+                .get(), 0.0D);
+            assertEquals(2.0D, parser.parseExpression("0??2")
+                .get(), 0.0D);
+        } finally {
+            // 钩子是**整个 JVM 一份**的静态字段，本用例必须自己复位：`nullCoalescingOperatorParses`
+            // 与本类其余用例都跑在"未接线"的语义上。
+            MolangParser.explicitVariableLookup = null;
+        }
+
+        // 复位之后回到未接线的语义（与 nullCoalescingOperatorParses 一致）。
+        assertEquals(2.0D, parser.parseExpression("0??2")
+            .get(), 0.0D);
+    }
+
+    @Test
     void colonlessConditionalOperatorParses() throws Exception {
         // YSM/Bedrock packs also write `cond?value` without a colon (meaning `cond ? value : 0`), and they nest it
         // inside a full ternary. parseSymbols used to answer any expression that still contained a bare '?' after

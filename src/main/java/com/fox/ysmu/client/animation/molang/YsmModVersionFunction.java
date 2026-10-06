@@ -59,8 +59,11 @@ public class YsmModVersionFunction extends Function {
     /**
      * 版本字符串 → 池化 id；空串/缺失（上游的 {@code null}）→ 0。
      * <p>拆出来是为了让"返回什么"这一半可以在没有 FML 的 JVM 里单测。</p>
+     * <p>public 是为了让**控制器条件路径**也能复用同一条规则（
+     * {@code OpenYsmControllerExpressionEvaluator.Context#functionValue} 的 {@code ysm.mod_version} 分支）——
+     * 两条路径共用这一个实现，而不是各写一份"字符串怎么变成 double"。</p>
      */
-    static double versionId(@Nullable String version) {
+    public static double versionId(@Nullable String version) {
         if (version == null) {
             return 0.0d;
         }
@@ -75,9 +78,10 @@ public class YsmModVersionFunction extends Function {
      * {@code YsmDebugDumpFunction.dumpMods()} 读的是同一张表。
      * <p>捕捉异常是因为这张表只有 FML 启动后才填好：单测 JVM 里 {@code Loader.instance()} 会抛，
      * 如实回答"这个 mod 的版本未知"（返回 null → 0），而不是让整条关键帧表达式崩掉。
+     * <p>public 的理由同 {@link #versionId}：控制器条件路径复用同一个取数点。</p>
      */
     @Nullable
-    static String modVersion(@Nullable String modId) {
+    public static String modVersion(@Nullable String modId) {
         if (modId == null || modId.trim()
             .isEmpty()) {
             return null;

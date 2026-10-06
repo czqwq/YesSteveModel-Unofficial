@@ -1157,6 +1157,20 @@ public final class OpenYsmControllerExpressionEvaluator {
                     arguments.get(2).asNumber(),
                     arguments.get(3).asNumber());
             }
+            // ysm.mod_version(modid)：**与关键帧路径同一个池化机制**，不是第二份惰性实现。
+            // 关键帧/时间轴路径把名字注册到 AnimationRegister.java:277，函数体是 YsmModVersionFunction；
+            // 它的字符串→double 规则（MolangStringPool 池化 id，空/未知 mod → 0）是 static 包内可见的，
+            // 这里只是把已经求值好的字符串实参交给它。
+            // 少了这一条，控制器条件里的 ysm.mod_version('ysm') 落到 unsupportedFunction 恒 0，
+            // 而同一个名字在动画文件里答的是池化 id —— 又一处"一个名字两个答案"。
+            // SOURCE(上游 1.20): YSMBinding.java:73 `function("mod_version", new ModVersion())`;
+            //   ModVersion.java:14-28（validateArgumentSize == 1，返回 Maven 版本字符串）。
+            // 参考分支在这条路径上既没有分支也没有桩；本仓的关键帧注册（AnimationRegister.java:277）就是
+            // 唯一的实现，这里复用它。
+            if ("ysm.mod_version".equals(name) && !arguments.isEmpty()) {
+                return com.fox.ysmu.client.animation.molang.YsmModVersionFunction.versionId(
+                    com.fox.ysmu.client.animation.molang.YsmModVersionFunction.modVersion(arguments.get(0).asString()));
+            }
             return unsupportedFunction(name);
         }
 
@@ -1466,6 +1480,33 @@ public final class OpenYsmControllerExpressionEvaluator {
                 Minecraft mc = Minecraft.getMinecraft();
                 return mc.theWorld == null ? 0.0d : mc.theWorld.getWorldTime();
             }
+            // Do not answer FALSE for a `query.*` name this chain does not list. The inventory's nineteen -
+            // `head_x_rotation`, `head_y_rotation`, `cardinal_facing_2d`, `distance_from_camera`, `equipment_count`,
+            // `eye_target_x_rotation`, `eye_target_y_rotation`, `has_cape`, `has_rider`, `actor_count`,
+            // `is_spectator`, `player_level`, `moon_phase`, `yaw_speed`, `item_in_use_duration`,
+            // `item_max_use_duration`, `item_remaining_use_duration`, plus the reference branch's own
+            // `head_z_rotation` extension - were all answered FALSE here while the **keyframe** path registered them
+            // AND gave each one a per-frame supplier (`AnimationRegister.registerQueryVariables`,
+            // `AnimationRegister.java:316-369`, and `setEntityQueryValues` / `setStateQueryValues` /
+            // `setItemUseQueryValues` / `setWorldQueryValues`, `:484-545`). So the same name read the real value in an
+            // animation channel and 0/false in a controller condition: the "one name, two stores" defect A-03 fixed
+            // for `v.*`, which the sibling `ysmValue` branch below already fixed for `ysm.*`
+            // (`OpenYsmControllerExpressionEvaluator.java:1529-1539`). Each of them also emitted one
+            // `Unsupported OpenYSM controller query: query.<name>` per JVM, and a controller gated on one was never
+            // entered.
+            //
+            // This is a **fallback, not a second table**: the values live in `MolangParser.VARIABLES`, the one store
+            // `AnimationRegister` publishes them into, and it is read exactly the way the sibling `ysmValue` branch
+            // below reads it (a direct `VARIABLES.get`), not through a parser instance - this is a per-frame path and
+            // constructing a parser here would allocate on every miss. `VARIABLES` is keyed by the canonical name
+            // (`MolangParser#register`), which for a `query.*` name is the name itself: `parseExpression` lower-cases
+            // the whole expression before parsing it (`MolangParser#lowerCaseOutsideStrings`), so `name` is already
+            // canonical. A name nothing published is `null` here and still warns, so the fallback cannot mask a
+            // genuinely unsupported name by creating it as a zero.
+            LazyVariable published = MolangParser.VARIABLES.get("query." + name);
+            if (published != null) {
+                return published.get();
+            }
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "query:" + name,
                 "Unsupported OpenYSM controller query: query." + name);
@@ -1473,7 +1514,62 @@ public final class OpenYsmControllerExpressionEvaluator {
         }
 
         private double ctrlValue(String name) {
-            return isControllerState(name) ? TRUE : FALSE;
+            // `ctrl.playing_extra_animation` is NOT a controller-state predicate like walk/idle/death: it asks whether
+            // the cap controller is playing an external (EEP) animation, so it must not be added to
+            // `isControllerStateDirect`/`hasNonIdleControllerState` - doing that would make `ctrl.idle` false for
+            // every actor that has an extra animation lit.
+            //
+            // Upstream registers it as its own variable, `CtrlBinding.java:75`
+            // `var("playing_extra_animation", CtrlBinding::checkExtraAnimationState)`, body at `:112-117`. The
+            // reference branch answers it at `OpenYsmControllerExpressionEvaluator.java:1180` from
+            // `isPlayingExtraAnimation()` (`:1343-1355`), which is `eep.isPlayAnimation()` OR the wheel lock.
+            //
+            // This port has the EEP half and no wheel half. The wheel half of the reference
+            // (`WheelPlaybackScope.countsAsExtraAnimationFor` -> `PENDING_ROAMING["lock_wheel"]`/`["wheel_anim"]` +
+            // `AnimationManager.getCurrentWheelAnimName()`) has no counterpart here at all: this port's
+            // `AnimationRouletteScreen.mouseClicked` sends `SetPlayAnimation` to the server and the animation arrives
+            // back as the same `ExtendedModelInfo.playAnimation` flag the EEP half below reads, so one source answers
+            // for both. See `.agent/phase41-controller-path-values.md` rows 10/11.
+            if ("playing_extra_animation".equals(name)) {
+                return isPlayingExtraAnimation() ? TRUE : FALSE;
+            }
+            // The vocabulary check is what tells "a known state that is currently false" apart from "a name nothing
+            // implements"; `isControllerState` answers false for both. Without it a `ctrl.<typo>` read 0 silently,
+            // while the two sibling prefixes (`query.*`, `ysm.*`) already emit this same one-shot diagnostic - so the
+            // one warning that would have named a broken pack condition was the one `ctrl.*` never produced.
+            // `CONTROLLER_STATE_NAMES` is the same single copy the debug overlay and `evaluateCtrlState` read
+            // (`:851-861`), so there is no second list to drift.
+            if (CONTROLLER_STATE_NAMES.contains(name)) {
+                return isControllerState(name) ? TRUE : FALSE;
+            }
+            OpenYsmAnimationControllerRegistry.warnOnce(
+                "var:ctrl." + name,
+                "Unsupported OpenYSM controller variable: ctrl." + name);
+            return FALSE;
+        }
+
+        /**
+         * Whether this actor is playing an external animation - the source of {@code ctrl.playing_extra_animation}.
+         *
+         * <p>Same store {@code AnimationManager.predicateCap} plays from ({@code eep.getAnimation()} guarded by
+         * {@code eep.isPlayAnimation()}, {@code AnimationManager.java:207-218}), so the condition and the hand-over
+         * cannot disagree about whether an EEP animation is lit - the "one name, two stores" defect class A-03 fixed
+         * for {@code v.*}.
+         *
+         * <p>Upstream gates the same fact on the cap controller not being IDLE
+         * ({@code CtrlBinding.java:112-117} {@code entity.isPlayingExtraAnimation() &&
+         * entity.getCodedAnimationStates(CAP_CONTROLLER) != AnimationState.IDLE}). That half has no equivalent on
+         * this path: the controller state is only readable while the cap controller is being processed, and
+         * {@code Context} is also used for {@code .molang} script conditions with no controller at all
+         * ({@link #evaluateCondition(String, EntityPlayer, AnimationEvent)}).
+         */
+        private boolean isPlayingExtraAnimation() {
+            if (player == null) {
+                // Detached evaluation (the unit-test path, and a preview that has no player): no EEP to read.
+                return false;
+            }
+            com.fox.ysmu.eep.ExtendedModelInfo eep = com.fox.ysmu.eep.ExtendedModelInfo.get(player);
+            return eep != null && eep.isPlayAnimation();
         }
 
         private double ysmValue(String name) {
@@ -1564,6 +1660,14 @@ public final class OpenYsmControllerExpressionEvaluator {
         }
 
         private boolean isControllerState(String name) {
+            // Detached evaluation (`new Context(null, null, null)`, the unit-test and preview path) has no actor to
+            // read a state from: answer false instead of dereferencing a null player. The reference branch guards the
+            // same way at the head of its own state-reading branch (`SOURCE:1187`
+            // `private double ysmValue(String name) { if (player == null) return FALSE; ...`), and every other reader
+            // in this class that can run detached guards too (`:1555`, `:1633`, `:1775`, `:1792`, `:1835`).
+            if (player == null) {
+                return false;
+            }
             // A-09: upstream answers every `ctrl.<state>` with false while the entity has a live vehicle
             // (CtrlBinding#testCondition, client/animation/molang/CtrlBinding.java:158-162): the main controller is not
             // what plays the riding animation - the vehicle controller is - so its state queries mean nothing there.

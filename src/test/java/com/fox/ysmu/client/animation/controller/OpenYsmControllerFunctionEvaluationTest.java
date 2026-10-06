@@ -13,6 +13,9 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvalu
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvaluator.Context;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 
+import software.bernie.geckolib3.core.molang.LazyVariable;
+import software.bernie.geckolib3.core.molang.MolangParser;
+
 /**
  * 控制器条件路径的**函数表**：{@code Context#functionValue}。
  *
@@ -273,5 +276,120 @@ class OpenYsmControllerFunctionEvaluationTest {
         assertEquals(0.0d, call("math.this_name_does_not_exist", 1.0d), 0.0d);
         assertEquals(0.0d, call("ysm.perlin_noise", 1.0d, 2.0d), 0.0d);
         assertFalse(condition("math.this_name_does_not_exist(1)==1"));
+    }
+
+    /**
+     * 行 27：{@code ctrl.playing_extra_animation} 必须是**自己的分支**，不能落到
+     * {@code ctrlValue -> isControllerState} 那条"每个名字都答 false"的兜底上。
+     *
+     * <p>反证与 {@link #theHostStateFunctionsAreRoutedToRealBranches} 同一手法：脱离玩家的
+     * {@code Context} 上这个变量答 0 与"名字不认识"的 0 在数值上无法区分，所以查一次性提示 ——
+     * 修复前它是 {@code var:ctrl.playing_extra_animation}（{@code ctrlValue} 恒 false 分支都不记提示，
+     * 但 {@code isControllerState} 也不记，所以这条断言测的是"没有落到
+     * {@code variableValue} 末尾的 Unsupported 分支"），修复后必须没有；真不认识的名字必须仍有。</p>
+     *
+     * <p>值那一半（EEP 置真 → 1）需要真实玩家：{@code ExtendedModelInfo.get(player)} 读的是
+     * 玩家身上的 {@code IExtendedEntityProperties}（{@code ExtendedModelInfo.java:160-162}），单测 JVM
+     * 造不出来，实机行为要客户端确认。这里钉住的是"分支存在、没有玩家时不抛异常"。</p>
+     */
+    @Test
+    void playingExtraAnimationIsItsOwnControllerVariableNotAControllerState() {
+        OpenYsmAnimationControllerRegistry.clearWarnings();
+
+        // 没有玩家时按假回答（不是 NPE，也不是 Unsupported）。
+        assertEquals(0.0d, detached().variableValue("ctrl.playing_extra_animation"), 0.0d);
+        assertFalse(
+            OpenYsmAnimationControllerRegistry.hasWarned("var:ctrl.playing_extra_animation"),
+            "ctrl.playing_extra_animation must be answered by ctrlValue's own branch, "
+                + "not fall through to the Unsupported-variable tail");
+
+        // 反向对照：这个名字以前走的路（isControllerState 对一个未知状态）不证明分支存在，
+        // 所以再加一个**真不认识**的 ctrl.* 名字，它必须被记为不支持。
+        assertEquals(0.0d, detached().variableValue("ctrl.this_name_is_not_a_state"), 0.0d);
+        assertTrue(
+            OpenYsmAnimationControllerRegistry.hasWarned("var:ctrl.this_name_is_not_a_state"),
+            "the negative control must be recorded, or the assertion above proves nothing");
+
+        // `playing_extra_animation` must not have been added to the controller-state vocabulary either: a name in
+        // CONTROLLER_STATE_NAMES (or in `isControllerStateDirect`) would make `ctrl.idle` false while an external
+        // animation is lit, which is exactly what the reference branch's comment warns about.
+        assertFalse(
+            OpenYsmControllerExpressionEvaluator.CONTROLLER_STATE_NAMES.contains("playing_extra_animation"),
+            "playing_extra_animation is a standalone check, not a no-idle controller state");
+    }
+
+    /**
+     * 行 29：{@code ysm.mod_version(modid)} 在控制器条件里必须与关键帧路径落到**同一个**池化实行，
+     * 而不是"Unsupported controller function"的 0。
+     *
+     * <p>数值上两边都可能读 0（单测 JVM 里 {@code Loader.instance()} 抛异常 →
+     * {@code YsmModVersionFunction.modVersion} 返回 null → 0），所以这里断言的是**转发**：答的必须正是
+     * 那个 static 实现对一个未知 mod 的答案，且这个函数名不能被记为不支持。</p>
+     */
+    @Test
+    void modVersionForwardsToTheKeyframePathsPooledStringFunction() {
+        OpenYsmAnimationControllerRegistry.clearWarnings();
+
+        // 与关键帧路径同一个 static 实现、同一个"未知 mod → null → 0"规则。
+        assertEquals(
+            com.fox.ysmu.client.animation.molang.YsmModVersionFunction
+                .versionId(com.fox.ysmu.client.animation.molang.YsmModVersionFunction.modVersion("ysmu")),
+            callStrings("ysm.mod_version", "ysmu"),
+            0.0d,
+            "ysm.mod_version must answer what the keyframe path's pooled-string function answers");
+        assertFalse(
+            OpenYsmAnimationControllerRegistry.hasWarned("func:ysm.mod_version"),
+            "ysm.mod_version must be routed to the real branch, not the unsupported-function fallback");
+
+        // 反向对照：真不存在的函数名仍必须被记为不支持。
+        call("ysm.this_name_does_not_exist");
+        assertTrue(
+            OpenYsmAnimationControllerRegistry.hasWarned("func:ysm.this_name_does_not_exist"),
+            "the negative control must be recorded, or the assertion above proves nothing");
+    }
+
+    /**
+     * 行 28：控制器路径上那批 {@code query.*} 名字必须落到**关键帧路径已经发布的那一份值**上，
+     * 而不是 {@code queryValue} 末尾的 FALSE。
+     *
+     * <p>做法与 {@code ysmValue} 的兜底同一条：先查 {@code MolangParser.VARIABLES}。这里钉两件事 ——
+     * 注册过的名字由那张表回答（用一个探针变量证明这条路真的在查表），以及没注册的名字仍然按不支持
+     * 处理（所以兜底不会把真不认识的名字静默成 0）。</p>
+     *
+     * <p>探针用一次性名字并自己在 finally 里摘掉：{@code VARIABLES} 是**整个 JVM 一份**的静态表，
+     * 别的用例（{@code FpsQueryTest} 会 clear 它）可以改变它，所以这条断言不能依赖
+     * {@code AnimationRegister.registerVariables()} 在本次测试里跑过 —— 只能依赖"兜底确实在查表"。
+     * 那十九个名字已由 {@code AnimationRegister.registerQueryVariables}
+     * （{@code AnimationRegister.java:316-369}）在客户端注册，注册与接值是同一批代码，实机行为要客户端确认。</p>
+     */
+    @Test
+    void unlistedQueryNamesFallBackToTheKeyframePathsPublishedValues() {
+        OpenYsmAnimationControllerRegistry.clearWarnings();
+        String probe = "query.zz_controller_fallback_probe";
+        try {
+            // 探针值刻意不是 0 也不是 1，这样"读到了表里的值"与任何默认值都区分得开。
+            // 用解析器自己的注册入口：它就是关键帧路径注册 `query.*` 的那条路
+            // （{@code AnimationRegister.registerQueryVariables} -> {@code MolangParser#register}）。
+            new MolangParser().register(new LazyVariable(probe, 7.5d));
+            assertEquals(
+                7.5d,
+                detached().variableValue(probe),
+                0.0d,
+                "a published query.* value must be what the controller path answers, not FALSE");
+            assertFalse(
+                OpenYsmAnimationControllerRegistry.hasWarned("query:" + probe.substring("query.".length())),
+                "a name the keyframe path published must not be reported as an unsupported controller query");
+        } finally {
+            MolangParser.VARIABLES.remove(probe);
+        }
+
+        // 反向对照：没发布过的 query.* 名字仍然必须被记为不支持、仍答 0。
+        OpenYsmAnimationControllerRegistry.clearWarnings();
+        String unpublished = "query.zz_controller_fallback_unpublished";
+        assertEquals(0.0d, detached().variableValue(unpublished), 0.0d);
+        assertTrue(
+            OpenYsmAnimationControllerRegistry
+                .hasWarned("query:" + unpublished.substring("query.".length())),
+            "the negative control must be recorded, or the fallback has silenced the warning instead of fixing it");
     }
 }
