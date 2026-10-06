@@ -94,6 +94,15 @@ public final class ServerModelManager {
      */
     public static final Map<String, ServerPackData> PACKS = new ConcurrentHashMap<>();
     public static volatile byte[] OPEN_YSM_SERVER_KEY;
+    /**
+     * 上一次 {@link #reloadPacks()} 的耗时（毫秒），0 表示还没跑过。
+     *
+     * <p>{@code Config.SHOW_MODEL_LOAD_CHAT} 的登录提示读它（{@code event/CommonEventHandler} 的
+     * {@code onPlayerLoggedIn}）。上游/reference 的同一个字段是
+     * {@code ServerModelManager.LAST_LOAD_TIME_MS}（参考分支 `model/ServerModelManager.java:95` 声明、
+     * `:170` 在 {@code reloadPacks()} 末尾由 StopWatch 赋值），所以这是照抄的接缝，不是新机制。
+     */
+    public static volatile long LAST_LOAD_TIME_MS;
 
     /**
      * Whether the server has a renderable model under this id, used to reject model overrides that no client
@@ -209,6 +218,8 @@ public final class ServerModelManager {
     }
 
     public static void reloadPacks() {
+        org.apache.commons.lang3.time.StopWatch watch = new org.apache.commons.lang3.time.StopWatch();
+        watch.start();
         clearModelCaches();
         createConfigDirectories();
         // 先补齐 blacklist.txt(首次运行时创建)。
@@ -225,6 +236,9 @@ public final class ServerModelManager {
         } catch (Exception | LinkageError e) {
             ysmu.LOG.warn("Failed to prune stale model caches; keeping every existing cache file", e);
         }
+        watch.stop();
+        // 耗时在**最后**取：prune 也算这次 reload 的一部分（参考分支把同一行放在它自己的 reloadPacks 末尾）。
+        LAST_LOAD_TIME_MS = watch.getTime();
     }
 
     private static void clearModelCaches() {

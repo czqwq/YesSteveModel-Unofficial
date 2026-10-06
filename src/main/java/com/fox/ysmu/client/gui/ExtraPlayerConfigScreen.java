@@ -31,6 +31,34 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         this.yawOffset = (float) Config.PLAYER_YAW_OFFSET;
     }
 
+    /**
+     * Must NOT pause the game: this screen is a live preview of an in-game element, exactly like the four other YSMU
+     * screens ({@code PlayerModelScreen:479}, {@code PlayerTextureScreen:141}, {@code AnimationRouletteScreen:191},
+     * {@code ModelInfoScreen:184}), which all override this. Left at the {@code GuiScreen} default of {@code true},
+     * the preview broke in two separate ways in single-player, because {@code Minecraft.isGamePaused()} was true for
+     * the whole time this screen was open:
+     *
+     * <ul>
+     *   <li>{@code Minecraft.updateTimer} freezes {@code renderPartialTicks} while paused, so
+     *       {@code AnimatedGeoModel.setLivingAnimations} sees a constant {@code seekTime}; the engine's
+     *       same-render-state de-duplication then short-circuits every frame and the bones keep their previous
+     *       values - the pose freezes (a blink sticks on the closed frame) while the transform still follows the
+     *       mouse, so it looks like the preview "keeps swaying but stopped animating".</li>
+     *   <li>{@code CustomPlayerModel.setLivingAnimations} gates its whole humanoid-hook branch on
+     *       {@code !Minecraft.getMinecraft().isGamePaused()} ({@code client/model/CustomPlayerModel.java:186-187}),
+     *       so the paused player fell into the <em>GUI preview</em> branch: neutralised parser values, i.e. the model
+     *       was drawn in its preview state - parts the in-game state hides were all shown.</li>
+     * </ul>
+     *
+     * <p>Ported from the reference branch's {@code client/gui/ExtraPlayerConfigScreen.java:30-59}, whose two bullets
+     * name the same two failures. The follow-mode preview ({@link Config#HUD_FOLLOW_MODE}) makes this load-bearing
+     * rather than cosmetic: a paused preview cannot show a mode change at all.
+     */
+    @Override
+    public boolean doesGuiPauseGame() {
+        return false;
+    }
+
 
     @Override
     public void drawScreen(int pMouseX, int pMouseY, float pPartialTick) {
@@ -65,6 +93,29 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
             this.drawString(fontRendererObj, line, width - 15 - w, y, 0xFFFFFF);
             y += 10;
         }
+
+        // HUD follow mode hint (reference client/gui/ExtraPlayerConfigScreen.java:102-120). The reference also draws
+        // its FBO-cache hint one line above this one (height - 20) and toggles it on 'C'; that is row 44's feature
+        // (`Config.GUI_HUD_PREVIEW_CACHE`), which this tree does not have yet, so the line above is deliberately left
+        // free for it rather than filled with a hint that would toggle nothing.
+        String followKey;
+        switch (Config.HUD_FOLLOW_MODE) {
+            case Config.HUD_FOLLOW_VANILLA_SMOOTH:
+                followKey = "gui.yes_steve_model.hud_follow.smooth";
+                break;
+            case Config.HUD_FOLLOW_YSM:
+                followKey = "gui.yes_steve_model.hud_follow.ysm";
+                break;
+            case Config.HUD_FOLLOW_YSM_SMOOTH:
+                followKey = "gui.yes_steve_model.hud_follow.ysm_smooth";
+                break;
+            default:
+                followKey = "gui.yes_steve_model.hud_follow.vanilla";
+                break;
+        }
+        String followStatus = I18n.format(followKey);
+        int followColor = Config.HUD_FOLLOW_MODE == Config.HUD_FOLLOW_VANILLA ? 0xFFFFFF : 0x55FF55;
+        this.drawString(fontRendererObj, followStatus, 15, height - 10, followColor);
 
         if (this.mc.thePlayer != null) {
             // The same frame partial tick the HUD overlay passes, so the doll on this screen poses like the real one.
@@ -159,6 +210,18 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
             this.posY = 10;
             this.scale = 40;
             this.yawOffset = 5;
+        }
+        // Cycle the HUD follow mode (0 = vanilla, 1 = vanilla smooth, 2 = ysm, 3 = ysm smooth), the reference's
+        // 'M' binding (client/gui/ExtraPlayerConfigScreen.java:194-199). The value is written back to Config here and
+        // persisted by onGuiClosed's Config.save(), exactly as the reference orders it.
+        //
+        // The reference also calls ClientEventHandler.invalidateHudPreviewCache() on this key. This tree has no HUD
+        // preview cache yet (row 44), so there is nothing to invalidate, and the mode change already resets both
+        // smoother state machines (RenderUtil#ensureFollowMode), which is what stops a stale smoothed angle from
+        // jumping across modes. Whoever ports row 44 must add that call back here.
+        if (keyCode == Keyboard.KEY_M) {
+            Config.HUD_FOLLOW_MODE = (Config.HUD_FOLLOW_MODE + 1) % 4;
+            return;
         }
         super.keyTyped(typedChar, keyCode);
     }

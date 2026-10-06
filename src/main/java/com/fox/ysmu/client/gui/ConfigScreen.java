@@ -12,7 +12,7 @@ import net.minecraft.client.resources.I18n;
  * 模组设置页。分页显示：第 1/2 页沿用参考分支的开关与循环按钮分组。
  * <p>
  * 本移植分支 {@code Config} 多出来的调试/调优字段（DEBUG_*、PARTICLE_Y_ADJUST、PARTICLE_ZERO_OFFSET、
- * GUI_POST_CLOSE_GRACE_SECONDS、ANIMATION_TRANSITION_TICKS 等）**没有**对应的
+ * GUI_POST_CLOSE_GRACE_SECONDS 等）**没有**对应的
  * {@code gui.yes_steve_model.config.*} 语言键，参考分支也没有为它们提供界面，因此它们只保留在
  * config/ysmu.cfg 里可改，不在此页暴露（不自行编造中英文文案）。
  */

@@ -47,6 +47,18 @@ public class Config {
     public static boolean GUI_HUD_PREVIEW_CACHE = true;
 
     // OpenYSM model sync config (port-specific: the port's own sync channel switch)
+    /**
+     * Whether a model the OpenYSM index carries is offered on the OpenYSM sync channel; off means every model is
+     * synced by the legacy MD5/AES channel.
+     *
+     * <p>The reference branch spells the same decision {@code ENABLE_SYNC_PROTOCOL} ("EnableSyncProtocol" in the
+     * {@code ysm_sync} section, its {@code Config.java:133}, 6 consumers). That field was carried into this port's
+     * {@code Config} too, but nothing here ever read it - the port has two channels and this is the switch for the
+     * OpenYSM one - so a user could set a switch that did nothing. It was deleted rather than wired: two names for
+     * one decision is the defect {@code AGENTS.md} calls out, and "wire the legacy field" would have given the
+     * second name its own meaning, which is how a rename lands in only one half and the other half stays silent.
+     * An old {@code ysm_sync.cfg} keeps its orphan {@code EnableSyncProtocol} line; the loader ignores unknown keys.
+     */
     public static boolean ENABLE_OPEN_YSM_SYNC_PROTOCOL = true;
 
     // Local asset config
@@ -97,7 +109,15 @@ public class Config {
     public static double PARTICLE_Y_ADJUST = 0.0;
     /** 调试/测试用：粒子 xyz 偏移全部置 0（直接生成在实体位置）。 */
     public static boolean PARTICLE_ZERO_OFFSET = false;
-    public static boolean DEBUG_MERGED_ANIMATIONS = false;
+    // `DEBUG_MERGED_ANIMATIONS` (the reference branch's "Show __ysm_merged__ animations in the preview GUI for
+    // debugging") was deleted with the mechanism it debugs: the reference *flattens* an overlay controller's
+    // contributor animations into one synthesised `Animation` cached under `"__ysm_merged__" + primaryName`
+    // (`OpenYsmPlayerControllerRuntime.java:846-864`), and that synthesised entry then shows up in the preview
+    // screen's animation-name list (`client/gui/PlayerTextureScreen.java:122,169`), which is why it needs a filter.
+    // This port has no such copy - `grep` for `merged`/`contributor`/`excludeRoot` over
+    // `client/animation/controller/OpenYsmPlayerControllerRuntime.java` is 0 - because each contributor is handed to
+    // its own controller instead of being flattened into one. So there is no name to filter, and a switch that
+    // filters nothing is the dead-switch defect, not a feature. `grep` for `__ysm_merged__` over this tree is now 0.
     /**
      * Master switch for the Molang debug overlay and the {@code /ysmclient} Molang commands: the full-screen
      * {@code v.*}/{@code query.*}/{@code ctrl.*} table (Ctrl+P, or {@code S2CSetDebugOverlay}), the
@@ -186,7 +206,6 @@ public class Config {
     public static boolean ENABLE_IDLE_ASSET_EVICTION = false;
 
     // Model sync config
-    public static boolean ENABLE_SYNC_PROTOCOL = true;
     /**
      * 动画控制脚本（{@code @player_ctrl_<槽位>.molang}）是否每帧真正执行。
      * <p>
@@ -230,10 +249,18 @@ public class Config {
     public static String[] HIDDEN_OFFHAND_ITEMS = new String[] { "ExtraUtilities:defoliageAxe" };
 
     // Animation config
-    /** 全局 GeckoLib 动画过渡时长（单位 tick，20 tick = 1 秒）。
-     *  0 = 立即切换，2 = 100ms，4 = 200ms。
-     *  仅作为默认值：若模型控制器 JSON 定义了 blend_transition 会按状态覆盖此值。 */
-    public static int ANIMATION_TRANSITION_TICKS = 4;
+    // `ANIMATION_TRANSITION_TICKS` (the reference branch's global "GeckoLib animation transition length in ticks",
+    // its `Config.java:180`, used at its `AnimationManager.java:673` and as the constructor argument of every
+    // controller in its `CustomPlayerEntity.java:75-118`) is deliberately **not** carried. This port passes
+    // upstream's per-controller lengths instead, and that choice is documented at
+    // `client/entity/CustomPlayerEntity.java:47-58` with the upstream source of each value
+    // (`client/controller/collections/PlayerControllerCollection.java:31-71`: the parallel axes, the pre/post slots
+    // and the armor slots are 0, `main`/`hold`/`use` are 0.1, `swing`/`cap`/the preview channels are 0). Wiring the
+    // reference's single global value in would overwrite all of them with 4 ticks (0.2 s) - and the length is not
+    // cosmetic: the engine pins a controller's clock at 0 while `AnimationState.Transitioning` until
+    // `tick >= transitionLengthTicks`, so 0.2 s on a 0-length one-shot blends into its first frame and cuts the tail
+    // off. A model's own `blend_transition` still overrides per state (`OpenYsmPlayerControllerRuntime`). The dead
+    // switch was deleted rather than left declared-but-inert; see `tmp/dead-switches-audit.md`.
 
     /** 移动动画防滑步（stride matching）总开关（默认关闭）：
      *  按真实水平速度缩放 walk/run/sneak 等移动类动画的播放倍速，
@@ -323,7 +350,8 @@ public class Config {
         DEBUG_PARTICLE = syncBoolean("DebugParticle", "debug", DEBUG_PARTICLE, "Enable particle()/abs_particle() debug logging ([YSMU-PARTICLE])", load);
         PARTICLE_Y_ADJUST = syncDouble("ParticleYAdjust", "debug", PARTICLE_Y_ADJUST, "Extra Y offset subtracted from particle()/abs_particle() spawn position, in blocks (debug/testing; default 0)", -10.0, 10.0, load);
         PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
-        DEBUG_MERGED_ANIMATIONS = syncBoolean("DebugMergedAnimations", "debug", DEBUG_MERGED_ANIMATIONS, "Show __ysm_merged__ animations in the preview GUI for debugging", load);
+        // `DebugMergedAnimations` (the reference branch's name) is deliberately absent: the `__ysm_merged__`
+        // synthesised animation it filters does not exist in this port. See the note beside PARTICLE_ZERO_OFFSET.
         DEBUG_MOLANG_OVERLAY = syncBoolean("DebugMolangOverlay", "debug", DEBUG_MOLANG_OVERLAY, "Enable the Molang debug overlay and the /ysmclient Molang commands. Off by default: while off, no per-frame variable snapshot is taken, no overlay renders, no client command is registered, and this client ignores the /ysm debug|reset packets it is sent (the senders do not read this switch)", load);
 
         // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
@@ -341,7 +369,8 @@ public class Config {
         WEARABLE_RENDER_SCALE = syncDouble("WearableRenderScale", "compatibility", WEARABLE_RENDER_SCALE, "Scale factor for wearable model rendering (1.0 = default)", 0.1, 5.0, load);
         ENABLE_DIRECT_BUFFER_WATCHDOG = syncBoolean("EnableDirectBufferWatchdog", "watchdog", ENABLE_DIRECT_BUFFER_WATCHDOG, "Safety-net: periodically check Direct Buffer usage and trigger GC when over threshold", load);
         DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = syncInt("DirectBufferWatchdogThreshold", "watchdog", DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB, "Direct Buffer GC trigger threshold in MB", 128, 8192, load);
-        ENABLE_SYNC_PROTOCOL = syncBoolean("EnableSyncProtocol", "ysm_sync", ENABLE_SYNC_PROTOCOL, "Use the unified model sync protocol (covers all model formats: folders, BOM+YSGP and legacy bare-YSGP .ysm). When disabled or version-mismatched, falls back to the legacy MD5/AES sync", load);
+        // `EnableSyncProtocol` (the reference branch's name for the OpenYSM channel switch) is deliberately absent:
+        // see `ENABLE_OPEN_YSM_SYNC_PROTOCOL`'s javadoc.
         MOLANG_CONTROL_SCRIPTS = syncBoolean("MolangControlScripts", "animation", MOLANG_CONTROL_SCRIPTS, "Execute @player_ctrl_<slot>.molang animation-control scripts every frame (wiki: molang/script). When disabled only the statically extracted state->animation mapping is used", load);
         NAMED_PARALLEL_EXTRA_SLOTS = syncInt("NamedParallelExtraSlots", "animation", NAMED_PARALLEL_EXTRA_SLOTS, "Extra pool controllers registered per parallel family (pre_parallel/parallel) to carry model-named parallel slots (player.pre_parallel_<name>). Each entity registers 2x this many extra controllers, so it is bounded; raise only if a model declares more named slots than the default. 0 disables named parallel slots.", 0, ControllerUtils.MAX_NAMED_PARALLEL_EXTRA_SLOTS, load);
         SLOT_EXTRA_CONTROLLERS = syncInt("SlotExtraControllers", "animation", SLOT_EXTRA_CONTROLLERS, "Extra pool controllers, shared by all eight player.<slot> slots and routed per model, carrying suffix controllers such as player.pre_main_<suffix> or player.post_main_<suffix>. Upstream registers every name matching ^player\\.<slot>(_.+)?$ as its own controller, so one slot can host a control script plus several JSON controllers; each entity registers this many extra controllers, so it is bounded. Raise only if a model declares more suffixed controllers than the default. 0 disables suffix slot controllers.", 0, ControllerUtils.MAX_SLOT_EXTRA_CONTROLLERS, load);
@@ -361,7 +390,8 @@ public class Config {
         ENABLE_IDLE_ASSET_EVICTION = syncBoolean("EnableIdleAssetEviction", "ysm_sync", ENABLE_IDLE_ASSET_EVICTION, "Release idle model geometry from GeckoLibCache and reload it from the encrypted client cache on next use (reference branch behaviour). DEFAULT OFF AND NOT YET VALIDATED IN THIS PORT: enabling it can evict geometry the port cannot rebuild (see .agent/phase32-asset-eviction-subsystem.md). Off = the AssetManager subsystem does nothing at all.", load);
         HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
         HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
-        ANIMATION_TRANSITION_TICKS = syncInt("AnimationTransitionTicks", "animation", ANIMATION_TRANSITION_TICKS, "Global GeckoLib animation transition length in ticks (20 ticks = 1s). 0 = instant, 2 = 100ms, 4 = 200ms. Model-defined blend_transition overrides this per state.", 0, 40, load);
+        // `AnimationTransitionTicks` (the reference branch's name) is deliberately absent: this port keeps
+        // upstream's per-controller transition lengths. See the note in the "Animation config" block.
         ANIMATION_SPEED_MATCH = syncBoolean("AnimationSpeedMatch", "animation", ANIMATION_SPEED_MATCH, "Scale locomotion animation playback rate to actual movement speed to reduce foot sliding (stride matching).", load);
         ANIMATION_SPEED_MATCH_BASE = syncDouble("AnimationSpeedMatchBase", "animation", ANIMATION_SPEED_MATCH_BASE, "Baseline rate for stride matching playback speed (1.0 = canonical per-gait strides). Playback = base x actualSpeed x cycleTime / gaitStride. Player speed is read live each frame so potion buffs/debuffs adapt automatically. Increase if animations play too slow, decrease if too fast.", 0.25, 4.0, load);
         ANIMATION_SPEED_MATCH_RESPONSE = syncDouble("AnimationSpeedMatchResponse", "animation", ANIMATION_SPEED_MATCH_RESPONSE, "Smoothing response per tick for the stride-match speed multiplier (0.05-1.0). Lower = smoother but slower reaction.", 0.05, 1.0, load);

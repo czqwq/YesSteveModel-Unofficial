@@ -277,6 +277,7 @@ message.yes_steve_model.model.reload.error.no_arm_file=§6§l[§aYSM§6§l] §r'
 message.yes_steve_model.model.reload.error.no_texture_file=§6§l[§aYSM§6§l] §r'%s'§b folder missing texture file!
 message.yes_steve_model.model.reload.error.texture_name=§6§l[§aYSM§6§l] §r'%s'§b texture name is incorrect, it must be §c§nlowercase English characters, underscores or numbers
 message.yes_steve_model.model.reload.info=§6§l[§aYSM§6§l] §eAll models have been reloaded, use time: %sms
+message.yes_steve_model.model.reload.ready=§6§l[§aYSM§6§l] §eServer model cache ready (built in %s ms).
 message.yes_steve_model.model.set.success=§6§l[§aYSM§6§l] §rSet '%s' models for player '%s'
 message.yes_steve_model.model.animation_roulette.play=§6§l[§aYSM§6§l] §rPlay '%s' animation
 message.yes_steve_model.model.debug_animation.true=§6§l[§aYSM§6§l] §rAnimation debug enable
@@ -417,8 +418,13 @@ message.yes_steve_model.debug.toggle_hint=§7Toggle with %s§7 in-game.
 message.yes_steve_model.debug.ysmclient.usage=Usage: /ysmclient <load|reset>
 message.yes_steve_model.debug.ysmclient.unknown=Unknown subcommand: %s. Use: load | reset
 commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §rLoading local models...
-commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §rLocal models: §e%d§r registered, §e%d§r skipped (already present), §e%d§r failed
+commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §rLocal models: §e%s§r registered, §e%s§r skipped (already present), §e%s§r failed
 commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §rNo local models found.
+# Model sync completion report, gated by Config.SHOW_MODEL_LOAD_CHAT (row 46). The reference branch's strings use
+# %d; 1.7.10's ChatComponentTranslation only accepts %s (ChatComponentTranslation.java:121-124 throws on anything
+# else), so the numbers arrive pre-formatted and these strings use %s.
+message.yes_steve_model.sync.complete=§6§l[§aYSM§6§l] §aClient sync complete in %s ms
+message.yes_steve_model.sync.complete_models=§6§l[§aYSM§6§l] §aModel load finished: §e%s§a loaded, §e%s§a failed (total §e%s§a)
 
 # /ysm debug + /ysm reset - the server-side halves that forward to the issuing player's client
 # (YsmCommand.processDebug / processReset). Readable from the server console, so they stay plain text.
@@ -501,3 +507,16 @@ message.yes_steve_model.buffer.direct=§6§l[§aYSM§6§l]§r §eDirect Buffer§
 message.yes_steve_model.buffer.mapped=§6§l[§aYSM§6§l]§r §eMapped Buffer§r: §b%s MB§r
 message.yes_steve_model.buffer.heap=§6§l[§aYSM§6§l]§r §eHeap§r: §b%s MB§r / §b%s MB§r
 message.yes_steve_model.buffer.error=§6§l[§aYSM§6§l]§r §cError reading buffer info: %s
+
+# HUD paper-doll render (ExtraPlayerConfigScreen + the selfie pass in ClientEventHandler). The reference branch's
+# four follow-mode labels and the FBO-cache pair, copied verbatim; `[M]` / `[C]` are the reference's own
+# key/mouse hints.
+gui.yes_steve_model.hud_follow.vanilla=HUD Follow: Vanilla [M]
+gui.yes_steve_model.hud_follow.smooth=HUD Follow: Vanilla Smooth [M]
+gui.yes_steve_model.hud_follow.ysm=HUD Follow: YSM [M]
+gui.yes_steve_model.hud_follow.ysm_smooth=HUD Follow: YSM Smooth [M]
+gui.yes_steve_model.hud_cache.on=HUD FBO Cache: ON [C]
+gui.yes_steve_model.hud_cache.off=HUD FBO Cache: OFF [C]
+# SHOW_LOADING_PROGRESS overlay (row 45). `sync_model` is followed by the model name when the port knows one.
+gui.yes_steve_model.sync_model=Loading: 
+gui.yes_steve_model.sync_waiting=Waiting for server...

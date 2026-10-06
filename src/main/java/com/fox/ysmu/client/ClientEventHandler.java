@@ -8,6 +8,7 @@ import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.AbstractClientPlayer;
 import net.minecraft.client.entity.EntityClientPlayerMP;
+import net.minecraft.client.gui.Gui;
 import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.client.settings.KeyBinding;
@@ -15,6 +16,7 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.event.ClickEvent;
 import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
+import net.minecraft.util.StatCollector;
 import net.minecraftforge.client.event.*;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 
@@ -25,6 +27,7 @@ import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
+import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
@@ -294,6 +297,17 @@ public class ClientEventHandler {
         }
     }
 
+    /**
+     * Makes the preview draw use the entity's <i>current</i> rotation fields instead of interpolating them, so this
+     * pass and the world's pass agree about the frame (the engine's per-frame de-duplication keys on that).
+     * <p>
+     * <b>{@code RenderUtil}'s HUD follow modes depend on this.</b> Their whole point is that the outer rotation the
+     * doll is drawn under cancels the renderer's inner {@code 180 - renderYawOffset}
+     * ({@code GeoReplacedEntityRenderer#applyRotations}), and that cancellation only holds exactly while the
+     * renderer's interpolated body yaw IS the current {@code renderYawOffset} - which is what this sync makes true.
+     * The mode math reads the current fields for the same reason; see {@code RenderUtil#renderPlayerEntity}. Removing
+     * this sync without changing that math would put the 20 Hz sawtooth back into modes 1 and 3.
+     */
     private static void syncPreviousRotationsToPreview(EntityPlayer player) {
         player.prevRenderYawOffset = player.renderYawOffset;
         player.prevRotationYaw = player.rotationYaw;
@@ -335,20 +349,106 @@ public class ClientEventHandler {
     }
 
     /**
-     * The Molang debug overlay's render hook, on the reference branch's shape
+     * The Post/{@code ALL} overlay pass: the Molang debug overlay first, then the model-sync progress bar.
+     * <p>
+     * The debug overlay is on the reference branch's shape
      * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/ClientEventHandler.java:299-308}: a
      * {@code RenderGameOverlayEvent.Post} subscriber on {@code ElementType.ALL}, i.e. after every other overlay so the
-     * table sits on top).
+     * table sits on top), and the sync bar is the second half of that same reference handler ({@code :310-354}). Both
+     * live in one subscriber rather than two, because Forge gives two subscribers of one event no order at all: the
+     * reference draws the debug overlay and returns, so the bar can never cover it. Renamed from
+     * {@code onRenderDebugOverlay} to the reference's own name - which is also the name
+     * {@code client/gui/debug/DebugOverlay.java:246} already cited for its caller.
      * <p>
      * This tree had no {@code Post} subscriber at all - its HUD selfie preview runs on {@code Pre}/{@code HOTBAR}
      * ({@link #onRenderScreen} above), which this method deliberately does not touch. The overlay is only active while
      * {@code Config.DEBUG_MOLANG_OVERLAY} is on, because {@code DebugOverlay.toggle()} refuses to open otherwise.
      */
     @SubscribeEvent
-    public static void onRenderDebugOverlay(RenderGameOverlayEvent.Post event) {
+    public static void onRenderOverlay(RenderGameOverlayEvent.Post event) {
         if (event.type != RenderGameOverlayEvent.ElementType.ALL) return;
-        if (!com.fox.ysmu.client.gui.debug.DebugOverlay.isActive()) return;
-        com.fox.ysmu.client.gui.debug.DebugOverlay.render(event.resolution);
+        if (com.fox.ysmu.client.gui.debug.DebugOverlay.isActive()) {
+            com.fox.ysmu.client.gui.debug.DebugOverlay.render(event.resolution);
+            return;
+        }
+        renderSyncProgress(event);
+    }
+
+    /**
+     * Row 45 {@code Config.SHOW_LOADING_PROGRESS}: the model-sync progress bar, ported from the reference
+     * ({@code client/ClientEventHandler.java:310-354}).
+     * <p>
+     * <b>Where the numbers come from.</b> The reference reads four {@code public static volatile} fields it keeps on
+     * {@code ClientModelManager} ({@code SYNC_IN_PROGRESS} / {@code SYNC_TOTAL} / {@code SYNC_LOADED} /
+     * {@code SYNC_CURRENT_MODEL}, reference {@code client/ClientModelManager.java:85-93}). This port's counters are
+     * already {@code OpenYsmModelSyncClient}'s own ({@code syncStep} / {@code syncTotalModels} /
+     * {@code loadedModelsCount}), so the bar reads those through the read-only outlets added there
+     * ({@code isSyncInProgress} / {@code syncTotal} / {@code syncLoaded}) rather than a second copy of the same state.
+     * <p>
+     * <b>Two recorded divergences, both forced by state this port does not keep:</b>
+     * <ol>
+     *   <li>The reference's first line is its label plus the <i>name</i> of the model being loaded. This port has no
+     *       such field and adding tracking for it was ruled out, so the label is drawn on its own and the name is
+     *       simply missing; the counter line below is the reference's own.</li>
+     *   <li>Only the OpenYSM round is reported. That is where the counters live, and the legacy md5-list channel
+     *       ({@code ClientModelManager.sendSyncModelMessage}) keeps no counters at all, so with
+     *       {@code Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL} off the bar never appears. Deriving progress for the legacy
+     *       channel would mean inventing a second mechanism; the reference's own bar is driven by the one channel it
+     *       has.</li>
+     * </ol>
+     * <p>
+     * The overlay does not throw for a missing client: the reference's own guards ({@code mc.theWorld == null ||
+     * mc.fontRenderer == null}) are kept. It does not add the reference's {@code suppressHandlerError} wrapper,
+     * because this tree has no such helper and its other render subscribers ({@link #onRenderScreen},
+     * {@link #onRenderHand}) are unguarded too - introducing it here alone would be a new cross-cutting mechanism
+     * rather than part of this port.
+     */
+    private static void renderSyncProgress(RenderGameOverlayEvent.Post event) {
+        if (!Config.SHOW_LOADING_PROGRESS) return;
+        if (!OpenYsmModelSyncClient.isSyncInProgress()) return;
+
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null || mc.theWorld == null || mc.fontRenderer == null) return;
+
+        int total = OpenYsmModelSyncClient.syncTotal();
+        int loaded = OpenYsmModelSyncClient.syncLoaded();
+
+        int screenWidth = event.resolution.getScaledWidth();
+        int screenHeight = event.resolution.getScaledHeight();
+
+        // Reference :323-330 draws `label + currentModel` here; this port has no current-model state, so the label
+        // stands alone (see the divergence list above).
+        String label = StatCollector.translateToLocal("gui.yes_steve_model.sync_model");
+        int labelX = (screenWidth - mc.fontRenderer.getStringWidth(label)) / 2;
+        mc.fontRenderer.drawStringWithShadow(label, labelX, screenHeight - 60, 0xFFFFFF);
+
+        // Progress bar (determinate when the index has declared a total, indeterminate before that)
+        int barWidth = 150;
+        int barHeight = 8;
+        int barX = (screenWidth - barWidth) / 2;
+        int barY = screenHeight - 40;
+
+        Gui.drawRect(barX, barY, barX + barWidth, barY + barHeight, 0xAA222222);
+        String text;
+        if (total > 0) {
+            int fillWidth = loaded >= total ? barWidth : (int) (barWidth * ((float) loaded / total));
+            Gui.drawRect(barX, barY, barX + fillWidth, barY + barHeight, 0xFF44AA44);
+            text = loaded + " / " + total;
+        } else {
+            // Indeterminate: pulsing highlight (first quarter)
+            int pulse = (int) ((System.currentTimeMillis() % 2000L) / 2000.0f * barWidth);
+            Gui.drawRect(
+                barX + pulse,
+                barY,
+                Math.min(barX + pulse + barWidth / 4, barX + barWidth),
+                barY + barHeight,
+                0xFF44AA44);
+            text = StatCollector.translateToLocal("gui.yes_steve_model.sync_waiting");
+        }
+
+        int textX = (screenWidth - mc.fontRenderer.getStringWidth(text)) / 2;
+        int textY = barY - mc.fontRenderer.FONT_HEIGHT - 2;
+        mc.fontRenderer.drawStringWithShadow(text, textX, textY, 0xFFFFFF);
     }
 
     @SubscribeEvent

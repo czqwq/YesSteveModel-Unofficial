@@ -7,14 +7,17 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.gui.ModelConfigRegistry;
 import com.fox.ysmu.client.gui.ModelPreviewRegistry;
@@ -73,6 +76,14 @@ public final class OpenYsmModelSyncClient {
     private static volatile int loadedModelsCount;
     private static volatile int downloadedModelsCount;
     private static volatile int cacheHitCount;
+    /**
+     * 行 46 SHOW_MODEL_LOAD_CHAT：本轮同步的聊天统计。{@code syncStartMs} 在 packet03 索引到达时打点，
+     * {@code syncTotalModels} 是本轮索引条目数（packet03 的 serverModelCount）。参考分支把这两个值放在
+     * {@code ClientModelManager}（{@code SYNC_TOTAL} / 会话级 {@code syncStartTimeMs}）；它们只被这条聊天消息
+     * 读，所以本仓按最小改动留在本类，不动 ClientModelManager。
+     */
+    private static volatile long syncStartMs;
+    private static volatile int syncTotalModels;
     /** N-11: session of the round in progress, learned from the server payload. */
     private static volatile int currentSessionId;
     /** N-11: session that already ended, used to drop payloads that arrive after the round finished. */
@@ -99,6 +110,8 @@ public final class OpenYsmModelSyncClient {
         loadedModelsCount = 0;
         downloadedModelsCount = 0;
         cacheHitCount = 0;
+        syncStartMs = 0L;
+        syncTotalModels = 0;
         currentSessionId = 0;
         key1 = null;
         lastKey = null;
@@ -116,6 +129,54 @@ public final class OpenYsmModelSyncClient {
     public static synchronized void clearConnectionState() {
         resetConnectionState();
         clientKey = null;
+    }
+
+    /**
+     * 行 45 {@code SHOW_LOADING_PROGRESS}: the read-only view the HUD progress overlay draws
+     * ({@code com.fox.ysmu.client.ClientEventHandler#renderSyncProgress}).
+     * <p>
+     * The reference keeps this state on {@code ClientModelManager} ({@code SYNC_IN_PROGRESS} / {@code SYNC_TOTAL} /
+     * {@code SYNC_LOADED} / {@code SYNC_CURRENT_MODEL}, reference {@code client/ClientModelManager.java:85-93},
+     * written from reference {@code client/sync/OpenYsmModelSyncClient.java:236-239}), but this port's counters
+     * already live in this class ({@code syncStep} / {@code syncTotalModels} / {@code loadedModelsCount}, above).
+     * Copying the reference's declaration site would produce a second copy of the same state, so only these
+     * read-only outlets were added and the sync logic itself is untouched.
+     * <p>
+     * "A round is in flight" is {@code syncStep >= 2}: {@code syncStep} starts at 1, becomes 2 in
+     * {@code handlePacket01}, becomes 3 in {@code sendPacket04}, and {@code sendComplete} ->
+     * {@code resetConnectionState} puts it back to 1 - so 1 is idle (including just-finished) and 2/3 are a round in
+     * flight. It is <b>not</b> a percentage; the overlay uses it only as the gate, exactly as the reference uses
+     * {@code SYNC_IN_PROGRESS}.
+     */
+    public static boolean isSyncInProgress() {
+        return syncStep >= 2;
+    }
+
+    /**
+     * 行 45: the model count this round's index declared ({@code handlePacket03}'s {@code serverModelCount}), or 0
+     * while it is still unknown - the state the reference spells {@code SYNC_TOTAL = -1} and the overlay draws as an
+     * indeterminate bar. It is the total, not the remaining count: {@code pendingModelsCount} only covers the cache
+     * misses still downloading, while the cache hits were already registered inside {@code handlePacket03}.
+     */
+    public static int syncTotal() {
+        return syncTotalModels;
+    }
+
+    /**
+     * 行 45: models registered by this round so far (cache hits in {@code handlePacket03} plus downloads completed
+     * in {@code handlePacket05}), i.e. the same counter {@code sendComplete} reports as {@code loaded}.
+     * <p>
+     * A model the client cannot bridge ({@code parseAndRegisterModel} answers false) is not counted, so the bar can
+     * disappear below 100% - the reference's {@code SYNC_LOADED} has the same property, and the completion message
+     * is where the failure count is reported (row 46).
+     * <p>
+     * <b>What is deliberately absent:</b> the reference's fourth item, the name of the model being loaded
+     * ({@code SYNC_CURRENT_MODEL}). This port has no such field - {@code handlePacket03}/{@code handlePacket05} only
+     * put {@code context.modelId} in log lines - and the owner's ruling was to <b>not</b> add tracking for it, so the
+     * overlay degrades to the counter without a name (see {@code ClientEventHandler#renderSyncProgress}).
+     */
+    public static int syncLoaded() {
+        return loadedModelsCount;
     }
 
     private static synchronized void processServerData(int sessionId, byte[] packetBytes) {
@@ -218,6 +279,9 @@ public final class OpenYsmModelSyncClient {
             throw new IllegalStateException("Invalid OpenYSM model index size: " + serverModelCount);
         }
         ysmu.LOG.info("OpenYSM client received sync index: models={}", serverModelCount);
+        // 行 46：完成时聊天统计的两个输入（参考分支 :236 / :245 在同一步骤打点）。
+        syncTotalModels = serverModelCount;
+        syncStartMs = System.currentTimeMillis();
 
         for (int i = 0; i < serverModelCount; i++) {
             long hash1 = buf.readVarLong();
@@ -703,6 +767,40 @@ public final class OpenYsmModelSyncClient {
                 downloadedModelsCount,
                 cacheHitCount,
                 finishedSession);
+            // 行 46 SHOW_MODEL_LOAD_CHAT（参考分支 client/sync/OpenYsmModelSyncClient.java:539-559）：完成时在
+            // 聊天栏报告本次加载的模型数量与耗时；开关关闭时只在确实有模型没加载出来时才报告。
+            // 两处与参考分支不同，都由本仓结构决定：
+            // 1) 成功数用本类已有的 loadedModelsCount，而不是参考分支的 ClientModelManager.MODELS.size()——
+            //    参考分支发完成信号前会等 apply 管线排空（isApplyPipelineDrained），本仓在 pendingModelsCount
+            //    归零时立刻发，此刻 func_152344_a 里的 registerAll 可能还没跑，MODELS.size() 会少报；
+            // 2) 总数用 packet03 的 serverModelCount（本仓协议头部没有参考分支的 progressTotal 字段），因此
+            //    failed = total - loaded 在完成时刻恰好是解析失败 / 无法桥接 / 服务端跳过的模型数。
+            long elapsed = syncStartMs == 0L ? 0L : System.currentTimeMillis() - syncStartMs;
+            int total = syncTotalModels;
+            int loaded = loadedModelsCount;
+            int failed = Math.max(0, total - loaded);
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc != null && mc.thePlayer != null) {
+                // 1.7.10 的 ChatComponentTranslation 只认 %s（ChatComponentTranslation.java:121-124 对其它的
+                // 格式串直接抛 ChatComponentTranslationFormatException），所以耗时先格式化成字符串，语言串用 %s
+                // 而不是参考分支的 %d——本仓既有做法见 YsmCommand.java:697-701。
+                if (Config.SHOW_MODEL_LOAD_CHAT) {
+                    mc.thePlayer.addChatMessage(new ChatComponentTranslation(
+                        "message.yes_steve_model.sync.complete",
+                        String.format(Locale.ROOT, "%.2f", (double) elapsed)));
+                    mc.thePlayer.addChatMessage(new ChatComponentTranslation(
+                        "message.yes_steve_model.sync.complete_models",
+                        String.valueOf(loaded),
+                        String.valueOf(failed),
+                        String.valueOf(total)));
+                } else if (failed > 0) {
+                    mc.thePlayer.addChatMessage(new ChatComponentTranslation(
+                        "message.yes_steve_model.sync.complete_models",
+                        String.valueOf(loaded),
+                        String.valueOf(failed),
+                        String.valueOf(total)));
+                }
+            }
         }
         // Any payload of this session that is still in flight is stale from now on.
         lastCompletedSessionId = finishedSession;

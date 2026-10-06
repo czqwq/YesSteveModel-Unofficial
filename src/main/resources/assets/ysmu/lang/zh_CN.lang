@@ -277,6 +277,7 @@ message.yes_steve_model.model.reload.error.no_arm_file=§6§l【§aYSM§6§l】�
 message.yes_steve_model.model.reload.error.no_texture_file=§6§l【§aYSM§6§l】§r'%s'§b 文件夹缺失材质文件！
 message.yes_steve_model.model.reload.error.texture_name=§6§l【§aYSM§6§l】§r'%s'§b 材质名称不正确，必须是§c§n小写英文字符，数字或者下划线
 message.yes_steve_model.model.reload.info=§6§l【§aYSM§6§l】§e所有的模型已经重置，耗时：%sms
+message.yes_steve_model.model.reload.ready=§6§l[§aYSM§6§l] §e服务端模型缓存已就绪(构建耗时 %s ms).
 message.yes_steve_model.model.set.success=§6§l[§aYSM§6§l] §r已将玩家 '%2$s' 的模型设置为 '%1$s'
 message.yes_steve_model.model.animation_roulette.play=§6§l【§aYSM§6§l】§r播放“%s”动画
 message.yes_steve_model.model.debug_animation.true=§6§l[§aYSM§6§l] §r动画调试模式启用
@@ -417,8 +418,13 @@ message.yes_steve_model.debug.toggle_hint=§7游戏内按 %s§7 切换.
 message.yes_steve_model.debug.ysmclient.usage=用法: /ysmclient <load|reset>
 message.yes_steve_model.debug.ysmclient.unknown=未知子命令: %s. 可用: load | reset
 commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §r正在加载本地模型...
-commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §r本地模型: 新增 §e%d§r 个, 跳过 §e%d§r 个(已存在) , 失败 §e%d§r 个
+commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §r本地模型: 新增 §e%s§r 个, 跳过 §e%s§r 个(已存在) , 失败 §e%s§r 个
 commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §r未找到本地模型.
+# 模型同步完成报告, 由 Config.SHOW_MODEL_LOAD_CHAT 门控(row 46). 参考分支的原文用 %d; 1.7.10 的
+# ChatComponentTranslation 只认 %s(ChatComponentTranslation.java:121-124 对其它的格式串直接抛异常),
+# 所以数字先格式化好再传, 这里用 %s.
+message.yes_steve_model.sync.complete=§6§l[§aYSM§6§l] §a客户端同步完成, 耗时 %s ms
+message.yes_steve_model.sync.complete_models=§6§l[§aYSM§6§l] §a模型加载完成: 成功 §e%s§a 个, 失败 §e%s§a 个(共 §e%s§a)
 
 # /ysm debug + /ysm reset - 服务端侧只做权限校验与转发, 执行在发起者自己的客户端 (YsmCommand.processDebug / processReset).
 # 服务端控制台也会读到这些文本, 所以保持纯文本、不使用 § 颜色码; 标点按仓库约定用 ASCII + 一个空格.
@@ -499,3 +505,15 @@ message.yes_steve_model.buffer.direct=§6§l[§aYSM§6§l]§r §e直接缓冲§r
 message.yes_steve_model.buffer.mapped=§6§l[§aYSM§6§l]§r §e映射缓冲§r: §b%s MB§r
 message.yes_steve_model.buffer.heap=§6§l[§aYSM§6§l]§r §e堆内存§r: §b%s MB§r / §b%s MB§r
 message.yes_steve_model.buffer.error=§6§l[§aYSM§6§l]§r §c读取缓冲信息失败: %s
+
+# HUD 纸娃娃渲染(ExtraPlayerConfigScreen + ClientEventHandler 的自拍通道). 参考分支的四条跟随模式与
+# FBO 缓存两条, 逐字照抄; `[M]` / `[C]` 是参考分支自己的按键提示. zh 按仓库约定用 ASCII 冒号.
+gui.yes_steve_model.hud_follow.vanilla=HUD 跟随模式: 原版 [M]
+gui.yes_steve_model.hud_follow.smooth=HUD 跟随模式: 原版 平滑 [M]
+gui.yes_steve_model.hud_follow.ysm=HUD 跟随模式: ysm [M]
+gui.yes_steve_model.hud_follow.ysm_smooth=HUD 跟随模式: ysm 平滑 [M]
+gui.yes_steve_model.hud_cache.on=HUD FBO 缓存: 开 [C]
+gui.yes_steve_model.hud_cache.off=HUD FBO 缓存: 关 [C]
+# SHOW_LOADING_PROGRESS 叠加层(row 45). 本仓知道模型名时 sync_model 后面会接模型名.
+gui.yes_steve_model.sync_model=加载中:
+gui.yes_steve_model.sync_waiting=等待服务器中...

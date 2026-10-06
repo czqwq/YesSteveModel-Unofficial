@@ -50,6 +50,18 @@ public class CommonEventHandler {
         if (event.player != null) {
             requestModelSync(event.player);
             syncNpcModels(event.player);
+            // SHOW_MODEL_LOAD_CHAT（行 46）的服务端半边：登录时报告服务端模型缓存的构建耗时。
+            // 参考分支 event/CommonEventHandler.java:36-44 读 ServerModelManager.LAST_LOAD_TIME_MS，
+            // 同一个接缝。与 /ysm reload 那条消息不同：这条只有耗时，没有跳过计数（参考的注释也是这么说的）。
+            // 两处按本仓/1.7.10 改写：语言串只能用 %s（ChatComponentTranslation.java:121-124 对其它的格式串
+            // 直接抛 ChatComponentTranslationFormatException），所以耗时先格式化再传；开关默认关闭，
+            // 所以默认不会每个玩家登录都刷一条。
+            long loadTimeMs = ServerModelManager.LAST_LOAD_TIME_MS;
+            if (loadTimeMs > 0 && com.fox.ysmu.Config.SHOW_MODEL_LOAD_CHAT) {
+                event.player.addChatMessage(new net.minecraft.util.ChatComponentTranslation(
+                    "message.yes_steve_model.model.reload.ready",
+                    String.format(java.util.Locale.ROOT, "%.2f", (double) loadTimeMs)));
+            }
         }
     }
 

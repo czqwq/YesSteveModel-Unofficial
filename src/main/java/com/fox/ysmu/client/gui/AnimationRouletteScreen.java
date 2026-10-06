@@ -1,12 +1,17 @@
 package com.fox.ysmu.client.gui;
 
+import java.util.List;
+import java.util.Map;
+
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.input.ExtraAnimationKey;
 import com.fox.ysmu.Config;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.util.ModelIdUtil;
+import com.fox.ysmu.ysmu;
 import net.minecraft.client.audio.PositionedSoundRecord;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.Tessellator;
@@ -46,6 +51,9 @@ public class AnimationRouletteScreen extends GuiScreen {
                 ClientModelManager.ensureGeometry(modelId);
                 this.modelId = modelId;
                 resolveNames();
+                if (Config.DEBUG_WHEEL) {
+                    dumpWheelData(modelId);
+                }
             }
         }
     }
@@ -67,6 +75,69 @@ public class AnimationRouletteScreen extends GuiScreen {
         if (resolved != null) {
             this.names = resolved;
         }
+    }
+
+    /**
+     * 行 47 DEBUG_WHEEL：转储本仓轮盘真正持有的数据（参考分支 client/gui/AnimationRouletteScreen.java:75-110）。
+     * <p>
+     * 参考分支转储的是它的 {@code ExtraWheelData}（entries / classifies / configButtons 三张表）；本仓轮盘没有
+     * 这张表，扇区标签就是 {@link ClientModelManager#EXTRA_ANIMATION_NAME} 的扁平数组（本类 {@link #names}，
+     * 按 {@link ModelIdUtil#getMainId} 取，见 {@link #resolveNames}），动画分类与设置按钮由
+     * {@link ModelConfigRegistry} 保存、由设置界面消费（按模型 id 取，与 {@code PlayerModelScreen:174} 一致）。
+     * 所以这里分三段转储本仓真实存在的三份数据，前缀与参考分支一致（{@code [YSMU-WHEEL]}），页号按参考分支的
+     * {@code idx / ITEMS_PER_PAGE}（本类 {@link #KEY_COUNT}）计算。
+     * <p>
+     * 只在 {@link #initGui} 里调用一次：标签表是模型发布时才写入的（{@link #resolveNames} 的异步间隙），所以
+     * 这次转储可能显示 0 个扇区而按钮/分类已在；参考分支没有这个间隙（标签随清单在模型绘制之前就存在）。
+     */
+    private void dumpWheelData(ResourceLocation modelId) {
+        String[] labels = this.names;
+        int entries = 0;
+        if (labels != null) {
+            for (String label : labels) {
+                if (StringUtils.isNotBlank(label)) {
+                    entries++;
+                }
+            }
+        }
+        ysmu.LOG.info("[YSMU-WHEEL] === Wheel Data for {} ===", modelId);
+        ysmu.LOG.info("[YSMU-WHEEL] Total entries: {} ({} pages)", entries, (entries + KEY_COUNT - 1) / KEY_COUNT);
+        if (labels != null) {
+            for (int i = 0; i < labels.length; i++) {
+                if (StringUtils.isNotBlank(labels[i])) {
+                    ysmu.LOG
+                        .info("[YSMU-WHEEL]   page={} [ANIM] key='extra{}' label='{}'", i / KEY_COUNT, i, labels[i]);
+                }
+            }
+        }
+
+        List<RawYsmModel.ExtraAnimationClassify> classifies = ModelConfigRegistry.classifiesFor(modelId);
+        if (!classifies.isEmpty()) {
+            ysmu.LOG.info("[YSMU-WHEEL] === Sub-pages ({} total) ===", classifies.size());
+            for (RawYsmModel.ExtraAnimationClassify classify : classifies) {
+                ysmu.LOG.info("[YSMU-WHEEL]   Classify '{}': {} entries", classify.id, classify.extras.size());
+                for (Map.Entry<String, String> entry : classify.extras.entrySet()) {
+                    ysmu.LOG.info("[YSMU-WHEEL]     key='{}' label='{}'", entry.getKey(), entry.getValue());
+                }
+            }
+        }
+
+        List<RawYsmModel.ExtraAnimationButton> buttons = ModelConfigRegistry.buttonsFor(modelId);
+        if (!buttons.isEmpty()) {
+            ysmu.LOG.info("[YSMU-WHEEL] === Config Buttons ({} total) ===", buttons.size());
+            for (RawYsmModel.ExtraAnimationButton button : buttons) {
+                ysmu.LOG.info("[YSMU-WHEEL]   btn id='{}' name='{}' desc='{}' forms={}", button.id, button.name,
+                    button.description, button.forms.size());
+                for (int i = 0; i < button.forms.size(); i++) {
+                    RawYsmModel.ConfigForm form = button.forms.get(i);
+                    ysmu.LOG.info(
+                        "[YSMU-WHEEL]     form[{}] type='{}' title='{}' desc='{}' default='{}' min={} max={} step={} labels={}",
+                        i, form.type, form.title, form.description, form.defaultValue, form.min, form.max, form.step,
+                        form.labels);
+                }
+            }
+        }
+        ysmu.LOG.info("[YSMU-WHEEL] === End Wheel Dump ===");
     }
 
     private void buildKeyTexts() {

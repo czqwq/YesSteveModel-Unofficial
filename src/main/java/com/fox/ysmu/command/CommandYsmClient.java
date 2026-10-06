@@ -102,8 +102,15 @@ public class CommandYsmClient extends CommandBase {
                     mc.thePlayer.addChatMessage(
                         new ChatComponentTranslation("commands.yes_steve_model.loadlocal.none"));
                 } else {
+                    // 语言串只能是 %s:1.7.10 的 ChatComponentTranslation 对 %d 之类的格式串直接抛
+                    // ChatComponentTranslationFormatException(ChatComponentTranslation.java:121-124),
+                    // 而它是在**渲染聊天栏时**才抛的,所以原来那三个 int 会让这条消息永远显示不出来。
+                    // 参考分支的 1.20 允许 %d,照抄语言串就把 1.20 的规则带进了 1.7.10。
                     mc.thePlayer.addChatMessage(new ChatComponentTranslation(
-                        "commands.yes_steve_model.loadlocal.complete", registered, skipped, failed));
+                        "commands.yes_steve_model.loadlocal.complete",
+                        String.valueOf(registered),
+                        String.valueOf(skipped),
+                        String.valueOf(failed)));
                 }
             });
         });
