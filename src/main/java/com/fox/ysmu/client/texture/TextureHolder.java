@@ -11,8 +11,10 @@ import net.minecraft.util.ResourceLocation;
  * it, so dropping the holder is what eventually releases the texture.
  *
  * <p>Upstream's interface has one method, {@code id()}, because in 1.20 the synthetic id it returns is the id the
- * caller must bind. In this port the id is the model's own texture id - the one every render site already binds and
- * the one the registration was made under - so {@code id()} answers that same id; see
+ * caller must bind. In this port a model texture's id is the model's own texture id - the one every render site
+ * already binds and the one the registration was published under, because it is supplied by the caller
+ * ({@code CustomTextureManager.register(texture, id)}) - so {@code id()} answers that same id. A registration that
+ * arrives without an id (the upstream-shaped callers) still gets a synthetic one; see
  * {@link CustomTextureManager.Registry#nextId()}.
  */
 public interface TextureHolder {

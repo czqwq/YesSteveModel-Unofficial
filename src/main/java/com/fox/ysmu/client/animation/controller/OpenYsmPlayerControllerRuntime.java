@@ -22,6 +22,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.MovementSpeedMatcher;
 import com.fox.ysmu.client.animation.condition.ConditionArmor;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Controller;
@@ -300,8 +301,31 @@ public final class OpenYsmPlayerControllerRuntime {
         if (state.blendTransitionTicks >= 0f) {
             event.getController().transitionLengthTicks = state.blendTransitionTicks;
         }
+        applyPlaybackSpeed(event, player, geckoControllerName, animationName);
         applyAnimation(event, runtimeState, state, animationName);
         return PlayState.CONTINUE;
+    }
+
+    /**
+     * 播放倍速（stride × anim_speed）：OpenYSM 控制器路径。防滑步仅对主身体控制器
+     * （{@code main_controller} / {@code player.pre_main}）生效，{@code anim_speed} 对所有控制器
+     * 生效。形状照参考分支 {@code OpenYsmPlayerControllerRuntime.java:595-609}。
+     * <p>
+     * 与参考的唯一差异：参考用 {@code existing.get(0)}（它合并后的主动画名），本仓该路径没有
+     * 合并动画这一步，所以直接传本帧真正播放的 {@code animationName}（{@code selectAnimation}
+     * 的结果），语义相同。{@code player==null}（GUI 预览）在本方法入口已被 {@link #tryApply} 挡掉。
+     */
+    private static void applyPlaybackSpeed(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
+        String geckoControllerName, String animationName) {
+        // 总开关先短路：关闭时（默认）这条路径不做任何玩家/动画文件查询。
+        if (!MovementSpeedMatcher.isEnabled() || player == null || StringUtils.isBlank(animationName)) {
+            return;
+        }
+        ResourceLocation animId = event.getAnimatable().getAnimation();
+        AnimationFile file = animId == null ? null : ClientModelManager.animationFileFor(animId);
+        boolean isBody = MAIN_CONTROLLER.equals(geckoControllerName)
+            || com.fox.ysmu.util.ControllerUtils.OPENYSM_PRE_MAIN_CONTROLLER.equals(geckoControllerName);
+        MovementSpeedMatcher.applyPlaybackSpeed(event.getController(), player, animationName, isBody, file);
     }
 
     private static RuntimeState runtimeState(EntityPlayer player, ResourceLocation animationId,

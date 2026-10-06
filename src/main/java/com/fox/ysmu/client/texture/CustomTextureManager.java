@@ -10,6 +10,8 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import javax.annotation.Nullable;
+
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.util.ResourceLocation;
 
@@ -41,8 +43,30 @@ import net.minecraft.util.ResourceLocation;
  *   <tr><td>{@code CleanerUtil.ref(holder, event, cleanupEvents::add)} ({@code :86})</td>
  *       <td>{@link CleanerUtil#ref} - the same {@code java.lang.ref.Cleaner} API, unchanged (see below)</td></tr>
  *   <tr><td>{@code host.register}/{@code host.release} ({@code :73}, {@code :122})</td>
- *       <td>the same two calls; only <em>what</em> they do differs (substitution, below)</td></tr>
+ *       <td>the same two calls, except that this port's {@code release} also carries the texture (see "The
+ *       registration id" below); only <em>what</em> they do differs (substitution, below)</td></tr>
  * </table>
+ *
+ * <h3>The registration id, and why the release carries the texture</h3>
+ * <p>Upstream registers every texture under a <b>fresh synthetic id</b>, {@code ysmu:textures/<counter>}, and its
+ * callers bind {@code holder.id()} (upstream {@code :142-145}; its callers are the GUI tiles and pack covers). A
+ * fresh id per registration is also what makes upstream's {@code release(id)} unambiguous: an id can only ever name
+ * the one registration that created it.
+ *
+ * <p>This port's model textures cannot work that way: every bind site binds the <b>model's own</b> texture id
+ * ({@code CustomPlayerModel.textureFor} -> {@code TextureManager.bindTexture}, e.g.
+ * {@code GeoReplacedEntityRenderer:112}), so that is the id the platform's texture map has to carry, and every
+ * release-side lookup ({@code TextureMapAccess.remove}, {@code MinecraftHost.ownsGlTexture}) is keyed by it. The id
+ * therefore comes from the caller ({@link #register(AbstractTexture, ResourceLocation)},
+ * {@link Registry#register}) and is not allocated here. {@link Registry#nextId()} survives for the callers that have
+ * no id of their own - the shape upstream uses, and the one {@link Registry}'s own test drives.
+ *
+ * <p>Sharing an id across registrations has one consequence upstream does not have to think about: a delayed release
+ * belonging to an <em>older</em> registration of id X can still be pending when a newer registration takes X over.
+ * Upstream's {@code release(id)} would then hit the newer texture, so this port's {@link Host#release} takes the
+ * texture as well and releases only while the platform still holds <em>that</em> object under the id
+ * ({@link MinecraftHost#release}). That restores, by an explicit identity check, the guarantee upstream gets for
+ * free from its per-registration ids.
  *
  * <h3>{@code java.lang.ref.Cleaner} is used as upstream uses it</h3>
  * <p>No substitution here. {@link CleanerUtil} is upstream's class on the same API, and it works because the build is
@@ -73,10 +97,12 @@ import net.minecraft.util.ResourceLocation;
  * replaced the reflection an earlier revision of this port used there.
  *
  * <h3>What this class does <em>not</em> do</h3>
- * <p>No {@code TEXTURE_LAST_USED} table, no {@code unloadIdleTextures}, no idle timestamp, no
- * {@code isUploaded()}/{@code freeGlTexture()}/{@code freeData()} methods on {@code OuterFileTexture}: upstream's one
- * mechanism is used, not the reference branch's second one. Release is driven by the holder becoming unreachable or
- * by an explicit {@link #release}, exactly as upstream drives it.
+ * <p>No idle-time eviction: no {@code TEXTURE_LAST_USED} table, no {@code unloadIdleTextures}, no idle timestamp, no
+ * {@code freeData()}/{@code setData()} on {@code OuterFileTexture} (the heap-byte release and its re-decrypt restore
+ * path, {@code Config.TEXTURE_RELEASE_BYTES_ON_IDLE}). Release is driven by the holder becoming unreachable or by an
+ * explicit {@link #release}, exactly as upstream drives it. The GPU-only half of that reference design - a VRAM
+ * budget that frees a still-registered texture's GPU copy and re-uploads it from the bytes it kept - lives in
+ * {@link ModelTextureRegistry}, on this class's registrations rather than as a second mechanism.
  *
  * @see ModelTextureRegistry the port's wiring: it owns the holders and drops them on the model-unload path
  */
@@ -88,14 +114,33 @@ public final class CustomTextureManager {
 
     private CustomTextureManager() {}
 
+    /**
+     * Registers a texture under the id the caller binds, returning its holder; see {@link Registry#register}.
+     *
+     * <p><b>This is the overload a model texture must use.</b> The port's render sites bind the model's own texture
+     * id - {@code ysmu:<model>/<file>}, resolved by {@code CustomPlayerModel.textureFor} and bound by
+     * {@code TextureManager.bindTexture} ({@code GeoReplacedEntityRenderer:112}, {@code FirstPersonHandRenderer:308},
+     * {@code RenderUtil:486}) - so that is the id the platform's texture map has to carry, which is also the id every
+     * release-side lookup is keyed by ({@code TextureMapAccess.remove}, {@code MinecraftHost.ownsGlTexture}).
+     * {@link ModelTextureRegistry#register} is the caller.
+     */
+    public static TextureHolder register(AbstractTexture texture, ResourceLocation id) {
+        return REGISTRY.register(texture, id, DEFAULT_REMOVAL_DELAY_TICKS);
+    }
+
     /** Registers a texture with the default delay, returning its holder; see {@link Registry#register}. */
     public static TextureHolder register(AbstractTexture texture) {
         return register(texture, DEFAULT_REMOVAL_DELAY_TICKS);
     }
 
-    /** Registers a texture with an explicit delay, returning its holder; see {@link Registry#register}. */
+    /**
+     * Registers a texture with an explicit delay and no caller-supplied id: the registration gets the per-registration
+     * synthetic id upstream gives every texture (see {@link Registry#nextId()}). This is the shape upstream's callers
+     * need - they bind {@code holder.id()} - and this port has no such caller left in production; it is kept because
+     * it is {@link Registry}'s own tested entry point. See {@link Registry#register} for what that means.
+     */
     public static TextureHolder register(AbstractTexture texture, int removingDelayTicks) {
-        return REGISTRY.register(texture, removingDelayTicks);
+        return REGISTRY.register(texture, null, removingDelayTicks);
     }
 
     /**
@@ -136,17 +181,28 @@ public final class CustomTextureManager {
             this.host = host;
         }
 
+        /** Registers with no caller-supplied id: the registration allocates the synthetic one (see {@link #nextId()}). */
+        TextureHolder register(AbstractTexture texture, int removingDelayTicks) {
+            return register(texture, null, removingDelayTicks);
+        }
+
         /**
-         * Ensures {@code texture} is registered with the platform and returns its holder.
+         * Ensures {@code texture} is registered with the platform under {@code id} and returns its holder.
          *
          * <p>Re-registering <b>while the previous holder is still reachable</b> returns that same holder and performs
          * no second platform registration (upstream {@code :57-68}); once the holder is unreachable (or was released
          * explicitly) a fresh activation is handed out and the platform registration is re-issued.
+         *
+         * @param id the id the caller binds and wants the platform to publish the texture under, or {@code null} to
+         *           let this registration allocate its own synthetic id (upstream's shape; see
+         *           {@link #nextId()}). The id is <b>not</b> re-derived later: it is what {@code host.register},
+         *           {@code host.release}, {@code TextureHolder#id()} and every lookup keyed by the registration all
+         *           see, so a model texture is published under the model's own texture id.
          */
-        TextureHolder register(AbstractTexture texture, int removingDelayTicks) {
+        TextureHolder register(AbstractTexture texture, @Nullable ResourceLocation id, int removingDelayTicks) {
             TextureRegistration registration = registrations.get(texture);
             if (registration == null) {
-                registration = new TextureRegistration(new TextureRegistrationState<>(nextId()));
+                registration = new TextureRegistration(new TextureRegistrationState<>(id != null ? id : nextId()));
                 registrations.put(texture, registration);
             } else {
                 TextureHolderImpl current = registration.holder();
@@ -253,7 +309,10 @@ public final class CustomTextureManager {
                 }
                 TextureRegistration registration = registrations.get(removal.texture());
                 if (registration != null && registration.state.shouldRelease(removal.token())) {
-                    host.release(registration.state.id());
+                    // The texture goes along: an id may have been taken over by a newer registration since this
+                    // removal was queued, and only the host can tell whether the platform still holds *this* object
+                    // under it (see Host#release).
+                    host.release(registration.state.id(), removal.texture());
                     // markReleased is idempotent, so a removal queued twice releases once (upstream :123-126).
                     if (registration.state.markReleased(removal.token())) {
                         registrations.remove(removal.texture());
@@ -301,16 +360,20 @@ public final class CustomTextureManager {
         }
 
         /**
-         * The slot's identity, allocated once per registration entry (upstream {@code :142-145}).
+         * The slot's identity for a registration the caller gave no id for: allocated once per registration entry
+         * (upstream {@code :142-145}).
          * <p>
          * Upstream returns {@code new ResourceLocation(MOD_ID, "textures/" + ++counter)} and registers the texture
          * with <em>that</em> id, because in 1.20 an {@code AbstractTexture} is addressed by whatever id the manager
-         * was given. This port keeps the model's own id instead - the id under which
-         * {@code ClientModelManager.registerTexture} already registers it and the id every render site already binds -
-         * so this counter only names the registration entry and is never handed to the platform. Keeping the real id
-         * is also what lets the port's release step find the manager's map entry for the texture it releases; with a
-         * synthetic id it would have to remember the mapping for no benefit. See
-         * {@code .agent/phase34-texture-release.md}.
+         * was given, and its callers bind {@code holder.id()}. This port's model textures instead carry the id the
+         * caller binds - the model's own texture id - and that id reaches the platform through
+         * {@link #register(AbstractTexture, ResourceLocation, int)}. This counter therefore only names the
+         * registrations that arrive without an id, i.e. the upstream-shaped callers.
+         * <p>
+         * It is never handed to the platform for a model texture, and it must not be: {@code TextureManager
+         * .mapTextureObjects} would then hold the texture under an id no render site binds, and
+         * {@code TextureManager.bindTexture} answers a miss with a {@code SimpleTexture} of the requested resource -
+         * the shared missing texture for a model id that has no resource file.
          */
         private ResourceLocation nextId() {
             return new ResourceLocation("ysmu", "textures/" + ++counter);
@@ -320,14 +383,23 @@ public final class CustomTextureManager {
     /**
      * The platform seam (upstream {@code :148-152}): everything 1.7.10-specific is behind these two methods, so the
      * registry itself is testable against a fake platform.
+     *
+     * <p>{@code release} takes the texture as well as the id, which upstream's one-argument form does not need. The
+     * reason is in the class javadoc ("The registration id"): this port's ids are the model's own and are therefore
+     * reused by later registrations, so "release id X" is only well-defined together with the object that is being
+     * released - the host must not release an id that a newer registration now owns.
      */
     interface Host {
 
         /** Publishes {@code texture} under {@code id}, as upstream's {@code TextureManager.register} does. */
         void register(ResourceLocation id, AbstractTexture texture);
 
-        /** Physically releases the texture published under {@code id}, as upstream's {@code TextureManager.release} does. */
-        void release(ResourceLocation id);
+        /**
+         * Physically releases the texture published under {@code id}, as upstream's {@code TextureManager.release}
+         * does - but only while {@code texture} is still the object the platform holds for it. A host that keys its
+         * entries per registration (upstream's synthetic ids) can implement this by ignoring {@code texture}.
+         */
+        void release(ResourceLocation id, AbstractTexture texture);
     }
 
     /**
@@ -342,7 +414,13 @@ public final class CustomTextureManager {
      * only ever sees textures it registered.
      *
      * <p>{@code release} is {@code AbstractTexture.deleteGlTexture} plus the map-entry removal described in the class
-     * javadoc. It is idempotent: a second call sees {@code glTextureId == -1} and only retries the map removal.
+     * javadoc. It is idempotent: the first call removes the map entry, so a second one finds no entry for the id and
+     * does nothing at all.
+     *
+     * <p>Both methods are guarded by the same identity question the id raises: {@code release} first checks that the
+     * id still resolves to the object whose delayed release is due, and does nothing at all when it does not - that
+     * is the case where a newer registration has taken the id over, and its texture, ownership flag and map entry are
+     * not this removal's to touch.
      */
     static final class MinecraftHost implements Host {
 
@@ -357,8 +435,9 @@ public final class CustomTextureManager {
             }
             net.minecraft.client.renderer.texture.TextureManager manager = minecraft.getTextureManager();
             if (ownsGlTexture.contains(id)) {
-                // Re-registering the same id replaces the map entry, so the previous GL texture would leak; upstream
-                // never re-registers the same id because its ids are fresh per registration.
+                // Re-registering an id replaces the map entry, so the previous GL texture would leak. With a
+                // caller-supplied id (a model texture) this is the ordinary re-registration path; upstream's ids are
+                // fresh per registration, so it never sees this branch.
                 manager.deleteTexture(id);
             }
             if (manager.loadTexture(id, texture)) {
@@ -369,16 +448,21 @@ public final class CustomTextureManager {
         }
 
         @Override
-        public void release(ResourceLocation id) {
+        public void release(ResourceLocation id, AbstractTexture texture) {
             net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getMinecraft();
             if (minecraft == null) {
                 return;
             }
             net.minecraft.client.renderer.texture.TextureManager manager = minecraft.getTextureManager();
             net.minecraft.client.renderer.texture.ITextureObject current = manager.getTexture(id);
-            if (current instanceof AbstractTexture && ownsGlTexture.remove(id)) {
+            if (current != texture) {
+                // The id has been taken over (or already released) since this removal was queued: the entry belongs
+                // to another registration, and so does the ownership flag it set. Leave both alone.
+                return;
+            }
+            if (ownsGlTexture.remove(id)) {
                 // The platform's own per-texture release: GL11.glDeleteTextures + glTextureId = -1.
-                ((AbstractTexture) current).deleteGlTexture();
+                texture.deleteGlTexture();
             }
             TextureMapAccess.remove(manager, id);
         }

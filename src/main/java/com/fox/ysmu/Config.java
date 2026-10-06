@@ -177,11 +177,28 @@ public class Config {
      *  128-256 MB; raise it if on-screen demand regularly exceeds the budget. */
     public static int TEXTURE_VRAM_BUDGET_MB = 256;
 
-    /** 30s 空闲卸载 GPU 纹理时，是否一并释放堆内的原始字节。
-     *  释放的字节在下次使用时由 ensureTexturesLoaded → restoreTextureData 从加密客户端
-     *  缓存重解密（与 geo/anim 懒恢复同一条已验证路径）。消除大库纹理字节的线性堆增长；
-     *  代价是闲置模型重新入场时会在渲染线程短暂解密其缓存文件。 */
-    public static boolean TEXTURE_RELEASE_BYTES_ON_IDLE = true;
+    // `TEXTURE_RELEASE_BYTES_ON_IDLE` (the reference branch's heap half of its 30 s idle texture policy) is
+    // deliberately **not** carried, and this note replaces the field so the promise is not left standing while
+    // nothing implements it. Two reasons, both checked:
+    //
+    //  1. The trigger does not exist here. The reference drives it from the last line of its `AssetManager.tick()`
+    //     (reference `client/asset/AssetManager.java:93` -> its `ClientModelManager.unloadIdleTextures`, reference
+    //     `:1845-1896`); this port's `client/asset/AssetManager` deliberately omits that line (`.agent/phase32`
+    //     member 3, `.agent/phase40` member 4) and the whole subsystem is off by default
+    //     (`ENABLE_IDLE_ASSET_EVICTION = false`). Adding a 30 s idle clock inside `client/texture` would be a
+    //     *second* eviction policy that neither upstream nor the reference has.
+    //  2. The restore half does not exist either. Releasing the heap bytes without it is a white model, and the
+    //     reference's restore seam is `ensureTexturesLoaded` -> `restoreTextureData` (reference `:1671-1695`,
+    //     `:1706-1741`) plus `YSM_TEXTURE_OBJECTS` and `MODELS` - `grep` for all three over this tree is 0.
+    //
+    // What *is* ported is the GPU half of the same reference feature, `TEXTURE_VRAM_BUDGET_MB` above: freeing a
+    // model's GPU copy while its registration, platform map entry and heap bytes stay put needs no restore seam
+    // because the next bind re-uploads from the bytes already in memory.
+    //
+    // A future port of the heap half needs `client/ClientModelManager` (the restore seam) and the `AssetManager`
+    // trigger line, and it must come with a default-off switch until it is validated in a client - the heap growth
+    // it removes is real, but so is the white-model failure mode if the restore path is wrong.
+
 
     /** GUI 关闭后的保护宽限期（秒）。在此期间，所有模型资源（几何/动画/纹理）
      *  不会被空闲超时回收。默认 120 秒（2 分钟），覆盖最常见的「关闭预览再打开」场景。
@@ -383,7 +400,8 @@ public class Config {
         ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "ysm_sync", ACCEPT_SOUND_FX, "Whether sync should accept model sound effect resources", load);
         TEXTURE_TARGET_SIZE = syncInt("TextureTargetSize", "ysm_sync", TEXTURE_TARGET_SIZE, "Target texture dimension (px) uploaded to VRAM. 0 = full resolution. Larger textures are downscaled by a power of two (result in [target, 2*target)).", 0, 8192, load);
         TEXTURE_VRAM_BUDGET_MB = syncInt("TextureVramBudget", "ysm_sync", TEXTURE_VRAM_BUDGET_MB, "YSM model texture VRAM budget in MB. 0 = unlimited. When uploaded texture VRAM exceeds this, least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so re-upload is cheap and never white).", 0, 8192, load);
-        TEXTURE_RELEASE_BYTES_ON_IDLE = syncBoolean("TextureReleaseBytesOnIdle", "ysm_sync", TEXTURE_RELEASE_BYTES_ON_IDLE, "Release raw texture bytes from heap when a model's GPU textures idle-unload (30s). Re-decrypted from the encrypted client cache on next use (same path as geo/anim lazy reload). Eliminates the linear heap growth from texture bytes on large libraries; the first re-entry of an idle model briefly decrypts its cache file on the render thread.", load);
+        // `TextureReleaseBytesOnIdle` (the reference branch's name) is deliberately absent: the heap half of its idle
+        // texture policy is not ported. See the note in the "Texture VRAM config" block for what a future port needs.
         GUI_POST_CLOSE_GRACE_SECONDS = syncInt("GuiPostCloseGraceSeconds", "ysm_sync", GUI_POST_CLOSE_GRACE_SECONDS, "Grace period (seconds) after closing the model preview GUI during which idle resource eviction is suppressed. Prevents full re-load when reopening the preview shortly after closing. 0 = disabled.", 0, 600, load);
         // Port-specific switch, default OFF: the reference branch has no such switch and always runs the
         // eviction (reference AssetManager.java:73-94). See Config#ENABLE_IDLE_ASSET_EVICTION.

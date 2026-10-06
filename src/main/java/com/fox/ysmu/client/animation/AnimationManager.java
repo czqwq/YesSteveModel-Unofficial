@@ -108,6 +108,9 @@ public final class AnimationManager {
     @NotNull
     private static <P extends IAnimatable> PlayState playAnimation(AnimationEvent<P> event, String animationName,
         ILoopType loopType) {
+        // 播放倍速（stride × anim_speed）：legacy 控制器共用入口，所有 legacy 控制器都生效；
+        // 防滑步仅 main_controller，预览（player==null）在 applyPlaybackSpeed 内跳过。
+        applyPlaybackSpeed(event, animationName);
         event.getController()
             .setAnimation(new AnimationBuilder().addAnimation(animationName, loopType));
         return PlayState.CONTINUE;
@@ -115,9 +118,41 @@ public final class AnimationManager {
 
     @NotNull
     private static <P extends IAnimatable> PlayState playAnimation(AnimationEvent<P> event, String animationName) {
+        applyPlaybackSpeed(event, animationName);
         event.getController()
             .setAnimation(new AnimationBuilder().addAnimation(animationName));
         return PlayState.CONTINUE;
+    }
+
+    /**
+     * 播放倍速（stride × anim_speed）：legacy 控制器路径。形状照参考分支
+     * {@code AnimationManager.java:599-613}（在公共 {@code playAnimation} 入口调用），
+     * 计算逻辑见 {@link MovementSpeedMatcher#applyPlaybackSpeed}。
+     * <p>
+     * 与参考的一处必要差异：参考直接取
+     * {@code GeckoLibCache.getInstance().getAnimations().get(animId)}，因为它的动画在注册期就装好了；
+     * 本仓的动画是按模型懒安装的（{@code ClientModelManager.animationFileFor} 才安装），
+     * 所以先 {@code ensureAnimations(mainModel)} 再取，否则会拿到内置 default 的文件。
+     */
+    private static void applyPlaybackSpeed(AnimationEvent<?> event, String animationName) {
+        // 总开关先短路：关闭时（默认）这条路径不做任何玩家/动画文件查询。
+        if (!MovementSpeedMatcher.isEnabled()) {
+            return;
+        }
+        if (event == null || event.getController() == null
+            || !(event.getAnimatable() instanceof CustomPlayerEntity)) {
+            return;
+        }
+        CustomPlayerEntity animatable = (CustomPlayerEntity) event.getAnimatable();
+        EntityPlayer player = animatable.getPlayer();
+        if (player == null) {
+            return;
+        }
+        ClientModelManager.ensureAnimations(animatable.getMainModel());
+        ResourceLocation animId = animatable.getAnimation();
+        AnimationFile file = animId == null ? null : ClientModelManager.animationFileFor(animId);
+        MovementSpeedMatcher.applyPlaybackSpeed(event.getController(), player, animationName,
+            com.fox.ysmu.util.ControllerUtils.MAIN_CONTROLLER.equals(event.getController().getName()), file);
     }
 
     public void register(AnimationState state) {

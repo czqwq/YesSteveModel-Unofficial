@@ -30,6 +30,7 @@ import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.client.animation.AnimationManager;
+import com.fox.ysmu.client.animation.MovementSpeedMatcher;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -559,6 +560,7 @@ public class ClientEventHandler {
      * 清 8 项：模型连接态、远端动画查询、远端动作状态、引擎侧远端 MoLang 变量、NPC 覆盖表、
      * 宿主推送的动画剪辑表，以及 {@link AnimationManager#clearPlayerState()} 里的两张 per-player
      * 进度表（{@code swingProgressByPlayer}/{@code useDurationByPlayer}，ExecPlan 的 A-11，由 t33 交付）、
+     * 防滑步的每玩家平滑倍速（{@link MovementSpeedMatcher#clearAll()}）、
      * 客户端音效与音源，最后是进服欢迎消息的一次性标志 {@link #welcomeShown}（见该字段的 javadoc）。
      * 该方法本身幂等（MANAGER 未创建时判空跳过、其余是 ConcurrentHashMap.clear()），
      * 与本方法上面的两个 Remote* 清理重复但互为 no-op。
@@ -574,6 +576,11 @@ public class ClientEventHandler {
         EntityClips.clear();
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
+        // 防滑步的平滑倍速同样按玩家 UUID 保存，是同一类不会自然释放的 per-player 状态：不清的话
+        // 同一个 UUID 再次进来会带着上一段的倍速。参考分支在它的 PlayerLoggedOutEvent 处理里
+        // clearSmoothing（reference ClientEventHandler.java:535），本仓的 PlayerLoggedOutEvent 也走
+        // 这个统一入口（onPlayerLeave），所以按全量清。
+        MovementSpeedMatcher.clearAll();
         // Model sounds as well: the sources are still playing in the SoundSystem and their bytes belong to the
         // server that just went away, so leaving them would keep the previous server's audio going and keep a
         // stale owner table alive across the next join.

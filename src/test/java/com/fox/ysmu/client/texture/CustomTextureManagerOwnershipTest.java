@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -27,9 +29,10 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The fake {@code Host} plays the platform: it uploads on registration (upstream's {@code TracingHost} calls
  * {@code texture.load(null)} at {@code :98}; 1.7.10's equivalent is
- * {@code AbstractTexture.loadTexture(IResourceManager)}, hence the null resource manager), it counts registrations and
- * releases, and it releases the texture the way 1.7.10's {@code MinecraftHost.release} does, through
- * {@code AbstractTexture.deleteGlTexture()}.
+ * {@code AbstractTexture.loadTexture(IResourceManager)}, hence the null resource manager), it records the id each
+ * registration is published under, it counts releases, and it releases the texture the way 1.7.10's
+ * {@code MinecraftHost.release} does, through {@code AbstractTexture.deleteGlTexture()} - only while that id still
+ * resolves to the object being released, which is the identity half of this port's platform contract.
  *
  * <p>Nothing here needs a client: {@link CustomTextureManager.Registry} holds no Minecraft reference - only the
  * production {@code MinecraftHost} does - and {@link TextureHolder} is a plain interface.
@@ -166,16 +169,87 @@ class CustomTextureManagerOwnershipTest {
         assertEquals(0, registry.size(), "a fully released registration is forgotten");
     }
 
+    /**
+     * The caller's id is the id the platform publishes the texture under.
+     *
+     * <p>This is the property commit 80ba10b lost: {@code ModelTextureRegistry.register(id, texture)} called the
+     * one-argument {@code CustomTextureManager.register(texture)}, so the registration allocated a synthetic
+     * {@code ysmu:textures/<n>} id and the platform map got that instead of the model's texture id - while every
+     * render site binds the model's own id through {@code TextureManager.bindTexture}, which answers a miss with a
+     * {@code SimpleTexture} of a resource that does not exist, i.e. the shared missing texture. The port's own
+     * javadoc, {@code TextureRegistrationState}'s class comment and 80ba10b's message all describe the intended
+     * behaviour, so nothing but this assertion would have caught the slip.
+     */
+    @Test
+    void theCallersIdIsTheIdThePlatformPublishes() {
+        TracingHost host = new TracingHost();
+        CustomTextureManager.Registry registry = new CustomTextureManager.Registry(host);
+        TracingTexture texture = new TracingTexture();
+        ResourceLocation modelTextureId = new ResourceLocation("ysmu", "wine_fox/05_magical/magic");
+
+        TextureHolder holder = registry.register(texture, modelTextureId, 0);
+
+        assertEquals(modelTextureId, holder.id(), "the holder answers the id the caller binds, not a synthetic one");
+        assertEquals(
+            java.util.Collections.singletonList(modelTextureId),
+            host.registeredIds,
+            "the platform must publish the texture under the caller's id");
+        assertEquals(1, host.registrations.get());
+
+        // The release half is keyed by the same id, and still finds the object it registered.
+        registry.release(texture);
+        registry.tick();
+        assertEquals(1, host.releases.get());
+        assertEquals(1, texture.closes.get());
+    }
+
+    /**
+     * A delayed release belonging to an older registration cannot take over an id a newer registration now owns.
+     *
+     * <p>Upstream does not need this: its ids are fresh per registration, so "release id X" can only ever name the
+     * registration that created X. This port publishes model textures under the caller's id, which later
+     * registrations reuse (a re-sync replaces the texture object for the same texture id), so the platform seam has to
+     * check the object as well - see {@code CustomTextureManager.Host#release}.
+     */
+    @Test
+    void aStaleReleaseCannotTakeOverAnIdANewerRegistrationOwns() {
+        TracingHost host = new TracingHost();
+        CustomTextureManager.Registry registry = new CustomTextureManager.Registry(host);
+        ResourceLocation modelTextureId = new ResourceLocation("ysmu", "probe/model/tex");
+
+        TracingTexture first = new TracingTexture();
+        registry.register(first, modelTextureId, 0);
+        registry.release(first); // its removal is due on the next tick
+
+        // The model is re-registered under the same id before that removal runs.
+        TracingTexture second = new TracingTexture();
+        registry.register(second, modelTextureId, 0);
+        registry.tick();
+
+        assertEquals(0, host.releases.get(), "the stale removal must not release the newer registration's texture");
+        assertSame(second, host.textures.get(modelTextureId));
+        assertEquals(0, second.closes.get(), "the newer texture must still hold its GL name");
+
+        // The newer registration's own release is unaffected.
+        registry.release(second);
+        registry.tick();
+        assertEquals(1, host.releases.get());
+        assertEquals(1, second.closes.get());
+    }
+
     /** The fake platform: publishes, counts, and physically releases by closing the texture. */
     private static final class TracingHost implements CustomTextureManager.Host {
 
         private final Map<ResourceLocation, AbstractTexture> textures = new HashMap<>();
+        /** Every id the platform was asked to publish, in order - what {@code TextureManager.mapTextureObjects} gets. */
+        private final List<ResourceLocation> registeredIds = new ArrayList<>();
         private final AtomicInteger registrations = new AtomicInteger();
         private final AtomicInteger releases = new AtomicInteger();
 
         @Override
         public void register(ResourceLocation id, AbstractTexture texture) {
             registrations.incrementAndGet();
+            registeredIds.add(id);
             try {
                 texture.loadTexture(null);
             } catch (IOException failure) {
@@ -185,13 +259,16 @@ class CustomTextureManagerOwnershipTest {
         }
 
         @Override
-        public void release(ResourceLocation id) {
-            releases.incrementAndGet();
-            AbstractTexture texture = textures.remove(id);
-            if (texture != null) {
-                // The port's platform half: AbstractTexture.deleteGlTexture(), i.e. the texture frees its own GL name.
-                texture.deleteGlTexture();
+        public void release(ResourceLocation id, AbstractTexture texture) {
+            // The identity half of the port's platform contract: an id a newer registration has taken over is not this
+            // removal's to release, so such a call releases nothing and is not counted.
+            if (textures.get(id) != texture) {
+                return;
             }
+            releases.incrementAndGet();
+            textures.remove(id);
+            // The port's platform half: AbstractTexture.deleteGlTexture(), i.e. the texture frees its own GL name.
+            texture.deleteGlTexture();
         }
     }
 

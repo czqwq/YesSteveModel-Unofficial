@@ -1913,8 +1913,9 @@ public class ClientModelManager {
             String animationName = entry.getKey();
             Animation animation;
             try {
-                animation = JsonAnimationUtils
-                    .deserializeJsonToAnimation(JsonAnimationUtils.getAnimation(jsonObject, animationName), parser);
+                Map.Entry<String, JsonElement> animEntry = JsonAnimationUtils.getAnimation(jsonObject, animationName);
+                animation = JsonAnimationUtils.deserializeJsonToAnimation(animEntry, parser);
+                attachAnimSpeed(animation, animEntry);
                 animationFile.putAnimation(animationName, animation);
             } catch (Exception e) {
                 ysmu.LOG.warn(
@@ -1926,6 +1927,40 @@ public class ClientModelManager {
             }
         }
         return animationFile;
+    }
+
+    /**
+     * YSMU: 把模型动画 JSON 的 {@code anim_speed}（逐动画播放倍率，数字或 MoLang 表达式）挂到引擎
+     * {@link Animation#animSpeed}。这是全仓对该字段的唯一写入点，消费方是
+     * {@code MovementSpeedMatcher.animSpeedFor}。
+     * <p>
+     * 形状照参考分支 {@code ClientModelManager.java:1275-1279}（它的 {@code getAnimationFile}）。
+     * 只补 {@code anim_speed}，不补参考同一处的 {@code anim_time_update}：那是另一个特性，
+     * 不在本任务范围内（本仓 {@code AnimationController} 已实现 anim_time_update 的时钟推进，
+     * 但同样没有写入点）。
+     * <p>
+     * 为什么这一处就够读 legacy 通道：legacy 通道上散件模型的动画 JSON 是<b>原样透传</b>的
+     * （{@code FolderFormat}/{@code YsmFormat} 直接读文件字节；{@code RawYsmModelAdapter.putAnimationFile}
+     * 优先使用 {@code RawAnimationFile.sourceJson}，而 {@code YSMFolderDeserializer} 为每条散件动画
+     * 都填了 sourceJson），所以 JSON 里的 {@code anim_speed} 一直都在，只是此前没人读。
+     * <p>
+     * 二进制通道读不到，这一点与参考分支一致：{@code YSMBinarySerializer.writeAnimationFileContent}
+     * 按结构字段序列化，既不写 {@code sourceJson} 也不写 {@code anim_speed}，
+     * {@code RawYsmModel.RawAnimation} 也没有这个字段，于是客户端只能用
+     * {@code RawYsmModelAdapter.createAnimationJson} 重新生成 JSON —— {@code anim_speed} 在那里就丢了。
+     * 参考分支同样只写客户端读取点与散件解析/回写，没有动它的二进制序列化
+     * （见本仓 {@code Animation.java:36} "二进制 .ysm 暂不支持"）。本仓默认开启 OpenYSM 协议
+     * （{@code Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL = true}），所以带 {@code ysm.json} 的模型走二进制通道时
+     * {@code anim_speed} 不生效；这是与参考分支同源的已知限制，不是本仓新丢的。
+     */
+    private static void attachAnimSpeed(Animation animation, Map.Entry<String, JsonElement> animEntry) {
+        if (animEntry == null || !animEntry.getValue().isJsonObject()) {
+            return;
+        }
+        JsonElement speed = animEntry.getValue().getAsJsonObject().get("anim_speed");
+        if (speed != null && speed.isJsonPrimitive()) {
+            animation.animSpeed = speed.getAsString();
+        }
     }
 
     private static AnimationFile mergeAnimationFile(AnimationFile main, AnimationFile other) {
@@ -2369,6 +2404,10 @@ public class ClientModelManager {
         // (reference ClientModelManager.java:2036 `AssetManager.clearAll()`). No-op while the
         // switch is off, in which case the caches are empty anyway.
         com.fox.ysmu.client.asset.AssetManager.clearAll();
+        // 防滑步的每玩家平滑倍速状态与表达式解析缓存随模型清空一起丢掉，避免换世界/重同步时
+        // 把上一个世界的倍速带到下一个。参考分支在同一个位置调用
+        // （reference ClientModelManager.java:2040 `MovementSpeedMatcher.clearAll()`）。
+        com.fox.ysmu.client.animation.MovementSpeedMatcher.clearAll();
         // The model textures belong to the models being dropped here, so their registrations are released with them:
         // this is upstream's explicit release trigger (upstream CustomTextureManager.release) driven from the port's
         // existing model-unload path, and it is what makes the holders unreachable - the reachability trigger alone
