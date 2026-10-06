@@ -1,6 +1,7 @@
 package com.fox.ysmu.client.gui;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientEventHandler;
 import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
@@ -94,10 +95,14 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
             y += 10;
         }
 
-        // HUD follow mode hint (reference client/gui/ExtraPlayerConfigScreen.java:102-120). The reference also draws
-        // its FBO-cache hint one line above this one (height - 20) and toggles it on 'C'; that is row 44's feature
-        // (`Config.GUI_HUD_PREVIEW_CACHE`), which this tree does not have yet, so the line above is deliberately left
-        // free for it rather than filled with a hint that would toggle nothing.
+        // HUD FBO cache hint (reference client/gui/ExtraPlayerConfigScreen.java:96-100); toggled on 'C' below.
+        // Row 44. Both lang keys already exist.
+        String cacheStatus = I18n.format(Config.GUI_HUD_PREVIEW_CACHE
+            ? "gui.yes_steve_model.hud_cache.on"
+            : "gui.yes_steve_model.hud_cache.off");
+        this.drawString(fontRendererObj, cacheStatus, 15, height - 20, Config.GUI_HUD_PREVIEW_CACHE ? 0x55FF55 : 0xFFAA00);
+
+        // HUD follow mode hint (reference client/gui/ExtraPlayerConfigScreen.java:102-120).
         String followKey;
         switch (Config.HUD_FOLLOW_MODE) {
             case Config.HUD_FOLLOW_VANILLA_SMOOTH:
@@ -211,16 +216,31 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
             this.scale = 40;
             this.yawOffset = 5;
         }
+        // Toggle the HUD paperdoll FBO cache (row 44), the reference's 'C' binding
+        // (client/gui/ExtraPlayerConfigScreen.java:189-193). Written back to Config here and persisted by
+        // onGuiClosed's Config.save(), exactly as the reference orders it. Turning it off makes the HUD channel
+        // render every frame again (HudPreviewCache#render's early return).
+        //
+        // The reference does not invalidate the cache on this key; this port does, because the FBO still holds the
+        // frame from before the cache was switched off and nothing else marks it dirty (the rate policy would
+        // catch up within one interval, ~83 ms at the 12 Hz floor, but that shows as a visibly stale doll).
+        // Calling the existing invalidate() is the reference's own mechanism, not a new one.
+        if (keyCode == Keyboard.KEY_C) {
+            Config.GUI_HUD_PREVIEW_CACHE = !Config.GUI_HUD_PREVIEW_CACHE;
+            ClientEventHandler.invalidateHudPreviewCache();
+            return;
+        }
         // Cycle the HUD follow mode (0 = vanilla, 1 = vanilla smooth, 2 = ysm, 3 = ysm smooth), the reference's
         // 'M' binding (client/gui/ExtraPlayerConfigScreen.java:194-199). The value is written back to Config here and
         // persisted by onGuiClosed's Config.save(), exactly as the reference orders it.
         //
-        // The reference also calls ClientEventHandler.invalidateHudPreviewCache() on this key. This tree has no HUD
-        // preview cache yet (row 44), so there is nothing to invalidate, and the mode change already resets both
-        // smoother state machines (RenderUtil#ensureFollowMode), which is what stops a stale smoothed angle from
-        // jumping across modes. Whoever ports row 44 must add that call back here.
+        // The invalidate call is the reference's (its :197): the cached doll was baked under the old mode's
+        // orientation, so it has to be re-drawn before the change can be seen. RenderUtil#ensureFollowMode resets
+        // both smoother state machines on the mode switch, which is what stops a stale smoothed angle from
+        // jumping across modes.
         if (keyCode == Keyboard.KEY_M) {
             Config.HUD_FOLLOW_MODE = (Config.HUD_FOLLOW_MODE + 1) % 4;
+            ClientEventHandler.invalidateHudPreviewCache();
             return;
         }
         super.keyTyped(typedChar, keyCode);

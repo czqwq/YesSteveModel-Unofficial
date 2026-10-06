@@ -11,6 +11,7 @@ import net.minecraft.client.Minecraft;
 
 import org.apache.commons.io.FileUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.data.ModelData;
@@ -191,6 +192,10 @@ public class RequestLoadModel implements IMessage {
             byte[] fileBytes = FileUtils.readFileToByteArray(modelFile);
             ModelData data = EncryptTools.decryptModel(UuidUtils.asBytes(passwordUuid), password, fileBytes);
             if (data != null) {
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SYNC) {
+                    ysmu.LOG.info("[YSMU-MODEL] Decrypted model {} (id={}), registering...",
+                        fileName, data.getModelId());
+                }
                 // Resource registration always returns to the client thread. The generation this work started on
                 // travels with it: reading and decrypting a cache file takes long enough to outlive a disconnect and
                 // the join that follows, and registering after that would put the previous server's model into the

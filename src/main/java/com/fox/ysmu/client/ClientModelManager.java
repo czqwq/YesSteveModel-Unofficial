@@ -427,11 +427,13 @@ public class ClientModelManager {
             // the models, so they are parked and installed on the first request for one of them.
             deferAnimations(modelId, data);
         }
-        ysmu.LOG.info(
-            "YSM client registered model {}: totalModelEntries={}, textureCount={}",
-            modelId,
-            MODELS.size(),
-            MODELS.get(modelId) == null ? 0 : MODELS.get(modelId).size());
+        if (com.fox.ysmu.Config.DEBUG_MODEL_LOAD && com.fox.ysmu.Config.DEBUG_MODEL_PARSE) {
+            ysmu.LOG.info(
+                "YSM client registered model {}: totalModelEntries={}, textureCount={}",
+                modelId,
+                MODELS.size(),
+                MODELS.get(modelId) == null ? 0 : MODELS.get(modelId).size());
+        }
         if (signature != null) {
             REGISTERED_MODEL_CONTENT.put(modelId, signature);
         }

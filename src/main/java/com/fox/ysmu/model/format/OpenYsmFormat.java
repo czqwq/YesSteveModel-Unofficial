@@ -14,6 +14,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 
 import org.jetbrains.annotations.NotNull;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
@@ -74,6 +75,10 @@ public final class OpenYsmFormat {
         try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(dir)) {
             RawYsmModel raw = deserializer.deserialize();
             raw.modelId = modelId;
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                int texCount = raw.mainEntity != null ? raw.mainEntity.textures.size() : 0;
+                ysmu.LOG.info("[YSMU-MODEL] Folder model {} ({}): textures={}", dir.getFileName(), modelId, texCount);
+            }
             if (!RawYsmModelAdapter.isBridgeable(raw)) {
                 ysmu.LOG.warn("OpenYSM folder model {} parsed but cannot be bridged to legacy ModelData", dir);
                 return;
@@ -107,12 +112,38 @@ public final class OpenYsmFormat {
             if (!isOpenYsmBinary(encrypted)) {
                 return;
             }
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                ysmu.LOG.info("[YSMU-MODEL] Found OpenYSM .ysm file: {} (size={})", file.getFileName(), encrypted.length);
+            }
             byte[] rawBytes = YsmCrypt.decryptYsmFile(encrypted);
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                ysmu.LOG.info("[YSMU-MODEL] Decrypted .ysm file {}: decompressed size={}", file.getFileName(), rawBytes.length);
+            }
             try (YSMBinaryDeserializer deserializer = new YSMBinaryDeserializer(rawBytes)) {
                 RawYsmModel raw = deserializer.deserializeKeepOpen();
                 deserializer.parseYSMFooter(raw);
                 String modelId = ModelIdUtil.getInternalModelId(removeExtension(toModelName(rootPath, file)));
                 raw.modelId = modelId;
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                    int texCount = raw.mainEntity != null ? raw.mainEntity.textures.size() : 0;
+                    int animCount = raw.mainEntity != null ? raw.mainEntity.animationFiles.size() : 0;
+                    boolean hasMainModel = raw.mainEntity != null && raw.mainEntity.mainModel != null;
+                    boolean hasArmModel = raw.mainEntity != null && raw.mainEntity.armModel != null;
+                    ysmu.LOG.info("[YSMU-MODEL] Parsed .ysm {} -> modelId={}, formatVersion={}, "
+                        + "mainModel={}, armModel={}, textures={}, animations={}, footer.version={}",
+                        file.getFileName(), modelId, raw.formatVersion,
+                        hasMainModel, hasArmModel, texCount, animCount, raw.footer.version);
+                    if (raw.mainEntity != null) {
+                        for (RawYsmModel.RawTexture tex : raw.mainEntity.textures.values()) {
+                            ysmu.LOG.info("[YSMU-MODEL]   texture: name={}, format={}, w={}, h={}, dataLen={}",
+                                tex.name, tex.imageFormat, tex.width, tex.height,
+                                tex.data == null ? 0 : tex.data.length);
+                        }
+                    }
+                }
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                    ysmu.LOG.info("[YSMU-MODEL] isBridgeable({}) = {}", modelId, RawYsmModelAdapter.isBridgeable(raw));
+                }
                 if (!RawYsmModelAdapter.isBridgeable(raw)) {
                     ysmu.LOG.info("OpenYSM binary model {} parsed but cannot be bridged to legacy ModelData", file);
                     return;
@@ -137,6 +168,9 @@ public final class OpenYsmFormat {
             ysmu.LOG.warn("Unsupported OpenYSM binary model {}: {}", file, e.getMessage(), e);
         } catch (Exception | LinkageError e) {
             ysmu.LOG.warn("Failed to load OpenYSM binary model {}", file, e);
+            if (Config.DEBUG_MODEL_LOAD && (Config.DEBUG_MODEL_SCAN || ysmu.LOG.isDebugEnabled())) {
+                ysmu.LOG.warn("[YSMU-MODEL] OpenYSM binary model {} load failure detail", file, e);
+            }
         }
     }
 

@@ -1,14 +1,21 @@
 package com.fox.ysmu.client;
 
 import java.util.List;
+import com.fox.ysmu.client.gui.ConfigScreen;
+import com.fox.ysmu.client.gui.DisclaimerScreen;
 import com.fox.ysmu.client.gui.ExtraPlayerConfigScreen;
+import com.fox.ysmu.client.gui.OpenModelFolderScreen;
+import com.fox.ysmu.client.gui.PlayerModelScreen;
+import com.fox.ysmu.client.gui.PlayerTextureScreen;
 import com.fox.ysmu.client.compat.AngelicaCompat;
 import com.fox.ysmu.client.renderer.FirstPersonHandRenderer;
+import com.fox.ysmu.client.renderer.HudPreviewCache;
 import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.AbstractClientPlayer;
 import net.minecraft.client.entity.EntityClientPlayerMP;
 import net.minecraft.client.gui.Gui;
+import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.client.settings.KeyBinding;
@@ -53,6 +60,24 @@ public class ClientEventHandler {
 
     private static boolean EXTRA_PLAYER = false;
     private static boolean pendingModelLoad;
+
+    /**
+     * The HUD paperdoll's FBO cache (row 44). Reference {@code client/ClientEventHandler.java:55-61}.
+     * <p>
+     * One instance for the whole client: the preview is per-frame screen state, not per-entity, and the cache
+     * tracks the configured position/scale and the player's held item/armour for its own invalidation.
+     */
+    private static final HudPreviewCache hudPreviewCache = new HudPreviewCache();
+
+    /**
+     * Invalidate the HUD paperdoll FBO so the next frame re-bakes it. Reference
+     * {@code client/ClientEventHandler.java:58-61}; the caller there is the follow-mode key
+     * ({@code client/gui/ExtraPlayerConfigScreen.java:197}) and this port adds it on that same key.
+     */
+    public static void invalidateHudPreviewCache() {
+        hudPreviewCache.invalidate();
+    }
+
     /**
      * Whether the join-world welcome message has already been shown in this client session. Ported from the reference
      * branch's {@code client/ClientEventHandler.java:53} ({@code private static boolean welcomeShown = false;}), whose
@@ -334,6 +359,12 @@ public class ClientEventHandler {
         EntityPlayer player = mc.thePlayer;
         if (player == null) return;
         if (mc.currentScreen instanceof ExtraPlayerConfigScreen) return;
+        // Covered by a full-screen YSMU GUI: mark the cache dirty instead of baking a paperdoll nobody can see.
+        // See hudIsCoveredByScreen for the reference's measurement and the reasoning.
+        if (hudIsCoveredByScreen(mc.currentScreen)) {
+            hudPreviewCache.invalidate();
+            return;
+        }
         double posX = Config.PLAYER_POS_X;
         double posY = Config.PLAYER_POS_Y;
         float scale = (float) Config.PLAYER_SCALE;
@@ -342,10 +373,38 @@ public class ClientEventHandler {
         // 之后世界内的自身渲染也会被当成 GUI 预览（渲染到 0,0,0 并走 GUI 光照）。
         EXTRA_PLAYER = true;
         try {
-            RenderUtil.renderPlayerEntity(player, posX, posY, scale, yawOffset, -500, event.partialTicks);
+            // Row 44: the paperdoll goes through the FBO cache rather than the full pipeline every frame
+            // (reference client/ClientEventHandler.java:485). With Config.GUI_HUD_PREVIEW_CACHE off the same call
+            // falls back to the previous per-frame renderPlayerEntity, so this is the only HUD call site either way.
+            hudPreviewCache.render(player, posX, posY, scale, yawOffset, event.partialTicks);
         } finally {
             EXTRA_PLAYER = false;
         }
+    }
+
+    /**
+     * True for the YSMU screens whose background completely covers the HUD, so the HUD paperdoll rendered
+     * underneath them can never be seen. Reference {@code client/ClientEventHandler.java:492-500}.
+     * <p>
+     * <b>Why this matters here.</b> 1.7.10 draws the HUD <i>before</i> the screen
+     * ({@code EntityRenderer#updateCameraAndRender} calls {@code ingameGUI.renderGameOverlay} at
+     * {@code build/rfg/minecraft-src/java/net/minecraft/client/renderer/EntityRenderer.java:1111-1114} and only
+     * then {@code currentScreen.drawScreen} at {@code :1130-1138}), so with one of these screens open the bake is
+     * invisible. The reference measured that path at 36 % of the whole client thread before this guard; without
+     * it the FBO cache would still bake an invisible doll at up to {@link HudPreviewCache}'s 120 Hz ceiling.
+     * The cache is invalidated rather than simply skipped, so the paperdoll is fresh on the first frame after
+     * the screen closes — which is also what picks up a model/texture switch made inside that screen.
+     * <p>
+     * {@code AnimationRouletteScreen} is deliberately NOT listed (neither in the reference nor here): it draws no
+     * background and is meant to show the paperdoll. {@link ExtraPlayerConfigScreen} never reaches this method
+     * (the caller returns above): it is a live preview of this very element.
+     */
+    private static boolean hudIsCoveredByScreen(GuiScreen screen) {
+        return screen instanceof PlayerModelScreen
+            || screen instanceof PlayerTextureScreen
+            || screen instanceof ConfigScreen
+            || screen instanceof DisclaimerScreen
+            || screen instanceof OpenModelFolderScreen;
     }
 
     /**

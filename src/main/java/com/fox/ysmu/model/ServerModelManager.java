@@ -220,6 +220,11 @@ public final class ServerModelManager {
     public static void reloadPacks() {
         org.apache.commons.lang3.time.StopWatch watch = new org.apache.commons.lang3.time.StopWatch();
         watch.start();
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+            ysmu.LOG.info("[YSMU-MODEL] ===== Starting model reload =====");
+            ysmu.LOG.info("[YSMU-MODEL] CUSTOM dir: {} (exists={})", CUSTOM, Files.isDirectory(CUSTOM));
+            ysmu.LOG.info("[YSMU-MODEL] BUILT dir: {} (exists={})", BUILT, Files.isDirectory(BUILT));
+        }
         clearModelCaches();
         createConfigDirectories();
         // 先补齐 blacklist.txt(首次运行时创建)。
@@ -235,6 +240,15 @@ public final class ServerModelManager {
             ModelCacheWriter.pruneUnregisteredCaches(CACHE_NAME_INFO, OPEN_YSM_SYNC_INFO);
         } catch (Exception | LinkageError e) {
             ysmu.LOG.warn("Failed to prune stale model caches; keeping every existing cache file", e);
+        }
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+            ysmu.LOG.info("[YSMU-MODEL] ===== Model reload complete =====");
+            ysmu.LOG.info("[YSMU-MODEL] CACHE_NAME_INFO size: {}", CACHE_NAME_INFO.size());
+            ysmu.LOG.info("[YSMU-MODEL] OPEN_YSM_SYNC_INFO size: {}", OPEN_YSM_SYNC_INFO.size());
+            ysmu.LOG.info("[YSMU-MODEL] PACKS size: {}", PACKS.size());
+            if (!CACHE_NAME_INFO.isEmpty()) {
+                ysmu.LOG.info("[YSMU-MODEL] Cached model IDs: {}", CACHE_NAME_INFO.keySet());
+            }
         }
         watch.stop();
         // 耗时在**最后**取：prune 也算这次 reload 的一部分（参考分支把同一行放在它自己的 reloadPacks 末尾）。

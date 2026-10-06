@@ -870,17 +870,16 @@ public final class RenderUtil {
 
     /**
      * 每帧轮询（即使 FBO 不重渲染也调用）：推进当前平滑模式的状态机。返回该模式下的
-     * 平滑跟随角（原版平滑 = 屏幕可见身体 offset，ysm 平滑 = 头部偏航），供 HudPreviewCache
-     * 判断模型是否仍在转动（转动期间逐帧重渲染，静止时继续走 FBO 缓存）；非平滑模式返回 NaN。
+     * 平滑跟随角（原版平滑 = 屏幕可见身体 offset，ysm 平滑 = 头部偏航）；非平滑模式返回 NaN。
      * 结果存入 lastPolledFollow 供 renderPlayerEntity 消费（不覆写任何实体字段）。
      * <p>
-     * Reference {@code util/RenderUtil.java:981-1000}. Its only caller there is the HUD preview cache
-     * ({@code client/renderer/HudPreviewCache.java:336}, once per frame whether or not it re-renders). <b>This port
-     * has no such cache yet</b> - {@code Config.GUI_HUD_PREVIEW_CACHE} and {@code util/FboCache} are still
-     * unconsumed - so nothing calls this method today. That is safe in both directions: with no poller
-     * {@code lastPolledFollow} stays NaN and {@link #renderPlayerEntity} advances the state machine itself, once per
-     * drawn frame; a future cache must call this every frame or the smoother stops advancing while the cached frame
-     * is shown.
+     * Reference {@code util/RenderUtil.java:981-1000}. Its only caller there is the HUD preview cache, and row 44
+     * has landed, so that is this port's only caller too: {@code client/renderer/HudPreviewCache#render} calls this
+     * once per frame whether or not it re-bakes, and the return value is <b>not</b> used for invalidation - angle
+     * tracking goes through the cache's own rate policy (the reference's {@code :333-335} says the same). With the
+     * cache switched off the caller returns before reaching this method and {@link #renderPlayerEntity} advances the
+     * state machine itself through {@code consumePolledFollowOrUpdate}; either way the low-pass advances exactly once
+     * per frame. Deleting the call would freeze modes 1 and 3 while a cached frame is on screen.
      * <p>
      * V and B are read from the current fields for the same reason {@link #renderPlayerEntity} does (see the port
      * difference noted there): both paths feed one state machine, and they have to feed it the same numbers.

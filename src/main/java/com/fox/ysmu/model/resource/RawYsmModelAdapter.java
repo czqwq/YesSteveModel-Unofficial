@@ -20,6 +20,7 @@ import javax.imageio.ImageIO;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.format.Type;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
@@ -43,15 +44,27 @@ public final class RawYsmModelAdapter {
 
     public static boolean isBridgeable(RawYsmModel raw) {
         if (raw == null || raw.mainEntity == null) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+                if (raw == null) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: raw is null");
+                else ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: mainEntity is null for {}", raw.modelId);
+            }
             return false;
         }
         if (!hasGeometry(raw.mainEntity.mainModel)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: no mainModel geometry for {}", raw.modelId);
             return false;
         }
         if (!hasGeometry(raw.mainEntity.armModel)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: no armModel geometry for {}", raw.modelId);
             return false;
         }
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+                ysmu.LOG.info("[YSMU-MODEL]   check texture {}: format={}, dataLen={}, w={}, h={}, ok={}",
+                    texture.name, texture.imageFormat,
+                    texture.data == null ? 0 : texture.data.length,
+                    texture.width, texture.height, hasLegacyTextureData(texture));
+            }
             if (hasLegacyTextureData(texture)) {
                 return true;
             }
@@ -283,19 +296,29 @@ public final class RawYsmModelAdapter {
 
     private static boolean hasLegacyTextureData(RawYsmModel.RawTexture texture) {
         if (texture == null || texture.data == null) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: texture null or data null");
             return false;
         }
         if (texture.imageFormat == PNG_FORMAT) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: PNG format, OK");
             return true;
+        }
+        // 参考在成功分支内打印 "RGBA format, OK"。这里不能把最后那句 return 改写成 if/return true
+        // （纯诊断改动不得改其它语句），所以条件原样重复一次，只多出一条被门控的日志语句。
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE
+            && texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture)) {
+            ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: RGBA format, OK");
         }
         return texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture);
     }
 
     private static byte[] getLegacyTextureData(RawYsmModel.RawTexture texture) {
         if (texture.imageFormat == PNG_FORMAT) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: PNG, returning as-is ({} bytes)", texture.data.length);
             return texture.data;
         }
         if (texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: RGBA->PNG ({}x{})", texture.width, texture.height);
             return convertRgbaToPng(texture.data, texture.width, texture.height);
         }
         return null;

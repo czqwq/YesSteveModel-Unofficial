@@ -175,11 +175,13 @@ public class SyncModelFiles implements IMessage {
                     return;
                 }
 
-                ysmu.LOG.info(
-                    "Sending large YSM legacy model cache {} in chunks: size={} bytes, chunk={} bytes",
-                    md5,
-                    fileLength,
-                    SendModelFileChunk.MAX_CHUNK_BYTES);
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SYNC) {
+                    ysmu.LOG.info(
+                        "Sending large YSM legacy model cache {} in chunks: size={} bytes, chunk={} bytes",
+                        md5,
+                        fileLength,
+                        SendModelFileChunk.MAX_CHUNK_BYTES);
+                }
                 int offset = 0;
                 byte[] buffer = new byte[SendModelFileChunk.MAX_CHUNK_BYTES];
                 try (InputStream input = FileUtils.openInputStream(modelFile)) {

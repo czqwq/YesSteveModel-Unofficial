@@ -12,6 +12,7 @@ import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Controller;
@@ -83,11 +84,13 @@ public final class OpenYsmAnimationControllerRegistry {
             return;
         }
         CONTROLLERS.put(animationId, set);
-        ysmu.LOG.info(
-            "YSM client registered OpenYSM controllers for {}: files={}, controllers={}",
-            animationId,
-            fileCount,
-            set.controllers.size());
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+            ysmu.LOG.info(
+                "YSM client registered OpenYSM controllers for {}: files={}, controllers={}",
+                animationId,
+                fileCount,
+                set.controllers.size());
+        }
     }
 
     static ControllerSet get(ResourceLocation animationId) {

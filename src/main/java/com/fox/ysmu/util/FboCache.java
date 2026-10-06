@@ -14,9 +14,15 @@ import org.lwjgl.opengl.GL11;
  * clearing, restoring the main framebuffer, and drawing the cached texture
  * as a GUI quad.
  * <p>
- * Used by {@code HudPreviewCache}, {@code ModelButton}, and
- * {@code TextureButton} — all three follow the same render-to-FBO-then-cache
- * pattern.
+ * Used by {@code HudPreviewCache} (the HUD selfie paperdoll, row 44); that is its only consumer in this port.
+ * The reference branch also wraps each model-selection preview tile in one
+ * ({@code client/gui/button/ModelButton.java:50} and {@code client/gui/button/TextureButton.java:29}), but those
+ * two classes still render their tiles directly here, so the claim that they use this class would be false.
+ * <p>
+ * The class body is byte-identical to the reference's {@code util/FboCache.java}; the port of row 44 did not have
+ * to touch it. Note in particular that {@link #checkAndResize} resets its own countdown whenever the interval
+ * <b>value</b> changes, which is why {@code HudPreviewCache} passes the constant 0 and keeps its measured refresh
+ * clock on its own side.
  *
  * <h3>Usage</h3>
  * <pre>{@code
