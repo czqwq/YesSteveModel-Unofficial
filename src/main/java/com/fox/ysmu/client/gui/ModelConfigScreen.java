@@ -103,12 +103,11 @@ public class ModelConfigScreen extends GuiScreen {
             double current = currentValue(variable);
             String type = form.type == null ? "" : form.type.toLowerCase(Locale.ROOT);
             if ("range".equals(type)) {
-                if (form.max <= form.min) {
-                    this.captions.add(new Caption(title + " - " + I18n.format("gui.yes_steve_model.model.config.bad_range"),
-                        panelX + 5, cursor, 0xFFB06060));
-                    cursor += 20;
-                    continue;
-                }
+                // A reverse range (`min: 0, max: -180`, which LaPluma 2.5.3 declares for 左小臂_Rx/右小臂_Rx) is
+                // legitimate and upstream hands it to a slider unchanged
+                // (com/elfmcys/ysm/client/gui/AnimationRouletteScreen.java:379); this screen used to reject it with a
+                // `bad_range` caption and made those forms unreachable. FlatSlider clamps against the sorted pair, so
+                // both orders work; see its clamp().
                 int id = this.nextWidgetId++;
                 this.sliderVariables.put(id, variable);
                 final String target = variable;
