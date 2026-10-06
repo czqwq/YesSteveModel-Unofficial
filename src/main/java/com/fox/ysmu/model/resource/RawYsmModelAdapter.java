@@ -693,6 +693,13 @@ public final class RawYsmModelAdapter {
         if (animation.blendWeight != null) {
             json.add("blend_weight", molangValue(animation.blendWeight));
         }
+        // Bedrock's per-animation `anim_speed` / `anim_time_update`. They have to be re-emitted here because this
+        // method IS the animation JSON for a baked payload: `putAnimationFile` prefers `RawAnimationFile.sourceJson`,
+        // and a payload has none (`YSMBinarySerializer` does not write it), so every binary-channel model's animation
+        // JSON is generated from the structure - and a field this method does not write is a field the engine never
+        // sees. `ClientModelManager.attachAnimSpeed` is the reader on the other end.
+        putOptionalText(json, "anim_speed", animation.animSpeed);
+        putOptionalText(json, "anim_time_update", animation.animTimeUpdate);
 
         JsonObject bones = new JsonObject();
         for (RawYsmModel.RawBoneAnimation boneAnimation : animation.boneAnimations) {
@@ -731,8 +738,17 @@ public final class RawYsmModelAdapter {
         }
     }
 
-    private static void putChannel(JsonObject bone, String channelName, List<RawYsmModel.RawKeyframe> keyframes) {
-        if (keyframes.isEmpty()) {
+    /**
+     * Adds {@code key} as a string property when the value is non-blank. Bedrock writes these as either a number or
+     * a MoLang expression, and the engine's own fields are Strings, so a number that came in as text stays text.
+     */
+    private static void putOptionalText(JsonObject json, String key, String value) {
+        if (value != null && !value.trim().isEmpty()) {
+            json.addProperty(key, value);
+        }
+    }
+
+    private static void putChannel(JsonObject bone, String channelName, List<RawYsmModel.RawKeyframe> keyframes) {        if (keyframes.isEmpty()) {
             return;
         }
         if (keyframes.size() == 1) {

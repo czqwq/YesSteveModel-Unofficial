@@ -73,6 +73,11 @@ public final class MovementSpeedMatcher {
         "sprint", "sprinting",
         "sneak", "sneaking", "crouch", "crouching",
         "swim", "swimming",
+        // Port-specific name: this port's own locomotion list declares `swim_stand` (in water, no movement -
+        // `OpenYsmControllerExpressionEvaluator.isControllerStateDirect`), and upstream has no stride matching at all,
+        // so there is no upstream name table to copy. Including it is behaviour-neutral while the player is still
+        // (`computeMultiplier` answers 1.0 below MIN_GROUND_SPEED) and correct when the state lingers while moving.
+        "swim_stand",
     };
     private static final double[] LOCOMOTION_SPEEDS = {
         4.317, 4.317, 4.317,
@@ -80,6 +85,7 @@ public final class MovementSpeedMatcher {
         5.612, 5.612,
         1.295, 1.295, 1.295, 1.295,
         1.727, 1.727,
+        1.727,
     };
 
     // ---- 各步态规范步幅（blocks/完整步幅周期，内部常量，不暴露给配置）----
@@ -98,7 +104,7 @@ public final class MovementSpeedMatcher {
         "sneak", "sneaking", "crouch", "crouching",
     };
     private static final String[] SWIM_NAMES = {
-        "swim", "swimming",
+        "swim", "swimming", "swim_stand",
     };
 
     /**

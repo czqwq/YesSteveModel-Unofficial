@@ -16,12 +16,24 @@ public class YSMBinaryDeserializer implements AutoCloseable {
     private final YSMByteBuf reader;
     private final int format;
     private final RawYsmModel model;
+    /**
+     * Whether this stream is one of this mod's own baked sync payloads rather than a real OpenYSM {@code .ysm} file.
+     * <p>
+     * The two are read by the two constructors, and the baked layout has two extra per-animation strings at the end
+     * of each animation record ({@code anim_speed} / {@code anim_time_update}, see
+     * {@link YSMBinarySerializer#writeAnimationFileContent}). Reading them from a real {@code .ysm} - which has no
+     * such fields - would misparse every animation after the first, so the distinction is explicit here instead of
+     * being inferred from {@code format}: a real file declares its format in its header, and a payload is read with
+     * the format the baker used, which is the same number.
+     */
+    private final boolean bakedPayload;
 
     public YSMBinaryDeserializer(byte[] decompressedData) {
         this.reader = new YSMByteBuf(Unpooled.wrappedBuffer(decompressedData));
         this.format = (int) this.reader.readDword();
         this.model = new RawYsmModel();
         this.model.formatVersion = this.format;
+        this.bakedPayload = false;
     }
 
     public YSMBinaryDeserializer(byte[] decompressedData, int format) {
@@ -29,6 +41,7 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         this.format = format;
         this.model = new RawYsmModel();
         this.model.formatVersion = this.format;
+        this.bakedPayload = true;
     }
 
 
@@ -803,12 +816,23 @@ public class YSMBinaryDeserializer implements AutoCloseable {
                     anim.soundEffects.add(sfx);
                 }
             }
+            // Baked payloads carry Bedrock's `anim_speed` / `anim_time_update` after the effects block; a real
+            // `.ysm` does not have them at all, which is what `bakedPayload` decides. See the field's javadoc.
+            if (bakedPayload) {
+                anim.animSpeed = readOptionalString();
+                anim.animTimeUpdate = readOptionalString();
+            }
             logOffset("parseAnimations anim[" + animIndex + "] DONE (" + anim.name + ")");
             animFile.animations.put(anim.name, anim);
         }
 
         logOffset("parseAnimations EXIT");
         return animFile;
+    }
+
+    /** Reads the {@code 0}/{@code 1}+string pair {@code YSMBinarySerializer.writeOptionalString} writes. */
+    private String readOptionalString() {
+        return reader.readVarInt() != 0 ? reader.readString() : null;
     }
 
     private void parseChannel(List<RawYsmModel.RawKeyframe> channel) {

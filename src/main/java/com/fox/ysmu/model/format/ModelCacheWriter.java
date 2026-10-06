@@ -36,8 +36,13 @@ public final class ModelCacheWriter {
      * {@link #isStoredOpenYsmCacheValid} - the signature still matches - and is served to every client whose cache
      * hashes match as well, so a model can stay invisible across reloads and restarts even after the bug that baked
      * it was fixed. Bumping the value changes every hash, which re-bakes the payload and makes the client miss.
+     *
+     * <p>3 -> 4: {@code YSMBinarySerializer.writeAnimationFileContent} now appends Bedrock's per-animation
+     * {@code anim_speed} / {@code anim_time_update} to every animation record of a baked payload. A payload baked
+     * before this change does not carry them and the reader would read the next animation's name as a flag byte, so
+     * every cache written by bake version 3 has to be re-baked rather than served.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 3;
+    static final int OPEN_YSM_BAKE_VERSION = 4;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。

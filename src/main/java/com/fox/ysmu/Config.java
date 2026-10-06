@@ -25,6 +25,16 @@ public class Config {
     public static int PLAYER_POS_Y = 10;
     public static double PLAYER_SCALE = 40.0;
     public static double PLAYER_YAW_OFFSET = 5.0;
+    /**
+     * Swap the roulette's config panel and preview sides.
+     * <p>
+     * Declared here and exposed as the "swap_config_sides" checkbox on the options screen
+     * ({@code ConfigScreen}), but this port has <b>no consumer</b>: its {@code AnimationRouletteScreen} is a
+     * ~240-line radial fan with neither a config panel nor a 3D preview - a model's own settings live in
+     * {@code ModelConfigScreen}, a separate screen. The reference's ~914-line wheel is what has both halves
+     * (its {@code AnimationRouletteScreen.java:178}, {@code :196}, {@code :270}, {@code :487}, {@code :719}).
+     * Carried and recorded rather than given an invented second meaning; see the task-9 report for the owner.
+     */
     public static boolean SWAP_CONFIG_SIDES = false;
 
     /** HUD paperdoll follow mode: 0 = vanilla (current), 1 = vanilla smooth, 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock). */
@@ -35,11 +45,24 @@ public class Config {
     public static int HUD_FOLLOW_MODE = HUD_FOLLOW_YSM_SMOOTH;
 
     // GUI Config
+    /**
+     * 模型选择 GUI 增强:前景/背景贴图与 GUI 动画。
+     * <p>
+     * 本仓已接上的消费者只有一个:{@code ModelButton} 在关闭时把该 tile 的刷新模式降级为静态
+     * (参考 {@code ModelButton.java:264-266})并停掉该 tile 的 hover/focus 预览通道。参考的另一半
+     * ("模型自带的前景/背景贴图")在本仓没有数据面:本仓不解析 {@code gui_background}/{@code gui_foreground}
+     * ({@code ClientModelManager.GUI_BACKGROUND_IMAGE}/{@code GUI_FOREGROUND_IMAGE} 在本仓不存在),
+     * 所以那半如实留空,不造贴图资源。参考的贴图页不受这个开关影响(其 {@code TextureButton.java:75}
+     * 直接读刷新模式),本仓照做。
+     */
     public static boolean GUI_ENHANCEMENTS = true;
     public static boolean SHOW_LOADING_PROGRESS = true;
     /** Preview grid FBO refresh mode. -1 = auto (whole-page shared budget, see
-     *  {@code PreviewRefreshPolicy}); 0 = static (only on interaction); 1-4 = refresh
-     *  every N frames. default: -1 */
+     *  {@link com.fox.ysmu.client.renderer.PreviewRefreshPolicy}); 0 = static (only on interaction);
+     *  1-4 = refresh every N frames. default: -1
+     *  <p>Consumed by {@code ModelButton} / {@code TextureButton}, which bake their tile into a
+     *  {@code FboCache} and blit it on the frames in between. {@code GUI_ENHANCEMENTS=false} forces the
+     *  model-selection tiles to 0 (static). */
     public static int GUI_MODEL_PREVIEW_REFRESH = -1;
     /** HUD selfie model FBO cache. When true (default), renders to an off-screen
      *  framebuffer at an adaptive rate and blits the cached texture between refreshes.

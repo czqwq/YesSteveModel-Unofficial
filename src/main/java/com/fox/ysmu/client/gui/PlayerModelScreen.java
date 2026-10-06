@@ -6,6 +6,7 @@ import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
 import com.fox.ysmu.client.gui.button.*;
+import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.RevokeModelGuiGrant;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -112,6 +113,9 @@ public class PlayerModelScreen extends GuiScreen {
         // Only the AssetManager subsystem reads this flag, and that subsystem no-ops while
         // Config.ENABLE_IDLE_ASSET_EVICTION is off.
         ClientModelManager.setGuiOpen(true);
+        // 翻页 / 换分类 / 重新 initGui 都会丢掉旧按钮,而每个预览 tile 各自持有一个离屏 FBO(行 43):
+        // 释放只能在这里做(参考的 disposePreviewButtons,其 PlayerModelScreen.java:449-459)。
+        this.disposePreviewButtons();
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
         // Entering the screen replays every tile's preview animation from its first frame, like re-opening the
@@ -305,6 +309,10 @@ public class PlayerModelScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        // 行 43:预览刷新预算每个渲染帧推进一次。参考把它挂在 ClientEventHandler.onRenderTick
+        // (参考 :118),本任务不能改 ClientEventHandler;而这一页的两个平铺页屏幕就是该策略唯一的消费者,
+        // 所以按渲染帧在这里推进一次,语义相同:先发布上一帧统计到的可见数量,再让按钮在这一帧里累加。
+        PreviewRefreshPolicy.beginFrame();
         // renderBackground(graphics) -> drawDefaultBackground()
         this.drawDefaultBackground();
 
@@ -372,6 +380,9 @@ public class PlayerModelScreen extends GuiScreen {
         String pageInfo = "%d/%d".formatted(this.browser.page() + 1, this.browser.maxPage() + 1);
         this.drawString(fontRendererObj, pageInfo, x + 138 + (282 - fontRendererObj.getStringWidth(pageInfo)) / 2, y + 223 - fontRendererObj.FONT_HEIGHT / 2, 0xF3EFE0);
 
+        // 行 43:自动模式的实时读数(参考 PlayerModelScreen.java:337-341 把它单独放一行,因为和版本号拼在
+        // 一起会被"前一页/后一页"按钮挡住)。文本与参考逐字一致、没有语言键,理由见 PreviewRefreshPolicy#describeMode。
+        this.drawString(fontRendererObj, PreviewRefreshPolicy.describeMode(), x + 2, y + 216, 0x777777);
         String debugInfo = String.format("%s-%s", "1.7.10", Tags.VERSION);
         this.drawString(fontRendererObj, debugInfo, x + 2, y + 226, 0x555555);
         // super.render -> super.drawScreen, 这会绘制所有按钮
@@ -497,10 +508,28 @@ public class PlayerModelScreen extends GuiScreen {
         // Start the post-close grace window during which idle asset eviction stays suppressed
         // (reference PlayerModelScreen.java:464).
         ClientModelManager.setGuiOpen(false);
+        this.disposePreviewButtons();
         int grantId = this.target.getGrantId();
         if (grantId != -1) {
             ysmu.LOG.debug("Model selection GUI closed, revoking grant for entity {}", grantId);
             NetworkHandler.CHANNEL.sendToServer(new RevokeModelGuiGrant(grantId));
+        }
+    }
+
+    /**
+     * Releases the off-screen FBO of every preview tile on this screen.
+     * <p>
+     * Called before {@code buttonList.clear()} in {@link #initGui()} (page flips, category switches, the model count
+     * changing under an open screen) and from {@link #onGuiClosed()}. Without it each flip leaks one GL texture per
+     * tile, because nothing else frees a {@code FboCache}. Reference {@code PlayerModelScreen.java:449-459}.
+     */
+    private void disposePreviewButtons() {
+        for (Object button : this.buttonList) {
+            if (button instanceof ModelButton modelButton) {
+                modelButton.dispose();
+            } else if (button instanceof TextureButton textureButton) {
+                textureButton.dispose();
+            }
         }
     }
 }

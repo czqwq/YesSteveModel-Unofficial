@@ -1930,36 +1930,34 @@ public class ClientModelManager {
     }
 
     /**
-     * YSMU: 把模型动画 JSON 的 {@code anim_speed}（逐动画播放倍率，数字或 MoLang 表达式）挂到引擎
-     * {@link Animation#animSpeed}。这是全仓对该字段的唯一写入点，消费方是
-     * {@code MovementSpeedMatcher.animSpeedFor}。
+     * YSMU: 把模型动画 JSON 的 {@code anim_speed}（逐动画播放倍率，数字或 MoLang 表达式）与
+     * {@code anim_time_update}（自定义时间推进）挂到引擎 {@link Animation#animSpeed} /
+     * {@link Animation#animTimeUpdate}。这是全仓对这两个字段的唯一写入点：前者由
+     * {@code MovementSpeedMatcher.animSpeedFor} 消费，后者由 {@code AnimationController} 的时钟推进消费。
      * <p>
-     * 形状照参考分支 {@code ClientModelManager.java:1275-1279}（它的 {@code getAnimationFile}）。
-     * 只补 {@code anim_speed}，不补参考同一处的 {@code anim_time_update}：那是另一个特性，
-     * 不在本任务范围内（本仓 {@code AnimationController} 已实现 anim_time_update 的时钟推进，
-     * 但同样没有写入点）。
+     * 形状照参考分支 {@code ClientModelManager.java:1275-1279}（它的 {@code getAnimationFile}），
+     * 但参考只写了 {@code anim_speed}。
      * <p>
-     * 为什么这一处就够读 legacy 通道：legacy 通道上散件模型的动画 JSON 是<b>原样透传</b>的
+     * <b>两条通道都读得到</b>：legacy 通道上散件模型的动画 JSON 是原样透传的
      * （{@code FolderFormat}/{@code YsmFormat} 直接读文件字节；{@code RawYsmModelAdapter.putAnimationFile}
-     * 优先使用 {@code RawAnimationFile.sourceJson}，而 {@code YSMFolderDeserializer} 为每条散件动画
-     * 都填了 sourceJson），所以 JSON 里的 {@code anim_speed} 一直都在，只是此前没人读。
-     * <p>
-     * 二进制通道读不到，这一点与参考分支一致：{@code YSMBinarySerializer.writeAnimationFileContent}
-     * 按结构字段序列化，既不写 {@code sourceJson} 也不写 {@code anim_speed}，
-     * {@code RawYsmModel.RawAnimation} 也没有这个字段，于是客户端只能用
-     * {@code RawYsmModelAdapter.createAnimationJson} 重新生成 JSON —— {@code anim_speed} 在那里就丢了。
-     * 参考分支同样只写客户端读取点与散件解析/回写，没有动它的二进制序列化
-     * （见本仓 {@code Animation.java:36} "二进制 .ysm 暂不支持"）。本仓默认开启 OpenYSM 协议
-     * （{@code Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL = true}），所以带 {@code ysm.json} 的模型走二进制通道时
-     * {@code anim_speed} 不生效；这是与参考分支同源的已知限制，不是本仓新丢的。
+     * 优先使用 {@code RawAnimationFile.sourceJson}），JSON 里的两个字段一直都在；OpenYSM 二进制通道上
+     * {@code sourceJson} 不存在，所以 JSON 是 {@code RawYsmModelAdapter.createAnimationJson} 从结构重新生成的，
+     * 而那两个字段现在既在 {@code RawYsmModel.RawAnimation} 里、也被二进制序列化器写出并被
+     * {@code createAnimationJson} 回写（{@code YSMBinarySerializer.writeAnimationFileContent} 尾部的两个
+     * {@code writeOptionalString}）。在此之前它们只在 legacy 通道存活，而默认通道是二进制通道。
      */
     private static void attachAnimSpeed(Animation animation, Map.Entry<String, JsonElement> animEntry) {
         if (animEntry == null || !animEntry.getValue().isJsonObject()) {
             return;
         }
-        JsonElement speed = animEntry.getValue().getAsJsonObject().get("anim_speed");
+        JsonObject animObject = animEntry.getValue().getAsJsonObject();
+        JsonElement speed = animObject.get("anim_speed");
         if (speed != null && speed.isJsonPrimitive()) {
             animation.animSpeed = speed.getAsString();
+        }
+        JsonElement timeUpdate = animObject.get("anim_time_update");
+        if (timeUpdate != null && timeUpdate.isJsonPrimitive()) {
+            animation.animTimeUpdate = timeUpdate.getAsString();
         }
     }
 

@@ -107,6 +107,25 @@ public class RawYsmModel {
         public List<RawBoneAnimation> boneAnimations = new ArrayList<>();
         public List<RawTimelineEvent> timelineEvents = new ArrayList<>();
         public List<RawSoundEffect> soundEffects = new ArrayList<>();
+        /**
+         * Bedrock's per-animation {@code anim_speed}: a number or a MoLang expression returning the playback rate.
+         * Carried to the engine's {@link software.bernie.geckolib3.core.builder.Animation#animSpeed} by
+         * {@code RawYsmModelAdapter.createAnimationJson} and read there by {@code ClientModelManager.attachAnimSpeed}.
+         *
+         * <p>Before this field existed the value only survived the paths that keep the animation's original JSON
+         * ({@code RawAnimationFile.sourceJson}, i.e. a flat folder model and a legacy bare-YSGP {@code .ysm}); the
+         * OpenYSM binary payload is re-emitted from these structure fields, so without a field here the value was
+         * dropped for every model on the binary channel - which is the default channel
+         * ({@code Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL}). See {@code YSMBinarySerializer.writeAnimationFileContent}.
+         */
+        public String animSpeed;
+        /**
+         * Bedrock's per-animation {@code anim_time_update}: a MoLang expression returning the animation time in
+         * seconds. Same chain and same reason as {@link #animSpeed}; consumed by the engine's
+         * {@link software.bernie.geckolib3.core.builder.Animation#animTimeUpdate}, whose advance
+         * {@code AnimationController} already implements.
+         */
+        public String animTimeUpdate;
     }
 
     public static class RawBoneAnimation {
