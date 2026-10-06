@@ -10,8 +10,15 @@ import net.minecraft.util.ResourceLocation;
  * 连续姿态采用 1/64 量化以减少微小变化带来的重画；这是近似缓存，非逐像素相等。
  * 显隐（包括精确零缩放）必须单独编码，不能被量化吞掉。
  *
- * <p>调用方见 {@link RenderUtil#renderEntityInInventory}；签名的计算（骨骼的
- * 旋转/位移/缩放/隐藏 + 几何对象与贴图身份）也在那里。
+ * <p><b>本仓当前没有调用方</b>，而这是有意的决定，不是漏接。参考分支用它跳过"姿态与上一帧相同"
+ * 时的几何提交（参考 {@code util/RenderUtil.java:371-378} 的 {@code invalidatePreviewPose} 与
+ * {@code :665-675}），本仓的 {@code RenderUtil.renderEntityInInventory} 没有这条链：模型网格的
+ * 重绘率现在由 {@code client/renderer/PreviewRefreshPolicy} + {@code FboCache} 限住
+ * （{@code GUI_MODEL_PREVIEW_REFRESH}，每格最多 90 Hz 且整页共享预算），再叠一层"姿态没变就不画"
+ * 的收益只对静止模型存在，代价是每个可能重建 FBO 的路径（翻页/换分类/换模型/悬停与 GUI 动画切换/
+ * FBO 尺寸变化）都必须记得 {@link #invalidate}，漏一个就是空白或过期缩略图 ——
+ * 正是 {@code AGENTS.md} 警告的"为时序差新增上游没有的状态"。
+ * 所以判定逻辑留在本类、可单测，接线等有了实机依据再定。
  *
  * <p>单独一个类而不是塞进 {@code RenderUtil}：{@code RenderUtil} 的静态初始化会加载
  * GL/LWJGL（`org.lwjgl.LWJGLException`），单测 JVM 里没有，所以判定逻辑放在这里才可测。

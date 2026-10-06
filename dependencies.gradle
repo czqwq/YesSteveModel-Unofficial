@@ -42,6 +42,14 @@ dependencies {
     // fastutil only reaches the compile classpath transitively through the GTNHLib dev jar,
     // so the test runtime classpath needs it declared explicitly (mod code uses it at runtime).
     testImplementation("it.unimi.dsi:fastutil:8.5.18")
+    // LWJGL 2 (the one `runClient` uses; `runClient25` uses LWJGL 3) is needed by the test runtime classpath for one
+    // reason: `net.minecraft.client.Minecraft`'s class initialisation touches `org.lwjgl.DisplayMode` and catches
+    // `org.lwjgl.LWJGLException` (`Minecraft.java:185`, `:476`), so *linking* the class at all needs the LWJGL 2
+    // types even though nothing initialises a display. Without it, any test that reaches a code path calling
+    // `Minecraft.getMinecraft()` dies with `NoClassDefFoundError: org/lwjgl/LWJGLException` before the call can
+    // return the null the port already degrades on (`CustomTextureManager.MinecraftHost` returns immediately when
+    // there is no client, which is what makes `ModelTextureRegistry`'s budget logic testable at all).
+    testRuntimeOnly("org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209")
     // The vendored engine's Bedrock geometry POJOs (software.bernie.geckolib3.geo.raw.pojo) are
     // Jackson-annotated and import plain `com.fasterxml.jackson.*`; the shadow task relocates them.
     implementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")

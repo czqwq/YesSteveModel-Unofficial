@@ -155,6 +155,17 @@ public class ClientEventHandler {
         // Record this as the client thread, so the model manager can refuse to install animations from anywhere else
         // (a host mod may query clips from the server thread).
         ClientModelManager.markClientThread();
+        // Direct-buffer safety net. It rate-limits itself (one JMX read per 100 calls, i.e. ~5 s) and returns
+        // immediately while `Config.ENABLE_DIRECT_BUFFER_WATCHDOG` is off, so this is one boolean read and one
+        // increment per tick in the normal case.
+        //
+        // Called **every tick**, not from a 1200-tick block the way the reference does
+        // (`tmp/YesSteveModel-Unofficial-perf-previewUI/.../ClientEventHandler.java:155-160` nests it inside
+        // `if (++unloadTick >= 1200)`): the watchdog's own interval is 100 calls, so nesting it inside another
+        // interval multiplies the two and the "check at ~5s intervals" its javadoc promises becomes ~100 minutes.
+        // Wiring it here is what makes `ENABLE_DIRECT_BUFFER_WATCHDOG` and `DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB`
+        // real switches - before this line both were declared, configurable and read by nothing that ever ran.
+        DirectBufferWatchdog.tick();
         // Install at most a few models that finished building on the loader thread. This is the publish half of
         // on-demand model loading: the parse happens off this thread and only the cache write and the texture upload
         // happen here, a few per tick, so a catalog of models fills in without ever blocking a frame.

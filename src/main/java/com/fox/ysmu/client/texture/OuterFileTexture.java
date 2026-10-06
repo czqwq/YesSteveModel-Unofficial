@@ -225,8 +225,12 @@ public class OuterFileTexture extends AbstractTexture {
      * divisor 循环退出时 {@code maxDim/divisor ∈ [target, 2*target)}（上一轮 ≥ 2*target，本轮 < 2*target，
      * 且整数除法下界是 target）；{@code divisor} 每轮翻倍必然终止，不会死循环；
      * {@code totalCount ≥ 1} 且 {@code opaqueCount == 0} 有分支保护，没有除零。
+     *
+     * <p>包内可见而不是 private：这是纯 {@link BufferedImage} 进出的降采样（没有 GL、没有平台对象），
+     * 是按 {@link Config#TEXTURE_TARGET_SIZE} 决定"上多少显存"的唯一一处决策，也是唯一能在单测里
+     * 逐像素验证的部分（见 {@code OuterFileTextureDownscaleTest}）。放宽可见性不改行为。
      */
-    private BufferedImage downscale(BufferedImage src) {
+    BufferedImage downscale(BufferedImage src) {
         int target = Config.TEXTURE_TARGET_SIZE;
         if (target <= 0) {
             return src;

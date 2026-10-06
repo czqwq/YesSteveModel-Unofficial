@@ -273,12 +273,20 @@ public final class ModelTextureRegistry {
      * {@code TextureUtil} upload from the retained image, not a decode or a decrypt.
      */
     public static void enforceVramBudget() {
+        enforceVramBudget(System.currentTimeMillis());
+    }
+
+    /**
+     * {@link #enforceVramBudget()} with the clock handed in, so a unit test can place a bind outside the
+     * {@link #TEXTURE_PROTECT_MS} window deterministically instead of sleeping. Production always goes through the
+     * no-argument form; the decision logic is unchanged (the clock is only read for the protect-window comparison).
+     */
+    static void enforceVramBudget(long now) {
         long budget = (long) Config.TEXTURE_VRAM_BUDGET_MB * 1024L * 1024L;
         if (budget <= 0L || textureGpuBytes <= budget) {
             return;
         }
         long target = budget * 3L / 4L; // hysteresis floor (reference :1944)
-        long now = System.currentTimeMillis();
 
         // 1. Candidate models: at least one uploaded texture, and not bound within the protect window.
         Map<ResourceLocation, List<ResourceLocation>> texturesByModel = new LinkedHashMap<>();
