@@ -3,16 +3,10 @@ package com.fox.ysmu.client.animation;
 import java.util.function.BiPredicate;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.entity.AbstractClientPlayer;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.item.EnumAction;
-import net.minecraft.item.ItemStack;
-import net.minecraft.util.MathHelper;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
-import com.fox.ysmu.compat.BackhandCompat;
-import com.fox.ysmu.compat.BlockingCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
 import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
 import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
@@ -489,77 +483,62 @@ public class AnimationRegister {
                 .getMainModel());
         RemotePlayerAnimationQueries.QueryValues queryValues = RemotePlayerAnimationQueries
             .get(animationEvent, player, data.netHeadYaw);
-        setEntityQueryValues(parser, data, player, mc, queryValues);
+        setEntityQueryValues(parser, data, player, mc, queryValues, animationEvent.getPartialTick());
         setStateQueryValues(parser, player, mc);
-        setItemUseQueryValues(parser, player);
         setWorldQueryValues(parser, player, mc);
         setYsmValues(animationEvent, parser, data, player, queryValues, humanoidHooks);
     }
 
     private static void setEntityQueryValues(MolangParser parser, EntityModelData data, EntityPlayer player,
-        Minecraft mc, RemotePlayerAnimationQueries.QueryValues queryValues) {
+        Minecraft mc, RemotePlayerAnimationQueries.QueryValues queryValues, float partialTicks) {
+        // The entity-parameterised half first: one definition per name, shared with the hand-written sub-entity
+        // sampler (VehicleRenderer / ArrowProjectileRenderer), which is why it is not spelled out again here. The
+        // player-only names and the two remote-player refinements below are written afterwards, so they win.
+        EntityQueryBindings.apply(parser, player, partialTicks);
         parser.setValue("query.actor_count", () -> mc.theWorld.loadedEntityList.size());
-        parser.setValue("query.body_x_rotation", player.rotationPitch);
-        parser.setValue("query.body_y_rotation", () -> MathHelper.wrapAngleTo180_float(player.rotationYaw));
-        parser.setValue("query.cardinal_facing_2d", () -> MathHelper.floor_double((double) (player.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3);
         // 相机到实体的距离：第三人称必须算上镜头后退（原实现在本机玩家上恒为 0，
-        // 见 CameraDistanceQuery 的类注释）。
-        parser.setValue("query.distance_from_camera", () -> CameraDistanceQuery.forPlayer(player));
-        parser.setValue("query.equipment_count", () -> getEquipmentCount(player));
-        parser.setValue("query.eye_target_x_rotation", () -> player.rotationPitch);
-        parser.setValue("query.eye_target_y_rotation", () -> player.rotationYaw);
-        parser.setValue("query.ground_speed", queryValues.groundSpeed());
-        parser.setValue("query.has_cape", () -> MolangUtils.booleanToFloat(hasCape(player)));
-        parser.setValue("query.has_rider", () -> MolangUtils.booleanToFloat(player.riddenByEntity != null));
-        parser.setValue("query.head_x_rotation", queryValues.headYaw());
-        parser.setValue("query.head_y_rotation", () -> data.headPitch);
+        // 见 CameraDistanceQuery 的类注释）。相机是本机玩家的，所以这个名字只对玩家帧有意义：子实体帧
+        // (载具/投射物)按"不适用"返回 0，而不是返回本机玩家到镜头的距离。上游对任意实体都会给出到相机的距离
+        // (它读 context 的 entity)，本仓的 CameraDistanceQuery 是玩家形状的 —— 见 task-23 汇报里的遗留项。
+        parser.setValue(
+            "query.distance_from_camera",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D : CameraDistanceQuery.forPlayer(player));
+        // 头朝向来自帧数据(AnimationEvent/EntityModelData)，不是实体状态：上游把它注册成 `var`（读 ctx.data()，
+        // YSMBinding.java:87-88），所以只有玩家帧有值。子实体帧没有 EntityModelData，按 0 回答。
+        parser.setValue(
+            "query.head_x_rotation",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D : (double) queryValues.headYaw());
+        parser.setValue(
+            "query.head_y_rotation",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D : (double) data.headPitch);
         // 同上：相机 roll，且只对本机玩家（远程玩家的 roll 无同步字段）。详见 CameraRollQuery。
-        parser.setValue("query.head_z_rotation", () -> com.fox.ysmu.client.animation.molang.CameraRollQuery
-            .isLocalPlayer(player) ? com.fox.ysmu.client.animation.molang.CameraRollQuery.interpolatedRoll() : 0.0d);
-        parser.setValue("query.health", player::getHealth);
-        parser.setValue("query.hurt_time", () -> player.hurtTime);
-        parser.setValue("query.modified_distance_moved", () -> player.distanceWalkedModified);
-        parser.setValue("query.vertical_speed", () -> getVerticalSpeed(player));
-        parser.setValue("query.walk_distance", () -> player.distanceWalkedOnStepModified);
+        parser.setValue("query.head_z_rotation", () -> MolangFrameContext.getPlayer() == null ? 0.0d
+            : com.fox.ysmu.client.animation.molang.CameraRollQuery
+                .isLocalPlayer(player) ? com.fox.ysmu.client.animation.molang.CameraRollQuery.interpolatedRoll() : 0.0d);
+        // 本仓对远程玩家的平滑/夹取是**精化**，叠在 EntityQueryBindings 的通用原值之上（上游没有这层）；
+        // 本机玩家的 groundSpeed 走 motionX/Z，与通用表的位置差分同值。
+        parser.setValue("query.ground_speed", queryValues.groundSpeed());
+        // 同 ground_speed：远程玩家的 yawSpeed 精化。
         parser.setValue("query.yaw_speed", queryValues.yawSpeed());
-
-        parser.setValue("query.position_delta", () -> {
-            double dx = player.posX - player.prevPosX;
-            double dy = player.posY - player.prevPosY;
-            double dz = player.posZ - player.prevPosZ;
-            return Math.sqrt(dx*dx + dy*dy + dz*dz);
-        });
     }
 
     private static void setStateQueryValues(MolangParser parser, EntityPlayer player, Minecraft mc) {
-        parser.setValue("query.is_eating", () -> MolangUtils.booleanToFloat(player.getItemInUse() != null && player.getItemInUse().getItemUseAction() == EnumAction.eat));
         parser.setValue("query.is_first_person", () -> MolangUtils.booleanToFloat(mc.gameSettings.thirdPersonView == 0));
-        parser.setValue("query.is_in_water", () -> MolangUtils.booleanToFloat(player.isInWater()));
-        parser.setValue("query.is_in_water_or_rain", () -> MolangUtils.booleanToFloat(player.isWet()));
-        parser.setValue("query.is_jumping", () -> MolangUtils.booleanToFloat(isPlayerJumping(player)));
-        parser.setValue("query.is_on_fire", () -> MolangUtils.booleanToFloat(player.isBurning()));
+        // 跳跃是**输入**状态（本仓 isPlayerJumping 读移动输入），上游对非玩家实体没有等价输入源，
+        // 所以子实体帧按"不适用"返回 0。
+        parser.setValue(
+            "query.is_jumping",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D
+                : MolangUtils.booleanToFloat(isPlayerJumping(player)));
+        // 1.7.10 不同步远程玩家的 onGround，本仓的 isPlayerOnGround 对它做外推——这是叠在通用值之上的精化
+        // （EntityQueryBindings 里 query.is_on_ground 是 entity.onGround），子实体取通用值，与上游一致。
         parser.setValue("query.is_on_ground", () -> MolangUtils.booleanToFloat(isPlayerOnGround(player)));
-        parser.setValue("query.is_playing_dead", () -> MolangUtils.booleanToFloat(player.isDead));
-        parser.setValue("query.is_riding", () -> MolangUtils.booleanToFloat(player.isRiding()));
-        parser.setValue("query.is_sleeping", () -> MolangUtils.booleanToFloat(player.isPlayerSleeping()));
+        // 同上：精化（isPlayerOnGround 的远程外推）。
         parser.setValue("query.is_sneaking", () -> MolangUtils.booleanToFloat(isPlayerOnGround(player) && player.isSneaking()));
-        parser.setValue("query.is_sprinting", () -> MolangUtils.booleanToFloat(player.isSprinting()));
-        parser.setValue("query.is_swimming", () -> MolangUtils.booleanToFloat(player.isInWater()));
-        parser.setValue("query.is_using_item", () -> MolangUtils.booleanToFloat(player.isUsingItem()));
-        parser.setValue("query.is_blocking", () -> MolangUtils.booleanToFloat(BlockingCompat.isBlocking(player)));
-    }
-
-    private static void setItemUseQueryValues(MolangParser parser, EntityPlayer player) {
-        // In 1.7.10, item use ticks count down. Modern versions count up. The logic is inverted.
-        parser.setValue("query.item_in_use_duration", () -> (getMaxUseDuration(player) - player.getItemInUseCount()) / 20.0);
-        parser.setValue("query.item_max_use_duration", () -> getMaxUseDuration(player) / 20.0);
-        parser.setValue("query.item_remaining_use_duration", () -> player.getItemInUseCount() / 20.0);
     }
 
     private static void setWorldQueryValues(MolangParser parser, EntityPlayer player, Minecraft mc) {
-        parser.setValue("query.max_health", player::getMaxHealth);
         parser.setValue("query.moon_phase", () -> mc.theWorld.getMoonPhase());
-        parser.setValue("query.player_level", () -> player.experienceLevel);
         parser.setValue("query.time_of_day", () -> MolangUtils.normalizeTime(mc.theWorld.getWorldTime()));
         parser.setValue("query.time_stamp", () -> mc.theWorld.getWorldTime());
     }
@@ -567,15 +546,18 @@ public class AnimationRegister {
     private static void setYsmValues(AnimationEvent<CustomPlayerEntity> animationEvent, MolangParser parser,
         EntityModelData data, EntityPlayer player, RemotePlayerAnimationQueries.QueryValues queryValues,
         boolean humanoidHooks) {
-        parser.setValue("ysm.head_yaw", queryValues.headYaw());
-        parser.setValue("ysm.head_pitch", () -> data.headPitch);
+        // 头朝向/眼闭是帧数据（AnimationEvent 的动画 tick + 玩家 UUID），上游注册成 `var` 读 ctx.data()
+        // (YSMBinding.java:87-88、:124)，所以只有玩家帧有值；子实体帧按"不适用"返回 0。
+        parser.setValue(
+            "ysm.head_yaw",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D : (double) queryValues.headYaw());
+        parser.setValue(
+            "ysm.head_pitch",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D : (double) data.headPitch);
         // G: the per-frame half of ysm.person_view; see the registration in registerYsmVariables for the upstream
-        // source and the numbering.
+        // source and the numbering. 相机状态，与实体类型无关（上游 entityVar 读的也是相机，YSMBinding.java:98），
+        // 所以子实体帧照旧取值，不设守卫。
         parser.setValue("ysm.person_view", () -> personView(player));
-        parser.setValue("ysm.has_helmet", () -> getSlotValue(player, 4));
-        parser.setValue("ysm.has_chest_plate", () -> getSlotValue(player, 3));
-        parser.setValue("ysm.has_leggings", () -> getSlotValue(player, 2));
-        parser.setValue("ysm.has_boots", () -> getSlotValue(player, 1));
         // A-16: the two per-frame hooks upstream fires from preAnimationSetup
         // (client/entity/CustomHumanoidEntity.java:205-218). `player_init` runs once after a model loads;
         // PackUserFunctions#clear (called when the model caches are rebuilt) re-arms it. `player_update` runs every
@@ -599,92 +581,41 @@ public class AnimationRegister {
                 PackUserFunctions.frameTicked(hookPlayerKey, animationEvent.getAnimationTick()) ? 1.0D : 0.0D);
         }
 
-        parser.setValue("ysm.has_mainhand", () -> getSlotValue(player, 0));
-        parser.setValue("ysm.has_offhand", () -> getSlotValue(player, 5));
-        // A-06: these four were registered when the port began and never assigned, so every pack expression that read
-        // them got the LazyVariable default - a constant zero. `has_elytra` is upstream's "an elytra is worn"
-        // (client/animation/molang/YSMBinding.java:120) and the rotations are the wing angles in degrees
-        // (YSMBinding.java:173-175, which converts the same radians). 1.7.10 only has an elytra at all through
-        // Et Futurum Requiem, so that is where they come from; without it they stay at their defaults by design.
-        // The wing angles themselves are advanced by EtFuturumElytraLayer, which is the one caller of ETFR's wing
-        // renderer: ETFR updates them from inside it and nothing else may, or the 0.1 lerp toward the target angle
-        // would run more than once per pass.
-        parser.setValue(
-            "ysm.has_elytra",
-            () -> MolangUtils.booleanToFloat(EtFuturumCompat.getEquippedElytra(player) != null));
-        parser.setValue("ysm.elytra_rot_x", () -> EtFuturumCompat.elytraRotX(player));
-        parser.setValue("ysm.elytra_rot_y", () -> EtFuturumCompat.elytraRotY(player));
-        parser.setValue("ysm.elytra_rot_z", () -> EtFuturumCompat.elytraRotZ(player));
-        // A-15: upstream MoveInputVariable#getVertical
-        // (client/animation/molang/variable/MoveInputVariable.java:9-29) - the movement direction relative to where the
-        // entity is facing, as a cosine: 1 straight ahead, negative walking backwards, 0 when not moving.
-        // This name had no producer at all, and the parser answers an unknown variable with a silent 0 - so a script
-        // comparing `ysm.input_vertical < 0.1` compared against 0 and was therefore *always true*.
+        // ysm.has_mainhand / has_offhand / has_helmet / has_chest_plate / has_leggings / has_boots / has_elytra and
+        // ysm.elytra_rot_x/y/z are now bound by EntityQueryBindings, guarded the way upstream registers them
+        // (livingEntityVar / clientPlayerVar, YSMBinding.java:114-120,173-175): a non-player frame gets the
+        // registered default instead of the local player's equipment. 1.7.10 only has an elytra through Et Futurum
+        // Requiem, which is where the value still comes from; its wing angles are advanced by EtFuturumElytraLayer,
+        // the one caller of ETFR's wing renderer (ETFR updates them from inside it and nothing else may, or the 0.1
+        // lerp toward the target angle would run more than once per pass).
+        // A-15: ysm.input_vertical is bound by EntityQueryBindings now (upstream registers it as entityVar,
+        // YSMBinding.java:96, and the port's implementation is derived from the entity's movement delta and body yaw,
+        // so it is entity-parameterised and a vehicle gets its own value). History kept: the name had no producer at
+        // all, and the parser answers an unknown variable with a silent 0 - so a script comparing
+        // `ysm.input_vertical < 0.1` compared against 0 and was therefore *always true*;
         // wine_fox/18_wedding's backwards-walk script (functions/简单倒走动画@player_ctrl_main.molang) played its clip
         // on every walk instead of only when walking backwards.
-        parser.setValue("ysm.input_vertical", () -> moveInputVertical(player, animationEvent.getPartialTick()));
         // 1.7.10 has no riptide and Et Futurum Requiem does not add one - its whole tree has no trident - so there is
         // no source to read: upstream binds this to `entity.isAutoSpinAttack()` (YSMBinding.java:121). Assigned
         // explicitly so the constant reads as a decision rather than as a name someone forgot to wire up.
         parser.setValue("ysm.is_riptide", MolangUtils.FALSE);
-        parser.setValue("ysm.is_close_eyes", () -> getEyeCloseState(animationEvent, player));
-        parser.setValue("ysm.is_passenger", () -> MolangUtils.booleanToFloat(player.isRiding()));
-        parser.setValue("ysm.is_sleep", () -> MolangUtils.booleanToFloat(player.isPlayerSleeping()));
+        // 同 ysm.head_yaw：帧数据（动画 tick），上游注册成 livingEntityVar 读 ctx.animationEvent()
+        // (YSMBinding.java:124)，子实体帧按"不适用"返回 0。
+        parser.setValue(
+            "ysm.is_close_eyes",
+            () -> MolangFrameContext.getPlayer() == null ? 0.0D
+                : getEyeCloseState(animationEvent, player));
+        // 同 query.is_sneaking：isPlayerOnGround 的远程外推是精化，通用值在 EntityQueryBindings 里。
         parser.setValue("ysm.is_sneak", () -> MolangUtils.booleanToFloat(isPlayerOnGround(player) && player.isSneaking()));
-        parser.setValue("ysm.on_ladder", () -> MolangUtils.booleanToFloat(player.isOnLadder()));
-        parser.setValue("ysm.is_fishing", () -> MolangUtils.booleanToFloat(player.fishEntity != null));
-        parser.setValue("ysm.swinging", () -> MolangUtils.booleanToFloat(player.isSwingInProgress));
-        parser.setValue("ysm.swing_time", () -> player.swingProgressInt);
-        parser.setValue("ysm.swinging_arm", () -> BackhandCompat.swingingArm(player) ? 0.0d : 1.0d);
-        // TiCon 十字弩的装填状态来自物品 NBT（InfiTool.Loaded），只能按物品读，
-        // 所以主手/副手各读一次；没有 TConstruct 时 TinkersCrossbowCompat 一律返回 false
-        // (reference branch AnimationRegister.java:587-590)。
-        parser.setValue(
-            "ysm.mainhand_charged_crossbow",
-            () -> MolangUtils.booleanToFloat(
-                com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem())));
-        parser.setValue(
-            "ysm.offhand_charged_crossbow",
-            () -> MolangUtils.booleanToFloat(
-                com.fox.ysmu.compat.TinkersCrossbowCompat
-                    .isCrossbowLoaded(BackhandCompat.getOffhandItem(player))));
-        parser.setValue("ysm.armor_value", player::getTotalArmorValue);
-        parser.setValue("ysm.hurt_time", () -> player.hurtTime);
-        parser.setValue("ysm.food_level", () -> player.getFoodStats().getFoodLevel());
+        // ysm.is_sleep / on_ladder / is_fishing / swinging / swing_time / swinging_arm /
+        // mainhand_charged_crossbow / offhand_charged_crossbow / armor_value / hurt_time / food_level are bound by
+        // EntityQueryBindings now, each with upstream's guard (livingEntityVar / playerVar / clientPlayerVar):
+        // a boat answers false/0 for them instead of the local player's value, and a living non-player answers the
+        // living-level ones (food_level is 20, matching YSMBinding.java:342-350).
     }
 
-    private static boolean hasCape(EntityPlayer player) {
-        if (player instanceof AbstractClientPlayer) {
-            AbstractClientPlayer clientPlayer = (AbstractClientPlayer) player;
-            // 'isCapeLoaded' & 'isModelPartShown' are modern. 1.7.10 has simpler checks.
-            // func_152122_n() checks if the cape texture is available and should be rendered.
-            return !player.isInvisible() && clientPlayer.func_152122_n() && clientPlayer.getLocationCape() != null;
-        }
-        return false;
-    }
-
-    private static int getEquipmentCount(EntityPlayer player) {
-        int count = 0;
-        for (ItemStack s : player.inventory.armorInventory) {
-            if (s != null) {
-                count += 1;
-            }
-        }
-        return count;
-    }
-
-    private static float getMaxUseDuration(EntityPlayer player) {
-        ItemStack useItem = player.getItemInUse();
-        if (useItem == null) {
-            return 0.0f;
-        } else {
-            return useItem.getMaxItemUseDuration();
-        }
-    }
-
-    private static float getVerticalSpeed(EntityPlayer player) {
-        return (float) ((player.posY - player.prevPosY) * 20.0);
-    }
+    // hasCape / getEquipmentCount / getMaxUseDuration / getSlotValue moved to EntityQueryBindings together with the
+    // bindings that were their only callers: the table needs them for the same names, and one definition is the rule.
 
     private static void register(String animationName, ILoopType loopType, int priority,
         BiPredicate<EntityPlayer, AnimationEvent<CustomPlayerEntity>> predicate) {
@@ -706,14 +637,6 @@ public class AnimationRegister {
         return MolangUtils.booleanToFloat(player.isPlayerSleeping() || isBlinkTime);
     }
 
-    private static double getSlotValue(EntityPlayer player, int slotIndex) {
-        if (slotIndex == 5) {
-            return MolangUtils.booleanToFloat(BackhandCompat.getOffhandItem(player) != null);
-        } else {
-            return MolangUtils.booleanToFloat(player.getEquipmentInSlot(slotIndex) != null);
-        }
-    }
-
     private static boolean isPlayerOnGround(EntityPlayer player) {
         // 本地玩家
         if (player == Minecraft.getMinecraft().thePlayer) {
@@ -732,34 +655,10 @@ public class AnimationRegister {
         }
     }
 
-    /**
-     * A-15: upstream {@code MoveInputVariable#getVertical} - the direction the entity is moving relative to the way it
-     * faces, as a cosine: 1 straight ahead, negative walking backwards, 0 while not moving.
-     * <p>
-     * Upstream compares the angle of the per-frame position delta against {@code entity.getViewYRot(partialTick)} and
-     * returns {@code cos(relative)}; the horizontal delta below {@code 1.0E-4} answers 0, so a standing entity reads 0
-     * rather than a direction derived from noise
-     * ({@code client/animation/molang/variable/MoveInputVariable.java:9-29}).
-     * <p>
-     * The yaw is 1.7.10's {@code renderYawOffset}, interpolated - this port's "body yaw", i.e. the direction the entity
-     * is actually facing, which is what a movement direction has to be measured against; the same choice
-     * {@code ParticleFunction} makes when it rotates an offset by the body yaw. (Upstream's {@code getViewYRot} is a
-     * 1.20 vanilla method whose body-versus-head semantics are not readable from this workspace, but both candidates
-     * agree on the sign this variable is used for - walking forwards versus backwards.)
-     */
-    private static double moveInputVertical(EntityPlayer player, float partialTicks) {
-        double deltaX = player.posX - player.prevPosX;
-        double deltaZ = player.posZ - player.prevPosZ;
-        if (Math.sqrt(deltaX * deltaX + deltaZ * deltaZ) < 1.0E-4D) {
-            return 0.0D;
-        }
-        float moveAngleDeg = (float) Math.toDegrees(Math.atan2(deltaZ, deltaX));
-        float yawDeg = player.prevRenderYawOffset + (player.renderYawOffset - player.prevRenderYawOffset) * partialTicks;
-        float entityYawDeg = 90.0F - MathHelper.wrapAngleTo180_float(-yawDeg);
-        float relativeDeg = MathHelper.wrapAngleTo180_float(moveAngleDeg - entityYawDeg);
-        // 0.017453292F is degrees-to-radians, the same literal the port already uses for the body-yaw particle rotation.
-        return MathHelper.cos(relativeDeg * 0.017453292F);
-    }
+    // A-15's moveInputVertical moved to EntityQueryBindings: its only caller was the ysm.input_vertical binding, and
+    // the table needs it for the same name. It was already a pure function of the entity (position delta + the
+    // interpolated body yaw, upstream MoveInputVariable.java:9-29), so parameterising it by the entity costs nothing
+    // and a vehicle now reads its own movement direction instead of its rider's.
 
     /**
      * Whether the player is in the airborne phase that plays the model's {@code jump} clip.

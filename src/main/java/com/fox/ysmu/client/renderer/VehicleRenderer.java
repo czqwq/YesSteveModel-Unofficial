@@ -34,10 +34,14 @@ import net.minecraftforge.common.MinecraftForge;
 import org.lwjgl.opengl.GL11;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.EntityQueryBindings;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
+import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime;
 import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime.VehicleState;
+import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
 import com.fox.ysmu.data.VehicleModelStates;
@@ -48,7 +52,9 @@ import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
+import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.IGeoRenderer;
@@ -322,8 +328,9 @@ public final class VehicleRenderer {
         }
 
         // Pose the model for this frame before the draw. A vehicle, like a projectile, is not an IAnimatable, so
-        // nothing else ticks its clips.
-        tickAnimation(entity, model, geoId, modelId, partialTicks);
+        // nothing else ticks its clips. The render transform is handed over because the frame's timeline
+        // (ysm.particle) offsets particles from the model's own origin and rotation.
+        tickAnimation(entity, model, geoId, modelId, partialTicks, x, y, z, yaw, pitch);
 
         GL11.glPushMatrix();
         try {
@@ -458,7 +465,7 @@ public final class VehicleRenderer {
      * ({@link VehicleControllerRuntime} vs {@code ProjectileControllerRuntime}).
      */
     private static void tickAnimation(Entity entity, GeoModel model, ResourceLocation geoId,
-        ResourceLocation modelId, float partialTicks) {
+        ResourceLocation modelId, float partialTicks, double x, double y, double z, float yaw, float pitch) {
         AnimationFile animationFile = GeckoLibCache.getInstance()
             .getAnimations()
             .get(geoId);
@@ -471,7 +478,13 @@ public final class VehicleRenderer {
         // The owner's roaming variables (upstream's molangVarsServerBound) are published for the duration of this
         // draw; see publishOwnerRoamingVariables for where they come from.
         PublishedVariables published = publishOwnerRoamingVariables(entity, modelId);
+        // Publish the frame's subject and its entity-derived query values exactly as the world path does
+        // (AnimationRegister#setParserValue:478-496): query.position_delta(...), ctrl.hold and the particle/bone
+        // functions read the subject from here, and query.* / ysm.* are bound by the one shared table. Without this
+        // a vehicle's animation read the local player's state - the values are live suppliers, not a snapshot.
+        MolangFrameContext.begin(entity, ModelIdUtil.getMainId(modelId));
         try {
+            EntityQueryBindings.apply(GeckoLibCache.getInstance().parser, entity, partialTicks);
             // Reset to the bind pose before sampling, so a bone the previous frame's clip moved and this frame's does
             // not touch cannot keep the stale pose.
             ArrowProjectileRenderer.saveInitialSnapshots(model.topLevelBones);
@@ -503,8 +516,59 @@ public final class VehicleRenderer {
             // DebugController.
             ArrowProjectileRenderer
                 .applyActiveAnimations(model, animationFile, activeAnimations, clockOrigins, ageInTicks, false);
+            // The timeline has to run after the bones are written: an instruction may read this frame's pose through
+            // ysm.bone_pivot_abs(...).
+            dispatchTimeline(entity, geoId, animationFile, activeAnimations, ageInTicks, model, x, y, z, yaw, pitch);
         } finally {
+            MolangFrameContext.end();
             restoreVariables(published);
+        }
+    }
+
+    /**
+     * Dispatches the vehicle's {@code timeline} instructions - the {@code ysm.particle(...)} a pack writes for an
+     * engine wake, a wheel spray, a mount effect.
+     *
+     * <p>Same four paired scopes as the projectile path ({@code ArrowProjectileRenderer#dispatchProjectileTimelines}),
+     * because the runtime underneath is the same one and it is generic: {@code ProjectileTimelineRuntime.dispatch}
+     * takes an entity id, an animation id, the file, the active names and the age, and nothing projectile-shaped. The
+     * per-frame dispatch budget is already reset once per frame for both kinds
+     * ({@code ClientEventHandler:142} → {@code ProjectileTimelineRuntime.beginRenderFrame}), so nothing is reset
+     * here.</p>
+     *
+     * <p>Upstream has no separate timeline dispatcher at all: its vehicle is a real animatable, so the instructions
+     * run inside the engine's per-frame animation processing, which is where it parses them
+     * ({@code geckolib3/util/json/JsonAnimationUtils.java:48}, {@code format/parser/pojo/animation/Animation.java:124-125}).
+     * A 1.7.10 vehicle never enters that processing, so the port's standalone dispatcher is its counterpart - the same
+     * reason the projectile path needed one.</p>
+     */
+    private static void dispatchTimeline(Entity entity, ResourceLocation geoId, AnimationFile animationFile,
+        List<String> activeAnimations, double ageInTicks, GeoModel model, double x, double y, double z, float yaw,
+        float pitch) {
+        Entity previousEntity = ParticleEffectUtil.getCurrentEntity();
+        ParticleEffectUtil.setCurrentEntity(entity);
+        // x/y/z are the model's origin (the minecart's rail-corrected position included) and yaw/pitch its
+        // orientation, so a model-space offset written as bone_pivot_abs(...)/16*0.7 lands where the model is.
+        ParticleEffectUtil.beginProjectileTransform(x, y, z, yaw, pitch);
+        Map<String, IBone> previousBones = MolangPhysicsRuntime.beginProjectileBones(model.topLevelBones);
+        try {
+            ProjectileTimelineRuntime.dispatch(
+                entity.getEntityId(),
+                geoId,
+                animationFile,
+                activeAnimations,
+                ageInTicks);
+        } catch (Throwable failure) {
+            warnOnce(
+                "timeline|" + failure.getClass()
+                    .getName() + '|' + failure.getMessage(),
+                "vehicle timeline dispatch failed for {}: {}",
+                entity,
+                failure.toString());
+        } finally {
+            MolangPhysicsRuntime.endProjectileBones(previousBones);
+            ParticleEffectUtil.endProjectileTransform();
+            ParticleEffectUtil.setCurrentEntity(previousEntity);
         }
     }
 

@@ -19,6 +19,7 @@ import org.lwjgl.opengl.GL11;
 import com.eliotlash.mclib.math.IValue;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.EntityQueryBindings;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ProjectileState;
@@ -299,6 +300,13 @@ public final class ArrowProjectileRenderer {
 
         double ageInTicks = arrow.ticksExisted + partialTicks;
 
+        // Publish the frame's subject and its entity-derived query values, exactly as the world path does
+        // (AnimationRegister#setParserValue:478-496). One table for both kinds: without this a projectile animation
+        // asking query.is_in_water answered with the local player's state, because these are live suppliers in a
+        // shared table rather than a per-draw snapshot.
+        MolangFrameContext.begin(arrow, ModelIdUtil.getMainId(modelId));
+        EntityQueryBindings.apply(GeckoLibCache.getInstance().parser, arrow, partialTicks);
+
         // In-ground detection reads the position delta rather than the motion vector: 1.7.10's EntityArrow leaves
         // motionX/Y/Z non-zero on a stuck arrow (onCollide does not always clear them), while prevPos vs pos is
         // reliable.
@@ -311,7 +319,8 @@ public final class ArrowProjectileRenderer {
         boolean debugThisTick = Config.DEBUG_ANIMATION && allowArrowDebug(arrow.getEntityId(), arrow.ticksExisted);
 
         setMolangVariable("ysm.in_ground", isInGround ? 1.0 : 0.0);
-        setMolangVariable("ysm.delta_movement_length", deltaLength);
+        // ysm.delta_movement_length is no longer published here: it is one of the names the shared
+        // EntityQueryBindings table defines for whichever entity the frame belongs to (same definition, no x20).
 
         // ysm.shoot_item_id: "the item that fired this arrow". 1.7.10 never syncs the firing weapon to the client
         // (shootingEntity is server-side only), so MixinEntityArrow captured the shooter's held item into a
@@ -375,6 +384,7 @@ public final class ArrowProjectileRenderer {
         }
         if (activeAnimations.isEmpty()) {
             // No animation is active, so the bind pose is what should be drawn.
+            MolangFrameContext.end();
             return;
         }
 
@@ -394,6 +404,8 @@ public final class ArrowProjectileRenderer {
             renderZ,
             interpYaw,
             interpPitch);
+        // Paired with the begin above: a sub-entity must not stay the frame's subject for whatever is drawn after it.
+        MolangFrameContext.end();
     }
 
     /**
