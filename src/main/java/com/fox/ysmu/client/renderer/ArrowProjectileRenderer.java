@@ -514,7 +514,14 @@ public final class ArrowProjectileRenderer {
         }
     }
 
-    private static void saveInitialSnapshots(List<GeoBone> bones) {
+    /**
+     * Package-visible rather than private since the vehicle path shares it ({@code VehicleRenderer}): a sub-entity
+     * that is not an {@code IAnimatable} has no {@code AnimationProcessor} to reset its bones, so both kinds reset
+     * them the same way before sampling - otherwise a bone the previous frame's animation moved and this frame's does
+     * not touch keeps the stale pose (for the built-in boat: its {@code water} clip offsets the {@code Boat} bone, and
+     * without the reset the boat stays lifted after leaving the water).
+     */
+    static void saveInitialSnapshots(List<GeoBone> bones) {
         if (bones == null) {
             return;
         }
@@ -524,7 +531,8 @@ public final class ArrowProjectileRenderer {
         }
     }
 
-    private static void resetBonesToSnapshot(List<GeoBone> bones) {
+    /** Package-visible for the same reason as {@link #saveInitialSnapshots}. */
+    static void resetBonesToSnapshot(List<GeoBone> bones) {
         if (bones == null) {
             return;
         }
@@ -668,7 +676,11 @@ public final class ArrowProjectileRenderer {
     }
 
     /**
-     * Writes one projectile Molang variable into the shared parser table, registering it if absent.
+     * Writes one sub-entity Molang variable into the shared parser table, registering it if absent.
+     * <p>
+     * Package-visible since the vehicle path shares it: a sub-entity is sampled by hand rather than by an
+     * {@code AnimationProcessor}, so the values its keyframes and controller conditions read have to be published
+     * here for the duration of its draw.
      * <p>
      * The name goes through {@link MolangParser#canonicalVariableName} - the same single rule
      * {@code ProjectileControllerRuntime#resolveVariable} reads by - so the two ends of this axis cannot key the same
@@ -676,7 +688,7 @@ public final class ArrowProjectileRenderer {
      * canonicalises, so this is a no-op for them today; it is the invariant that keeps a condition spelled with the
      * pack's own capitalisation from missing the entry this method created.
      */
-    private static void setMolangVariable(String name, double value) {
+    static void setMolangVariable(String name, double value) {
         String canonical = MolangParser.canonicalVariableName(name);
         MolangParser.VARIABLES.computeIfAbsent(canonical, key -> new LazyVariable(key, () -> 0.0D))
             .set(value);

@@ -2,9 +2,13 @@ package com.fox.ysmu.client.renderer;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.annotation.Nullable;
@@ -30,13 +34,22 @@ import net.minecraftforge.common.MinecraftForge;
 import org.lwjgl.opengl.GL11;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
+import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime;
+import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime.VehicleState;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.roaming.ClientRoamingKeys;
+import com.fox.ysmu.client.roaming.ClientRoamingStore;
 import com.fox.ysmu.data.VehicleModelStates;
 import com.fox.ysmu.mixin.client.RenderLivingInvoker;
 import com.fox.ysmu.mixin.client.RendererLivingEntityInvoker;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
+import software.bernie.geckolib3.core.molang.LazyVariable;
+import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
+import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.IGeoRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
@@ -308,6 +321,10 @@ public final class VehicleRenderer {
             }
         }
 
+        // Pose the model for this frame before the draw. A vehicle, like a projectile, is not an IAnimatable, so
+        // nothing else ticks its clips.
+        tickAnimation(entity, model, geoId, modelId, partialTicks);
+
         GL11.glPushMatrix();
         try {
             GL11.glTranslated(x, y, z);
@@ -426,6 +443,133 @@ public final class VehicleRenderer {
                     entity,
                     failure.toString());
             }
+        }
+    }
+
+    /**
+     * Poses the model for this frame: selects the vehicle's active clips and samples their keyframes onto the bones.
+     *
+     * <p>Upstream ticks a real animatable every frame ({@code client/entity/CustomVehicleEntity.java:20-125}) and its
+     * renderer drives a real controller set ({@code VehicleControllerCollection.java:19-44}). A 1.7.10 vehicle is not
+     * an {@code IAnimatable} and never enters an {@code AnimationProcessor} - the engine's replaced-entity renderer is
+     * {@code RendererLivingEntity}-typed and cannot draw a boat - so its clips are selected and sampled by hand,
+     * exactly as the projectile path does it ({@code ArrowProjectileRenderer.applyProjectileAnimations:348-381}): the
+     * same shared sampler, the same bind-pose reset, a different selector
+     * ({@link VehicleControllerRuntime} vs {@code ProjectileControllerRuntime}).
+     */
+    private static void tickAnimation(Entity entity, GeoModel model, ResourceLocation geoId,
+        ResourceLocation modelId, float partialTicks) {
+        AnimationFile animationFile = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(geoId);
+        if (animationFile == null || animationFile.animations == null) {
+            // Nothing to sample, so the geometry stays in its bind pose.
+            return;
+        }
+        double ageInTicks = entity.ticksExisted + partialTicks;
+
+        // The owner's roaming variables (upstream's molangVarsServerBound) are published for the duration of this
+        // draw; see publishOwnerRoamingVariables for where they come from.
+        PublishedVariables published = publishOwnerRoamingVariables(entity, modelId);
+        try {
+            // Reset to the bind pose before sampling, so a bone the previous frame's clip moved and this frame's does
+            // not touch cannot keep the stale pose.
+            ArrowProjectileRenderer.saveInitialSnapshots(model.topLevelBones);
+            ArrowProjectileRenderer.resetBonesToSnapshot(model.topLevelBones);
+
+            List<ActiveAnimation> activeEntries = VehicleControllerRuntime.getActiveAnimationEntries(
+                entity.getEntityId(),
+                geoId,
+                ageInTicks,
+                VehicleState.of(entity));
+            if (entity.isDead) {
+                // The entity is leaving: drop the coded-controller state it will never use again.
+                VehicleControllerRuntime.cleanupEntity(entity.getEntityId());
+            }
+            if (activeEntries.isEmpty()) {
+                // No clip is active, so the bind pose is what should be drawn.
+                return;
+            }
+            List<String> activeAnimations = new ArrayList<>(activeEntries.size());
+            Map<String, Double> clockOrigins = new HashMap<>();
+            for (ActiveAnimation entry : activeEntries) {
+                activeAnimations.add(entry.name);
+                if (entry.startTick != 0.0d) {
+                    clockOrigins.put(entry.name, entry.startTick);
+                }
+            }
+            // The sampler's own debug flag is left off: its diagnostics are per keyframe and this path has no
+            // rate-limited dump of its own, while the selection is already logged by VehicleControllerRuntime behind
+            // DebugController.
+            ArrowProjectileRenderer
+                .applyActiveAnimations(model, animationFile, activeAnimations, clockOrigins, ageInTicks, false);
+        } finally {
+            restoreVariables(published);
+        }
+    }
+
+    /** What {@link #publishOwnerRoamingVariables} wrote, so the draw can put the shared table back as it was. */
+    private static final class PublishedVariables {
+
+        /** Names that had no entry before this draw, so the entry is removed again. */
+        final Set<String> created = new HashSet<>();
+        /** Names that did have an entry, with the value it held, so it is restored. */
+        final Map<String, Double> previousValues = new HashMap<>();
+    }
+
+    /**
+     * Publishes the vehicle owner's roaming variables as {@code v.roaming.<name>} for the duration of one draw.
+     *
+     * <p>Upstream carries them in the vehicle state itself ({@code molangVarsServerBound},
+     * {@code VehicleModelInfoCapability.java:10,12-16}) so a vehicle animation can read the owner's
+     * {@code v.roaming.*}. This port does <b>not</b> need a second payload for that: the roaming channel already
+     * delivers every player's values to every tracking client ({@code S2CRoamingState}, clientbound id 20, applied to
+     * {@code ClientRoamingStore} at {@code S2CRoamingState.java:196}), and the vehicle state carries both halves of
+     * the address - the owner's UUID ({@code VehicleModelStates.State#getOwnerId}) and the owner's model id. The
+     * namespace key comes from {@link ClientRoamingKeys#keyFor}, the same derivation the owner's own client used when
+     * it reported the values, so the two agree without a wire field.</p>
+     *
+     * <p>The values go into the shared parser table because that is the table the hand-written sampler evaluates
+     * keyframe expressions against (the projectile path publishes its {@code ysm.*} state there for the same reason,
+     * {@code ArrowProjectileRenderer.setMolangVariable}). They are put back afterwards: this is model-specific data,
+     * and a name the owner's model defines but another model does not must not be visible to that other model as a
+     * leftover.</p>
+     */
+    private static PublishedVariables publishOwnerRoamingVariables(Entity vehicle, ResourceLocation modelId) {
+        PublishedVariables published = new PublishedVariables();
+        VehicleModelStates.State state = VehicleModelStates.get(vehicle);
+        UUID ownerId = state == null ? null : state.getOwnerId();
+        if (ownerId == null) {
+            // The owner is unknown (a state written before the owner was resolvable, or one this build never
+            // received): the animation reads 0, which is upstream's "no struct" case.
+            return published;
+        }
+        Map<String, Double> values = ClientRoamingStore.valuesFor(ownerId, ClientRoamingKeys.keyFor(modelId));
+        if (values == null || values.isEmpty()) {
+            return published;
+        }
+        for (Map.Entry<String, Double> entry : values.entrySet()) {
+            // RemoteAnimationVariables.normalize is the port's one rule for a roaming name: a bare name is promoted to
+            // v.roaming.<name> and canonicalised, so the pack's own spelling cannot miss the entry.
+            String name = RemoteAnimationVariables.normalize(entry.getKey());
+            LazyVariable existing = MolangParser.VARIABLES.get(name);
+            if (existing == null) {
+                published.created.add(name);
+            } else {
+                published.previousValues.put(name, existing.get());
+            }
+            ArrowProjectileRenderer.setMolangVariable(name, entry.getValue());
+        }
+        return published;
+    }
+
+    /** Puts the shared parser table back the way {@link #publishOwnerRoamingVariables} found it. */
+    private static void restoreVariables(PublishedVariables published) {
+        for (String name : published.created) {
+            MolangParser.VARIABLES.remove(name);
+        }
+        for (Map.Entry<String, Double> entry : published.previousValues.entrySet()) {
+            ArrowProjectileRenderer.setMolangVariable(entry.getKey(), entry.getValue());
         }
     }
 }

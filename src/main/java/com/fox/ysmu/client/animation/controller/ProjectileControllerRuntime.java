@@ -26,19 +26,48 @@ import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
- * The controller state machines of a projectile sub-entity (an arrow, a trident, a thrown item).
+ * The controller state machines of a <b>sub-entity</b> - a projectile (an arrow, a trident, a thrown item) or a
+ * vehicle (a boat, a minecart, a pig, a horse, a modded rideable).
  *
- * <p>A projectile is not an {@code IAnimatable} and never goes through the engine's controllers, so this is a
+ * <p>A sub-entity is not an {@code IAnimatable} and never goes through the engine's controllers, so this is a
  * deliberately separate, much smaller runtime: it evaluates the same OpenYSM controller definitions
- * ({@code OpenYsmControllerDefinitions}, parsed from the {@code files.projectiles} entries of a pack's
- * {@code ysm.json}) with no {@code EntityPlayer} and no {@code AnimationEvent} in sight. The {@code ysm.*} values the
- * expressions read are published into the shared {@link MolangParser#VARIABLES} map by the renderer once per frame,
- * before {@link #getAnimationEntries} is called.</p>
+ * ({@code OpenYsmControllerDefinitions}, parsed from the {@code files.projectiles} / {@code files.vehicles} entries of
+ * a pack's {@code ysm.json}) with no {@code EntityPlayer} and no {@code AnimationEvent} in sight. The {@code ysm.*}
+ * values the expressions read are published into the shared {@link MolangParser#VARIABLES} map by the renderer once
+ * per frame, before {@link #getActiveAnimationEntries} is called.</p>
  *
- * <p>State is keyed per entity, so two arrows in flight run their own machines; a projectile leaving the world is
+ * <p>What differs between the two kinds is only the fallback used when the model declares no JSON controller for this
+ * animation set: upstream gives each kind a set of <em>coded</em> controllers
+ * ({@code VehicleControllerCollection.java:27-38} for a vehicle, the state animations plus {@code parallel0..7} for a
+ * projectile). That choice is passed in as an {@link ImplicitAnimationSelector}, so the machine evaluation - which is
+ * the part with the rules in it - exists once. The class keeps its original name because renaming it would touch the
+ * projectile test sources, which are outside this change's scope.</p>
+ *
+ * <p>State is keyed per entity, so two arrows in flight run their own machines; a sub-entity leaving the world is
  * forgotten through {@link #cleanupEntity}.</p>
  */
 public final class ProjectileControllerRuntime {
+
+    /**
+     * Selects the animations a sub-entity plays by itself, for the model that declares no JSON controller for this
+     * animation set.
+     *
+     * <p>Implementations append to {@code result} in <b>priority order</b> - a later entry overwrites an earlier one
+     * bone by bone, which is how the caller's list order becomes the priority - and must not append a name in
+     * {@code managedAnims}, which the JSON controllers already own.</p>
+     */
+    public interface ImplicitAnimationSelector {
+
+        /**
+         * @param animId     the sub-entity's animation id, i.e. the {@code files.projectiles} / {@code files.vehicles}
+         *                   entry
+         * @param result     the list to append to; already holds every JSON controller's selection
+         * @param managedAnims every animation name any JSON controller state can select
+         * @param ageInTicks the sub-entity's age including the partial tick
+         */
+        void select(ResourceLocation animId, List<ActiveAnimation> result, Set<String> managedAnims,
+            double ageInTicks);
+    }
 
     /** Per-controller runtime state. */
     private static final class RuntimeState {
@@ -174,9 +203,12 @@ public final class ProjectileControllerRuntime {
      * As {@link #getActiveAnimations(int, ResourceLocation, double, ProjectileState)}, but each entry also carries the
      * state-entry tick the renderer needs to sample its keyframes. The order is identical to
      * {@code getActiveAnimations}, and the machines are evaluated once either way.
+     * <p>
+     * The projectile-shaped overload below keeps the projectile's own implicit selection; a vehicle passes its own
+     * {@link ImplicitAnimationSelector} to this one.
      */
     public static List<ActiveAnimation> getActiveAnimationEntries(int entityId, ResourceLocation animId,
-        double ageInTicks, ProjectileState state) {
+        double ageInTicks, ImplicitAnimationSelector selector) {
         ControllerSet set = OpenYsmAnimationControllerRegistry.get(animId);
         if (set == null || set.controllers.isEmpty()) {
             if (Config.DEBUG_CONTROLLER) {
@@ -185,7 +217,9 @@ public final class ProjectileControllerRuntime {
                     animId,
                     entityId);
             }
-            return selectImplicitAnimations(animId, state, new ArrayList<>(), Collections.emptySet());
+            List<ActiveAnimation> implicit = new ArrayList<>();
+            selector.select(animId, implicit, Collections.emptySet(), ageInTicks);
+            return implicit;
         }
 
         if (Config.DEBUG_CONTROLLER) {
@@ -221,7 +255,23 @@ public final class ProjectileControllerRuntime {
             result.addAll(controllerAnims);
         }
 
-        return selectImplicitAnimations(animId, state, result, managedAnims);
+        selector.select(animId, result, managedAnims, ageInTicks);
+        return result;
+    }
+
+    /**
+     * The projectile-shaped entry: identical to
+     * {@link #getActiveAnimationEntries(int, ResourceLocation, double, ImplicitAnimationSelector)}, with the
+     * projectile's own implicit selection ({@code air} / {@code ground} / {@code fire} / {@code water} plus
+     * {@code parallel0..7}, {@code ProjectileControllerRuntime#selectImplicitAnimations}).
+     */
+    public static List<ActiveAnimation> getActiveAnimationEntries(int entityId, ResourceLocation animId,
+        double ageInTicks, ProjectileState state) {
+        return getActiveAnimationEntries(
+            entityId,
+            animId,
+            ageInTicks,
+            (id, result, managedAnims, age) -> selectImplicitAnimations(id, state, result, managedAnims));
     }
 
     /**
