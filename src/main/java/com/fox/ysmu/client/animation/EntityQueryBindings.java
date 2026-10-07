@@ -34,23 +34,45 @@ import software.bernie.geckolib3.util.MolangUtils;
  * binding table; the port's vehicles and projectiles are not animatables at all (see
  * {@code VehicleRenderer#tickAnimation}), so both call this.</p>
  *
- * <p><b>What is not here.</b> The names that need more than an entity stay on the player path and are deliberately not
- * published for a sub-entity: the item/equipment and first-person queries ({@code query.item_*},
- * {@code query.is_using_item}, {@code ysm.has_*}, {@code ysm.person_view}, ...), the {@code AnimationEvent}-derived
- * head yaw ({@code query.head_yaw}), and the world queries ({@code query.time_of_day}, {@code query.moon_phase},
- * {@code query.actor_count}, ...). For a sub-entity those keep the registered default (0/false) - which is the
- * "not applicable" answer a boat gets from upstream's table - unless the local player's frame has since rebound them;
- * {@link #PUBLISHED_NAMES} is the exact set this class covers, so that boundary is checkable rather than implied.</p>
+ * <p><b>What is not here.</b> The names whose value is frame data or camera state rather than the drawn entity stay on
+ * the player path, because a sub-entity frame has no source for them at all: the {@code AnimationEvent}-derived head
+ * angles ({@code query.head_x_rotation} / {@code head_y_rotation} / {@code head_z_rotation}, {@code ysm.head_yaw} /
+ * {@code ysm.head_pitch}), {@code ysm.is_close_eyes}, {@code query.distance_from_camera} and {@code query.is_jumping}.
+ * Those are guarded there by "the frame subject is a player" and answer 0 otherwise. The world-level names
+ * ({@code query.actor_count}, {@code query.time_of_day}, {@code query.time_stamp}, {@code query.moon_phase}) and the
+ * camera/input ones ({@code query.is_first_person}, {@code ysm.person_view}) are deliberately left unguarded: their
+ * upstream bindings are not entity state either, so a sub-entity frame reading them reads the same value the player
+ * frame does. {@link #PUBLISHED_NAMES} is the exact set this class covers, so that boundary is checkable rather than
+ * implied.</p>
  */
 public final class EntityQueryBindings {
 
-    /** Every name {@link #apply} writes, for diagnostics and for a caller that needs to know the covered set. */
-    public static final String[] PUBLISHED_NAMES = { "query.is_in_water", "query.is_in_water_or_rain",
-        "query.is_on_fire", "query.is_playing_dead", "query.is_riding", "query.is_on_ground", "query.has_rider",
-        "query.modified_distance_moved", "query.walk_distance", "query.body_y_rotation", "query.vertical_speed",
-        "query.ground_speed", "query.yaw_speed", "query.health", "query.max_health", "query.hurt_time",
-        "query.is_sprinting", "query.is_swimming", "query.is_sneaking", "ysm.is_passenger", "ysm.is_sneak",
-        "ysm.delta_movement_length" };
+    /**
+     * Every name {@link #apply} writes, for diagnostics and for a caller that needs to know the covered set.
+     * <p>
+     * The first group is answerable by any entity (upstream's {@code entityVar}); the second needs a living entity and
+     * the third a player, and each answers the registered default for the other kinds - which is what upstream's typed
+     * registration ({@code livingEntityVar} / {@code playerVar} / {@code clientPlayerVar}, {@code YSMBinding.java:114-175})
+     * does when the context entity is not of that type.
+     */
+    public static final String[] PUBLISHED_NAMES = {
+        // any entity
+        "query.is_in_water", "query.is_in_water_or_rain", "query.is_on_fire", "query.is_playing_dead",
+        "query.is_riding", "query.is_on_ground", "query.has_rider", "query.modified_distance_moved",
+        "query.walk_distance", "query.body_y_rotation", "query.body_x_rotation", "query.cardinal_facing_2d",
+        "query.eye_target_x_rotation", "query.eye_target_y_rotation", "query.is_swimming", "query.ground_speed",
+        "query.yaw_speed", "query.vertical_speed", "query.position_delta", "ysm.is_passenger",
+        "ysm.delta_movement_length", "ysm.on_ladder", "ysm.input_vertical",
+        // living entity
+        "query.health", "query.max_health", "query.hurt_time", "query.is_sprinting", "query.is_sneaking",
+        "query.is_sleeping", "ysm.is_sneak", "ysm.is_sleep", "ysm.armor_value", "ysm.hurt_time", "ysm.swinging",
+        "ysm.swing_time", "ysm.mainhand_charged_crossbow", "ysm.food_level",
+        // player
+        "query.is_eating", "query.is_using_item", "query.is_blocking", "query.item_in_use_duration",
+        "query.item_max_use_duration", "query.item_remaining_use_duration", "query.equipment_count",
+        "query.has_cape", "query.player_level", "ysm.has_helmet", "ysm.has_chest_plate", "ysm.has_leggings",
+        "ysm.has_boots", "ysm.has_mainhand", "ysm.has_offhand", "ysm.swinging_arm", "ysm.offhand_charged_crossbow",
+        "ysm.is_fishing", "ysm.has_elytra", "ysm.elytra_rot_x", "ysm.elytra_rot_y", "ysm.elytra_rot_z" };
 
     private EntityQueryBindings() {}
 
