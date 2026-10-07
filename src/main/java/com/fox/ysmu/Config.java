@@ -48,16 +48,22 @@ public class Config {
     /**
      * 模型选择 GUI 增强:前景/背景贴图与 GUI 动画。
      * <p>
-     * 本仓已接上的消费者只有一个:{@code ModelButton} 在关闭时把该 tile 的刷新模式降级为静态
-     * (参考 {@code ModelButton.java:264-266})并停掉该 tile 的 hover/focus 预览通道。
+     * 本仓的消费者是 {@code ModelButton} 的三处:关闭时把该 tile 的刷新模式降级为静态
+     * (参考 {@code ModelButton.java:264-266})、停掉该 tile 的 hover/focus 预览通道、以及**不画**模型自带的
+     * GUI 前景/背景图。
      * <p>
-     * 参考的另一半("模型自带的前景/背景贴图")在本仓缺的是**转发与绘制**,不是解析:模型格式侧
-     * {@code gui_background}/{@code gui_foreground} 的解析与同步都在
+     * 这两张图的链路现在是完整的:模型格式侧解析与同步在
      * ({@code YSMFolderDeserializer:178-179,202-203,240-250}、{@code YSMBinarySerializer:556-557,586-587}、
      * {@code YSMBinaryDeserializer:677-678,701-710},落在 {@code RawYsmModel:237-239} 的 {@code backgroundImages}),
-     * 只是 {@code RawYsmModelAdapter} 从不把它们转发给客户端,客户端也没有对应的注册与绘制。
-     * 这一句此前写成"本仓不解析",是错的 —— 见 {@code tmp/lapluma-checklist-status.md} 的 §5 复核。
-     * 参考的贴图页不受这个开关影响(其 {@code TextureButton.java:75} 直接读刷新模式),本仓照做。
+     * {@code RawYsmModelAdapter} 把它们转发进 {@code ModelData#getGuiImages},客户端注册进
+     * {@code ClientModelManager} 并画在 tile 上(实心底 → 背景 → 模型预览 → 前景 → 文字/边框/星,顺序照
+     * upstream {@code CatalogModelButton:101-106})。参考的贴图页不受这个开关影响(其 {@code TextureButton.java:75}
+     * 直接读刷新模式),本仓照做。
+     * <p>
+     * <b>这个门控是参考分支自己的选择,不是 upstream 的语义。</b>upstream 对这两张图**没有开关**:模型声明了就画
+     * (它的 hover/focus 动画是另一条通道,在 {@code CatalogModelButton:99} 单独驱动)。本仓沿用参考的门控,因为
+     * 这个开关自己的说明就是"前景/背景贴图与 GUI 动画" —— 一处 port-specific 的取舍,写在这里以免被当成 upstream
+     * 行为。
      */
     public static boolean GUI_ENHANCEMENTS = true;
     public static boolean SHOW_LOADING_PROGRESS = true;

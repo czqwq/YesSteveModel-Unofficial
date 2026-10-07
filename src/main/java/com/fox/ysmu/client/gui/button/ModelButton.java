@@ -12,6 +12,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.util.IChatComponent;
 import net.minecraft.util.ResourceLocation;
 import org.apache.commons.lang3.tuple.Pair;
@@ -133,6 +134,18 @@ public class ModelButton extends GuiButton {
         // TextureManager fall back to a lookup that cannot succeed; see CustomPlayerModel#getTextureLocation.
         boolean published = ClientModelManager.isModelPublished(this.modelInfo.getLeft());
         ClientModelManager.ensureGeometry(this.modelInfo.getLeft());
+        // The pack's own GUI background goes between that solid fill and the model preview, and its foreground over the
+        // preview - upstream's order in CatalogModelButton.renderWidget (:101-106): fillGradient -> background ->
+        // entity -> foreground, all three inside its "the render target is there" branch (:102-106). Both images cover
+        // the whole tile, as upstream's renderImage blits them (:164-172). Gating on `published` is the port's form of
+        // that branch: this tile has no loading placeholder, so an unpublished model keeps the bare fill it had before.
+        // Config.GUI_ENHANCEMENTS gates both as well, which is the reference's own choice: upstream has no switch for
+        // these two images (its hover/focus animation is a separate channel, driven at CatalogModelButton:99), and the
+        // port keeps the gate because the switch's own description is "foreground/background textures and GUI
+        // animations".
+        if (Config.GUI_ENHANCEMENTS && published) {
+            this.drawGuiImage(mc, this.modelInfo.getLeft(), ClientModelManager.GUI_IMAGE_BACKGROUND);
+        }
         if (texture != null && published) {
             // 行 43: 预览的实体渲染改成"按策略烘焙到离屏 FBO,其余帧只 blit"(参考 :263-366)。
             this.bakePreviewIfDue(mc, texture);
@@ -145,6 +158,11 @@ public class ModelButton extends GuiButton {
             // 但缓存**里已有的**那张画面继续 blit:重建期间显示上一次烘焙的结果,而不是突然空一块(参考的 blit
             // 就在"要不要重烘焙"的判断之外)。没有 FBO 时 draw() 自己 no-op。
             this.fboCache.draw(this.xPosition, this.yPosition, this.width, this.height - 20);
+        }
+        // The pack's GUI foreground goes over the model preview and under the tile's own text, border and star - the
+        // same slot upstream gives it (CatalogModelButton:106 draws it before renderName/renderState).
+        if (Config.GUI_ENHANCEMENTS && published) {
+            this.drawGuiImage(mc, this.modelInfo.getLeft(), ClientModelManager.GUI_IMAGE_FOREGROUND);
         }
         // 渲染文本
         // font.split->listFormattedStringToWidth
@@ -174,6 +192,44 @@ public class ModelButton extends GuiButton {
             GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
             this.drawTexturedModalRect(this.xPosition + this.width - 14, this.yPosition, 16, 0, 16, 16);
         }
+    }
+
+    /**
+     * Draws one of the model's own GUI presentation images stretched over the whole tile.
+     * <p>
+     * Upstream's card blits the same image the same way - over the full card with UV 0..1
+     * ({@code CatalogModelButton#renderImage}: {@code graphics.blit(id, getX(), getY(), 0, 0, width, height, width,
+     * height)}) - and the reference's tile did too (its {@code drawGuiTexture}). Nothing is drawn when the model
+     * declares no such image, which is the common case: the call is then one map lookup and a null return.
+     * <p>
+     * The GL state is set explicitly instead of inherited, because the FBO blit that runs between the two images
+     * leaves depth test, lighting and colour material disabled ({@link FboCache#draw}), and the texture matrix is reset
+     * because the model pass may leave a transform on it (the same reason the reference reset it).
+     */
+    private void drawGuiImage(Minecraft mc, ResourceLocation modelId, String imageId) {
+        ResourceLocation imageTexture = ClientModelManager.guiImageTextureFor(modelId, imageId);
+        if (imageTexture == null) {
+            return;
+        }
+        GL11.glDisable(GL11.GL_DEPTH_TEST);
+        GL11.glDisable(GL11.GL_LIGHTING);
+        GL11.glDisable(GL11.GL_COLOR_MATERIAL);
+        GL11.glEnable(GL11.GL_BLEND);
+        GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+        GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+        GL11.glMatrixMode(GL11.GL_TEXTURE);
+        GL11.glLoadIdentity();
+        GL11.glMatrixMode(GL11.GL_MODELVIEW);
+        mc.getTextureManager().bindTexture(imageTexture);
+        GL11.glEnable(GL11.GL_TEXTURE_2D);
+        Tessellator tessellator = Tessellator.instance;
+        tessellator.startDrawingQuads();
+        tessellator.addVertexWithUV(this.xPosition, this.yPosition + this.height, 0.0, 0.0, 1.0);
+        tessellator.addVertexWithUV(this.xPosition + this.width, this.yPosition + this.height, 0.0, 1.0, 1.0);
+        tessellator.addVertexWithUV(this.xPosition + this.width, this.yPosition, 0.0, 1.0, 0.0);
+        tessellator.addVertexWithUV(this.xPosition, this.yPosition, 0.0, 0.0, 0.0);
+        tessellator.draw();
+        GL11.glDisable(GL11.GL_BLEND);
     }
 
     /**

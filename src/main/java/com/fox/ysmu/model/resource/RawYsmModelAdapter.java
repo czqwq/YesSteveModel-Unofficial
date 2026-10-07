@@ -306,7 +306,26 @@ public final class RawYsmModelAdapter {
         }
         putAnimationControllers(animations, raw);
 
-        return new ModelData(modelId, Type.FOLDER, model, textures, animations);
+        // The pack's GUI presentation images: its ysm.json's gui_background / gui_foreground, already read and
+        // normalised to PNG by the parser (YSMFolderDeserializer.loadGuiImage:240-251 passes the ids
+        // "gui_foreground" / "gui_background" into RawYsmModel.RawImage.name). Upstream reads the same two paths into
+        // the model's settings as presentation image blobs (format/parser/ModelInfoBuilder.java:57-64) and its catalog
+        // card requests them per model (client/gui/button/CatalogModelCardState.java:238-246); the port has no
+        // manifest, so they travel beside the payload in ModelData#getGuiImages and the selection tile draws them.
+        //
+        // Deliberately NOT the two maps next door: `textures` is the model's texture *list* - ServerModelInfo is
+        // built from its key set (ModelData's constructor) and the selection screen offers it as selectable skins, so
+        // a GUI background in there would become a skin and move the texture count - and `model` is a map of geometry
+        // files that ClientModelManager parses as JSON key by key.
+        Map<String, byte[]> guiImages = new LinkedHashMap<>();
+        for (RawYsmModel.RawImage image : raw.properties.backgroundImages) {
+            if (image == null || image.data == null || StringUtils.isBlank(image.name)) {
+                continue;
+            }
+            guiImages.put(image.name, image.data);
+        }
+
+        return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages);
     }
 
     /**

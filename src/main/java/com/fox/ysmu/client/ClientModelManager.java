@@ -1,5 +1,6 @@
 package com.fox.ysmu.client;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,8 +29,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.Nullable;
+import javax.imageio.ImageIO;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.util.*;
 
 import org.apache.commons.io.FileUtils;
@@ -44,8 +47,10 @@ import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegist
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
+import com.fox.ysmu.client.texture.CustomTextureManager;
 import com.fox.ysmu.client.texture.ModelTextureRegistry;
 import com.fox.ysmu.client.texture.OuterFileTexture;
+import com.fox.ysmu.client.texture.TextureHolder;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.FolderFormat;
@@ -123,6 +128,122 @@ public class ClientModelManager {
     public static Set<ResourceLocation> TRANSLUCENT_TEXTURES = Sets.newHashSet();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
+
+    /** The image id the parser files a pack's {@code gui_background} under ({@code YSMFolderDeserializer.loadGuiImage}). */
+    public static final String GUI_IMAGE_BACKGROUND = "gui_background";
+    /** The image id the parser files a pack's {@code gui_foreground} under. */
+    public static final String GUI_IMAGE_FOREGROUND = "gui_foreground";
+    /**
+     * The GUI presentation images a model declares, keyed by the model id the selection screen uses and then by the
+     * image's own id ({@link #GUI_IMAGE_BACKGROUND} / {@link #GUI_IMAGE_FOREGROUND}).
+     * <p>
+     * They are the pack's {@code gui_background} / {@code gui_foreground} (an OpenYSM-format model's
+     * {@code ysm.json}), which upstream reads into the model's settings as presentation image blobs and its catalog
+     * card draws behind and over the model preview
+     * ({@code format/parser/ModelInfoBuilder.java:57-64}, {@code client/gui/button/CatalogModelCardState.java:238-246},
+     * {@code client/gui/button/CatalogModelButton.java:104-106}). They are neither model textures nor geometry, so
+     * they are neither in {@link #MODELS} nor in the geometry map - see {@code ModelData#getGuiImages}.
+     */
+    private static final Map<ResourceLocation, Map<String, byte[]>> GUI_IMAGES = Maps.newHashMap();
+    /**
+     * The published texture of each GUI image, keyed by model id + image id, plus the holder that keeps its
+     * registration alive; see {@link #guiImageTextureFor}.
+     */
+    private static final Map<String, GuiImageTexture> GUI_IMAGE_TEXTURES = Maps.newHashMap();
+
+    /**
+     * Records the GUI presentation images a model declares.
+     * <p>
+     * Called from {@link #registerAll} with the payload's own map, i.e. from the same registration the texture list
+     * and the sub-entity indexes come from, and keyed the same way. Self-healing like those: a payload that declares
+     * none removes the entry instead of leaving the previous payload's images in place.
+     */
+    private static void indexGuiImages(ResourceLocation modelId, Map<String, byte[]> images) {
+        if (images == null || images.isEmpty()) {
+            GUI_IMAGES.remove(modelId);
+            return;
+        }
+        GUI_IMAGES.put(modelId, new LinkedHashMap<>(images));
+    }
+
+    /** The declared bytes of one GUI image, or {@code null} when the model declares no such image. */
+    @Nullable
+    public static byte[] guiImageBytesFor(@Nullable ResourceLocation modelId, @Nullable String imageId) {
+        if (modelId == null || imageId == null) {
+            return null;
+        }
+        Map<String, byte[]> images = GUI_IMAGES.get(modelId);
+        return images == null ? null : images.get(imageId);
+    }
+
+    /**
+     * The published texture of one GUI image, created on first use; {@code null} when the model declares none or its
+     * bytes cannot be decoded.
+     * <p>
+     * The lifecycle is upstream's: its catalog card creates the texture from the image source, registers it with
+     * {@code CustomTextureManager.register(texture, 10 * 20)} and keeps the returned holder so the registration stays
+     * alive while the card does, releasing it on close
+     * ({@code client/gui/button/CatalogModelCardState.java:261-274} and {@code :276-296}). This port keeps the holder
+     * in {@link #GUI_IMAGE_TEXTURES} instead, so a model's image is uploaded once per session rather than once per
+     * tile - a page flip rebuilds every button - and drops them all in {@link #clearRuntimeModelCaches} together with
+     * an explicit release, the same two steps {@code ModelTextureRegistry#clear} uses and for the same reason: the
+     * platform's texture map keeps the texture object reachable, so the reachability trigger cannot fire on its own.
+     */
+    @Nullable
+    public static ResourceLocation guiImageTextureFor(@Nullable ResourceLocation modelId, @Nullable String imageId) {
+        byte[] bytes = guiImageBytesFor(modelId, imageId);
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        String key = modelId + "/" + imageId;
+        GuiImageTexture cached = GUI_IMAGE_TEXTURES.get(key);
+        if (cached != null) {
+            return cached.id;
+        }
+        try {
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
+            if (image == null) {
+                ysmu.LOG.warn("Unsupported YSM GUI image {} of model {}", imageId, modelId);
+                return null;
+            }
+            ResourceLocation id = new ResourceLocation(
+                ysmu.MODID,
+                "gui_image/" + modelId.getResourcePath() + "/" + imageId);
+            DynamicTexture texture = new DynamicTexture(image);
+            GUI_IMAGE_TEXTURES.put(key, new GuiImageTexture(id, texture, CustomTextureManager.register(texture, id)));
+            return id;
+        } catch (IOException e) {
+            ysmu.LOG.warn("Failed to decode YSM GUI image {} of model {}", imageId, modelId, e);
+            return null;
+        }
+    }
+
+    /** Drops every GUI image and starts the delayed release of the textures they were published as. */
+    private static void clearGuiImages() {
+        GUI_IMAGES.clear();
+        for (GuiImageTexture image : GUI_IMAGE_TEXTURES.values()) {
+            CustomTextureManager.release(image.texture);
+        }
+        GUI_IMAGE_TEXTURES.clear();
+    }
+
+    /**
+     * One published GUI image texture. The holder is kept only so the registration stays alive - dropping it is what
+     * arms {@code CustomTextureManager}'s release - which is why it is a field and not a local.
+     */
+    private static final class GuiImageTexture {
+
+        private final ResourceLocation id;
+        private final DynamicTexture texture;
+        private final TextureHolder holder;
+
+        private GuiImageTexture(ResourceLocation id, DynamicTexture texture, TextureHolder holder) {
+            this.id = id;
+            this.texture = texture;
+            this.holder = holder;
+        }
+    }
+
     /**
      * The projectile sub-entity ids a model declares - the {@code match} entries of its
      * {@code files.projectiles} - keyed by the model id.
@@ -433,6 +554,9 @@ public class ClientModelManager {
         // The texture *list* is the model index the selection screen builds its tiles from, so it stays here; only
         // the uploads are deferred.
         indexTextures(modelId, data.getTexture());
+        // The model's GUI presentation images are indexed here for the same reason the texture list is: the selection
+        // screen needs them to draw a tile, and nothing about them needs the geometry build.
+        indexGuiImages(modelId, data.getGuiImages());
         // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.
@@ -1070,6 +1194,10 @@ public class ClientModelManager {
      * Content fingerprint of everything {@link #registerAll} installs for a model: the geometry, texture and
      * animation bytes plus the digest the server published as this model's metadata.
      * <p>
+     * The GUI presentation images are part of it because {@code registerAll} indexes them too: a payload whose only
+     * change is its {@code gui_background} / {@code gui_foreground} must not be skipped as "identical content is
+     * already registered", or the tile would keep drawing the previous payload's images.
+     * <p>
      * Returns {@code null} when no digest is available, in which case the caller registers unconditionally rather
      * than assuming that two models are equal.
      */
@@ -1080,6 +1208,7 @@ public class ClientModelManager {
             updateDigest(digest, data.getModel());
             updateDigest(digest, data.getTexture());
             updateDigest(digest, data.getAnimation());
+            updateDigest(digest, data.getGuiImages());
             ServerModelInfo info = data.getInfo();
             String md5 = info == null ? null : info.getMd5();
             if (md5 != null) {
@@ -2493,6 +2622,9 @@ public class ClientModelManager {
         com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
         // The declared settings panels belong to the models being dropped as well, and for the same reason.
         com.fox.ysmu.client.gui.ModelConfigRegistry.clear();
+        // The GUI presentation images belong to the dropped models, and their textures have to be released explicitly
+        // for the reason on guiImageTextureFor.
+        clearGuiImages();
         // Roaming namespaces are keyed by model content hash, so they belong to the dropped models too.
         com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
         com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
