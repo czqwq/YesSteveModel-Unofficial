@@ -148,6 +148,18 @@ shape, or record why 1.7.10 or the port's own architecture cannot.
   `animations/fp.arm.animation.json` existed) can never fill the first-person fallback, and that domain stays empty
   until the model's own pack declares `fp_arm` or the built-in default is re-copied. Upstream has the same hole for a
   payload that declares no `fp_arm` set, so this is the format's behaviour, not a missing port mapping.
+- **`vehicle.origin` has nothing to port.** Upstream's `VehicleOriginController` is not "rotate by the entity's yaw";
+  it is a compat hook that takes a quaternion from exactly two providers, `SimplePlaneCompat.getRotation` (Simple
+  Planes' `PlaneEntity`) and `ImmersiveAircraftCompat.getRotation` (Immersive Aircraft's `AircraftEntity`)
+  (`VehicleOriginController.java:57-69`). Both are 1.20 mods with no 1.7.10 counterpart, and the port has no compat
+  wrapper for either. With neither installed, upstream's controller leaves `rotation` null and visits no bone queue -
+  i.e. the renderer's own yaw decides the orientation, which is exactly what the port does. Recorded rather than given
+  an invented "entity yaw origin controller", which upstream does not have. Two neighbouring gaps in the same area are
+  recorded too: a vehicle's `timeline` (`ysm.particle`) never dispatches, because the dispatch needs the particle
+  subsystem's paired scopes (`ParticleEffectUtil.setCurrentEntity`/`beginProjectileTransform` plus
+  `MolangPhysicsRuntime.beginProjectileBones`); and the hand-written vehicle sampler reads only the shared variable
+  table, so a vehicle animation reading `query.*` reads 0 - the right fix is to feed the sampler from the same binding
+  table the world path uses, not to hand-pick names, which would be half-real and half-zero.
 
 ## Cross-Project Ownership
 
