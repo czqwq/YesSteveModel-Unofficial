@@ -13,8 +13,9 @@
     "MixinItemRenderer",
     "MixinEffectRenderer",
     "client.MixinRenderArrow",
-    "client.MixinRenderBoat",
-    "client.MixinRenderMinecart",
+    "client.MixinRenderManager",
+    "client.RenderLivingInvoker",
+    "client.RendererLivingEntityInvoker",
     "MixinMinecraft"
   ]
 }

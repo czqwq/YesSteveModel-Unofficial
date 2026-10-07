@@ -11,19 +11,29 @@ import javax.annotation.Nullable;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.Tessellator;
+import net.minecraft.client.renderer.entity.Render;
+import net.minecraft.client.renderer.entity.RenderLiving;
+import net.minecraft.client.renderer.entity.RendererLivingEntity;
 import net.minecraft.entity.Entity;
-import net.minecraft.entity.item.EntityBoat;
+import net.minecraft.entity.EntityList;
+import net.minecraft.entity.EntityLiving;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.item.EntityMinecart;
 import net.minecraft.entity.passive.EntityHorse;
-import net.minecraft.entity.passive.EntityPig;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.projectile.EntityArrow;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.Vec3;
+import net.minecraftforge.client.event.RenderLivingEvent;
+import net.minecraftforge.common.MinecraftForge;
 
 import org.lwjgl.opengl.GL11;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.data.VehicleModelStates;
+import com.fox.ysmu.mixin.client.RenderLivingInvoker;
+import com.fox.ysmu.mixin.client.RendererLivingEntityInvoker;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
@@ -34,9 +44,12 @@ import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
- * Draws a pack's vehicle sub-entity (the {@code files.vehicles} entry, e.g. {@code #minecraft:boat}) in place of a
- * vanilla entity. Called from {@code MixinRenderBoat}, {@code MixinRenderMinecart} and the client's
- * {@code RenderLivingEvent.Pre} handler for pigs and horses.
+ * Draws a pack's vehicle sub-entity (the {@code files.vehicles} entry, e.g. {@code #minecraft:boat}) in place of any
+ * entity a pack's {@code match} list names. Called from the one dispatcher hook, {@code MixinRenderManager}, which
+ * wraps the {@code render.doRender(...)} call inside {@code RenderManager.func_147939_a} - upstream's shape, whose
+ * vehicle replacement is likewise a wrapper on the renderer call in its entity render dispatcher
+ * ({@code mixin/client/EntityRenderDispatcherMixin.java:20-52}). Any entity type therefore qualifies, vanilla or
+ * modded, as long as a loaded model declares it.
  *
  * <p>The model is the one the vehicle's <b>owner</b> had when they mounted it, which is what upstream stores in the
  * vehicle's capability ({@code mixin/ServerPlayerMixin.java:14-29} → {@code CapabilityEvent.onVehicleSetModel:244-258})
@@ -46,10 +59,20 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  *
  * <p>Failure is always "let the host draw": every early return here means the caller does <b>not</b> cancel the
  * vanilla renderer. A missing model, a missing geometry, a missing texture or a missing renderer therefore leaves the
- * vanilla boat/minecart/pig/horse on screen. That is upstream's fallback rule (its product decisions
+ * entity's own renderer on screen. That is upstream's fallback rule (its product decisions
  * {@code docs/product-decisions/decisions/model-fallback.md:27} and {@code failure-and-recovery.md:22}: a render
  * failure restores the host's own draw) and it is the same contract {@code ArrowProjectileRenderer} keeps - this
  * renderer never substitutes the built-in default humanoid.
+ *
+ * <p>Because the dispatcher's redirect replaces the entity's whole renderer call, the parts of the vanilla living
+ * pass that live <em>inside</em> that call have to be replayed here, which is what upstream's own replaced-entity
+ * renderer does: the name tag and its {@code RenderLivingEvent.Specials.Pre} come back through
+ * {@link RendererLivingEntityInvoker#ysmu$passSpecialRender}, {@code RenderLivingEvent.Post} is posted after it
+ * (upstream {@code GeoReplacedEntityRenderer.java:129-130}), and the leash comes back through
+ * {@link RenderLivingInvoker#ysmu$renderLeash} (the port's own replaced-player renderer does the same at
+ * {@code GeoReplacedEntityRenderer.java:145-150}). Shadow and fire are <b>not</b> replayed: they are drawn by
+ * {@code Render#doRenderShadowAndFire}, which the dispatcher calls after the redirected call
+ * ({@code RenderManager.java:309}).
  *
  * <p>Animation is not driven yet: the geometry is drawn at its authored rest pose. The vehicle animation sets are
  * forwarded and registered (see {@code RawYsmModelAdapter} and {@code ClientModelManager#registerAnimations}), so
@@ -100,35 +123,46 @@ public final class VehicleRenderer {
     }
 
     /**
-     * Whether this entity is one of the vehicle kinds this port can replace, and if so which entity ids a pack's
-     * {@code match} entry may use for it.
+     * The entity ids a pack's {@code match} entry may name for this entity.
      * <p>
-     * Two spellings per kind, because the two sides of the port disagree about what an entity "is called": upstream
-     * (1.20) matches a {@code ResourceLocation} such as {@code minecraft:minecart}
-     * ({@code client/entity/CustomVehicleEntity.java:29-35}), while 1.7.10 identifies an entity type by the string it
-     * was registered with - and registers the minecart family under seven different names, none of them
-     * {@code Minecart} ({@code EntityList.java:298-305}: {@code MinecartRideable}, {@code MinecartChest}, ...), with
-     * {@code EntityMinecart} itself abstract ({@code EntityMinecart.java:31}). A pack authored against either spelling
-     * therefore matches. The comparison strips upstream's {@code #} entity-tag prefix, which 1.7.10 cannot resolve -
-     * there are no data-driven entity tags here.
+     * Upstream compares the entity <b>type's</b> {@code ResourceLocation} against the pack's match list
+     * ({@code client/entity/CustomVehicleEntity.java:29-35}), which is what makes its vehicle replacement work for any
+     * entity type. 1.7.10 has no such registry - {@code EntityList.getEntityString} is an exact class lookup
+     * ({@code EntityList.java:258-261}) returning the string the entity was registered with, and that string is
+     * neither the same text nor always the same shape:
+     * <ul>
+     * <li>vanilla entities use bare names ({@code "Boat"}, {@code "Pig"}, {@code "EntityHorse"}, and seven different
+     * {@code "Minecart*"} names for the minecart family, {@code EntityList.java:298-305,325,335});</li>
+     * <li>FML registers a mod entity as {@code "<modid>.<name>"} ({@code EntityRegistry.java:162-167}), which is
+     * upstream's {@code "modid:name"} with the separator spelled differently.</li>
+     * </ul>
+     * So each entity yields the id(s) a pack could reasonably have written, and a match is an exact comparison against
+     * one of them (after stripping upstream's {@code #} entity-tag prefix, which 1.7.10 cannot resolve - there are no
+     * data-driven entity tags here). The result is never null: an entity type nothing names simply matches nothing.
      */
-    @Nullable
     private static List<String> matchCandidates(Entity entity) {
-        List<String> candidates = new ArrayList<>(2);
-        if (entity instanceof EntityBoat) {
-            candidates.add("minecraft:boat");
-        } else if (entity instanceof EntityMinecart) {
+        List<String> candidates = new ArrayList<>(3);
+        String registryName = EntityList.getEntityString(entity);
+        if (registryName != null && !registryName.isEmpty()) {
+            String lowered = registryName.toLowerCase(Locale.ROOT);
+            if (lowered.indexOf(':') >= 0) {
+                candidates.add(lowered);
+            } else {
+                int dot = lowered.indexOf('.');
+                if (dot > 0 && dot < lowered.length() - 1) {
+                    // FML's "<modid>.<name>" in upstream's "modid:name" spelling.
+                    candidates.add(lowered.substring(0, dot) + ":" + lowered.substring(dot + 1));
+                }
+                candidates.add("minecraft:" + lowered);
+            }
+        }
+        // The two vanilla families 1.7.10 registers under a name upstream does not use. Without these the built-in
+        // default's own `minecraft:minecart` entry could never match anything, because every concrete minecart class
+        // is registered as "Minecart<something>" and EntityMinecart itself is abstract (EntityMinecart.java:31).
+        if (entity instanceof EntityMinecart) {
             candidates.add("minecraft:minecart");
-            // The concrete 1.7.10 registration, for a pack that was authored by looking at EntityList.
-            candidates.add("minecraft:minecartrideable");
-        } else if (entity instanceof EntityPig) {
-            candidates.add("minecraft:pig");
         } else if (entity instanceof EntityHorse) {
             candidates.add("minecraft:horse");
-            // 1.7.10 registers the horse as "EntityHorse" (EntityList.java:335).
-            candidates.add("minecraft:entityhorse");
-        } else {
-            return null;
         }
         return candidates;
     }
@@ -148,21 +182,34 @@ public final class VehicleRenderer {
     /**
      * Tries to draw a custom vehicle model for {@code entity}.
      *
+     * @param vanillaRenderer the entity's own renderer, which the dispatcher was about to call. It is not called here
+     *                        - the caller does that when this returns {@code false} - but its living half is what the
+     *                        special pass (name tag, leash) is replayed through.
      * @return {@code true} when a custom model was drawn, so the caller must skip the vanilla renderer;
      *         {@code false} when there is nothing to draw, so vanilla should proceed
      */
-    public static boolean render(Entity entity, double x, double y, double z, float yaw, float partialTicks) {
+    public static boolean render(Entity entity, double x, double y, double z, float yaw, float partialTicks,
+        Render vanillaRenderer) {
         if (entity == null) {
             return false;
         }
-        List<String> candidates = matchCandidates(entity);
-        if (candidates == null) {
+        // Upstream's capability is attached to everything that is neither a player nor a projectile
+        // (event/CapabilityEvent.java:78-81), so players are not vehicles. The server never writes state for one
+        // either (S2CVehicleModelState.onOwnerMounted); this is the render-side half of the same rule.
+        if (entity instanceof EntityPlayer) {
+            return false;
+        }
+        // Arrows keep their own mechanism - a datawatcher model id plus a RenderArrow mixin
+        // (MixinEntityArrow, MixinRenderArrow). Replacing the renderer call here would bypass that mixin, so an arrow
+        // is never claimed as a vehicle even if a packet put state on one.
+        if (entity instanceof EntityArrow) {
             return false;
         }
         ResourceLocation modelId = ownerModelId(entity);
         if (modelId == null) {
             return false;
         }
+        List<String> candidates = matchCandidates(entity);
         List<String> declared = ClientModelManager.VEHICLE_MODEL_IDS.get(modelId);
         if (declared == null) {
             warnOnce("no-vehicle-models", "no vehicle sub-entity is registered for {}", modelId);
@@ -215,6 +262,16 @@ public final class VehicleRenderer {
         IGeoRenderer<?> geoRenderer = GeoReplacedEntityRenderer.getRenderer(CustomPlayerEntity.class);
         if (geoRenderer == null) {
             return false;
+        }
+
+        // A living entity is rotated by its interpolated <b>body</b> yaw, not by the rotationYaw the dispatcher hands
+        // over: that is the value this engine's own GeckoLib entity renderer uses
+        // (GeoReplacedEntityRenderer.resolveBodyYaw:185 lerps prevRenderYawOffset/renderYawOffset) and the one
+        // vanilla's RendererLivingEntity#applyRotations would have used. A boat or a minecart is not living and keeps
+        // the yaw it was given. The leash pass below still gets the dispatcher's own value, as vanilla passes it.
+        float dispatcherYaw = yaw;
+        if (entity instanceof EntityLivingBase living) {
+            yaw = living.prevRenderYawOffset + (living.renderYawOffset - living.prevRenderYawOffset) * partialTicks;
         }
 
         boolean minecart = entity instanceof EntityMinecart;
@@ -306,6 +363,69 @@ public final class VehicleRenderer {
             net.geckominecraft.client.renderer.GlStateManager.enableCull();
             GL11.glPopMatrix();
         }
+        replayLivingSpecials(vanillaRenderer, entity, x, y, z, dispatcherYaw, partialTicks);
         return true;
+    }
+
+    /**
+     * Replays the vanilla living pass that the replaced {@code render.doRender(...)} call would have run.
+     *
+     * <p>The dispatcher's redirect replaces the entity's <em>whole</em> renderer call, so everything 1.7.10 draws
+     * inside it is skipped unless it is replayed here. Three things live there:
+     * <ul>
+     * <li>the name tag and its {@code RenderLivingEvent.Specials.Pre}, both inside
+     * {@code RendererLivingEntity#passSpecialRender} ({@code RendererLivingEntity.java:466-471}, called from
+     * {@code :296}); upstream replays the same pass through an accessor of its own replaced-entity renderer
+     * ({@code GeoReplacedEntityRenderer.java:129});</li>
+     * <li>{@code RenderLivingEvent.Post}, posted by vanilla immediately after it ({@code RendererLivingEntity.java:297})
+     * and by upstream at {@code GeoReplacedEntityRenderer.java:130};</li>
+     * <li>the leash, drawn by {@code RenderLiving#doRender} <b>after</b> the model pass
+     * ({@code RenderLiving.java:36-37}); the port's own replaced-player renderer re-draws it for the same reason
+     * ({@code GeoReplacedEntityRenderer.java:145-150}).</li>
+     * </ul>
+     *
+     * <p>Shadow and fire are deliberately <b>not</b> replayed: they are {@code Render#doRenderShadowAndFire}
+     * ({@code Render.java:311-320}), which the dispatcher calls itself after the redirected call
+     * ({@code RenderManager.java:309}), together with the F3+B bounding box at {@code :316-326}.
+     *
+     * <p>A non-living entity has no specials pass in vanilla either - {@code RenderBoat} and {@code RenderMinecart}
+     * draw no name tag - so nothing is restored for a boat or a minecart.
+     */
+    private static void replayLivingSpecials(Render vanillaRenderer, Entity entity, double x, double y, double z,
+        float yaw, float partialTicks) {
+        if (!(entity instanceof EntityLivingBase living)
+            || !(vanillaRenderer instanceof RendererLivingEntity livingRenderer)) {
+            return;
+        }
+        try {
+            ((RendererLivingEntityInvoker) livingRenderer).ysmu$passSpecialRender(living, x, y, z);
+        } catch (Throwable failure) {
+            // The model is already on screen: a broken name tag must not take the frame (or the client) down, and it
+            // must not make the model invisible either - that is what "restore the host's draw" means here.
+            warnOnce(
+                "specials|" + failure.getClass()
+                    .getName() + '|' + failure.getMessage(),
+                "vehicle name tag pass failed for {}: {}",
+                entity,
+                failure.toString());
+        } finally {
+            MinecraftForge.EVENT_BUS.post(new RenderLivingEvent.Post(living, livingRenderer, x, y, z));
+        }
+        if (entity instanceof EntityLiving leashEntity && vanillaRenderer instanceof RenderLiving leashRenderer) {
+            try {
+                // The vanilla method, on the entity's own renderer - not a copy. Its own first statement is the
+                // "is anything leashed to me" test (RenderLiving.java:47-49), so an unleashed entity costs one field
+                // read. Its yaw argument is unused by the vanilla body (RenderLiving.java:45-...), so the dispatcher's
+                // value is passed exactly as vanilla does.
+                ((RenderLivingInvoker) leashRenderer).ysmu$renderLeash(leashEntity, x, y, z, yaw, partialTicks);
+            } catch (Throwable failure) {
+                warnOnce(
+                    "leash|" + failure.getClass()
+                        .getName() + '|' + failure.getMessage(),
+                    "vehicle leash pass failed for {}: {}",
+                    entity,
+                    failure.toString());
+            }
+        }
     }
 }
