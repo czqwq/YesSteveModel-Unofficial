@@ -79,6 +79,19 @@ public final class ParticleEffectUtil {
         VANILLA_FALLBACK.put("cherry_leaves", "snowshovel");
     }
 
+    /**
+     * {@link #VANILLA_FALLBACK} 的查表结果：{@code particleName} 在 1.7.10 里对应的内置粒子名，
+     * 表里没有（或名字为 null）返回 {@code null}。
+     *
+     * <p>包内可见的纯访问器：这张表决定"一个高版本粒子名最终生成成什么"，而它的唯一消费者
+     * {@link #resolve} 是 private，所以单测只能通过这里核对表内容（见
+     * {@code ParticleEffectUtilFallbackTest}）。返回 {@code null} 就是 {@code resolve} 里
+     * "保持原样、走原路径"的那一支，所以这个访问器同时钉住了两个方向。
+     */
+    static String fallbackNameFor(String particleName) {
+        return VANILLA_FALLBACK.get(particleName);
+    }
+
     /** 当前渲染帧的实体上下文（由 {@code AnimationRegister.setParserValue} 每帧写入），
      *  供无实体上下文的 mclib Function 在 get() 时刻读取。 */
     private static volatile Entity currentEntity;
