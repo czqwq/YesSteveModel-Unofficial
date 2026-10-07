@@ -135,6 +135,28 @@ public final class RawYsmModelAdapter {
             }
         }
 
+        // Vehicle sub-entity geometry (a pack's files.vehicles entry, e.g. #minecraft:boat). Same key shape as the
+        // projectile block above - "vehicle_<matchId>" - and ClientModelManager turns it back into the sub-model id
+        // "<model>/vehicle_<matchId>" that VehicleRenderer looks up.
+        //
+        // Upstream carries the same data as a render target of kind RENDER_TARGET_KIND_VEHICLE
+        // (RawModelAssembler.java:224-228) and bakes it into the same "main" geometry/animation domain as a
+        // projectile (ModelRenderTargetLoader.java:259-271). This port has no render-target kind, so the sub-model id
+        // is the whole carrier - exactly as it is for projectiles.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null || sub.model == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                try {
+                    model.put("vehicle_" + matchId, toGeometryJson(null, sub.model, false));
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to convert vehicle geometry {} for model {}", matchId, modelId, e);
+                }
+            }
+        }
+
         Map<String, byte[]> textures = new LinkedHashMap<>();
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
             if (texture.data == null) {
@@ -177,6 +199,36 @@ public final class RawYsmModelAdapter {
                         continue;
                     }
                     String textureKey = "projectile_" + matchId + "_" + texture.name;
+                    if (!textureKey.endsWith(".png")) {
+                        textureKey += ".png";
+                    }
+                    textures.put(textureKey, textureData);
+                }
+            }
+        }
+        // Vehicle sub-entity textures, keyed like the projectile ones: "vehicle_<matchId>_<file>". VehicleRenderer
+        // picks a vehicle's texture by searching for "vehicle_<matchId>_" in the registered texture ids, so the key
+        // carries the matchId as well as the file name.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawTexture texture : sub.textures.values()) {
+                    if (texture.data == null) {
+                        continue;
+                    }
+                    byte[] textureData = getLegacyTextureData(texture);
+                    if (textureData == null) {
+                        ysmu.LOG.warn(
+                            "Skipping unsupported vehicle texture {} (format {}) for {}",
+                            textureName(texture),
+                            texture.imageFormat,
+                            matchId);
+                        continue;
+                    }
+                    String textureKey = "vehicle_" + matchId + "_" + texture.name;
                     if (!textureKey.endsWith(".png")) {
                         textureKey += ".png";
                     }
@@ -227,18 +279,46 @@ public final class RawYsmModelAdapter {
                 }
             }
         }
+        // Vehicle animations and controllers, keyed like the projectile ones: animation "vehicle_<matchId>",
+        // controller "vehicle_ctrl_<matchId>". They must NOT merge into the player's animation namespace - a pack's
+        // boat set and its player set can both define a clip name, and merging lets one overwrite the other - so
+        // ClientModelManager registers each under the vehicle's own sub-model id, exactly as it does for projectiles.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
+                    putAnimationFile(animations, "vehicle_" + matchId, animationFile);
+                }
+                for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
+                    if (controllerFile == null) {
+                        continue;
+                    }
+                    byte[] data = controllerFile.sourceJson == null ? createControllerJson(controllerFile)
+                        : controllerFile.sourceJson;
+                    if (data != null && data.length > 0) {
+                        animations.put("vehicle_ctrl_" + matchId, data);
+                    }
+                }
+            }
+        }
         putAnimationControllers(animations, raw);
 
         return new ModelData(modelId, Type.FOLDER, model, textures, animations);
     }
 
     /**
-     * The entity ids a projectile sub-entity answers to: its declared {@code match} list, or its identifier when it
-     * declares none.
+     * The entity ids a sub-entity (projectile or vehicle) answers to: its declared {@code match} list, or its
+     * identifier when it declares none.
      * <p>
      * One sub-entity may match several entity types (a pack's {@code #arrow} covering both {@code minecraft:arrow} and
      * {@code minecraft:spectral_arrow}), and each needs its own entry under its own id, because the renderer looks a
-     * projectile up by the entity type it is drawing.
+     * sub-entity up by the entity type it is drawing. A leading {@code #} is upstream's entity-type-tag syntax
+     * ({@code RawModelAssembler.java:253-255} writes the string verbatim into {@code RenderTarget.match}); 1.7.10 has
+     * no data-driven entity tags, so the consumer strips it and compares the rest - the id written here stays exactly
+     * as the pack wrote it.
      */
     private static java.util.List<String> matchIdsOf(RawYsmModel.RawSubEntity sub) {
         java.util.List<String> ids = new java.util.ArrayList<>();

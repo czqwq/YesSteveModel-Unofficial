@@ -72,6 +72,10 @@ public class SetModelAndTexture implements IMessage {
                 NPCData.remove(sender);
                 NetworkHandler.broadcastNpcDataRemoval(sender, sender.getEntityId());
             }
+            // The vehicle this player owns carries the model they had when they mounted, so a model change while
+            // riding has to rewrite it - upstream re-runs onVehicleSetModel from its own model-update path
+            // (event/CapabilityEvent.java:198-211).
+            S2CVehicleModelState.onOwnerModelChanged(sender);
         }
     }
 }

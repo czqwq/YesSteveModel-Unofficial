@@ -50,9 +50,15 @@ public final class NetworkHandler {
      * following bytes as whatever came next: the handshake has to reject the pair rather than let it decode. The
      * legacy {@code extra0..extra7} vocabulary is unchanged - those senders now spell the same name the server used
      * to concatenate.</li>
+     * <li>6: clientbound id 35 ({@code S2CVehicleModelState}), the vehicle half of upstream's
+     * {@code VehicleModelState} (its id 27). The server sends it when a player mounts a vehicle, so it reaches a peer
+     * that does not know the id on an ordinary action rather than on a command - FML disconnects that peer on an
+     * unknown discriminator, so the handshake has to reject the pair first with a readable message, exactly as
+     * versions 3 and 4 do. Nothing existing is renumbered or reused; 35 is the first free clientbound id above the
+     * highest in use (34).</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 5;
+    public static final int NETWORK_PROTOCOL = 6;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -177,6 +183,12 @@ public final class NetworkHandler {
     private static final int CLIENTBOUND_SYNC_GAME_PATH = 32;
     private static final int CLIENTBOUND_SET_WELCOME_CONFIG = 33;
     private static final int CLIENTBOUND_SHOW_BUFFER_INFO = 34;
+    /**
+     * The vehicle model state (task-17), appended above the highest clientbound id in use: the port's counterpart of
+     * upstream's {@code VehicleModelState} (its id 27). See {@link #NETWORK_PROTOCOL} version 6 for why this is a new
+     * id rather than a reuse of the NPC channel.
+     */
+    private static final int CLIENTBOUND_VEHICLE_MODEL_STATE = 35;
 
     public static void init() {
         registerServerboundMessages();
@@ -348,6 +360,12 @@ public final class NetworkHandler {
             ShowBufferInfo.Handler.class,
             ShowBufferInfo.class,
             CLIENTBOUND_SHOW_BUFFER_INFO,
+            Side.CLIENT);
+        // The vehicle model state. See CLIENTBOUND_VEHICLE_MODEL_STATE above for the id and the protocol bump.
+        CHANNEL.registerMessage(
+            S2CVehicleModelState.Handler.class,
+            S2CVehicleModelState.class,
+            CLIENTBOUND_VEHICLE_MODEL_STATE,
             Side.CLIENT);
     }
 

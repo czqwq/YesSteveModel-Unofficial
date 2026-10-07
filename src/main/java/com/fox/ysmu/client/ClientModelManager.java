@@ -144,6 +144,24 @@ public class ClientModelManager {
     public static final String PROJECTILE_KEY_PREFIX = "projectile_";
     /** The key prefix a bridged projectile animation-controller file uses. */
     private static final String PROJECTILE_CONTROLLER_KEY_PREFIX = "projectile_ctrl_";
+
+    /**
+     * The vehicle sub-entities a model declares ({@code files.vehicles} - keyed by the model id), same shape and same
+     * reason as {@link #PROJECTILE_MODEL_IDS}: a vehicle model replaces a vanilla entity's renderer, and the renderer
+     * has to find which of the model's sub-entities answers to the entity type it is drawing (the built-in default
+     * declares {@code #minecraft:boat}, {@code minecraft:chest_boat} and {@code minecraft:minecart}).
+     */
+    public static Map<ResourceLocation, List<String>> VEHICLE_MODEL_IDS = Maps.newHashMap();
+    /**
+     * The textures belonging to a model's vehicle sub-entities, as full sub-model ids, carrying both the match id and
+     * the file name ({@code <model>/vehicle_<matchId>_<name>.png}) - the same rule as
+     * {@link #PROJECTILE_TEXTURE_IDS}.
+     */
+    public static Map<ResourceLocation, List<ResourceLocation>> VEHICLE_TEXTURE_IDS = Maps.newHashMap();
+    /** The key prefix a bridged vehicle sub-entity uses inside a {@link ModelData} payload. */
+    public static final String VEHICLE_KEY_PREFIX = "vehicle_";
+    /** The key prefix a bridged vehicle animation-controller file uses. */
+    private static final String VEHICLE_CONTROLLER_KEY_PREFIX = "vehicle_ctrl_";
     /**
      * The built-in default model's animations for the main domain, i.e. the fallback a model's own set is completed
      * from. Upstream resolves the fallback per domain ({@code defaultAnimations.fallback(domain)},
@@ -419,6 +437,10 @@ public class ClientModelManager {
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.
         indexProjectiles(modelId, data);
+        // Vehicles are indexed for the same reason and at the same moment: a boat can be drawn by a client whose
+        // passenger's model was never the local player's, and the renderer needs the index to decide whether this
+        // model has a vehicle sub-entity at all.
+        indexVehicles(modelId, data);
         if (eager) {
             installNow(data);
         } else {
@@ -1574,6 +1596,56 @@ public class ClientModelManager {
     }
 
     /**
+     * Records the vehicle sub-entities a model declares, so {@code VehicleRenderer} can ask "does this model have a
+     * vehicle for the entity I am drawing, and which texture is its own".
+     * <p>
+     * Both answers come out of the payload's key naming, which {@code RawYsmModelAdapter} produces:
+     * {@code vehicle_<matchId>} for the geometry and {@code vehicle_<matchId>_<file>.png} for the textures. The match
+     * id is kept exactly as the pack wrote it (a leading {@code #} included, e.g. {@code #minecraft:boat}), because
+     * that same string is the one embedded in the sub-model id the renderer has to build.
+     */
+    private static void indexVehicles(ResourceLocation modelId, ModelData data) {
+        List<String> matchIds = new ArrayList<>();
+        for (String key : data.getModel()
+            .keySet()) {
+            if (key.startsWith(VEHICLE_KEY_PREFIX)) {
+                String matchId = key.substring(VEHICLE_KEY_PREFIX.length());
+                if (!matchId.isEmpty()) {
+                    matchIds.add(matchId);
+                }
+            }
+        }
+        if (matchIds.isEmpty()) {
+            // Assigned rather than skipped, so a re-registration that drops the vehicles stops answering with the
+            // previous payload's list.
+            VEHICLE_MODEL_IDS.remove(modelId);
+            VEHICLE_TEXTURE_IDS.remove(modelId);
+            return;
+        }
+        VEHICLE_MODEL_IDS.put(modelId, matchIds);
+
+        List<ResourceLocation> vehicleTextures = new ArrayList<>();
+        for (String name : data.getTexture()
+            .keySet()) {
+            if (name.startsWith(VEHICLE_KEY_PREFIX)) {
+                vehicleTextures.add(ModelIdUtil.getSubModelId(modelId, name));
+            }
+        }
+        if (vehicleTextures.isEmpty()) {
+            VEHICLE_TEXTURE_IDS.remove(modelId);
+        } else {
+            VEHICLE_TEXTURE_IDS.put(modelId, vehicleTextures);
+        }
+        if (com.fox.ysmu.Config.DEBUG_MODEL_LOAD) {
+            ysmu.LOG.info(
+                "YSM client indexed vehicle sub-entities for {}: match={}, textures={}",
+                modelId,
+                matchIds,
+                vehicleTextures.size());
+        }
+    }
+
+    /**
      * Uploads every texture of a model.
      * <p>
      * A texture the game cannot decode is <em>not</em> a failure here: {@code TextureManager.loadTexture} catches the
@@ -1675,6 +1747,7 @@ public class ClientModelManager {
         // registered under its own sub-model id, which is what the projectile renderer looks up.
         ResourceLocation baseId = ModelIdUtil.getParentModelId(id);
         Map<ResourceLocation, byte[]> projectileControllerFiles = new LinkedHashMap<>();
+        Map<ResourceLocation, byte[]> vehicleControllerFiles = new LinkedHashMap<>();
         for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
             // The controller prefix is tested first: `projectile_ctrl_arrow` also starts with `projectile_`.
             if (entry.getKey()
@@ -1704,6 +1777,38 @@ public class ClientModelManager {
                 ResourceLocation projectileId = ModelIdUtil
                     .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
                 animations.put(projectileId, projectileAnimationFile(bytes, projectileId));
+                continue;
+            }
+            // The vehicle family, same two branches and same reason as the projectile ones above: a pack's boat set
+            // and its player set can both define a clip name (`water`, `forward`, ...), and merging them would let one
+            // overwrite the other for whichever is drawn second. Each vehicle gets its own AnimationFile under its own
+            // sub-model id. The controller prefix is tested first: `vehicle_ctrl_<match>` also starts with `vehicle_`.
+            if (entry.getKey()
+                .startsWith(VEHICLE_CONTROLLER_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(VEHICLE_CONTROLLER_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
+                vehicleControllerFiles.put(vehicleId, bytes);
+                animations.computeIfAbsent(vehicleId, ignored -> new AnimationFile());
+                continue;
+            }
+            if (entry.getKey()
+                .startsWith(VEHICLE_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(VEHICLE_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
+                // Same parser as the projectile branch: it is "one sub-entity's own animation file, never merged into
+                // the player's namespace", which is exactly what a vehicle needs too. Only its name and its log line
+                // say projectile.
+                animations.put(vehicleId, projectileAnimationFile(bytes, vehicleId));
                 continue;
             }
             // Each file's bytes are decoded and parsed exactly once: that one JsonObject both answers "is this a
@@ -1864,6 +1969,16 @@ public class ClientModelManager {
                     java.util.Collections.singletonList(entry.getValue()));
             } catch (Throwable failure) {
                 ysmu.LOG.warn("Failed to register projectile controllers for {}", entry.getKey(), failure);
+            }
+        }
+        // The vehicle controllers live under the vehicle's own sub-model id, same rule as the projectile ones.
+        for (Map.Entry<ResourceLocation, byte[]> entry : vehicleControllerFiles.entrySet()) {
+            try {
+                OpenYsmAnimationControllerRegistry.register(
+                    entry.getKey(),
+                    java.util.Collections.singletonList(entry.getValue()));
+            } catch (Throwable failure) {
+                ysmu.LOG.warn("Failed to register vehicle controllers for {}", entry.getKey(), failure);
             }
         }
         ysmu.LOG.info(
@@ -2395,9 +2510,15 @@ public class ClientModelManager {
         // were driving.
         PROJECTILE_MODEL_IDS.clear();
         PROJECTILE_TEXTURE_IDS.clear();
+        // The vehicle index belongs to the models being dropped for the same reason.
+        VEHICLE_MODEL_IDS.clear();
+        VEHICLE_TEXTURE_IDS.clear();
         com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
         com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.clear();
         com.fox.ysmu.client.renderer.ArrowProjectileRenderer.clearDumpedTrees();
+        // The vehicle renderer's once-per-message warnings belong to the models being dropped too, so a reload reports
+        // a still-broken vehicle again instead of staying silent.
+        com.fox.ysmu.client.renderer.VehicleRenderer.clearWarnings();
         // Reference wiring: the reference releases the framework's assets at this point too
         // (reference ClientModelManager.java:2036 `AssetManager.clearAll()`). No-op while the
         // switch is off, in which case the caches are empty anyway.

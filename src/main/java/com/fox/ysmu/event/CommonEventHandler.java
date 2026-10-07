@@ -79,6 +79,11 @@ public class CommonEventHandler {
         // 而 1.7.10 的 entityId 跨服务器可复现，旧条目可能套到新会话里 id 相同的实体上。
         if (event.world != null && event.world.provider != null) {
             NPCData.clear();
+            // The vehicle overrides are keyed by entity id for the same reason and have the same hazard the comment
+            // above describes, so they go with the NPC ones. Upstream never clears its vehicle capability, but there
+            // the entity itself carries it; here a stale entry could be read by an unrelated entity that happens to
+            // get the same id in the next session.
+            com.fox.ysmu.data.VehicleModelStates.clear();
             EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
         }
@@ -144,6 +149,12 @@ public class CommonEventHandler {
                     data.getModelId(),
                     data.getTextureId());
             }
+        }
+        // The same gap exists for vehicles, and upstream closes it on this very event
+        // (event/CapabilityEvent.java:152-159): the state is broadcast when the owner mounts, which is before this
+        // client could see the vehicle, so a late tracker is resent it here.
+        if (event.entityPlayer instanceof EntityPlayerMP vehicleViewer) {
+            com.fox.ysmu.network.message.S2CVehicleModelState.resendTo(vehicleViewer, event.target);
         }
     }
 

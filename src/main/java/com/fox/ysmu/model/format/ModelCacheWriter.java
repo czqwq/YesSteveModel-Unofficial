@@ -50,8 +50,14 @@ public final class ModelCacheWriter {
      * folder or a bare-YSGP {@code .ysm}) the {@code ModelData} is baked into the cache file by the server, so a
      * payload baked by an older build keeps carrying the empty array and the named pack's roulette stays empty no
      * matter what the client does.
+     *
+     * <p>5 -> 6: {@code RawYsmModelAdapter} now forwards {@code raw.vehicles} as well - the {@code vehicle_<matchId>}
+     * geometry, its {@code vehicle_<matchId>_<file>.png} textures, the {@code vehicle_<matchId>} animation set and the
+     * {@code vehicle_ctrl_<matchId>} controller. A payload baked before this change carries none of those keys, so the
+     * vehicle renderer would find no geometry for a vehicle the pack does declare and fall back to drawing the host
+     * (vanilla boat / minecart / pig / horse) - a payload that looks valid and is simply missing a target kind.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 5;
+    static final int OPEN_YSM_BAKE_VERSION = 6;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。
