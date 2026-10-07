@@ -109,27 +109,6 @@ public final class RawYsmModelAdapter {
         return faces;
     }
 
-    /**
-     * M-22 / E-10(跨仓):把模型自带的 {@code sound_effects} 音频资源交付给调用方
-     * (引擎的声音管理器,或宿主侧的注册点)。交付内容与二进制载荷里
-     * {@code YSMBinarySerializer.writeSoundFiles} 写出的一致:文件名 -> OGG 字节。
-     * 关键帧侧的 {@code sound_effects} 由 {@code YSMFolderDeserializer.parseSoundEffects} 负责,
-     * 两边合起来才能让 sound_effects 关键帧真的出声;引擎侧的播放器是 E-10 的对端。
-     */
-    public static Map<String, byte[]> getSoundFileData(RawYsmModel raw) {
-        Map<String, byte[]> sounds = new LinkedHashMap<>();
-        if (raw == null || raw.soundFiles == null) {
-            return sounds;
-        }
-        for (Map.Entry<String, RawYsmModel.RawDataFile> entry : raw.soundFiles.entrySet()) {
-            RawYsmModel.RawDataFile file = entry.getValue();
-            if (file != null && file.data != null && file.data.length > 0) {
-                sounds.put(entry.getKey(), file.data);
-            }
-        }
-        return sounds;
-    }
-
     public static ModelData toLegacyModelData(RawYsmModel raw, String modelId) throws IOException {
         if (!isBridgeable(raw)) {
             throw new IOException("RawYsmModel cannot be bridged to legacy ModelData");
@@ -544,6 +523,32 @@ public final class RawYsmModelAdapter {
         description.add("ysm_extra_info", extraInfo);
     }
 
+    /**
+     * The wheel's flat, baked label array: element {@code i} is the label of the {@code i}-th entry the pack declared.
+     *
+     * <p>Two shapes are handled, and the first one is byte-for-byte what this method always produced:</p>
+     * <ul>
+     *   <li><b>Legacy</b> - the pack's keys are literally {@code extra0..extra7}. Then slot {@code i} is
+     *       {@code extra<i>}, which is also the animation name the play path uses, so labels and actions line up with
+     *       no further mapping (M-14: only up to the last defined slot, trailing slots trimmed, a {@code '#'}-prefixed
+     *       value not used as a label).</li>
+     *   <li><b>Named</b> (YSM 2.3.0+) - the keys are the animation names themselves, in declaration order, and the
+     *       <em>values</em> are the labels. LaPluma 2.5.3 declares exactly this: {@code HI}, {@code WHAT}, {@code Bird},
+     *       {@code Illustration0}, {@code Illustration1} plus three {@code '#...'} sub-page markers, and its
+     *       {@code extra.animation.json} really defines those named clips. Upstream's roulette works from the same
+     *       ordered pairs and shows {@code LanguageManager.getI18n(model, "properties.extra_animation." + key, value)}
+     *       ({@code tmp/YesSteveModel-dev-1.20/.../client/gui/AnimationRouletteScreen.java:719-750}), which is the rule
+     *       {@link #extraAnimationLabel} applies here.</li>
+     * </ul>
+     *
+     * <p>The declaration order is the slot order on purpose: it is the order the rich table arrives in
+     * ({@code ModelConfigRegistry.wheelEntriesFor}, filled from the same map by the sync path), so element {@code i}
+     * here is the label of entry {@code i} there. Both are backed by a {@code LinkedHashMap} that the folder parser
+     * fills in JSON order and the binary serializer/deserializer round-trips in that order
+     * ({@code YSMBinarySerializer:468-469} writes the entries in iteration order, {@code YSMBinaryDeserializer:687-689}
+     * reads them back into a {@code LinkedHashMap}), so the mapping is stable across both channels and across
+     * restarts.</p>
+     */
     private static String[] getExtraAnimationNames(RawYsmModel raw) {
         if (raw.properties.extraAnimations.isEmpty()) {
             return new String[0];
@@ -557,25 +562,77 @@ public final class RawYsmModelAdapter {
                 lastDefined = i;
             }
         }
-        if (lastDefined < 0) {
-            return new String[0];
+        if (lastDefined >= 0) {
+            String[] names = new String[lastDefined + 1];
+            for (int i = 0; i <= lastDefined; i++) {
+                names[i] = legacyExtraAnimationLabel(raw, "extra" + i);
+            }
+            return names;
         }
-        String[] names = new String[lastDefined + 1];
-        for (int i = 0; i <= lastDefined; i++) {
-            String key = "extra" + i;
-            String label = getLocalizedValue(raw, "properties.extra_animation." + key);
-            if (StringUtils.isBlank(label)) {
-                String configured = raw.properties.extraAnimations.get(key);
-                if (StringUtils.isNotBlank(configured) && !configured.startsWith("#")) {
+        String[] names = new String[raw.properties.extraAnimations.size()];
+        int index = 0;
+        for (String key : raw.properties.extraAnimations.keySet()) {
+            names[index++] = extraAnimationLabel(raw, key);
+        }
+        return names;
+    }
+
+    /**
+     * The legacy {@code extra<i>} label rule, unchanged: the pack's language file for
+     * {@code properties.extra_animation.<key>}, else the declared value when it is not a {@code '#'} reference, else
+     * the key itself. A legacy pack's keys are the animation names, so its labels and its playable slots are the same
+     * thing and nothing has to be substituted here.
+     */
+    private static String legacyExtraAnimationLabel(RawYsmModel raw, String key) {
+        String label = getLocalizedValue(raw, "properties.extra_animation." + key);
+        if (StringUtils.isBlank(label)) {
+            String configured = raw.properties.extraAnimations.get(key);
+            if (StringUtils.isNotBlank(configured) && !configured.startsWith("#")) {
+                label = configured;
+            }
+        }
+        return StringUtils.isBlank(label) ? key : label;
+    }
+
+    /**
+     * The label of one named entry, exactly upstream's rule
+     * ({@code AnimationRouletteScreen.java:719-750}): the pack's language file for
+     * {@code properties.extra_animation.<key>} wins, then the declared value - except that a value which is a
+     * {@code '#'} reference to a declared settings button is shown as that button's own {@code name}, which is what
+     * upstream substitutes before the language lookup ({@code :726-736}); if the reference names no known button it is
+     * shown as written. A blank result falls back to the key, so a sector is never unlabelled.
+     * <p>
+     * The {@code '#'} in a <em>key</em> needs no special case here: it is a sub-page marker, and its value (for
+     * example {@code 更多动作}) is the label the pack wrote for it.
+     */
+    private static String extraAnimationLabel(RawYsmModel raw, String key) {
+        String label = getLocalizedValue(raw, "properties.extra_animation." + key);
+        if (StringUtils.isBlank(label)) {
+            String configured = raw.properties.extraAnimations.get(key);
+            if (StringUtils.isNotBlank(configured)) {
+                if (configured.startsWith("#")) {
+                    RawYsmModel.ExtraAnimationButton button =
+                        findExtraAnimationButton(raw, configured.substring(1));
+                    label = button != null && StringUtils.isNotBlank(button.name) ? button.name : configured;
+                } else {
                     label = configured;
                 }
             }
-            if (StringUtils.isBlank(label)) {
-                label = key;
-            }
-            names[i] = label;
         }
-        return names;
+        return StringUtils.isBlank(label) ? key : label;
+    }
+
+    /** One declared {@code extra_animation_buttons} entry by id, or {@code null} when the pack declares no such id. */
+    private static RawYsmModel.ExtraAnimationButton findExtraAnimationButton(RawYsmModel raw, String id) {
+        if (StringUtils.isBlank(id)) {
+            return null;
+        }
+        for (RawYsmModel.ExtraAnimationButton button : raw.properties.extraAnimationButtons) {
+            if (id.equals(button.id)) {
+                return button;
+            }
+        }
+        return null;
     }
 
     private static String getLocalizedValue(RawYsmModel raw, String key) {

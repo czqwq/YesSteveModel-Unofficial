@@ -43,9 +43,16 @@ public final class NetworkHandler {
      * first with a readable message. (The earlier debug ids 23/26/27/31 arrived with senders in
      * {@code .agent/phase35-debug-command-senders.md} without a bump; that omission is closed by this entry rather
      * than repeated.)</li>
+     * <li>5: serverbound id 7 ({@code SetPlayAnimation}) carries the animation <b>name</b> instead of a slot index,
+     * so the extra-animation wheel can reach the named keys a YSM 2.3.0+ pack declares (LaPluma 2.5.3: {@code HI},
+     * {@code WHAT}, {@code Bird}, ...). The old payload was a fixed four-byte int and the new one is a
+     * length-prefixed UTF-8 string, so an old peer would read the string's length varint as the index and the
+     * following bytes as whatever came next: the handshake has to reject the pair rather than let it decode. The
+     * legacy {@code extra0..extra7} vocabulary is unchanged - those senders now spell the same name the server used
+     * to concatenate.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 4;
+    public static final int NETWORK_PROTOCOL = 5;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 

@@ -1,7 +1,6 @@
 package com.fox.ysmu.client.input;
 
-import com.fox.ysmu.network.NetworkHandler;
-import com.fox.ysmu.network.message.SetPlayAnimation;
+import com.fox.ysmu.client.gui.AnimationRouletteScreen;
 import com.google.common.collect.Lists;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
 import cpw.mods.fml.client.registry.ClientRegistry;
@@ -14,6 +13,23 @@ import org.lwjgl.input.Keyboard;
 
 import java.util.List;
 
+/**
+ * The eight extra-animation key bindings: key {@code i} acts on the {@code i}-th <b>root</b> wheel entry of the local
+ * player's model.
+ *
+ * <p>That is upstream's own mapping. Its {@code ExtraAnimationKey} takes the root {@code extra_animation} entry at the
+ * binding's index and dispatches on its <em>key</em>: {@code "#return"} stops the animation, a
+ * {@code "#<classifyId>"} entry opens the roulette inside that sub-page, and anything else is played by name
+ * ({@code tmp/YesSteveModel-dev-1.20/.../client/input/ExtraAnimationKey.java:58-85}). The wheel draws the binding
+ * hints next to the same entries, and only on its first root page
+ * ({@code client/gui/AnimationRouletteScreen.java:751-755}).</p>
+ *
+ * <p>This port used to send the slot index and let the server spell the name as {@code "extra" + index}, which could
+ * only reach the legacy {@code extra0..extra7} vocabulary - a pack that declares named keys (LaPluma 2.5.3: {@code HI},
+ * {@code WHAT}, {@code Bird}, ...) had no working binding at all. The dispatch now lives in
+ * {@link AnimationRouletteScreen#activateRootSlot(int)}, so a key press and a click on the same sector do the same
+ * thing by construction.</p>
+ */
 @EventBusSubscriber(side = Side.CLIENT)
 public class ExtraAnimationKey {
     public static final List<KeyBinding> EXTRA_ANIMATION_KEYS = Lists.newArrayList();
@@ -39,7 +55,7 @@ public class ExtraAnimationKey {
             if (mc.currentScreen != null || mc.thePlayer == null) {
                 return;
             }
-            NetworkHandler.CHANNEL.sendToServer(new SetPlayAnimation(EXTRA_ANIMATION_KEYS.indexOf(key)));
+            AnimationRouletteScreen.activateRootSlot(EXTRA_ANIMATION_KEYS.indexOf(key));
             return;
         }
     }

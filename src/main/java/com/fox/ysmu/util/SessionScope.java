@@ -15,11 +15,15 @@ import java.util.UUID;
  *
  * <h3>失败方向是不对称的，这一点刻意保留</h3>
  * <p>本方法只可能在 {@code thePlayer} 已经为 null（或 UUID 不匹配）时返回 false —— 也就是
- * 只可能**少清**，不可能把别人的登出当好本地登出。少清的那一侧由另外两条路径兜住：
- * {@code ClientDisconnectionFromServerEvent}（远端断线唯一可靠通知）与客户端 tick 的
- * 「上一 tick 还在世界、这一 tick 世界与玩家都为 null」兜底。
+ * 只可能**少清**，不可能把别人的登出当好本地登出。少清的那一侧由
+ * {@code ClientDisconnectionFromServerEvent}（远端断线唯一可靠通知）兜住：本地玩家登出必然伴随连接关闭，
+ * 而那条路径是**无条件全量清**（{@code ClientEventHandler.clearClientRuntimeState} 的唯一无条件调用者）。
  * 反过来若在这里放宽（例如本地玩家未知时默认当作本地登出），就会重新引入
  * "客人登出清掉服主会话"这个原始缺陷。</p>
+ * <p><b>本仓没有第三条兜底</b>：参考分支还有一条"客户端 tick 发现『上一 tick 还在世界、这一 tick 世界与玩家
+ * 都为 null』"的兜底（它的 {@code ClientEventHandler} 里的 {@code inWorldLastTick}），本仓
+ * {@code grep inWorldLastTick} 为 0，{@code clearClientRuntimeState} 只有上面那两个调用者。所以这一句
+ * 此前写成"由 tick 兜底"是错的，已按本仓的实际形状改写；真要靠 tick 兜底就得把那条状态机补上，那是另一个决定。</p>
  */
 public final class SessionScope {
 

@@ -41,8 +41,17 @@ public final class ModelCacheWriter {
      * {@code anim_speed} / {@code anim_time_update} to every animation record of a baked payload. A payload baked
      * before this change does not carry them and the reader would read the next animation's name as a flag byte, so
      * every cache written by bake version 3 has to be re-baked rather than served.
+     *
+     * <p>4 -> 5: {@code RawYsmModelAdapter.getExtraAnimationNames} now fills the wheel labels for a pack whose
+     * {@code extra_animation} uses <b>named</b> keys (LaPluma 2.5.3's {@code HI}/{@code WHAT}/{@code Bird}/… and the
+     * {@code #} sub-menus) instead of the {@code extra0..extra7} slots; before it, such a pack produced an empty
+     * array. On the OpenYSM channel the labels are computed by the client from the raw model it just received, so
+     * that half heals itself - but on the <b>legacy</b> channel (and for any model the server bakes, e.g. a flat
+     * folder or a bare-YSGP {@code .ysm}) the {@code ModelData} is baked into the cache file by the server, so a
+     * payload baked by an older build keeps carrying the empty array and the named pack's roulette stays empty no
+     * matter what the client does.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 4;
+    static final int OPEN_YSM_BAKE_VERSION = 5;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。

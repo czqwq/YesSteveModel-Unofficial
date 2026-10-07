@@ -10,15 +10,28 @@ import net.minecraft.util.ResourceLocation;
  * 连续姿态采用 1/64 量化以减少微小变化带来的重画；这是近似缓存，非逐像素相等。
  * 显隐（包括精确零缩放）必须单独编码，不能被量化吞掉。
  *
- * <p><b>本仓当前没有调用方</b>，而这是有意的决定，不是漏接。参考分支用它跳过"姿态与上一帧相同"
- * 时的几何提交（参考 {@code util/RenderUtil.java:371-378} 的 {@code invalidatePreviewPose} 与
- * {@code :665-675}），本仓的 {@code RenderUtil.renderEntityInInventory} 没有这条链：模型网格的
- * 重绘率现在由 {@code client/renderer/PreviewRefreshPolicy} + {@code FboCache} 限住
- * （{@code GUI_MODEL_PREVIEW_REFRESH}，每格最多 90 Hz 且整页共享预算），再叠一层"姿态没变就不画"
- * 的收益只对静止模型存在，代价是每个可能重建 FBO 的路径（翻页/换分类/换模型/悬停与 GUI 动画切换/
- * FBO 尺寸变化）都必须记得 {@link #invalidate}，漏一个就是空白或过期缩略图 ——
- * 正是 {@code AGENTS.md} 警告的"为时序差新增上游没有的状态"。
- * 所以判定逻辑留在本类、可单测，接线等有了实机依据再定。
+ * <p><b>谁在用它。</b>{@code util/RenderUtil.java} 的缩略图烘焙路径
+ * （{@code renderEntityInInventory(..., clearBeforeDraw, allowPoseSkip)}）：签名由
+ * {@code previewPoseSignature}（几何 identity + 贴图 + 逐骨骼 {@link #appendBone}）算，命中时跳过几何
+ * 提交、只跑动画 tick，并把"这一帧到底画没画"作为布尔值返回给 {@code ModelButton}，由它决定要不要把耗时
+ * 喂给 {@code PreviewRefreshPolicy}。参考分支的同一条链：{@code util/RenderUtil.java:371-378}
+ * （{@code invalidatePreviewPose}）、{@code :380-397}（签名）、{@code :662-672}（命中即 return）、
+ * {@code :351-356}（跳过时不喂预算）。
+ *
+ * <h3>失效点就是这套机制的失败模式</h3>
+ * <p>命中时几何不提交、FBO 里的旧画面直接复用，所以任何"画面已经不该是这个"的时刻都必须
+ * {@link #invalidate}，漏一个就是**空白或过期**缩略图。已接的点（{@code ModelButton#bakePreviewIfDue}）：
+ * <ol>
+ * <li>{@code FboCache#checkAndResize} 返回 true —— FBO 被（重）建、画面物理上已经没了：首次烘焙、
+ * 窗口/GUI scale 变化、{@code dispose()} 删掉之后。这是唯一"内容消失但姿态可能没变"的情况。</li>
+ * <li>悬停/选中变化 —— 切的是预览动画通道，骨骼姿态可能这一帧还没变。</li>
+ * <li>{@code modelCacheDirty} —— 构造后的第一次、{@code dispose()} 之后、模型重新发布。</li>
+ * <li>{@link #clear()} —— 断线/模型重载（{@code ClientEventHandler#clearClientRuntimeState}）：签名按
+ * 模型 id 存，换服务器后同一个 id 可能指向另一份几何。</li>
+ * </ol>
+ * <p><b>贴图页不接</b>：同一个主模型有 N 张贴图、共用同一个签名 key，打开只会互相顶掉（参考
+ * {@code util/RenderUtil.java:532-533} 的同一句说明），所以 {@code TextureButton} 仍传
+ * {@code allowPoseSkip=false}。
  *
  * <p>单独一个类而不是塞进 {@code RenderUtil}：{@code RenderUtil} 的静态初始化会加载
  * GL/LWJGL（`org.lwjgl.LWJGLException`），单测 JVM 里没有，所以判定逻辑放在这里才可测。

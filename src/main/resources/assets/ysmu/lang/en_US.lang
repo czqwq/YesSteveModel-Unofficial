@@ -286,6 +286,8 @@ commands.yes_steve_model.export.success=§6§l[§aYSM§6§l] §eSaved as §r'con
 commands.yes_steve_model.export.not_exist=§6§l[§aYSM§6§l] §r'%s' is not exist
 key.yes_steve_model.player_model.desc=Open Player Model GUI
 key.yes_steve_model.animation_roulette.desc=Open Animation Roulette
+# Sub-menu depth limit of the roulette (upstream's own key, its AnimationRouletteScreen caps the path at 5 levels).
+gui.yes_steve_model.roulette.too_long=The roulette's path is too long
 key.yes_steve_model.extra_animation.none=None
 key.yes_steve_model.extra_animation.0.desc=Play Extra Animation 0
 key.yes_steve_model.extra_animation.1.desc=Play Extra Animation 1

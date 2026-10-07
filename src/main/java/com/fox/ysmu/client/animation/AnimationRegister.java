@@ -41,6 +41,7 @@ import com.fox.ysmu.client.animation.molang.YsmSoundFunction;
 import com.fox.ysmu.client.animation.molang.YsmSyncFunction;
 import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
+import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
@@ -48,6 +49,7 @@ import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.model.provider.data.EntityModelData;
+import software.bernie.geckolib3.molang.util.PersonView;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.util.MolangUtils;
 
@@ -406,6 +408,13 @@ public class AnimationRegister {
         // A-15: see the assignment in setYsmValues for what this is and why it was missing.
         parser.register(new LazyVariable("ysm.input_vertical", 0));
 
+        // G: upstream `entityVar("person_view", PersonView::getPersonView)` (client/animation/molang/YSMBinding.java:98).
+        // The value is the modern CameraType ordinal, and 1.7.10's gameSettings.thirdPersonView shares that numbering
+        // (0 = first person, 1 = third person back, 2 = third person front - the constants on PersonView say so).
+        // Every frame that is not the local player's own body drawn in the world answers THIRD_PERSON_FRONT, which is
+        // upstream's fallback too; see personView() for the two conditions behind that.
+        parser.register(new LazyVariable("ysm.person_view", PersonView.THIRD_PERSON_FRONT));
+
         // Projectile (sub-entity) values, published per frame by the projectile renderer. They are registered here
         // rather than only written at render time because an animation file is parsed once, when its model is
         // installed: a name that does not exist yet at that moment is not a variable the keyframe expression can
@@ -418,6 +427,14 @@ public class AnimationRegister {
         parser.register(new LazyVariable("ysm.on_ground_time", 0));
         parser.register(new LazyVariable("ysm.delta_movement_length", 0));
         parser.register(new LazyVariable("ysm.shoot_item_id", 0));
+        // H: upstream `projectileVar("projectile_owner", ctx -> ctx.createChild(ctx.entity().getOwner()))`
+        // (client/animation/molang/YSMBinding.java:193) - the value is a *context*, so a pack reaches the shooter
+        // through the `->` operator (`ysm.projectile_owner->query.health`). The legacy mclib parser this port
+        // evaluates animation files with has no `->` at all (com/eliotlash/mclib/math/Operation.java registers only
+        // `+ - * / && || < <= >= >` and `== !=`), so a chained form cannot even be tokenised, let alone resolved.
+        // What is published instead is the flat question the port can answer from the wire: 1 when the projectile
+        // was fired by a player, 0 otherwise. See ArrowProjectileRenderer's owner publish for what that rests on.
+        parser.register(new LazyVariable("ysm.projectile_owner", MolangUtils.FALSE));
 
         // ysm.fps：注册前它在关键帧路径上会落进 newVariable() 的默认 0，而控制器路径返回 60，
         // 同一条表达式在两条路径读到不同的值（见 FpsQuery）。显式注册（与其他 ysm.* 常量变量
@@ -552,6 +569,9 @@ public class AnimationRegister {
         boolean humanoidHooks) {
         parser.setValue("ysm.head_yaw", queryValues.headYaw());
         parser.setValue("ysm.head_pitch", () -> data.headPitch);
+        // G: the per-frame half of ysm.person_view; see the registration in registerYsmVariables for the upstream
+        // source and the numbering.
+        parser.setValue("ysm.person_view", () -> personView(player));
         parser.setValue("ysm.has_helmet", () -> getSlotValue(player, 4));
         parser.setValue("ysm.has_chest_plate", () -> getSlotValue(player, 3));
         parser.setValue("ysm.has_leggings", () -> getSlotValue(player, 2));
@@ -741,14 +761,33 @@ public class AnimationRegister {
         return MathHelper.cos(relativeDeg * 0.017453292F);
     }
 
+    /**
+     * Whether the player is in the airborne phase that plays the model's {@code jump} clip.
+     * <p>
+     * Upstream is {@code !player.onGround() && !player.isInWater()}
+     * ({@code tmp/YesSteveModel-dev-1.20 .../client/animation/AnimationRegister.java:36}): the <b>whole</b> airborne
+     * phase, rising and falling alike. This port keeps that duration and adds two exclusions, each for a 1.7.10 reason:
+     * <ul>
+     *   <li>{@code isPlayerFlying} - {@code fly} is a {@code HIGH} state and {@code jump} is {@code NORMAL}, so a
+     *       flying player already prefers {@code fly} whenever the model declares it; this exclusion only decides the
+     *       fallback for a model that declares no {@code fly} clip (which would otherwise play the airborne clip while
+     *       hovering).</li>
+     *   <li>{@code isRiding} - the riding states live in this port's {@code player.vehicle} controller
+     *       ({@code VehiclePredicate}), not in this table (B-04, see {@link #registerFlyingStates}), so a rider must
+     *       not also match the main table's airborne clip.</li>
+     * </ul>
+     * <p>
+     * <b>Removed: the local player's {@code motionYState(player, 0.0) != 0} condition.</b> That was not upstream's
+     * rule and it had a visible failure mode: {@code motionY} passes through exactly 0 at the apex of a jump (and a
+     * mod or a plugin may zero it), so for that tick the local player dropped out of {@code jump}, the state machine
+     * fell through to {@code idle} - the only state left once {@code onGround} is false, since {@code run}/{@code walk}
+     * need the ground - and the arms snapped from the jump pose's folded forearms (X = -80 empty-handed, see the
+     * model's own {@code animations/main.animation.json}) back to neutral and out again. Remote players never had the
+     * condition, so one player's jump looked different depending on who was watching it. The whole airborne phase is
+     * now a single state for everyone, which is what upstream does.
+     */
     private static boolean isPlayerJumping(EntityPlayer player) {
-        if (isPlayerFlying(player) || player.isRiding() || isPlayerOnGround(player) || player.isInWater()) {
-            return false;
-        }
-        if (player == Minecraft.getMinecraft().thePlayer) {
-            return motionYState(player, 0.0D) != 0;
-        }
-        return true;
+        return !isPlayerFlying(player) && !player.isRiding() && !isPlayerOnGround(player) && !player.isInWater();
     }
 
     /**
@@ -769,5 +808,30 @@ public class AnimationRegister {
         } else {
             return 0;
         }
+    }
+
+    /**
+     * G: the value {@code ysm.person_view} reports for one frame.
+     *
+     * <p>
+     * Upstream answers the camera mode only for the local player's own body while the world is being drawn, and
+     * {@code CameraType.THIRD_PERSON_FRONT} for everything else - another player, and any frame that is not the world
+     * pass ({@code PersonView#getPersonView}, client/animation/molang/YSMBinding.java:98). The port has the same two
+     * inputs: the identity of the frame's player, and whether this pass is the world or a preview. The preview signal
+     * is {@link CustomPlayerRenderer#isPreviewRendering()}, which the renderer already maintains for the GUI preview
+     * grid and the HUD paper doll - both are the local player, and both are exactly "not the world" passes, which is
+     * what upstream's {@code renderContext.level()} answers.
+     *
+     * <p>
+     * The ordinal itself is read straight from {@code gameSettings.thirdPersonView}: 1.7.10 numbers the three modes
+     * the way the modern enum does (0 = first person, 1 = third person back, 2 = third person front), which is what
+     * {@link PersonView}'s constants record.
+     */
+    private static double personView(EntityPlayer player) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (player != null && player == mc.thePlayer && !CustomPlayerRenderer.isPreviewRendering()) {
+            return mc.gameSettings.thirdPersonView;
+        }
+        return PersonView.THIRD_PERSON_FRONT;
     }
 }

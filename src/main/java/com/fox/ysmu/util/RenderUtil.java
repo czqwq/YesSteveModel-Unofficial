@@ -33,9 +33,11 @@ import com.fox.ysmu.ysmu;
 import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.IAnimatableModel;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
+import software.bernie.geckolib3.util.GeoStats;
 
 @SuppressWarnings("all")
 public final class RenderUtil {
@@ -316,8 +318,33 @@ public final class RenderUtil {
 
     public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
         ResourceLocation modelId, ResourceLocation textureId, Consumer<CustomPlayerEntity> consumer) {
+        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, consumer, null, false);
+    }
+
+    /**
+     * 缩略图烘焙的完整入口：允许"姿态与上次真正画出去的相同就跳过几何提交"，并把离屏 FBO 的清除推迟到
+     * 确实要画的那一刻。
+     *
+     * <p>参考分支 {@code util/RenderUtil.java:445-514}（{@code clearBeforeDraw} 的 javadoc 在
+     * {@code :529-538}）。两个参数都是必需的，理由与参考相同：</p>
+     * <ul>
+     *   <li>{@code clearBeforeDraw} 只在**确实要画**之前调用一次（见 {@code renderModel}）。先清 FBO 再发现
+     *       姿态没变而跳过，就会留下一张空白缩略图 —— 这是这套缓存最典型的失败模式。</li>
+     *   <li>{@code allowPoseSkip} 只对"一个 tile 一个模型"的缩略图页打开。贴图页同一个主模型有 N 张贴图，
+     *       共用同一个签名 key，打开只会互相顶掉（参考 {@code :532-533} 的同一句说明）。</li>
+     * </ul>
+     *
+     * @param clearBeforeDraw 调用方传进来的 FBO 清除动作，可为 {@code null}
+     * @param allowPoseSkip   是否允许姿态签名命中时跳过几何提交
+     * @return {@code true} = 这一帧真的提交了几何；{@code false} = 姿态没变、复用了 FBO 里的画面（或模型不可用）。
+     *         调用方据此决定要不要把耗时喂给 {@code PreviewRefreshPolicy}：跳过时不喂，否则估计成本会塌到零、
+     *         刷新频率被推到上限，而每次 tick 的开销反而成倍增加（参考 {@code :351-356}）。
+     */
+    public static boolean renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
+        ResourceLocation modelId, ResourceLocation textureId, Consumer<CustomPlayerEntity> consumer,
+        Runnable clearBeforeDraw, boolean allowPoseSkip) {
         if (player == null) {
-            return;
+            return false;
         }
         try {
             CustomPlayerRenderer renderer = ClientProxy.getInstance();
@@ -335,7 +362,7 @@ public final class RenderUtil {
                 // did.
                 CustomPlayerRenderer.beginPreviewRender();
                 try {
-                    renderModel(
+                    return renderModel(
                         (double) pPosX,
                         (double) pPosY,
                         (float) pScale,
@@ -343,7 +370,9 @@ public final class RenderUtil {
                         modelId,
                         textureId,
                         renderer,
-                        entity);
+                        entity,
+                        clearBeforeDraw,
+                        allowPoseSkip);
                 } finally {
                     CustomPlayerRenderer.endPreviewRender();
                 }
@@ -351,6 +380,7 @@ public final class RenderUtil {
         } catch (ExecutionException e) {
             ysmu.LOG.warn("Failed to render the YSM player model in the inventory GUI", e);
         }
+        return false;
     }
 
     public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
@@ -368,17 +398,65 @@ public final class RenderUtil {
      */
     public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
         ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused) {
-        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, entity -> {
+        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, hovered, focused, null, false);
+    }
+
+    /** {@link #renderEntityInInventory(int, int, int, EntityPlayer, ResourceLocation, ResourceLocation, boolean,
+     * boolean)} plus the thumbnail-bake pair; see the {@code clearBeforeDraw}/{@code allowPoseSkip} javadoc there. */
+    public static boolean renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
+        ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused,
+        Runnable clearBeforeDraw, boolean allowPoseSkip) {
+        return renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, entity -> {
             ModelPreviewAnimationState.forModel(modelId)
                 .apply(entity.getPreviewInfo(), hovered, focused, Minecraft.getSystemTime());
             entity.getFactory()
                 .getOrCreateAnimationData(entity.hashCode()).shouldPlayWhilePaused = true;
-        });
+        }, clearBeforeDraw, allowPoseSkip);
     }
 
-    private static void renderModel(double pPosX, double pPosY, float pScale, EntityPlayer player,
+    /** 作废某模型的姿态签名（见 {@link PreviewPoseCache}）：FBO 被重建、翻页/换模型、悬停或 GUI 动画切换后
+     *  调用，下一次渲染必然执行。参考 {@code util/RenderUtil.java:369-373}。 */
+    public static void invalidatePreviewPose(ResourceLocation modelId) {
+        PreviewPoseCache.invalidate(modelId);
+    }
+
+    /** 全部作废（模型重载 / 断线时用）。参考 {@code util/RenderUtil.java:375-378}。 */
+    public static void clearPreviewPoseCache() {
+        PreviewPoseCache.clear();
+    }
+
+    /**
+     * 近似连续姿态 + 精确显隐 + 几何/贴图身份（参考 {@code util/RenderUtil.java:380-397}）。
+     * <p>
+     * 几何身份用 {@code System.identityHashCode(model)}：换模型或重新解析会换掉 {@code GeoModel} 对象本身，
+     * 所以它是"这次画的是不是同一份几何"最便宜的判据；贴图身份用 {@code textureId}。骨骼逐根交给
+     * {@link PreviewPoseCache#appendBone}（1/64 量化，显隐与零缩放单独编码）。
+     */
+    private static long previewPoseSignature(AnimatedGeoModel provider, GeoModel model, ResourceLocation textureId) {
+        long h = 1125899906842597L;
+        h = h * 31 + System.identityHashCode(model);
+        if (textureId != null) {
+            h = h * 31 + textureId.hashCode();
+        }
+        if (provider != null) {
+            // The wildcard local is load-bearing: `AnimationProcessor<T extends IAnimatable>` is **generic**, and
+            // `AnimatedGeoModel`'s own field/accessor is raw, so `getModelRendererList()` reached through either raw
+            // type erases its return to a raw `List` whose element javac reads as `Object` (measured: "incompatible
+            // types: Object cannot be converted to IBone"). `AnimationProcessor<?>` keeps the method's own
+            // `List<IBone>` signature, which is what it declares (`AnimationProcessor.java:570`, the same list as
+            // `getBones()`).
+            software.bernie.geckolib3.core.processor.AnimationProcessor<?> processor = provider
+                .getAnimationProcessor();
+            for (IBone bone : processor.getModelRendererList()) {
+                h = PreviewPoseCache.appendBone(h, bone);
+            }
+        }
+        return h;
+    }
+
+    private static boolean renderModel(double pPosX, double pPosY, float pScale, EntityPlayer player,
         ResourceLocation modelId, ResourceLocation textureId, GeoReplacedEntityRenderer renderer,
-        CustomPlayerEntity entity) {
+        CustomPlayerEntity entity, Runnable clearBeforeDraw, boolean allowPoseSkip) {
         entity.setMainModel(ModelIdUtil.getMainId(modelId));
         entity.setTexture(textureId);
 
@@ -429,6 +507,10 @@ public final class RenderUtil {
         // （SOURCE RenderUtil.java:542/701 用 YSMSoundManager.setPreviewRendering 把整个预览
         //  方法括起来）。这里括住同一段渲染（模型求值 + 提交），true 紧贴配对的 try，
         //  所以任何抛出路径都不会把标志留在 true 上。
+        //
+        // rendered[0] = 这一帧是否真的提交了几何（姿态签名命中时跳过）。用数组是因为它要在
+        // withGuiEntityLighting 的 lambda 里写、在方法末尾读（参考 :541 的同一个形状）。
+        boolean[] rendered = { false };
         YSMSoundManager.setPreviewRendering(true);
         try {
             // The tile draws a detached preview entity, which has no player of its own; naming the owner here is what
@@ -483,6 +565,22 @@ public final class RenderUtil {
                     if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
                         ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
                     }
+                    // 姿态签名与上次真正画出去的相同 → 跳过几何提交，FBO 里的画面直接复用
+                    // （此时**不能**清 FBO，清除动作在下面才执行）。只跳过几何：上面那句
+                    // setLivingAnimations 照常跑 —— 眨眼/呼吸这类变化要先 tick 才可能被看见
+                    // （参考 util/RenderUtil.java:662-672 的同一条注释与顺序）。
+                    if (allowPoseSkip) {
+                        GeoStats.notePoseCheck();
+                        if (PreviewPoseCache.shouldSkip(
+                            ModelIdUtil.getMainId(modelId),
+                            previewPoseSignature(provider, model, textureId))) {
+                            GeoStats.notePoseSkip();
+                            return;
+                        }
+                    }
+                    if (clearBeforeDraw != null) {
+                        clearBeforeDraw.run();
+                    }
                     Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
                     diagnosePreviewPose(modelId, model);
                     // The preview asks for a render type the way every upstream draw does - visible, not glowing, and
@@ -498,6 +596,7 @@ public final class RenderUtil {
                         1.0f,
                         1.0f,
                         1.0f);
+                    rendered[0] = true;
                 } finally {
                     pose.restore();
                 }
@@ -525,6 +624,7 @@ public final class RenderUtil {
             player.inventory.mainInventory[player.inventory.currentItem] = itemStacks[4];
             BackhandCompat.setOffhandItem(player, itemStacks[5]);
         }
+        return rendered[0];
     }
 
     /**

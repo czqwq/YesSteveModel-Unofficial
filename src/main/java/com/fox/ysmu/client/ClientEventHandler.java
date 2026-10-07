@@ -47,6 +47,7 @@ import com.fox.ysmu.network.message.RequestLoadModel;
 import com.fox.ysmu.network.message.SetPlayAnimation;
 import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
 import com.fox.ysmu.util.ModelIdUtil;
+import com.fox.ysmu.util.SessionScope;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
 
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
@@ -543,12 +544,65 @@ public class ClientEventHandler {
     public static void onPlayerLeave(PlayerEvent.PlayerLoggedOutEvent event) {
         // 注意：纯多人客户端不会收到这个 FML 事件（1.7.10 只有 ServerConfigurationManager 会 post），
         // 因此真正的兜底是下面的 onClientDisconnect。
-        // 音效归属状态按玩家清理：不留该玩家的"控制器→音效"映射与音源。集成服上任何客人登出都会走到
-        // 这里，所以只清这一个 owner，不动其他人的音源（SOURCE ClientEventHandler.java:537）。
+        //
+        // 这里是「玩家登出」边界，不是「本地会话结束」边界 —— 两者原先被混在一起：集成服务器上**任何**客人
+        // 登出都会在服主客户端触发本方法（服务端 ServerConfigurationManager.playerLoggedOut →
+        // firePlayerLoggedOut，同一个 FML 总线），于是服主自己的动画/漫游/连接状态被一并清掉。参考分支在它的
+        // PlayerLoggedOutEvent 里按 UUID 判是不是本地玩家（reference ClientEventHandler.java:513-543，判定
+        // 在 :545-551），本仓用同一判定（{@link SessionScope}，由本方法接上）。
+        //
+        // 事件里的 player 是服务端的 EntityPlayerMP，与客户端渲染用的 mc.thePlayer **不是同一个对象**，所以
+        // 只能按 UUID 比。SessionScope.isLocalPlayer 只可能在 thePlayer 未知时返回 false —— 也就是只可能
+        // **少清**，而少清的那一侧由 onClientDisconnect 的无条件全量清兜住：本地玩家登出必然伴随连接关闭
+        // （退出集成服世界、专用服断开、被踢都会派发 ClientDisconnectionFromServerEvent）。
         if (event.player != null) {
-            com.fox.ysmu.client.audio.YSMSoundManager.clearOwner(event.player);
+            clearDepartedPlayerState(event.player);
         }
-        clearClientRuntimeState();
+        if (isLocalPlayerLogout(event)) {
+            clearClientRuntimeState();
+        }
+    }
+
+    /**
+     * 登出事件里的玩家是不是本地玩家（按 UUID 比；服务端对象与客户端对象不是同一个实例）。
+     * 参考 {@code client/ClientEventHandler.java:545-551}；判定本身在 {@link SessionScope}。
+     */
+    private static boolean isLocalPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+        EntityPlayer loggedOut = event.player;
+        EntityPlayer local = Minecraft.getMinecraft().thePlayer;
+        return SessionScope.isLocalPlayer(
+            loggedOut == null ? null : loggedOut.getUniqueID(),
+            local == null ? null : local.getUniqueID());
+    }
+
+    /**
+     * 远程玩家登出：只清**这一名玩家**的远端状态，不碰本地会话（见 {@link #onPlayerLeave}）。
+     * <p>
+     * 逐项与依据：
+     * <ul>
+     * <li>音效归属：不留该玩家的"控制器→音效"映射与音源（SOURCE ClientEventHandler.java:537）。</li>
+     * <li>{@link RemoteAnimationVariables#clear(net.minecraft.entity.Entity)}：引擎侧那张表按 UUID 存
+     * （{@code BY_ENTITY}），所以服务端的 EntityPlayerMP 也能命中 —— 与本地玩家对象不同实例不影响。</li>
+     * <li>{@link MovementSpeedMatcher#clearSmoothing(EntityPlayer)}：按 UUID 的防滑步平滑倍速，参考在同一
+     * 位置调用（reference {@code :535}）。</li>
+     * <li>{@link RemotePlayerAnimationQueries} / {@link RemotePlayerMotionStates}：本仓只有全量 {@code clear()}，
+     * 没有 per-UUID 出口，所以按参考的无条件清理处理（reference {@code :524-525}）。这两张表都是**远端玩家
+     * 专用**的：本地玩家在 {@code RemotePlayerAnimationQueries.get} 的 {@code isRemotePlayer} 处直接短路、
+     * 根本不写表，所以全量清不会碰到本地状态。</li>
+     * </ul>
+     * <p>
+     * <b>没有在这里做的两项，都是本仓缺 per-player 出口，不是漏接：</b>
+     * {@link AnimationManager#clearPlayerState()} 会同时清掉本地玩家的 swing/use 进度表（参考用的是
+     * {@code AnimationManager.getInstance().resetPlayerState(pid)}，本仓没有那个方法），所以它只留给本地会话
+     * 结束的那条路径；NPC 覆盖表与宿主推送的剪辑表是**连接级**状态，客人登出时连接还在，同样只留给全量清
+     * （参考在 {@code :526} 无条件清 NPCData，本仓按连接语义收紧）。
+     */
+    private static void clearDepartedPlayerState(EntityPlayer loggedOut) {
+        com.fox.ysmu.client.audio.YSMSoundManager.clearOwner(loggedOut);
+        RemoteAnimationVariables.clear(loggedOut);
+        MovementSpeedMatcher.clearSmoothing(loggedOut);
+        RemotePlayerAnimationQueries.clear();
+        RemotePlayerMotionStates.clear();
     }
 
     /**
@@ -558,6 +612,11 @@ public class ClientEventHandler {
      * 所以这里挂到确实会在客户端触发的 {@link FMLNetworkEvent.ClientDisconnectionFromServerEvent} 上
      * （由 {@code NetworkDispatcher} 在 FML bus 上 post）。该事件只在连接关闭时触发，
      * 不会在连接建立期间被调用。
+     * <p>
+     * <b>这里保持无条件全量清，与 {@link #onPlayerLeave} 的按 UUID 判定不同</b>：连接已经断了，这一整套
+     * 运行期状态（连接密钥、模型表、漫游值、姿态签名……）都属于刚刚消失的那个服务器，没有任何一条需要
+     * 留给下一个连接；而 {@code PlayerLoggedOutEvent} 描述的是"某一名玩家离开"，集成服上客人离开时连接
+     * 仍然有效。两条路径的差别就是 R3 那个缺陷的修复本身，不要为了统一而把它们合并回一个无条件入口。
      */
     @SubscribeEvent
     public static void onClientDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
@@ -565,14 +624,23 @@ public class ClientEventHandler {
     }
 
     /**
-     * 客户端断开/退出的统一清理入口（只由上面的两个断开事件调用：{@code PlayerLoggedOutEvent}
-     * 与 {@link FMLNetworkEvent.ClientDisconnectionFromServerEvent}；join 路径不调用）。
+     * 客户端断开/退出的统一清理入口，由两条路径调用，且**只有第二条是无条件的**：
+     * <ul>
+     * <li>{@link #onPlayerLeave} —— 仅当登出的是**本地玩家**（{@link #isLocalPlayerLogout}）；客人登出走
+     * {@link #clearDepartedPlayerState}，不走这里。</li>
+     * <li>{@link #onClientDisconnect}（{@link FMLNetworkEvent.ClientDisconnectionFromServerEvent}）——
+     * <b>无条件全量清</b>：连接已经断了，这一整套运行期状态都属于刚刚消失的那个服务器。</li>
+     * </ul>
+     * join 路径不调用。
      * <p>
      * 清 8 项：模型连接态、远端动画查询、远端动作状态、引擎侧远端 MoLang 变量、NPC 覆盖表、
      * 宿主推送的动画剪辑表，以及 {@link AnimationManager#clearPlayerState()} 里的两张 per-player
      * 进度表（{@code swingProgressByPlayer}/{@code useDurationByPlayer}，ExecPlan 的 A-11，由 t33 交付）、
      * 防滑步的每玩家平滑倍速（{@link MovementSpeedMatcher#clearAll()}）、
-     * 客户端音效与音源，最后是进服欢迎消息的一次性标志 {@link #welcomeShown}（见该字段的 javadoc）。
+     * 客户端音效与音源，以及缩略图的姿态签名缓存（{@link RenderUtil#clearPreviewPoseCache()}：它按模型 id
+     * 存，模型重载/断线后必须整表作废，见 {@link com.fox.ysmu.util.PreviewPoseCache}；因为它是渲染线程专用的
+     * 普通 HashMap，这一项是排队回客户端线程清的，见方法体内注释），
+     * 最后是进服欢迎消息的一次性标志 {@link #welcomeShown}（见该字段的 javadoc）。
      * 该方法本身幂等（MANAGER 未创建时判空跳过、其余是 ConcurrentHashMap.clear()），
      * 与本方法上面的两个 Remote* 清理重复但互为 no-op。
      */
@@ -585,12 +653,19 @@ public class ClientEventHandler {
         com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
         NPCData.clear();
         EntityClips.clear();
+        // 缩略图的姿态签名按模型 id 存（PreviewPoseCache 是渲染线程专用的普通 HashMap，见它自己的 javadoc），
+        // 而本方法会在 Netty 线程（ClientDisconnectionFromServerEvent，NetworkDispatcher.disconnect/close 里
+        // post）或服务端线程（集成服的 PlayerLoggedOutEvent）上被调用 —— ClientModelManager#clearConnectionState
+        // 的注释把这条前提写得很清楚，并因此**故意不碰**渲染线程读的普通 HashMap。所以这一项不在本线程直接清，
+        // 而是按本仓既有的"要碰渲染线程状态就回客户端线程"约定排队（AGENTS.md 的 Network and Threading
+        // Rules）。清的是"换服务器后同一个模型 id 可能指向另一份几何"这类残留，晚一帧无影响。
+        Minecraft.getMinecraft().func_152344_a(RenderUtil::clearPreviewPoseCache);
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
         // 防滑步的平滑倍速同样按玩家 UUID 保存，是同一类不会自然释放的 per-player 状态：不清的话
-        // 同一个 UUID 再次进来会带着上一段的倍速。参考分支在它的 PlayerLoggedOutEvent 处理里
-        // clearSmoothing（reference ClientEventHandler.java:535），本仓的 PlayerLoggedOutEvent 也走
-        // 这个统一入口（onPlayerLeave），所以按全量清。
+        // 同一个 UUID 再次进来会带着上一段的倍速。参考分支在它的 PlayerLoggedOutEvent 处理里按 UUID
+        // clearSmoothing（reference ClientEventHandler.java:535），本仓把那一项放在
+        // clearDepartedPlayerState（任何玩家登出都清自己那一份），这里只兜住"本地会话结束"的全量清。
         MovementSpeedMatcher.clearAll();
         // Model sounds as well: the sources are still playing in the SoundSystem and their bytes belong to the
         // server that just went away, so leaving them would keep the previous server's audio going and keep a

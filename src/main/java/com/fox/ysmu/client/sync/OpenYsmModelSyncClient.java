@@ -563,10 +563,16 @@ public final class OpenYsmModelSyncClient {
                     // The model's own settings panel (extra_animation_buttons[].config_forms, each form naming a
                     // v.roaming.* variable) travels in the same payload. Remembering it here is what lets the
                     // selection screen offer that panel; nothing else on the client reads it.
+                    // The root extra_animation map travels with it: it is the wheel's table, and it is ordered
+                    // (name-or-marker -> label-or-button-reference), which a flat label array cannot express. This is
+                    // the reference branch's ClientModelManager.registerExtraWheel -> ExtraWheelData.from(raw) call
+                    // (reference client/ClientModelManager.java:2088-2090), which this port routes through the
+                    // registry that already owns the other two blocks because its roulette is a separate screen.
                     ModelConfigRegistry.accept(
                         modelId,
                         raw.properties == null ? null : raw.properties.extraAnimationButtons,
-                        raw.properties == null ? null : raw.properties.extraAnimationClassifies);
+                        raw.properties == null ? null : raw.properties.extraAnimationClassifies,
+                        raw.properties == null ? null : raw.properties.extraAnimations);
                     // The roaming-variable namespace of this model is derived from its content hash, which only this
                     // payload carries; remember it so the settings panel and the preview address the same namespace
                     // the server will use.

@@ -179,18 +179,21 @@ public class ModelButton extends GuiButton {
     /**
      * 行 43: 到点就把这个 tile 重画进它的离屏 FBO,然后把缓存贴图 blit 到按钮的模型区域。
      *
-     * <p>逐处对照参考 {@code client/gui/button/ModelButton.java:263-366},三处按本仓结构改写:</p>
+     * <p>逐处对照参考 {@code client/gui/button/ModelButton.java:263-366},四处按本仓结构改写:</p>
      * <ul>
-     *   <li>参考在烘焙前调 {@code RenderUtil.invalidatePreviewPose(mainModelId)} 并读
+     *   <li>参考在烘焙前按自己的 {@code modelCacheFbW/FbH} 字段判断"FBO 尺寸变了"并调
+     *       {@code RenderUtil.invalidatePreviewPose(mainModelId)},再读
      *       {@code RenderUtil.renderEntityInInventory(...)} 的布尔返回值(姿态没变时跳过几何提交)。
-     *       本仓的 {@code RenderUtil} 没有姿态签名跳过逻辑({@code PreviewPoseCache} 在本仓是零调用者的
-     *       死代码),而且那个改动要落在 {@code util/RenderUtil.java} —— 不在本任务的写权限里。所以这里
-     *       每次到点都真的提交几何,成本也如实全额入账。</li>
+     *       本仓没有那两个字段,用的是 {@link FboCache#checkAndResize} 的返回值 —— 它恰好就是
+     *       "FBO 被(重)建、画面已经没了"(interval 传 0,所以周期刷新不会让它返回 true),
+     *       语义与参考的尺寸比较相同且更少状态。姿态跳过链已在 {@code util/RenderUtil.java} 接上。</li>
      *   <li>参考用 {@code ClientModelManager.SYNC_IN_PROGRESS} 在同步期间暂停烘焙;本仓的对应门是
      *       {@code isModelPublished}(调用方已经问过),所以这里不再重复判断。</li>
      *   <li>参考的悬停/焦点动画由它自己算动画名并写进实体;本仓把 {@code hovered}/{@code focused} 交给
      *       {@code RenderUtil.renderEntityInInventory} 的 8 参数重载,由 {@code ModelPreviewAnimationState}
      *       决定通道 —— 所以"动画名变了"这个重烘焙触发条件在这里就是悬停/选中状态的变化。</li>
+     *   <li>FBO 的清除从"烘焙前直接清"改成回调:姿态命中时不会走到清除,否则先清后跳过就是一张空白缩略图
+     *       (参考 {@code :313-314})。</li>
      * </ul>
      * <p>投影只换 x/y:z 沿用屏幕 GUI 的那一段(1000..3000)。1.7.10 的 GUI 投影是
      * {@code glOrtho(0,w,h,0,1000,3000)} 加 {@code modelview translate(0,0,-2000)}
@@ -227,6 +230,7 @@ public class ModelButton extends GuiButton {
         }
         this.modelCacheWasHovered = hovered;
         this.modelCacheWasFocused = focused;
+        boolean wasDirty = this.modelCacheDirty;
         this.modelCacheDirty = false;
         this.modelCacheFramesUntilRefresh = refreshMode;
 
@@ -234,13 +238,20 @@ public class ModelButton extends GuiButton {
         int fbW = this.width * this.guiScale;
         int fbH = (this.height - 20) * this.guiScale;
         // 尺寸变了由 checkAndResize 建/重建 FBO(interval 传 0:周期刷新由上面的策略驱动,见 FboCache 的类注释)。
-        this.fboCache.checkAndResize(fbW, fbH, 0);
+        // 返回值就是"FBO 被(重)建、里面的画面已经没了":首次烘焙、窗口/GUI scale 变化、dispose() 删掉之后。
+        boolean fboRebuilt = this.fboCache.checkAndResize(fbW, fbH, 0);
+        // 姿态签名作废(见 RenderUtil.invalidatePreviewPose):下面每一种情况都会让 FBO 里的画面失效,而模型
+        // 可能静止不动 —— 姿态签名不变,不在这里作废就会跳过几何提交,留下**空白或过期**的缩略图:
+        //   1. fboRebuilt:FBO 被重建,画面物理上已经没了(唯一"内容消失但姿态不变"的情况);
+        //   2. 悬停/选中变化:切的是预览动画通道,骨骼姿态可能这一帧还没变;
+        //   3. modelCacheDirty:构造后的第一次、dispose() 之后、模型重新发布(画面可能整块换了)。
+        if (fboRebuilt || hoverChanged || focusChanged || wasDirty) {
+            RenderUtil.invalidatePreviewPose(ModelIdUtil.getMainId(this.modelInfo.getLeft()));
+        }
         this.fboCache.bind();
         // 1.7.10 的 Framebuffer#bindFramebuffer(false) 不设 viewport(Framebuffer.java:197-208,只有 true 分支设),
         // 所以调用方负责(同 HudPreviewCache:437-440)。
         GL11.glViewport(0, 0, fbW, fbH);
-        GL11.glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
-        GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
 
         GL11.glMatrixMode(GL11.GL_PROJECTION);
         GL11.glPushMatrix();
@@ -255,10 +266,27 @@ public class ModelButton extends GuiButton {
             // (那个开关在 CustomPlayerEntity 上,不在本任务写权限内),而按钮能控制的通道就是这两个。
             boolean animations = Config.GUI_ENHANCEMENTS;
             long bakeStart = System.nanoTime();
-            RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 20, 30,
-                mc.thePlayer, this.modelInfo.getLeft(), texture,
-                hovered && animations, focused && animations);
-            PreviewRefreshPolicy.noteBake((System.nanoTime() - bakeStart) / 1.0e6F);
+            boolean poseRendered = RenderUtil.renderEntityInInventory(
+                this.xPosition + this.width / 2,
+                this.yPosition + this.height / 2 + 20,
+                30,
+                mc.thePlayer,
+                this.modelInfo.getLeft(),
+                texture,
+                hovered && animations,
+                focused && animations,
+                // 注意:清除动作作为回调传进去,只有真的决定要画时才执行 —— 姿态没变会被跳过,
+                // 先清就会留下空白缩略图(参考 ModelButton.java:313-314)。
+                () -> {
+                    GL11.glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
+                    GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
+                },
+                true);
+            // 姿态没变时跳过了几何提交(只剩动画 tick),**不能**把那点耗时喂给预算:否则估计成本会塌到零、
+            // 频率被推到上限,而每次 tick 的开销反而成倍增加(参考 :351-356)。
+            if (poseRendered) {
+                PreviewRefreshPolicy.noteBake((System.nanoTime() - bakeStart) / 1.0e6F);
+            }
         } finally {
             GL11.glMatrixMode(GL11.GL_PROJECTION);
             GL11.glPopMatrix();

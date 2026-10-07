@@ -286,6 +286,8 @@ commands.yes_steve_model.export.success=§6§l[§aYSM§6§l] §e已保存为 §r
 commands.yes_steve_model.export.not_exist=§6§l[§aYSM§6§l] §r'%s' 不存在
 key.yes_steve_model.player_model.desc=打开玩家模型界面
 key.yes_steve_model.animation_roulette.desc=打开轮盘动画
+# 轮盘子菜单的深度上限(upstream 自己的 key;它的 AnimationRouletteScreen 把路径限制在 5 层).
+gui.yes_steve_model.roulette.too_long=轮盘页面菜单过长!
 key.yes_steve_model.extra_animation.none=无
 key.yes_steve_model.extra_animation.0.desc=播放额外动画 0
 key.yes_steve_model.extra_animation.1.desc=播放额外动画 1

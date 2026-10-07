@@ -323,6 +323,18 @@ public final class ArrowProjectileRenderer {
             : null;
         setMolangVariable("ysm.shoot_item_id", MolangStringPool.intern(ProjectileShootItemIds.toModernId(shootItemId)));
 
+        // H: the shooter's model id is the same datawatcher value this arrow is drawn with, and MixinEntityArrow only
+        // writes it for a player-fired arrow (it checks `shooter instanceof EntityPlayer` at construction), so a
+        // non-empty value is exactly "this projectile has a player owner". Upstream's `projectile_owner` is a context
+        // read through `->` (client/animation/molang/YSMBinding.java:193); the legacy mclib parser has no `->`
+        // operator, so the port publishes the flat question it can answer from the wire instead. The owner's entity id
+        // is NOT available: 1.7.10 never syncs `EntityArrow.shootingEntity` to the client, and only the model id and
+        // the firing item travel in the two datawatcher slots MixinEntityArrow added.
+        String ownerModelId = arrow instanceof IProjectileModelArrow ownerArrow
+            ? ownerArrow.ysmu$getProjectileModelId()
+            : null;
+        setMolangVariable("ysm.projectile_owner", ownerModelId != null && !ownerModelId.isEmpty() ? 1.0 : 0.0);
+
         if (arrow.isDead) {
             GROUND_TRACKER.forget(arrow.getEntityId());
             ProjectileTimelineRuntime.forget(arrow.getEntityId(), projectileGeoId);

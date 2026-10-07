@@ -249,7 +249,19 @@ public final class AnimationManager {
                 event.getController()
                     .markNeedsReload();
             }
-            return playAnimation(event, eep.getAnimation());
+            // The name comes from the EEP, which the *server* writes and broadcasts (`SetPlayAnimation`, whose handler
+            // can only check a name where its own GeckoLibCache has an animation table - never on a dedicated server,
+            // the asymmetry `YsmCommand.processPlay` documents - and the `/ysm play` subcommand), so on this side it can
+            // name a clip this model does not declare: the player switched models while the animation was playing.
+            // Handing such a name over drives AnimationController#setAnimation into its "Could not load animation:
+            // <name>. Is it missing?" branch once per frame and leaves the controller without a fallback - the same
+            // defect the class's own playIfPresent exists for (see its javadoc), which is why the hand-over goes
+            // through it: valid names behave exactly as before (no loop type given, so the file's own loop setting is
+            // kept), a missing one answers STOP instead of spamming the log. STOP is not a new state-machine input
+            // here - this method already answers STOP on the next line whenever the EEP is not playing, and the engine
+            // turns STOP into AnimationState.Stopped and returns before touching bones
+            // (software/bernie/geckolib3/core/controller/AnimationController.java:722-737).
+            return playIfPresent(event, eep.getAnimation());
         }
         return PlayState.STOP;
     }

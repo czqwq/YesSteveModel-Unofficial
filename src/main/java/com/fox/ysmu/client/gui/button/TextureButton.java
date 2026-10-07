@@ -105,7 +105,7 @@ public class TextureButton extends GuiButton {
     /**
      * 行 43: 到点就把这张贴图预览重画进它的离屏 FBO,然后把缓存贴图 blit 到按钮的模型区域。
      *
-     * <p>结构与 {@code ModelButton#bakePreviewIfDue} 相同;两处与参考不同,理由都在那里:</p>
+     * <p>结构与 {@code ModelButton#bakePreviewIfDue} 相同;三处与参考不同,理由都在那里:</p>
      * <ul>
      *   <li>参考的 TextureButton <b>不</b>受 {@code GUI_ENHANCEMENTS} 影响(它的 {@code :75} 直接读
      *       {@code Config.GUI_MODEL_PREVIEW_REFRESH}),这里照做:该开关的说明是"模型选择 GUI 增强",
@@ -113,6 +113,10 @@ public class TextureButton extends GuiButton {
      *   <li>参考的 TextureButton 用 6 参数重载,根本不驱动预览动画通道,所以它没有"悬停/选中变化要重烘焙"
      *       这件事;本仓的贴图 tile 把 {@code hovered}/{@code selected} 当 hover/focus 通道传下去(上游纹理选择
      *       界面的行为),所以这里额外跟踪这两个状态 —— 否则静态模式下点选一张贴图不会切换 focus 动画。</li>
+     *   <li><b>不接姿态签名跳过</b>({@code RenderUtil.renderEntityInInventory} 的
+     *       {@code allowPoseSkip=false}):同一个主模型在这一页有 N 张贴图,它们共用同一个签名 key,
+     *       开了只会互相顶掉、还额外要求每张贴图都正确失效(参考 {@code util/RenderUtil.java:532-533}
+     *       明确说这一页不要开)。所以这里也不把 FBO 清除改成回调 —— 不跳过时"先清后画"是正确的。</li>
      * </ul>
      */
     private void bakePreviewIfDue(Minecraft mc, boolean selected) {
