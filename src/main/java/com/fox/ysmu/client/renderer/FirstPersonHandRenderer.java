@@ -313,7 +313,9 @@ public final class FirstPersonHandRenderer {
             prepareCustomArmState(renderType);
             try {
                 alignGeckoArmToVanillaBipedArm(rightArm);
-                renderRightArmBone(renderer, rightArm, customPlayer);
+                GeoModel armModel = GeckoLibCache.getInstance().getGeoModels().get(ModelIdUtil.getArmId(
+                    ModelIdUtil.getModelIdFromMainId(customPlayer.getMainModel())));
+                renderer.renderMaterialRoot(customPlayer, armModel, rightArm, texture, renderType);
             } finally {
                 restoreCustomArmState();
             }
@@ -574,10 +576,11 @@ public final class FirstPersonHandRenderer {
      * is {@code CustomFirstPersonArmEntity} and its {@code fpArmAnimations} store
      * ({@code model/resource/client/render/ModelRenderTargetLoader.java:251-253}).
      * <p>
-     * It is cached under the model's {@code arm} id, not under the model id the GUI preview uses, so the arm can
-     * never inherit a pose or a model the preview left on that animatable - and so the existing
-     * {@code AnimatableCacheUtil.ANIMATABLE_CACHE.invalidateAll()} calls (the model and texture screens) still clear
-     * it along with everything else.
+     * It is cached under the model's {@code arm} id, not under the model id a GUI preview uses, so the arm can never
+     * inherit a pose or a model a preview left on that animatable. Since the catalog tiles moved to their own
+     * {@code CustomGuiPlayerEntity} instances, this cache holds the arm and nothing else: no screen invalidates it any
+     * more, so the entry lives until {@code CacheBuilder}'s five-minute idle expiry and the arm's animation clock is
+     * not reset by opening or paging through the model browser.
      * <p>
      * The main model id is still set on it, because the things this arm asks of its animatable are about the model
      * (scale, layer order, roaming namespace), not about which file its animation comes from.

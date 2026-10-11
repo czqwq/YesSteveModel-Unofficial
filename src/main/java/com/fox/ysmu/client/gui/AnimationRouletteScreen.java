@@ -11,7 +11,9 @@ import javax.annotation.Nullable;
 import com.fox.ysmu.api.EntityAnimationApi;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.gui.button.FlatColorButton;
 import com.fox.ysmu.client.input.ExtraAnimationKey;
+import com.fox.ysmu.client.input.WheelAnimationLock;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
@@ -20,8 +22,10 @@ import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.audio.PositionedSoundRecord;
+import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.Tessellator;
+import net.minecraft.client.resources.I18n;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.*;
 import org.apache.commons.lang3.StringUtils;
@@ -57,10 +61,15 @@ import org.lwjgl.opengl.GL11;
  *   <li><b>Paging.</b> Upstream pages eight entries at a time ({@code MAX_ROULETTE_COUNT}, {@code pageUp/pageDown},
  *       {@code :562-571}); so does this wheel (scroll wheel, page indicator), because a sub-page may declare more than
  *       eight entries (LaPluma's {@code §5默认动作} declares 22) and the rest would be unreachable otherwise.</li>
- *   <li><b>No lock / stop / return buttons and no config column.</b> Upstream adds a movement-lock button, a stop
- *       button, a Return button and a scrolling config column ({@code :175-235}). The port has no movement lock, its
- *       stop path is the existing "move key" handler, and its settings panel is {@link ModelConfigScreen}; porting
- *       those three would mean inventing the features behind them.</li>
+ *   <li><b>The movement lock is here; the stop / Return buttons and the config column are not.</b> Upstream's
+ *       {@code init} adds a movement-lock button, a stop button, a Return button and a scrolling config column
+ *       ({@code :175-235}); the lock button is the one this port now has (see {@link #initGui}), because the lock
+ *       itself exists upstream and in the reference branch while this port had only the "moving stops the animation"
+ *       half. The other two have no feature behind them here: the port's stop path is the existing "move key" handler
+ *       plus the {@code #return} entry ({@link #activateRootSlot}), and its settings panel is {@link ModelConfigScreen},
+ *       a screen of its own. Upstream's lock button sits in the {@code else} of "is the animatable a player", whose
+ *       other branch is the maid stop button ({@code :189-194}); this wheel is always the local player's, so there is
+ *       no maid half to pair the lock with and the button is unconditional.</li>
  *   <li><b>The label.</b> Element {@code i} of the baked flat array
  *       ({@code ClientModelManager.EXTRA_ANIMATION_NAME}, written by {@code RawYsmModelAdapter.getExtraAnimationNames})
  *       is the language-resolved label of entry {@code i} - both are in declaration order - so it wins when present;
@@ -82,6 +91,8 @@ public class AnimationRouletteScreen extends GuiScreen {
     private static final int OUTER_MAX_RADIUS = 100;
     private static final int INNER_MIN_RADIUS = 20;
     private static final int INNER_MAX_RADIUS = 50;
+    /** The movement-lock button's widget id; the only button this screen owns. */
+    private static final int LOCK_BUTTON_ID = 0;
 
     private int x;
     private int y;
@@ -89,6 +100,15 @@ public class AnimationRouletteScreen extends GuiScreen {
     private int selectId = -1;
     /** Inner-ring selection: the index within the current page of the config entry under the mouse, or -1. */
     private int configId = -1;
+    /**
+     * The movement-lock button, upstream's {@code AnimationRouletteScreen.java:177-186}. Its label is refreshed from
+     * {@link WheelAnimationLock#isLocked()} on every draw, which is what upstream's anonymous
+     * {@code getMessage()} override does.
+     */
+    private FlatColorButton lockButton;
+    /** The two labels of {@link #lockButton}, resolved once in {@link #initGui} (CU-16: not per frame). */
+    private String lockOnText;
+    private String lockOffText;
     /** The model whose wheel this screen shows; see {@link #resolveNames}. */
     private ResourceLocation modelId;
     private String[] names;
@@ -122,8 +142,12 @@ public class AnimationRouletteScreen extends GuiScreen {
         this.x = width / 2;
         this.y = height / 2 - 8;
         this.buildKeyTexts();
+        // initGui runs again when the window is resized, and this screen is the only writer of its own button list.
+        this.buttonList.clear();
+        this.lockButton = null;
 
         if (mc != null && mc.thePlayer != null) {
+            this.addLockButton();
             ExtendedModelInfo eep = ExtendedModelInfo.get(mc.thePlayer);
             if (eep != null) {
                 ResourceLocation modelId = eep.getModelId();
@@ -343,6 +367,44 @@ public class AnimationRouletteScreen extends GuiScreen {
         }
     }
 
+    /**
+     * Upstream's movement-lock button ({@code tmp/YesSteveModel-dev-1.20/.../client/gui/AnimationRouletteScreen.java:
+     * 177-186}): a 40x20 widget whose label follows the lock's own state between
+     * {@code gui.yes_steve_model.roulette.lock_on} and {@code ...lock_off}, and whose click calls upstream's
+     * {@code PlayerMoveEvent.switchLock()}. Here that is {@link WheelAnimationLock#switchLock()}, because the port's
+     * move-stop handler is {@code ClientEventHandler.onKeyboardInput} rather than upstream's {@code PlayerMoveEvent}
+     * (see that class for why the state cannot live beside the handler).
+     * <p>
+     * Upstream shows the button only when the animatable's entity is a player and otherwise shows the maid stop button
+     * ({@code :187-195}). This wheel is always the local player's, so the lock is unconditional here.
+     * <p>
+     * Placement is the one thing that cannot follow upstream literally. Upstream's wheel is drawn around
+     * {@code x = width / 2 - 70} and its button sits 90px left of that centre, i.e. inside the fan's own outer hit box
+     * (50..100), so there a sector click wins over the button. This wheel is centred and its widest drawn sector
+     * reaches radius 105, so the button is placed wholly outside the fan at {@code x - 150} and
+     * {@link #mouseClicked} offers the click to the button before the rings.
+     */
+    private void addLockButton() {
+        this.lockOnText = I18n.format("gui.yes_steve_model.roulette.lock_on");
+        this.lockOffText = I18n.format("gui.yes_steve_model.roulette.lock_off");
+        this.lockButton = new FlatColorButton(LOCK_BUTTON_ID, this.x - 150, this.y - 10, 40, 20, this.lockOffText);
+        this.lockButton.displayString = WheelAnimationLock.isLocked() ? this.lockOnText : this.lockOffText;
+        this.buttonList.add(this.lockButton);
+    }
+
+    /** The lock button is this screen's only widget ({@link #LOCK_BUTTON_ID}). */
+    @Override
+    protected void actionPerformed(GuiButton button) {
+        if (button == this.lockButton) {
+            WheelAnimationLock.switchLock();
+        }
+    }
+
+    /**
+     * The wheel's own drawing is not a widget, so the lock button has to be drawn on top of it by hand: this screen
+     * never called {@code super.drawScreen} before, and without it the button would exist, be clickable and be
+     * invisible.
+     */
     @Override
     public void drawScreen(int pMouseX, int pMouseY, float pPartialTick) {
         // The labels arrive with the model's publish, which can happen while this screen is open; asking again here
@@ -351,6 +413,12 @@ public class AnimationRouletteScreen extends GuiScreen {
         drawRoulette(pMouseX, pMouseY);
         drawRouletteText();
         drawPageText();
+        if (this.lockButton != null) {
+            // Upstream re-reads the state in the button's own getMessage() on every draw (:177-186), so a toggle from
+            // the key binding shows up without the button being rebuilt.
+            this.lockButton.displayString = WheelAnimationLock.isLocked() ? this.lockOnText : this.lockOffText;
+        }
+        super.drawScreen(pMouseX, pMouseY, pPartialTick);
     }
 
     @Override
@@ -360,6 +428,13 @@ public class AnimationRouletteScreen extends GuiScreen {
         // (AnimationRouletteScreen.java:686-694), and LaPluma ships neither - only a hint entry.
         if (pButton == 1) {
             this.goBack();
+            return;
+        }
+        // The lock button gets the click first: it is drawn outside the fan (see addLockButton), but a click that
+        // lands on a widget must never be turned into "play this sector" by the ring hit test below. Delegating to
+        // GuiScreen keeps its own dispatch (click sound, ActionPerformedEvent, actionPerformed) intact.
+        if (this.lockButton != null && this.lockButton.mousePressed(this.mc, pMouseX, pMouseY)) {
+            super.mouseClicked(pMouseX, pMouseY, pButton);
             return;
         }
         // The inner ring wins when the mouse is over it: an entry can both be playable and open a panel (LaPluma's

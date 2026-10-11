@@ -16,6 +16,47 @@ public class Config {
     public static boolean DISABLE_SELF_MODEL = false;
     public static boolean DISABLE_OTHER_MODEL = false;
     public static boolean DISABLE_SELF_HANDS = false;
+    /**
+     * Stops this client from drawing a pack's projectile sub-entity, so an arrow keeps its vanilla renderer.
+     *
+     * <p>Upstream's switch is {@code ClientConfig.DISABLE_PROJECTILE_MODEL}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../config/ClientConfig.java:12,48-49}, config key {@code DisableProjectileModel}),
+     * and its <b>only</b> consumer is the render-dispatcher wrap that decides whether to replace the vanilla renderer:
+     * {@code mixin/client/EntityRenderDispatcherMixin.java:37} - {@code entity instanceof Projectile &&
+     * !DISABLE_PROJECTILE_MODEL.get()} - which otherwise hands the entity to {@code ProjectileRendererReplace}. This
+     * port has no dispatcher mixin for it: its arrow replacement is entered directly from {@code MixinRenderArrow}, so
+     * the equivalent bypass point is that renderer's own entry, {@link
+     * com.fox.ysmu.client.renderer.ArrowProjectileRenderer#render}. Upstream's second consumer, the animation ticker
+     * ({@code client/animation/AnimationParallelTicker.java:60-63}), has no separate counterpart here because this
+     * port samples a projectile's keyframes inside that same render entry.</p>
+     */
+    public static boolean DISABLE_PROJECTILE_MODEL = false;
+    /**
+     * Stops this client from drawing a pack's vehicle sub-entity, so a boat/minecart/horse keeps its vanilla renderer.
+     *
+     * <p>Upstream's switch is {@code ClientConfig.DISABLE_VEHICLE_MODEL}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../config/ClientConfig.java:13,51-52}, config key {@code DisableVehicleModel}),
+     * consumed at the same dispatcher wrap ({@code mixin/client/EntityRenderDispatcherMixin.java:46}) and by the same
+     * ticker ({@code client/animation/AnimationParallelTicker.java:64-66}). This port's vehicle replacement is entered
+     * from {@code MixinRenderManager}, so its bypass point is {@link
+     * com.fox.ysmu.client.renderer.VehicleRenderer#render}.</p>
+     */
+    public static boolean DISABLE_VEHICLE_MODEL = false;
+    /**
+     * Whether {@code /ysm auth}'s per-player model grants are enforced. <b>Off by default</b>: with it off every
+     * player may select every model, exactly as before this feature existed.
+     *
+     * <p>Upstream has no such switch on the selection path - its grant check is unconditional
+     * ({@code model/session/server/ServerModelSession.java:317-322}) because only the {@code auth} catalog root is
+     * restricted ({@code model/catalog/source/CatalogRootKind.java:5-7}), so a fresh install restricts nothing. This
+     * port has no catalog root kinds (all models come from {@code config/ysmu/custom} and {@code config/ysmu/builtin},
+     * {@code model/ServerModelManager.java:50-63}), so the restricted set has to be named somewhere - and a default-off
+     * server switch is both upstream's own posture for its authorization config
+     * ({@code config/ServerConfig.java:13,56-57} {@code RestrictedAuth = false}) and the task's required guard against
+     * locking every player out of every model after an upgrade. The decision, the rejected alternative and the user
+     * commands live in {@link com.fox.ysmu.api.ModelAuthorization}.</p>
+     */
+    public static boolean ENABLE_MODEL_AUTHORIZATION = false;
     public static String DEFAULT_MODEL_ID = "default";
     public static String DEFAULT_MODEL_TEXTURE = "default.png";
 
@@ -360,6 +401,13 @@ public class Config {
         DISABLE_SELF_MODEL = syncBoolean("DisableSelfModel", Configuration.CATEGORY_GENERAL, DISABLE_SELF_MODEL, "Prevents rendering of self player's model", load);
         DISABLE_OTHER_MODEL = syncBoolean("DisableOtherModel", Configuration.CATEGORY_GENERAL, DISABLE_OTHER_MODEL, "Prevents rendering of other player's model", load);
         DISABLE_SELF_HANDS = syncBoolean("DisableSelfHands", Configuration.CATEGORY_GENERAL, DISABLE_SELF_HANDS, "Prevents rendering of self player's hand", load);
+        // Upstream's two sub-entity switches, same names and same default (ClientConfig.java:48-52); see the field
+        // declarations for the bypass points they are read at.
+        DISABLE_PROJECTILE_MODEL = syncBoolean("DisableProjectileModel", Configuration.CATEGORY_GENERAL, DISABLE_PROJECTILE_MODEL, "Prevents rendering of projectile model", load);
+        DISABLE_VEHICLE_MODEL = syncBoolean("DisableVehicleModel", Configuration.CATEGORY_GENERAL, DISABLE_VEHICLE_MODEL, "Prevents rendering of vehicle model", load);
+        // /ysm auth: off by default, so an upgraded server keeps letting every player select every model. See the
+        // field declaration and api/ModelAuthorization.
+        ENABLE_MODEL_AUTHORIZATION = syncBoolean("EnableModelAuthorization", Configuration.CATEGORY_GENERAL, ENABLE_MODEL_AUTHORIZATION, "Enforce /ysm auth model grants: when on, a player may only select the models an operator granted them (or the server's default model). Off by default, so nothing changes until an operator opts in.", load);
         DEFAULT_MODEL_ID = syncString("DefaultModelId", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_ID, "The default model ID when a player first enters the game", load);
         DEFAULT_MODEL_TEXTURE = syncString("DefaultModelTexture", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_TEXTURE, "The default model texture when a player first enters the game", load);
 

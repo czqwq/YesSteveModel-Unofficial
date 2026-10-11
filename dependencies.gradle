@@ -42,6 +42,9 @@ dependencies {
     // fastutil only reaches the compile classpath transitively through the GTNHLib dev jar,
     // so the test runtime classpath needs it declared explicitly (mod code uses it at runtime).
     testImplementation("it.unimi.dsi:fastutil:8.5.18")
+    // Authored concurrent blending now links Quaternionfc even in headless engine tests.
+    // Match compileClasspath's GTNHLib-provided JOML; production keeps the existing GTNHLib runtime owner.
+    testRuntimeOnly("org.joml:joml:1.10.8")
     // LWJGL 2 (the one `runClient` uses; `runClient25` uses LWJGL 3) is needed by the test runtime classpath for one
     // reason: `net.minecraft.client.Minecraft`'s class initialisation touches `org.lwjgl.DisplayMode` and catches
     // `org.lwjgl.LWJGLException` (`Minecraft.java:185`, `:476`), so *linking* the class at all needs the LWJGL 2

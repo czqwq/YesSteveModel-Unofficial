@@ -33,6 +33,7 @@ import net.minecraftforge.common.MinecraftForge;
 
 import org.lwjgl.opengl.GL11;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.EntityQueryBindings;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
@@ -210,6 +211,15 @@ public final class VehicleRenderer {
     public static boolean render(Entity entity, double x, double y, double z, float yaw, float partialTicks,
         Render vanillaRenderer) {
         if (entity == null) {
+            return false;
+        }
+        // Upstream's own bypass: EntityRenderDispatcherMixin.java:46 wraps the replacement in
+        // `!ClientConfig.DISABLE_VEHICLE_MODEL.get()`, so with the switch on the entity is left to its vanilla
+        // renderer. This port's replacement is entered from MixinRenderManager, so that entry is where the same
+        // decision belongs; a predicate there would also have to cover the arrow path, which has its own switch.
+        // Upstream's other read, the animation ticker (AnimationParallelTicker.java:64-66), has no counterpart here -
+        // this renderer drives no animation yet (see the class javadoc).
+        if (Config.DISABLE_VEHICLE_MODEL) {
             return false;
         }
         // Upstream's capability is attached to everything that is neither a player nor a projectile

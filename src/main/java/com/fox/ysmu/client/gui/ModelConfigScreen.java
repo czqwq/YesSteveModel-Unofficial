@@ -18,8 +18,15 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.client.gui.button.ConfigCheckBox;
 import com.fox.ysmu.client.gui.button.FlatColorButton;
 import com.fox.ysmu.client.gui.button.FlatSlider;
-import com.fox.ysmu.client.roaming.ClientRoamingKeys;
-import com.fox.ysmu.client.roaming.ClientRoamingStore;
+import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
+import com.fox.ysmu.client.model.CustomPlayerModel;
+import com.fox.ysmu.client.roaming.ModelFormExecution;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.C2SSubmitRouletteExpression;
+import com.fox.ysmu.util.RenderUtil;
+import software.bernie.geckolib3.resource.GeckoLibCache;
 import com.fox.ysmu.client.roaming.RoamingProgram;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.ysmu;
@@ -32,11 +39,10 @@ import cpw.mods.fml.relauncher.SideOnly;
  * form of the selected button.
  * <p>
  * A form's type decides the widget ({@code range} a slider, {@code checkbox} a toggle, {@code radio} a row of labelled
- * buttons), and its {@code value} is the program that names the {@code v.roaming.*} <em>roaming variable</em> the
- * setting lives in. Upstream hosts the same panel inside {@code AnimationRouletteScreen} and evaluates the program as
- * MoLang; here the named variable is written through {@link ClientRoamingStore}, which is what makes it visible to the
- * animation immediately, persistent across a relog, and visible to other players - see
- * {@code .agent/phase15-roaming-variables.md}, Milestone 5.
+ * buttons), and its {@code value} is a complete MoLang read program. Upstream's AnimationRouletteScreen.java:237-338
+ * evaluates those reads and complete radio actions in an animatable context. This screen owns an independent real
+ * GUI player/model context so it can configure a model the player is not wearing. Roaming writes still use the
+ * existing server-authoritative roaming channel; non-roaming expressions use the sender-authorized expression path.
  * <p>
  * <b>Why a list.</b> A pack may declare many buttons - LaPluma 2.5.3 declares sixteen with 122 forms between them - and
  * upstream opens whichever one the wheel's {@code "#<buttonId>"} entry names, as a scrolling column of the roulette
@@ -76,7 +82,9 @@ public class ModelConfigScreen extends GuiScreen {
 
     private final GuiScreen parent;
     private final ResourceLocation modelId;
-    private final int modelKey;
+    private CustomGuiPlayerEntity formPreview;
+    private int bindingGeneration;
+    private final List<ReadBinding> readBindings = new ArrayList<>();
     /** The button id the caller asked for, honoured on the first {@link #initGui}; see the constructor. */
     private final String initialButtonId;
     /** Every declared button that carries forms, in declaration order; refreshed by {@link #initGui}. */
@@ -97,8 +105,8 @@ public class ModelConfigScreen extends GuiScreen {
     private final Map<Integer, String> sliderVariables = new HashMap<>();
     /** Id -> the variable a checkbox writes. */
     private final Map<Integer, String> checkboxVariables = new HashMap<>();
-    /** Id -> the variable and value a radio button writes. */
-    private final Map<Integer, RadioTarget> radioTargets = new HashMap<>();
+    /** Id -> the complete action program a radio button executes. */
+    private final Map<Integer, String> radioTargets = new HashMap<>();
     /** Text drawn by {@link #drawScreen} instead of by a widget: form titles, descriptions and the unusable note. */
     private final List<Caption> captions = new ArrayList<>();
 
@@ -120,12 +128,16 @@ public class ModelConfigScreen extends GuiScreen {
     public ModelConfigScreen(GuiScreen parent, ResourceLocation modelId, @Nullable String initialButtonId) {
         this.parent = parent;
         this.modelId = modelId;
-        this.modelKey = ClientRoamingKeys.keyFor(modelId);
+        this.formPreview = new CustomGuiPlayerEntity();
         this.initialButtonId = initialButtonId;
     }
 
     @Override
     public void initGui() {
+        this.bindingGeneration++;
+        this.readBindings.clear();
+        ModelFormExecution.cancelInvalid();
+        if (this.formPreview == null) this.formPreview = new CustomGuiPlayerEntity();
         this.buttonList.clear();
         this.sliderVariables.clear();
         this.checkboxVariables.clear();
@@ -133,7 +145,7 @@ public class ModelConfigScreen extends GuiScreen {
         this.captions.clear();
         this.nextWidgetId = FORM_WIDGET_FIRST_ID;
 
-        this.panelX = (this.width - 420) / 2;
+        this.panelX = (this.width - 520) / 2;
         this.panelY = (this.height - 235) / 2;
 
         // Re-read the declarations: a model that arrives again (a re-sync, or a pack added while the screen is open)
@@ -304,9 +316,6 @@ public class ModelConfigScreen extends GuiScreen {
     /** The height of a form's widget/caption block, without its description line. */
     private int blockHeight(RawYsmModel.ConfigForm form) {
         String type = form.type == null ? "" : form.type.toLowerCase(Locale.ROOT);
-        if (RoamingProgram.variableName(form.defaultValue) == null) {
-            return 20;
-        }
         if ("range".equals(type) || "checkbox".equals(type)) {
             return ROW_HEIGHT;
         }
@@ -326,15 +335,15 @@ public class ModelConfigScreen extends GuiScreen {
      * Places one form's widgets and captions at {@code cursor} and returns the cursor for the next form.
      * <p>
      * The form-to-widget mapping is the one this screen always had: a {@code range} becomes a {@link FlatSlider}, a
-     * {@code checkbox} a {@link ConfigCheckBox}, a {@code radio} a row of labelled buttons, and a form whose program
-     * names no variable is reported instead of drawn as a widget that would silently do nothing.
+     * {@code checkbox} a {@link ConfigCheckBox}, a {@code radio} a row of labelled buttons. Complete read source is
+     * bound to each widget; malformed programs are reported by the parser rather than restricted to variable names.
      */
     private int addForm(RawYsmModel.ConfigForm form, int cursor) {
-        String variable = RoamingProgram.variableName(form.defaultValue);
+        String variable = form.defaultValue;
         String title = form.title == null || form.title.isEmpty() ? form.defaultValue : form.title;
         String type = form.type == null ? "" : form.type.toLowerCase(Locale.ROOT);
         int formsX = panelX + FORMS_X_OFFSET;
-        if (variable == null) {
+        if (variable == null || variable.trim().isEmpty()) {
             this.captions.add(
                 new Caption(
                     title + " - " + I18n.format("gui.yes_steve_model.model.config.unsupported"),
@@ -350,41 +359,40 @@ public class ModelConfigScreen extends GuiScreen {
             int id = this.nextWidgetId++;
             this.sliderVariables.put(id, variable);
             final String target = variable;
-            this.buttonList.add(
-                new FlatSlider(id, formsX, cursor + 10, FORMS_WIDTH, title, form.min, form.max, form.step,
-                    (float) currentValue(variable), (slider, value) -> write(target, value)));
+            FlatSlider slider = new FlatSlider(id, formsX, cursor + 10, FORMS_WIDTH, title, form.min, form.max,
+                form.step, 0f, (widget, value) -> executeAction(target + "=" + Float.toString(value)));
+            this.buttonList.add(slider);
+            this.readBindings.add(new ReadBinding(variable, value -> {
+                if (Double.isFinite(value) && !slider.isDragging()) slider.setValue(value.floatValue());
+            }));
         } else if ("checkbox".equals(type)) {
             int id = this.nextWidgetId++;
             this.checkboxVariables.put(id, variable);
-            this.buttonList.add(
-                ConfigCheckBox.forLabel(id, formsX, cursor + 10, FORMS_WIDTH, title, currentValue(variable) >= 0.5d));
+            ConfigCheckBox checkbox = ConfigCheckBox.forLabel(id, formsX, cursor + 10, FORMS_WIDTH, title, false);
+            this.buttonList.add(checkbox);
+            this.readBindings.add(new ReadBinding(variable, value -> {
+                if (Double.isFinite(value)) checkbox.setChecked(value > 0d);
+            }));
         } else if ("radio".equals(type)) {
             this.captions.add(new Caption(title, formsX, cursor, 0xFFF3EFE0));
             int perLine = radioPerLine();
             int index = 0;
+            List<ConfigCheckBox> radios = new ArrayList<>();
             for (Map.Entry<String, String> label : form.labels.entrySet()) {
-                double assigned = RoamingProgram.assignedValue(label.getValue());
-                if (!Double.isNaN(assigned)) {
-                    String labelVariable = RoamingProgram.variableName(label.getValue());
-                    // A label may assign a different variable than the form reads; fall back to the form's own.
-                    String target = labelVariable == null ? variable : labelVariable;
-                    int id = this.nextWidgetId++;
-                    this.radioTargets.put(id, new RadioTarget(target, assigned));
-                    // Upstream keeps each label in its declared cell (:321-349), so a label whose expression cannot
-                    // be read leaves a gap instead of shifting the rest of the row.
-                    int labelX = formsX + RADIO_STEP * (index % perLine);
-                    int labelY = cursor + 12 + 20 * (index / perLine);
-                    this.buttonList.add(
-                        new FlatColorButton(
-                            id,
-                            labelX,
-                            labelY,
-                            52,
-                            18,
-                            this.fontRendererObj.trimStringToWidth(label.getKey(), 50)));
-                }
+                int id = this.nextWidgetId++;
+                this.radioTargets.put(id, label.getValue());
+                int labelX = formsX + RADIO_STEP * (index % perLine);
+                int labelY = cursor + 12 + 20 * (index / perLine);
+                ConfigCheckBox radio = ConfigCheckBox.forLabel(id, labelX, labelY, 52,
+                    this.fontRendererObj.trimStringToWidth(label.getKey(), 24), false);
+                radios.add(radio);
+                this.buttonList.add(radio);
                 index++;
             }
+            this.readBindings.add(new ReadBinding(variable, value -> {
+                int selected = radioIndex(value, radios.size());
+                for (int i = 0; i < radios.size(); i++) radios.get(i).setChecked(i == selected);
+            }));
         } else {
             this.captions.add(
                 new Caption(
@@ -448,12 +456,12 @@ public class ModelConfigScreen extends GuiScreen {
         if (checkboxVariable != null && button instanceof ConfigCheckBox) {
             ConfigCheckBox box = (ConfigCheckBox) button;
             box.doPress();
-            write(checkboxVariable, box.isChecked() ? 1d : 0d);
+            executeAction(checkboxVariable + "=" + (box.isChecked() ? "1" : "0"));
             return;
         }
-        RadioTarget radio = this.radioTargets.get(button.id);
+        String radio = this.radioTargets.get(button.id);
         if (radio != null) {
-            write(radio.variable, radio.value);
+            executeAction(radio);
         }
     }
 
@@ -486,6 +494,8 @@ public class ModelConfigScreen extends GuiScreen {
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
         this.drawDefaultBackground();
+        this.refreshConfigValues();
+        renderFormPreview();
         RawYsmModel.ExtraAnimationButton panel = selected();
         String title = I18n.format("gui.yes_steve_model.model.config.title");
         if (panel != null) {
@@ -553,28 +563,63 @@ public class ModelConfigScreen extends GuiScreen {
         this.drawGradientRect(x, y + height - 1, x + width, y + height, color, color);
     }
 
-    /** The stored value of a variable, or zero when nothing has been stored for it yet. */
-    private double currentValue(String variable) {
-        EntityPlayer local = this.mc.thePlayer;
-        if (local == null) {
-            return 0d;
-        }
-        Double stored = ClientRoamingStore.valuesFor(local.getUniqueID(), modelKey)
-            .get(variable);
-        return stored == null ? 0d : stored;
+    private void renderFormPreview() {
+        if (this.mc.thePlayer == null) return;
+        ResourceLocation texture = CustomPlayerModel.resolveTexture(this.modelId,
+            ClientModelManager.MODELS.get(this.modelId), null,
+            ClientModelManager.DECLARED_DEFAULT_TEXTURES.get(this.modelId));
+        RenderUtil.renderFormPreview(panelX + 470, panelY + 190, 45, this.mc.thePlayer,
+            this.modelId, texture, this.formPreview);
     }
 
-    /**
-     * Stores a value for the local player. The client tick reports it to the server, which echoes the authoritative
-     * map back, so what the panel writes is a request that the server then confirms.
-     */
-    private void write(String variable, double value) {
+    private void executeAction(String source) {
         EntityPlayer local = this.mc.thePlayer;
-        if (local == null) {
-            ysmu.LOG.warn("Ignoring YSM model setting '{}' outside a world", variable);
-            return;
+        if (local == null) return;
+        try {
+            RoamingProgram.Compiled compiled = RoamingProgram.compile(GeckoLibCache.getInstance().parser, source);
+            ModelFormExecution.submit(local, this.modelId, source, null, () -> true);
+            // Drive the independent context now as well: closing the screen before another draw must not strand an
+            // action for a model the player is not wearing. Read callbacks remain generation/screen guarded.
+            renderFormPreview();
+            refreshConfigValues();
+            // This is the expression path, not ysm.sync. Lead registers its new packet IDs before integration.
+            if (!compiled.hasOnlyRoamingAssignments() && !Config.LOW_BANDWIDTH_USAGE
+                && this.mc.getNetHandler() != null) {
+                NetworkHandler.CHANNEL.sendToServer(new C2SSubmitRouletteExpression(this.modelId, source));
+            }
+        } catch (Exception failure) {
+            ysmu.LOG.warn("Failed to parse model form action '{}': {}", source, failure.getMessage());
         }
-        ClientRoamingStore.setLocal(local.getUniqueID(), modelKey, variable, value);
+    }
+
+    private void refreshConfigValues() {
+        if (this.mc.currentScreen != this || this.mc.thePlayer == null) return;
+        final int generation = this.bindingGeneration;
+        for (ReadBinding binding : this.readBindings) {
+            if (binding.pending) continue;
+            binding.pending = true;
+            boolean queued = ModelFormExecution.submit(this.mc.thePlayer, this.modelId, binding.source, value -> {
+                binding.pending = false;
+                if (this.mc.currentScreen == this && this.bindingGeneration == generation) binding.apply.accept(value);
+            }, () -> this.mc.currentScreen == this && this.bindingGeneration == generation);
+            if (!queued) binding.pending = false;
+        }
+    }
+
+    static int radioIndex(double value, int labelCount) {
+        if (!Double.isFinite(value)) return -1;
+        long index = Math.round(value);
+        return index >= 0 && index < labelCount ? (int) index : -1;
+    }
+
+    @Override
+    public void onGuiClosed() {
+        this.bindingGeneration++;
+        this.readBindings.clear();
+        ModelFormExecution.cancelInvalid();
+        if (this.formPreview != null) this.formPreview.close();
+        this.formPreview = null;
+        super.onGuiClosed();
     }
 
     /** One line of text the widgets do not draw themselves. */
@@ -593,15 +638,14 @@ public class ModelConfigScreen extends GuiScreen {
         }
     }
 
-    /** What a radio button writes when pressed. */
-    private static final class RadioTarget {
+    private static final class ReadBinding {
+        final String source;
+        final java.util.function.Consumer<Double> apply;
+        boolean pending;
 
-        private final String variable;
-        private final double value;
-
-        private RadioTarget(String variable, double value) {
-            this.variable = variable;
-            this.value = value;
+        ReadBinding(String source, java.util.function.Consumer<Double> apply) {
+            this.source = source;
+            this.apply = apply;
         }
     }
 }

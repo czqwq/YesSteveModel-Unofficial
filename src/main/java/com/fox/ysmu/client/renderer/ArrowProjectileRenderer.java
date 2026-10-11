@@ -138,6 +138,16 @@ public final class ArrowProjectileRenderer {
         if (modelId == null || entity == null) {
             return false;
         }
+        // Upstream's own bypass: EntityRenderDispatcherMixin.java:37 wraps the vanilla renderer call in
+        // `entity instanceof Projectile && !ClientConfig.DISABLE_PROJECTILE_MODEL.get()`, i.e. with the switch on the
+        // projectile replacement never runs and the vanilla renderer draws. Its second read, the animation ticker
+        // (client/animation/AnimationParallelTicker.java:60-63), has no counterpart here because this port samples the
+        // projectile's keyframes inside this same entry (applyProjectileAnimations), so returning before them is the
+        // whole of the upstream behaviour. Upstream's switch is consulted at the dispatcher, which for this port is
+        // this entry - a broad predicate at MixinRenderArrow would have to know about every other replacement as well.
+        if (Config.DISABLE_PROJECTILE_MODEL) {
+            return false;
+        }
         if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_RENDER) {
             ysmu.LOG.info("[YSMU-ARROW] render start: modelId={}, entityId={}", modelId, entity.getEntityId());
         }

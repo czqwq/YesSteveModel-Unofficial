@@ -12,6 +12,10 @@ gui.yes_steve_model.model.license=§2§l▌ §3License: %s
 gui.yes_steve_model.model.texture=Select Texture
 gui.yes_steve_model.model.info=Open Info GUI
 gui.yes_steve_model.model.info.contact.click_hint=Click to copy the contact
+# The two link-type presets of the model information screen; upstream's own keys and strings (en_us.json:21-22,
+# its ModelInfoScreen LINK_TYPE_PRESET at :37-40). Any other declared type is shown as written.
+gui.yes_steve_model.url.home=Home Page
+gui.yes_steve_model.url.donate=Donate
 gui.yes_steve_model.model.star=Star Current Model
 gui.yes_steve_model.model.return=Return
 gui.yes_steve_model.model.config.title=Model Settings
@@ -25,6 +29,9 @@ gui.yes_steve_model.config.disable_self_model=Prevents rendering of self player'
 gui.yes_steve_model.config.disable_other_model=Prevents rendering of other player's model
 gui.yes_steve_model.config.print_animation_roulette_msg=Whether to print animation roulette play message
 gui.yes_steve_model.config.disable_self_hands=Prevents rendering of self player's hands
+# Upstream's own strings (its en_us.json), for the two sub-entity switches (ClientConfig.java:48-52).
+gui.yes_steve_model.config.disable_projectile_model=Prevents rendering of projectile model
+gui.yes_steve_model.config.disable_vehicle_model=Prevents rendering of vehicle model
 gui.yes_steve_model.config.disable_player_render=Disable extra player render
 gui.yes_steve_model.config.swap_config_sides=Swap config panel and preview sides
 gui.yes_steve_model.config.gui_enhancements=Enable GUI enhancements (foreground/background textures, GUI animations)
@@ -288,6 +295,10 @@ key.yes_steve_model.player_model.desc=Open Player Model GUI
 key.yes_steve_model.animation_roulette.desc=Open Animation Roulette
 # Sub-menu depth limit of the roulette (upstream's own key, its AnimationRouletteScreen caps the path at 5 levels).
 gui.yes_steve_model.roulette.too_long=The roulette's path is too long
+# The roulette's movement lock: the key, and the button's two labels (upstream's own keys/strings, en_us.json:16-17,406).
+key.yes_steve_model.lock_roulette.desc=Lock Roulette
+gui.yes_steve_model.roulette.lock_on=Lock: ON
+gui.yes_steve_model.roulette.lock_off=Lock: OFF
 key.yes_steve_model.extra_animation.none=None
 key.yes_steve_model.extra_animation.0.desc=Play Extra Animation 0
 key.yes_steve_model.extra_animation.1.desc=Play Extra Animation 1
@@ -522,3 +533,21 @@ gui.yes_steve_model.hud_cache.off=HUD FBO Cache: OFF [C]
 # SHOW_LOADING_PROGRESS overlay (row 45). `sync_model` is followed by the model name when the port knows one.
 gui.yes_steve_model.sync_model=Loading: 
 gui.yes_steve_model.sync_waiting=Waiting for server...
+
+# /ysm auth (model authorization; api/ModelAuthorization, Config.ENABLE_MODEL_AUTHORIZATION). The feedback lines are a
+# port addition - upstream's AuthCommand answers nothing on success - and the two message.* keys are what a player
+# sees when the server refuses or resets their selection. Every one of these is drawn by ChatComponentTranslation, so
+# each may only use `%s`: 1.7.10 throws for any other conversion (ChatComponentTranslation.java:121-124), lazily, while
+# the chat is being rendered, which shows up as "the line never appears" rather than as an error. Argument order is
+# (model, count) for add/remove and (count) for all/clear, matching the send sites in command/YsmCommand.
+commands.yes_steve_model.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
+commands.yes_steve_model.auth.add.done=Granted model %s to %s player(s).
+commands.yes_steve_model.auth.remove.done=Revoked model %s from %s player(s).
+commands.yes_steve_model.auth.all.done=Granted every registered model to %s player(s).
+commands.yes_steve_model.auth.clear.done=Cleared every model grant of %s player(s).
+commands.yes_steve_model.auth.unknown_model=Unknown or ambiguous model path: %s
+message.yes_steve_model.auth.denied=§6§l[§aYSM§6§l]§r §cYou are not authorized to use model §e%s§r§c.
+message.yes_steve_model.auth.reset=§6§l[§aYSM§6§l]§r §cYour model §e%s§r§c is no longer authorized; reset to the server's default model.
+commands.yes_steve_model.help.line.auth=  /ysm auth <player|@a|@p> <add|remove|all|clear> [model] - manage model authorizations (OP)
+commands.yes_steve_model.help.detail.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
+commands.yes_steve_model.help.detail.auth.desc=  Manage which models a player may select, once EnableModelAuthorization is on. add/remove grant or revoke one model, all grants every registered model, clear revokes all of them; a player whose current model is revoked is reset to the server's default model. The model argument is a model name as the config directory spells it (wine_fox/01_taisho_maid) or a ysmu:<id>. Examples: /ysm auth Notch add default, /ysm auth @a clear

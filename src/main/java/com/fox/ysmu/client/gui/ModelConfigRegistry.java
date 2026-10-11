@@ -59,6 +59,19 @@ public final class ModelConfigRegistry {
     /** Model id -> the model's root {@code extra_animation} entries (name/marker -> label/button reference). */
     private static final Map<ResourceLocation, Map<String, String>> WHEEL = new ConcurrentHashMap<>();
 
+    /**
+     * Model id -> the model's {@code metadata.links} (link type -> URL), in declaration order.
+     * <p>
+     * It is filed here rather than in {@code ClientModelMetadataRegistry} because this registry is what
+     * {@code ClientModelManager.registerAll} already feeds from a synced payload
+     * ({@code ClientModelManager.java:560-563}) and the information screen is the only consumer, so the links need no
+     * second client-side table and no second registration path. Both sync channels reach that funnel: the OpenYSM
+     * payload carries {@code metadata.links} ({@code YSMBinarySerializer:486-490} /
+     * {@code YSMBinaryDeserializer:605-608}) and bridges it through {@code RawYsmModelAdapter.toLegacyModelData}, the
+     * legacy container carries it in its version-6 section ({@code EncryptTools.LINKS_MODEL_VERSION}).
+     */
+    private static final Map<ResourceLocation, Map<String, String>> LINKS = new ConcurrentHashMap<>();
+
     private ModelConfigRegistry() {}
 
     /**
@@ -201,11 +214,58 @@ public final class ModelConfigRegistry {
         return panels.isEmpty() ? EMPTY_BUTTON : panels.get(0);
     }
 
+    /**
+     * Records a model's metadata links, in declaration order. Self-healing like the tables above: a payload that
+     * declares none removes the previous bytes' links rather than leaving them on the id.
+     *
+     * <p>An entry missing either half is dropped rather than indexed: one button is drawn per entry, its label is the
+     * type and its target is the URL, and upstream's own click handler ignores a blank URL anyway
+     * ({@code tmp/YesSteveModel-dev-1.20/.../client/gui/ModelInfoScreen.java:130-139} checks
+     * {@code StringUtils.isNoneBlank} before opening). Drawing a button that can never open anything - or handing
+     * 1.7.10's tooltip renderer a null string - would be the worse half of that behaviour to copy.</p>
+     *
+     * @param links link type to URL; {@code null} and an empty map both mean "this model declares none"
+     */
+    public static void acceptLinks(ResourceLocation modelId, @Nullable Map<String, String> links) {
+        if (modelId == null) {
+            return;
+        }
+        Map<String, String> usable = new LinkedHashMap<>();
+        if (links != null) {
+            for (Map.Entry<String, String> link : links.entrySet()) {
+                if (isBlank(link.getKey()) || isBlank(link.getValue())) {
+                    continue;
+                }
+                usable.put(link.getKey(), link.getValue());
+            }
+        }
+        if (usable.isEmpty()) {
+            LINKS.remove(modelId);
+        } else {
+            LINKS.put(modelId, Collections.unmodifiableMap(usable));
+        }
+    }
+
+    private static boolean isBlank(@Nullable String value) {
+        return value == null || value.trim()
+            .isEmpty();
+    }
+
+    /** The model's metadata links in declaration order; empty when the model declares none. */
+    public static Map<String, String> linksFor(@Nullable ResourceLocation modelId) {
+        if (modelId == null) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> links = LINKS.get(modelId);
+        return links == null ? Collections.emptyMap() : links;
+    }
+
     /** Drops every remembered declaration, for a resource reload or a server change. */
     public static void clear() {
         BUTTONS.clear();
         CLASSIFIES.clear();
         WHEEL.clear();
+        LINKS.clear();
     }
 
     private static final RawYsmModel.ExtraAnimationButton EMPTY_BUTTON = new RawYsmModel.ExtraAnimationButton();

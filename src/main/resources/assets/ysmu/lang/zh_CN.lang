@@ -12,6 +12,10 @@ gui.yes_steve_model.model.license=§2§l▌ §3协议：%s
 gui.yes_steve_model.model.texture=选择材质贴图
 gui.yes_steve_model.model.info=打开详情界面
 gui.yes_steve_model.model.info.contact.click_hint=单击复制联系方式
+# 模型详情页的两个链接类型预设;upstream 自己的 key 与文案(zh_cn.json:21-22,它的 ModelInfoScreen
+# LINK_TYPE_PRESET 在 :37-40)。其它自定义类型按原样显示。
+gui.yes_steve_model.url.home=主页
+gui.yes_steve_model.url.donate=赞助
 gui.yes_steve_model.model.star=收藏当前模型
 gui.yes_steve_model.model.return=返回
 gui.yes_steve_model.model.config.title=模型设置
@@ -25,6 +29,9 @@ gui.yes_steve_model.config.disable_self_model=阻止渲染自身玩家模型
 gui.yes_steve_model.config.disable_other_model=阻止渲染其他玩家模型
 gui.yes_steve_model.config.print_animation_roulette_msg=是否显示轮盘动画播放信息
 gui.yes_steve_model.config.disable_self_hands=阻止渲染玩家自身手臂
+# upstream 自己的文案(它的 zh_cn.json),对应 ClientConfig.java:48-52 的两个子实体开关。
+gui.yes_steve_model.config.disable_projectile_model=阻止渲染自定义投掷物模型
+gui.yes_steve_model.config.disable_vehicle_model=阻止渲染自定义载具模型
 gui.yes_steve_model.config.disable_player_render=禁用额外玩家渲染
 gui.yes_steve_model.config.swap_config_sides=交换配置面版和预览框位置
 gui.yes_steve_model.config.gui_enhancements=启用选择界面增强(前景/背景纹理/选择界面动画)
@@ -288,6 +295,10 @@ key.yes_steve_model.player_model.desc=打开玩家模型界面
 key.yes_steve_model.animation_roulette.desc=打开轮盘动画
 # 轮盘子菜单的深度上限(upstream 自己的 key;它的 AnimationRouletteScreen 把路径限制在 5 层).
 gui.yes_steve_model.roulette.too_long=轮盘页面菜单过长!
+# 轮盘移动锁定:键位 + 按钮的两种文案(upstream 自己的 key 与文案,zh_cn.json:16-17,407).
+key.yes_steve_model.lock_roulette.desc=锁定轮盘
+gui.yes_steve_model.roulette.lock_on=锁定：开
+gui.yes_steve_model.roulette.lock_off=锁定：关
 key.yes_steve_model.extra_animation.none=无
 key.yes_steve_model.extra_animation.0.desc=播放额外动画 0
 key.yes_steve_model.extra_animation.1.desc=播放额外动画 1
@@ -519,3 +530,20 @@ gui.yes_steve_model.hud_cache.off=HUD FBO 缓存: 关 [C]
 # SHOW_LOADING_PROGRESS 叠加层(row 45). 本仓知道模型名时 sync_model 后面会接模型名.
 gui.yes_steve_model.sync_model=加载中:
 gui.yes_steve_model.sync_waiting=等待服务器中...
+
+# /ysm auth(模型授权; api/ModelAuthorization, Config.ENABLE_MODEL_AUTHORIZATION). 回执是本次移植新增的
+# (上游 AuthCommand 成功时不回话), 两条 message.* 是服务端拒绝/重置玩家选择时玩家看到的内容.
+# 这些键全部由 ChatComponentTranslation 渲染, 所以只许用 `%s`: 1.7.10 对其它转换字符会抛异常
+# (ChatComponentTranslation.java:121-124), 而且是在绘制聊天栏时才抛, 表现为"整行不显示"而不是报错.
+# 参数顺序: add/remove 是 (模型, 人数), all/clear 只有 (人数), 与 command/YsmCommand 的发送点一致.
+commands.yes_steve_model.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
+commands.yes_steve_model.auth.add.done=已把模型 %s 授权给 %s 个玩家.
+commands.yes_steve_model.auth.remove.done=已撤销模型 %s 对 %s 个玩家的授权.
+commands.yes_steve_model.auth.all.done=已把全部已注册模型授权给 %s 个玩家.
+commands.yes_steve_model.auth.clear.done=已清空 %s 个玩家的全部模型授权.
+commands.yes_steve_model.auth.unknown_model=未知或有歧义的模型路径: %s
+message.yes_steve_model.auth.denied=§6§l【§aYSM§6§l】§r §c你没有使用模型 §e%s§r§c 的授权.
+message.yes_steve_model.auth.reset=§6§l【§aYSM§6§l】§r §c你的模型 §e%s§r§c 已被撤销授权, 已重置为服务端默认模型.
+commands.yes_steve_model.help.line.auth=  /ysm auth <玩家|@a|@p> <add|remove|all|clear> [模型] - 管理模型授权 (OP)
+commands.yes_steve_model.help.detail.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
+commands.yes_steve_model.help.detail.auth.desc=  在 EnableModelAuthorization 打开后管理玩家能选哪些模型. add/remove 授权或撤销单个模型, all 授权全部已注册模型, clear 全部撤销; 当前模型被撤销的玩家会重置为服务端默认模型. 模型参数写配置目录里的模型名(wine_fox/01_taisho_maid)或 ysmu:<id>. 示例: /ysm auth Notch add default, /ysm auth @a clear

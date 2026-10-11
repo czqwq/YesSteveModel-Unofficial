@@ -25,10 +25,8 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     private EntityPlayer player;
 
     // 2. 将原 ModelInfoCapability 的字段和方法直接移到这里
-    private ResourceLocation modelId = new ResourceLocation(
-        ysmu.MODID,
-        ModelIdUtil.getInternalModelId(Config.DEFAULT_MODEL_ID));
-    private ResourceLocation selectTexture = ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
+    private ResourceLocation modelId = defaultModelId();
+    private ResourceLocation selectTexture = defaultTextureId(modelId);
     private String animation = "idle";
     private boolean playAnimation = false;
     /** See {@link #getAnimationReplayCount()}; serialized, because the client that renders is not the side that asked. */
@@ -147,6 +145,26 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     }
 
     // 3. 静态辅助方法
+    /**
+     * The intrinsic default model id: the pair the field initialisers above start a fresh selection with, named once
+     * so the authorization reset ({@code api/ModelAuthorization}, {@code command/YsmCommand}'s {@code auth} family)
+     * cannot drift from it.
+     * <p>
+     * This is the port's rendering of upstream's "intrinsic default": {@code ModelSelectionService.selectDefault}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../capability/ModelSelectionService.java:15-31}) resolves
+     * {@code ServerConfig.DEFAULT_MODEL_PATH} plus {@code DEFAULT_MODEL_TEXTURE}, and the session accepts
+     * {@code Selection.IntrinsicDefault} without a grant check
+     * ({@code model/session/server/ServerModelSession.java:153-156}).
+     */
+    public static ResourceLocation defaultModelId() {
+        return new ResourceLocation(ysmu.MODID, ModelIdUtil.getInternalModelId(Config.DEFAULT_MODEL_ID));
+    }
+
+    /** The default texture id of {@code modelId}: the configured {@code Config.DEFAULT_MODEL_TEXTURE} sub-id. */
+    public static ResourceLocation defaultTextureId(ResourceLocation modelId) {
+        return ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
+    }
+
     /**
      * 将 EEP 注册到玩家身上
      */
