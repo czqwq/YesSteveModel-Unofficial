@@ -758,8 +758,13 @@ public final class OpenYsmPlayerControllerRuntime {
             String base = preParallel ? "pre_parallel_" : "parallel_";
             names.add("player." + base + parallelIndex);
             names.add(base + parallelIndex);
-            names.add("player." + base + "0");
-            names.add(base + "0");
+            // No index-0 fallback: the grouped spelling (`player.parallel_0` holding every slot's clip) belongs to
+            // the controller-0 spelling only, exactly as the comment above says, and upstream builds one controller
+            // per clip it discovers (ParallelControllerDiscovery.java:52-70) - a slot whose own clip the model does
+            // not declare has no definition to find, which is what lets playParallelIfPresent answer STOP for it.
+            // Without this, every slot matched the 0-spelling and eight pool controllers played `pre_parallel0`
+            // together: its one-shot tick-0 timeline (v.is_feet/is_chest/is_legs = 1) was then replayed by whichever
+            // of them re-armed, ~88 times a second, hiding the costume over parallel4's v.roaming.* re-seed.
         } else if (MAIN_CONTROLLER.equals(geckoControllerName)) {
             names.add("player.main");
             names.add("player.base");
