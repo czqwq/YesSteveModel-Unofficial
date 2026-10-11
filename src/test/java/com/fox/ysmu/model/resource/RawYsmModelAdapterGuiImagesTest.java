@@ -112,6 +112,29 @@ class RawYsmModelAdapterGuiImagesTest {
                 .isEmpty());
     }
 
+    @Test
+    void adapterCarriesRichDeclarationsBesideImagesAndGeometry() throws Exception {
+        RawYsmModel raw = bridgeableModel();
+        raw.properties.sha256 = "12345678";
+        raw.properties.extraAnimations.put("Wave", "#settings");
+        raw.properties.extraAnimations.put("#page", "Page");
+        RawYsmModel.ExtraAnimationButton button = new RawYsmModel.ExtraAnimationButton();
+        button.id = "settings";
+        RawYsmModel.ConfigForm form = new RawYsmModel.ConfigForm();
+        form.type = "range";
+        form.defaultValue = "v.roaming.size";
+        button.forms.add(form);
+        raw.properties.extraAnimationButtons.add(button);
+        ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
+        assertEquals(java.util.List.of("Wave", "#page"),
+            new java.util.ArrayList<>(data.getWheelDeclarations().values().animations.keySet()));
+        assertEquals("v.roaming.size", data.getWheelDeclarations().values().buttons.get(0).forms.get(0).defaultValue);
+        assertEquals("12345678", data.getWheelDeclarations().values().sha256);
+        assertTrue(data.getGuiImages().isEmpty());
+        raw.properties.extraAnimations.clear();
+        assertEquals(2, data.getWheelDeclarations().values().animations.size());
+    }
+
     /** A null entry, a blank/empty name or no bytes at all is skipped instead of producing an unusable image. */
     @Test
     void nullBlankAndDataLessEntriesAreSkipped() throws Exception {

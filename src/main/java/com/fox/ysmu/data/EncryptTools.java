@@ -30,9 +30,37 @@ public final class EncryptTools {
     public static final int HEAD = 0x59_53_47_50;
 
     /**
-     * 二进制文件的版本号
+     * PASSWORD 的版本号（也是历史三地图模型载荷版本，保持 v2 以复用持久化密码）。
      */
     public static final int VERSION = 0x00_00_00_02;
+
+    /**
+     * Model container version, independent of the unchanged v2 PASSWORD format above. Version 3 adds a fourth,
+     * separate GUI-image map; version 4 adds independent wheel/settings declarations; version 5 adds explicit PBR
+     * components; version 6 appends the model's metadata links after those components. Versions 2, 3, 4 and 5 remain
+     * readable. Old clients reject the new version rather than interpreting metadata or image bytes as geometry.
+     * Deploy matching client/server builds for full legacy GUI support.
+     */
+    public static final int GUI_IMAGE_MODEL_VERSION = 0x00_00_00_03;
+    /** Version 4 adds a length-prefixed independent wheel/settings declaration section after the model id. */
+    public static final int WHEEL_MODEL_VERSION = 0x00_00_00_04;
+    /** Version 5 appends explicit base/component associations after the four resource maps. */
+    public static final int MODEL_VERSION = 0x00_00_00_05;
+    /**
+     * Version 6 appends the model's {@code metadata.links} - an ordered list of type/URL string pairs - as the last
+     * section of the payload.
+     *
+     * <p>It is a new trailing section rather than a field inside {@link WheelDeclarations}, even though that JSON blob
+     * would have tolerated an unknown key: the container is the thing whose layout is versioned, and the read below is
+     * gated on this constant so a v5 payload simply comes back with no links (see {@code decryptModel}). This is the
+     * same shape version 4 used for the wheel declarations ({@code modelVersion >= WHEEL_MODEL_VERSION}).</p>
+     *
+     * <p>{@code ModelCacheWriter.OPEN_YSM_BAKE_VERSION} is <b>not</b> bumped for this:
+     * the OpenYSM baked payload already carries {@code metadata.links} - {@code YSMBinarySerializer:486-490} writes it
+     * and {@code YSMBinaryDeserializer:605-608} reads it - so its bytes and their meaning are unchanged. Only the
+     * legacy container gained a field.</p>
+     */
+    public static final int LINKS_MODEL_VERSION = 0x00_00_00_06;
 
     /**
      * 加密方法
@@ -96,7 +124,7 @@ public final class EncryptTools {
      * 将附加信息和加密文件块组合成二进制文件
      * -----------------------------------------
      * 59 53 47 50 幻数
-     * 00 00 00 01 版本号
+     * 00 00 00 06 模型载荷版本号（独立于 PASSWORD v2）
      * 00 00 00 00 00 00 00 00
      * 00 00 00 00 00 00 00 00 文件 MD5
      * -----------------------------------------
@@ -105,7 +133,7 @@ public final class EncryptTools {
     public static byte[] assembleEncryptModels(ModelData data) throws IOException {
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
         stream.write(ByteInteger.int2Bytes(HEAD));
-        stream.write(ByteInteger.int2Bytes(VERSION));
+        stream.write(ByteInteger.int2Bytes(LINKS_MODEL_VERSION));
         byte[] encryptModelBytes = encryptModel(data);
         // M-19:空/过短的载荷不再被写进缓存文件,否则客户端只会拿到一个解不开的 24 字节壳。
         if (encryptModelBytes.length < MIN_ENCRYPTED_MODEL_BYTES) {
@@ -143,14 +171,31 @@ public final class EncryptTools {
             ByteArrayOutputStream tmp = new ByteArrayOutputStream();
 
             writeString(tmp, data.getModelId());
+            writeString(tmp, data.getWheelDeclarations().encode());
 
             writeMapDataInfo(tmp, data.getModel());
             writeMapDataInfo(tmp, data.getTexture());
             writeMapDataInfo(tmp, data.getAnimation());
+            // Upstream ModelInfoBuilder:57-64 carries GUI images beside settings, not model textures/geometry.
+            writeMapDataInfo(tmp, data.getGuiImages());
 
             writeMapData(tmp, data.getModel());
             writeMapData(tmp, data.getTexture());
             writeMapData(tmp, data.getAnimation());
+            writeMapData(tmp, data.getGuiImages());
+            tmp.write(ByteInteger.int2Bytes(data.getPbrComponents().size()));
+            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                writeString(tmp, base.getKey());
+                tmp.write(ByteInteger.int2Bytes(base.getValue().size()));
+                for (Map.Entry<Integer, byte[]> component : base.getValue().entrySet()) {
+                    tmp.write(ByteInteger.int2Bytes(component.getKey()));
+                    tmp.write(ByteInteger.int2Bytes(component.getValue().length));
+                    tmp.write(component.getValue());
+                }
+            }
+            // v6: the model's metadata links, in declaration order. Written last so every earlier section keeps its
+            // offset and the read of an older payload stops before this one (see LINKS_MODEL_VERSION).
+            writeStringMap(tmp, data.getLinks());
 
             byte[] output = DeflateUtil.compressBytes(tmp.toByteArray());
             return AESUtil.encrypt(SECRET_KEY, IV, output)
@@ -166,6 +211,15 @@ public final class EncryptTools {
         byte[] stringBytes = string.getBytes(StandardCharsets.UTF_8);
         stream.write(ByteInteger.int2Bytes(stringBytes.length));
         stream.write(stringBytes);
+    }
+
+    /** Order-preserving string map: count, then key/value pairs ({@code LINKS_MODEL_VERSION}'s section). */
+    private static void writeStringMap(ByteArrayOutputStream stream, Map<String, String> map) throws IOException {
+        stream.write(ByteInteger.int2Bytes(map.size()));
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            writeString(stream, entry.getKey() == null ? "" : entry.getKey());
+            writeString(stream, entry.getValue() == null ? "" : entry.getValue());
+        }
     }
 
     private static void writeFileInfo(ByteArrayOutputStream stream, String name, byte[] input) throws IOException {
@@ -217,7 +271,10 @@ public final class EncryptTools {
             if (ByteInteger.bytes2Int(modelRawData, 0) != HEAD) {
                 return null;
             }
-            if (ByteInteger.bytes2Int(modelRawData, 4) != VERSION) {
+            int modelVersion = ByteInteger.bytes2Int(modelRawData, 4);
+            if (modelVersion != VERSION && modelVersion != GUI_IMAGE_MODEL_VERSION
+                && modelVersion != WHEEL_MODEL_VERSION && modelVersion != MODEL_VERSION
+                && modelVersion != LINKS_MODEL_VERSION) {
                 return null;
             }
 
@@ -249,15 +306,50 @@ public final class EncryptTools {
             ByteArrayInputStream tmp = new ByteArrayInputStream(modelData);
 
             String modelId = readString(tmp);
+            WheelDeclarations declarations = modelVersion >= WHEEL_MODEL_VERSION
+                ? WheelDeclarations.decode(readString(tmp)) : WheelDeclarations.empty();
             Map<String, Integer> modelMapDataInfo = readMapDataInfo(tmp);
             Map<String, Integer> textureMapDataInfo = readMapDataInfo(tmp);
             Map<String, Integer> animationMapDataInfo = readMapDataInfo(tmp);
+            Map<String, Integer> guiMapDataInfo = modelVersion >= GUI_IMAGE_MODEL_VERSION
+                ? readMapDataInfo(tmp) : java.util.Collections.emptyMap();
 
             Map<String, byte[]> modelMapData = readMapData(tmp, modelMapDataInfo);
             Map<String, byte[]> textureMapData = readMapData(tmp, textureMapDataInfo);
             Map<String, byte[]> animationMapData = readMapData(tmp, animationMapDataInfo);
 
-            return new ModelData(modelId, Type.UNKNOWN, modelMapData, textureMapData, animationMapData);
+            Map<String, byte[]> guiMapData = readMapData(tmp, guiMapDataInfo);
+            Map<String, Map<Integer, byte[]>> components = new LinkedHashMap<>();
+            if (modelVersion >= MODEL_VERSION) {
+                int count = readInt(tmp);
+                if (count < 0 || count > tmp.available() / 8) throw new IOException("Invalid PBR base count");
+                for (int i = 0; i < count; i++) {
+                    String base = readString(tmp);
+                    if (!textureMapData.containsKey(base) || components.containsKey(base)) {
+                        throw new IOException("Invalid PBR base " + base);
+                    }
+                    int roles = readInt(tmp);
+                    if (roles < 0 || roles > 2) throw new IOException("Invalid PBR role count");
+                    Map<Integer, byte[]> values = new LinkedHashMap<>();
+                    for (int j = 0; j < roles; j++) {
+                        int role = readInt(tmp), size = readInt(tmp);
+                        if (role != 1 && role != 2 || values.containsKey(role) || size < 0 || size > tmp.available()) {
+                            throw new IOException("Invalid PBR component");
+                        }
+                        byte[] bytes = new byte[size];
+                        if (size > 0 && tmp.read(bytes) != size) throw new IOException("Truncated PBR component");
+                        values.put(role, bytes);
+                    }
+                    components.put(base, values);
+                }
+            }
+            Map<String, String> links = modelVersion >= LINKS_MODEL_VERSION ? readStringMap(tmp)
+                : java.util.Collections.emptyMap();
+            if (tmp.available() != 0) {
+                throw new IOException("Unexpected trailing model payload bytes");
+            }
+            return new ModelData(modelId, Type.UNKNOWN, modelMapData, textureMapData, animationMapData,
+                guiMapData, declarations, components, links);
         } catch (Exception e) {
             // M-16:统一走日志,不再 printStackTrace。
             ysmu.LOG.warn("Failed to decrypt model cache payload", e);
@@ -271,8 +363,11 @@ public final class EncryptTools {
         Map<String, byte[]> output = new LinkedHashMap<>();
         for (String name : modelMapDataInfo.keySet()) {
             int size = modelMapDataInfo.get(name);
+            if (size < 0 || size > tmp.available()) {
+                throw new IOException("Invalid model resource size for " + name + ": " + size);
+            }
             byte[] sizeBytes = new byte[size];
-            int read = tmp.read(sizeBytes);
+            int read = size == 0 ? 0 : tmp.read(sizeBytes);
             if (read != size) {
                 throw new IOException("Unexpected EOF while reading model resource " + name);
             }
@@ -284,19 +379,46 @@ public final class EncryptTools {
     private static Map<String, Integer> readMapDataInfo(ByteArrayInputStream tmp) throws IOException {
         Map<String, Integer> mapDataInfo = new LinkedHashMap<>();
         int modelCount = readInt(tmp);
+        if (modelCount < 0 || modelCount > tmp.available() / 8) {
+            throw new IOException("Invalid model resource count: " + modelCount);
+        }
         for (int i = 0; i < modelCount; i++) {
             String name = readString(tmp);
             int size = readInt(tmp);
-            mapDataInfo.put(name, size);
+            if (size < 0 || mapDataInfo.put(name, size) != null) {
+                throw new IOException("Invalid or duplicate model resource: " + name);
+            }
         }
         return mapDataInfo;
+    }
+
+    /**
+     * {@code LINKS_MODEL_VERSION}'s section: a count and then key/value string pairs, in declaration order.
+     * <p>
+     * Only ever called for a payload that declares that version or later, which is what makes an older payload read
+     * as "no links" instead of throwing: the count and both bounds checks below mirror {@link #readMapDataInfo}'s,
+     * so a truncated section fails this payload rather than silently shifting anything.
+     */
+    private static Map<String, String> readStringMap(ByteArrayInputStream tmp) throws IOException {
+        int count = readInt(tmp);
+        if (count < 0 || count > tmp.available() / 8) {
+            throw new IOException("Invalid string map count: " + count);
+        }
+        Map<String, String> map = new LinkedHashMap<>();
+        for (int i = 0; i < count; i++) {
+            map.put(readString(tmp), readString(tmp));
+        }
+        return map;
     }
 
     @SuppressWarnings("all")
     private static String readString(ByteArrayInputStream stream) throws IOException {
         int size = readInt(stream);
+        if (size < 0 || size > stream.available()) {
+            throw new IOException("Invalid model resource name size: " + size);
+        }
         byte[] stringBytes = new byte[size];
-        int read = stream.read(stringBytes);
+        int read = size == 0 ? 0 : stream.read(stringBytes);
         if (read != size) {
             throw new IOException("Unexpected EOF while reading model resource name");
         }

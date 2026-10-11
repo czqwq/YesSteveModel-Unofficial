@@ -128,7 +128,7 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 try {
-                    model.put("projectile_" + matchId, toGeometryJson(null, sub.model, false));
+                    model.put("projectile_" + matchId, toGeometryJson(raw, sub.model, false));
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to convert projectile geometry {} for model {}", matchId, modelId, e);
                 }
@@ -150,7 +150,7 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 try {
-                    model.put("vehicle_" + matchId, toGeometryJson(null, sub.model, false));
+                    model.put("vehicle_" + matchId, toGeometryJson(raw, sub.model, false));
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to convert vehicle geometry {} for model {}", matchId, modelId, e);
                 }
@@ -158,6 +158,7 @@ public final class RawYsmModelAdapter {
         }
 
         Map<String, byte[]> textures = new LinkedHashMap<>();
+        Map<String, Map<Integer, byte[]>> components = new LinkedHashMap<>();
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
             if (texture.data == null) {
                 continue;
@@ -176,6 +177,7 @@ public final class RawYsmModelAdapter {
                 fileName = texture.name.endsWith(".png") ? texture.name : texture.name + ".png";
             }
             textures.put(fileName, textureData);
+            components.put(fileName, pbrComponents(texture));
         }
         // Projectile sub-entity textures. The key carries the matchId as well as the file name, because the renderer
         // picks a projectile's texture by searching for "projectile_<matchId>_" in the id.
@@ -203,6 +205,7 @@ public final class RawYsmModelAdapter {
                         textureKey += ".png";
                     }
                     textures.put(textureKey, textureData);
+                    components.put(textureKey, pbrComponents(texture));
                 }
             }
         }
@@ -233,6 +236,7 @@ public final class RawYsmModelAdapter {
                         textureKey += ".png";
                     }
                     textures.put(textureKey, textureData);
+                    components.put(textureKey, pbrComponents(texture));
                 }
             }
         }
@@ -325,7 +329,14 @@ public final class RawYsmModelAdapter {
             guiImages.put(image.name, image.data);
         }
 
-        return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages);
+        // The model's metadata links travel beside the wheel declarations for the same reason they do: this bridge is
+        // the only place a parsed RawYsmModel becomes a client payload, so both sync channels get them here - the
+        // OpenYSM channel calls this from OpenYsmModelSyncClient, and the legacy container is written from the
+        // ModelData this returns (EncryptTools.LINKS_MODEL_VERSION carries the field on that channel).
+        // Upstream draws the first two on its information screen (client/gui/ModelInfoScreen.java:111-124).
+        return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
+            com.fox.ysmu.data.WheelDeclarations.from(raw.properties), components,
+            raw.metadata == null ? null : raw.metadata.links);
     }
 
     /**
@@ -390,6 +401,22 @@ public final class RawYsmModelAdapter {
         return texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture);
     }
 
+    private static Map<Integer, byte[]> pbrComponents(RawYsmModel.RawTexture texture) {
+        Map<Integer, byte[]> output = new LinkedHashMap<>();
+        // Legacy YSMClientMapper:117-126: 1=NORMAL, 2=SPECULAR, attached to this base, not skins.
+        for (RawYsmModel.RawTexture.SubTexture sub : texture.subTextures) {
+            if (sub.data == null || sub.specularType != 1 && sub.specularType != 2) continue;
+            RawYsmModel.RawTexture component = new RawYsmModel.RawTexture();
+            component.data = sub.data;
+            component.imageFormat = sub.imageFormat;
+            component.width = sub.width;
+            component.height = sub.height;
+            byte[] png = getLegacyTextureData(component);
+            if (png != null) output.put(sub.specularType, png);
+        }
+        return output;
+    }
+
     private static byte[] getLegacyTextureData(RawYsmModel.RawTexture texture) {
         if (texture.imageFormat == PNG_FORMAT) {
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: PNG, returning as-is ({} bytes)", texture.data.length);
@@ -438,6 +465,8 @@ public final class RawYsmModelAdapter {
         }
 
         JsonObject description = getOrCreateDescription(root);
+        // RawModelAssembler:204,270 gives player/arm and replacement targets the same active settings.
+        if (raw != null) description.addProperty("ysm_all_cutout", raw.properties.allCutout);
         if (includeModelInfo) {
             applyOpenYsmModelInfo(raw, description);
         }
@@ -811,12 +840,30 @@ public final class RawYsmModelAdapter {
     }
 
     private static boolean putAnimationFile(Map<String, byte[]> animations, String key,
-        RawYsmModel.RawAnimationFile animationFile) {
+        RawYsmModel.RawAnimationFile animationFile) throws IOException {
         if (animationFile == null) {
             return false;
         }
         if (animationFile.sourceJson != null) {
-            animations.put(key, animationFile.sourceJson);
+            // Preserve unknown source metadata, replacing only timeline with parser-normalized statements (G06).
+            try {
+                JsonObject root = new com.google.gson.JsonParser().parse(
+                    new String(animationFile.sourceJson, StandardCharsets.UTF_8)).getAsJsonObject();
+                JsonObject sourceAnimations = root.getAsJsonObject("animations");
+                if (sourceAnimations != null) {
+                    for (RawYsmModel.RawAnimation animation : animationFile.animations.values()) {
+                        JsonElement entry = sourceAnimations.get(animation.name);
+                        if (entry != null && entry.isJsonObject()) {
+                            JsonObject json = entry.getAsJsonObject();
+                            json.remove("timeline");
+                            putTimeline(json, animation.timelineEvents);
+                        }
+                    }
+                }
+                animations.put(key, ysmu.GSON.toJson(root).getBytes(StandardCharsets.UTF_8));
+            } catch (RuntimeException failure) {
+                throw new IOException("Could not normalize source animation timelines for " + key, failure);
+            }
             return true;
         }
         if (!animationFile.animations.isEmpty()) {

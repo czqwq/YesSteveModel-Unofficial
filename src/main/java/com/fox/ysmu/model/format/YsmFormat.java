@@ -48,6 +48,12 @@ public final class YsmFormat {
                     }
                     String modelId = ModelIdUtil.getInternalModelId(
                         removeExtension(OpenYsmFormat.toModelName(rootPath, file)));
+                    ModelIndexCache.Source source = ModelIndexCache
+                        .Source.of(ModelIndexCache.Scanner.LEGACY_YSM, rootPath, file);
+                    // 命中索引则跳过这个 .ysm：不解包、不解密、不烘 ModelData、不加密。
+                    if (ModelIndexCache.restoreIfHit(source, modelId)) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     try {
                         Map<String, byte[]> data = YesModelUtils.input(file.toFile());
                         if (data.isEmpty()) {
@@ -68,6 +74,7 @@ public final class YsmFormat {
                         ServerModelInfo info = cacheModel(data, modelId);
                         if (info != null) {
                             CACHE_NAME_INFO.put(modelId, info);
+                            ModelIndexCache.remember(source, modelId, info, null);
                         }
                     } catch (Exception | LinkageError e) {
                         ysmu.LOG.warn("Failed to cache legacy .ysm model {}", file, e);

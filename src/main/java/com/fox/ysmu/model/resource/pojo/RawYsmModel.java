@@ -232,8 +232,35 @@ public class RawYsmModel {
         public boolean renderLayersFirst;
         public boolean allCutout;
         public boolean disablePreviewRotation;
+        /**
+         * {@code gui_no_lighting} - parsed (YSMFolderDeserializer:176) and carried over the wire
+         * (YSMBinarySerializer:552 / YSMBinaryDeserializer:672), and it has <b>no consumer in this repository</b> on
+         * purpose, because no authority for its meaning was found:
+         * <ul>
+         * <li>upstream's only consumer copies the value into the native protobuf
+         * ({@code tmp/YesSteveModel-dev-1.20/.../format/parser/ModelInfoBuilder.java:95}
+         * {@code .setGuiNoLighting(properties.guiNoLighting)},
+         * {@code src/main/proto/manifest/info/model_settings.proto:11} {@code bool gui_no_lighting = 5;}), i.e. the
+         * behaviour lives in native code this repository does not build or read;</li>
+         * <li>the available native source has no live reader either: the field is decoded from the legacy container
+         * and projected into the protobuf ({@code tmp/YesSteveModel-Native-dev/modules/legacy/src/v3/container/
+         * decoder.cc:1192}, {@code .../v3/conversion/projector.cc:525},
+         * {@code .../proto/include/proto/manifest/info/model_settings.proto.h:13}) but the renderer's only mention is
+         * a commented-out block, {@code modules/gfx/src/renderer/render_impl.inc:97-101}, guarding on a
+         * {@code kGuiNoLighting} template parameter that is not declared anywhere in that module (the renderer's
+         * template parameters are {@code kCulling}, {@code kIris}, {@code kHasPbr}, {@code kPosOnly}), so it is dead
+         * text rather than a consumer;</li>
+         * <li>the reference branch does consume it - {@code
+         * tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/ClientModelManager.java:112-113,2192} +
+         * {@code util/RenderUtil.java:607-614}, which turns off {@code RenderHelper.enableStandardItemLighting} and
+         * drives a full-bright lightmap for a model that opts in - but {@code AGENTS.md} says that branch is a
+         * completed port, not a correct one, so its choice is not authority for inventing the semantics here.</li>
+         * </ul>
+         * Kept as a recorded gap: wiring it would mean inventing a brightness behaviour and a switch to control it.
+         * See the task-9 decision briefing for the options and their costs.
+         */
         public boolean guiNoLighting;
-        public boolean mergeMultilineExpr = true;
+        public boolean mergeMultilineExpr = false;
         public String guiForeground = "";
         public String guiBackground = "";
         public List<RawImage> backgroundImages = new ArrayList<>();

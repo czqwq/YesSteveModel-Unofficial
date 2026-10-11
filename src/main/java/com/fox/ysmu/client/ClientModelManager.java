@@ -557,6 +557,15 @@ public class ClientModelManager {
         // The model's GUI presentation images are indexed here for the same reason the texture list is: the selection
         // screen needs them to draw a tile, and nothing about them needs the geometry build.
         indexGuiImages(modelId, data.getGuiImages());
+        com.fox.ysmu.data.WheelDeclarations.Values declarations = data.getWheelDeclarations().values();
+        com.fox.ysmu.client.gui.ModelConfigRegistry.accept(
+            modelId, declarations.buttons, declarations.classifies, declarations.animations);
+        com.fox.ysmu.client.roaming.ClientRoamingKeys.accept(modelId, declarations.sha256);
+        // D2: the model's metadata links, indexed beside the wheel declarations and for the same reason - this is the
+        // one funnel both sync channels register a model through (the legacy container's LINKS_MODEL_VERSION section
+        // and the OpenYSM payload's metadata.links both end up in ModelData#getLinks), and the information screen is
+        // the only reader. Before this line the field was parsed and synced but nothing on the client consumed it.
+        com.fox.ysmu.client.gui.ModelConfigRegistry.acceptLinks(modelId, data.getLinks());
         // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.
@@ -694,7 +703,7 @@ public class ClientModelManager {
                 publishGeo(geo);
             }
         }
-        if (!uploadTextures(modelId, data.getTexture())) {
+        if (!uploadTextures(modelId, data.getTexture(), Collections.emptyMap(), data.getPbrComponents(), Collections.emptyMap())) {
             ysmu.LOG.warn(
                 "YSM client cannot draw the built-in default model: one of its textures could not be uploaded");
             rollbackPublishedGeometry(modelId);
@@ -869,7 +878,16 @@ public class ClientModelManager {
                         failure);
                 }
             }
-            COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, data, generation));
+            Map<String, Map<Integer, BufferedImage>> components = new LinkedHashMap<>();
+            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                Map<Integer, BufferedImage> roles = new LinkedHashMap<>();
+                for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
+                    try { roles.put(role.getKey(), OuterFileTexture.decode(role.getValue())); }
+                    catch (Exception failure) { ysmu.LOG.warn("Could not decode PBR component {} of {}", role.getKey(), base.getKey(), failure); }
+                }
+                components.put(base.getKey(), roles);
+            }
+            COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, components, data, generation));
         } catch (Throwable failure) {
             ysmu.LOG.warn("Failed to build geometry for model {}", modelId, failure);
             // A build that threw is a deterministic failure - the same bytes will throw again - so the model is
@@ -975,7 +993,7 @@ public class ClientModelManager {
         // never reached the texture manager, which is the resource-pack fallback and the shared missing texture.
         // TextureManager absorbs an ordinary bad image by substituting the missing texture and still registering the
         // id, so this only triggers on something abnormal.
-        if (!uploadTextures(built.modelId, built.textures, built.textureImages)) {
+        if (!uploadTextures(built.modelId, built.textures, built.textureImages, built.data.getPbrComponents(), built.componentImages)) {
             ysmu.LOG.warn(
                 "YSM client cannot draw model {}: one of its textures could not be uploaded; it is quarantined",
                 built.modelId);
@@ -1209,6 +1227,14 @@ public class ClientModelManager {
             updateDigest(digest, data.getTexture());
             updateDigest(digest, data.getAnimation());
             updateDigest(digest, data.getGuiImages());
+            digest.update(data.getWheelDeclarations().encode().getBytes(StandardCharsets.UTF_8));
+            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                digest.update(base.getKey().getBytes(StandardCharsets.UTF_8));
+                for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
+                    digest.update((byte) (int) role.getKey());
+                    digest.update(role.getValue());
+                }
+            }
             ServerModelInfo info = data.getInfo();
             String md5 = info == null ? null : info.getMd5();
             if (md5 != null) {
@@ -1547,17 +1573,20 @@ public class ClientModelManager {
          * from here failed to decode and is left to the client thread. See {@link #buildModel}.
          */
         private final Map<String, BufferedImage> textureImages;
+        private final Map<String, Map<Integer, BufferedImage>> componentImages;
         /** The exact payload these bytes came from; see the identity check in {@link #publishBuiltModel}. */
         private final ModelData data;
         /** The connection this build was queued on; see {@link #publishBuiltModel}. */
         private final long generation;
 
         private BuiltModel(ResourceLocation modelId, List<BuiltGeo> geometry, Map<String, byte[]> textures,
-            Map<String, BufferedImage> textureImages, ModelData data, long generation) {
+            Map<String, BufferedImage> textureImages, Map<String, Map<Integer, BufferedImage>> componentImages,
+            ModelData data, long generation) {
             this.modelId = modelId;
             this.geometry = geometry;
             this.textures = textures;
             this.textureImages = textureImages;
+            this.componentImages = componentImages;
             this.data = data;
             this.generation = generation;
         }
@@ -1799,11 +1828,22 @@ public class ClientModelManager {
      */
     private static boolean uploadTextures(ResourceLocation id, Map<String, byte[]> mapData,
         Map<String, BufferedImage> decoded) {
+        return uploadTextures(id, mapData, decoded, Collections.emptyMap(), Collections.emptyMap());
+    }
+
+    private static boolean uploadTextures(ResourceLocation id, Map<String, byte[]> mapData,
+        Map<String, BufferedImage> decoded, Map<String, Map<Integer, byte[]>> components,
+        Map<String, Map<Integer, BufferedImage>> componentImages) {
         boolean complete = true;
         for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
             ResourceLocation textureId = ModelIdUtil.getSubModelId(id, entry.getKey());
             try {
-                registerTexture(textureId, entry.getValue(), decoded.get(entry.getKey()));
+                BufferedImage base = decoded.get(entry.getKey());
+                if (base != null && componentImages.containsKey(entry.getKey())) {
+                    ModelTextureRegistry.register(textureId, new OuterFileTexture(base, componentImages.get(entry.getKey())));
+                } else if (components.containsKey(entry.getKey())) {
+                    ModelTextureRegistry.register(textureId, new OuterFileTexture(entry.getValue(), components.get(entry.getKey())));
+                } else registerTexture(textureId, entry.getValue(), base);
             } catch (Throwable failure) {
                 // Throwable, like the other publish steps: an Error escaping into the client tick would take the tick
                 // down, and there is nothing to do with this texture either way.
@@ -2199,6 +2239,10 @@ public class ClientModelManager {
         if (speed != null && speed.isJsonPrimitive()) {
             animation.animSpeed = speed.getAsString();
         }
+        JsonElement weight = animObject.get("blend_weight");
+        if (weight != null && weight.isJsonPrimitive()) {
+            animation.blendWeight = weight.getAsString();
+        }
         JsonElement timeUpdate = animObject.get("anim_time_update");
         if (timeUpdate != null && timeUpdate.isJsonPrimitive()) {
             animation.animTimeUpdate = timeUpdate.getAsString();
@@ -2274,15 +2318,19 @@ public class ClientModelManager {
 
     /** Client thread: resets the sync state, clears the runtime caches, then reads the cache directory. */
     private static void prepareModelSync() {
-        long generation = SYNC_GENERATION + 1L;
-        SYNC_GENERATION = generation;
+        final long generation;
+        synchronized (com.fox.ysmu.network.message.RequestLoadModel.class) {
+            generation = SYNC_GENERATION + 1L;
+            SYNC_GENERATION = generation;
+            PASSWORD = null;
+            PASSWORD_UUID = null;
+            com.fox.ysmu.network.message.RequestLoadModel.clearPendingLoads();
+        }
         pendingModelSync = null;
         ysmu.LOG.info(
             "YSM client starting model sync: currentModels={}, rememberedCachedModels={}",
             MODELS.size(),
             CACHE_MD5.size());
-        PASSWORD = null;
-        PASSWORD_UUID = null;
         clearCachedModelMd5();
         // CUI-01: the cache reset and the cache-directory listing run in this one client task, in this order, so
         // the reply describes the state the client is actually in when it is built.
@@ -2622,6 +2670,7 @@ public class ClientModelManager {
         com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
         // The declared settings panels belong to the models being dropped as well, and for the same reason.
         com.fox.ysmu.client.gui.ModelConfigRegistry.clear();
+        com.fox.ysmu.client.roaming.ModelFormExecution.clear();
         // The GUI presentation images belong to the dropped models, and their textures have to be released explicitly
         // for the reason on guiImageTextureFor.
         clearGuiImages();

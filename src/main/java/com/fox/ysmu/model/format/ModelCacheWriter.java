@@ -57,7 +57,9 @@ public final class ModelCacheWriter {
      * vehicle renderer would find no geometry for a vehicle the pack does declare and fall back to drawing the host
      * (vanilla boat / minecart / pig / horse) - a payload that looks valid and is simply missing a target kind.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 6;
+    // 6 -> 7: folder timelines honour merge_multiline_expr (upstream default false), and
+    // adapter metadata changes require a re-bake even when the source signature still matches.
+    static final int OPEN_YSM_BAKE_VERSION = 7;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。
@@ -76,6 +78,10 @@ public final class ModelCacheWriter {
     private ModelCacheWriter() {}
 
     static ServerModelInfo write(ModelData data) throws Exception {
+        // Legacy cache identity is the COMPLETE freshly baked container, not the source model hash. The v2 -> v3
+        // model header and dedicated GUI map therefore change its MD5 even when the source pack is unchanged:
+        // reload writes the new file, clients miss the new name, and pruneUnregisteredCaches removes the old file.
+        // PASSWORD stays v2 (same AES key/IV); no key rotation or OpenYSM bake-salt bump is needed for this container.
         byte[] dataBytes = EncryptTools.assembleEncryptModels(data);
         data.setMd5(Md5Utils.md5Hex(dataBytes).toUpperCase(Locale.US));
 
@@ -123,8 +129,13 @@ public final class ModelCacheWriter {
         return new OpenYsmSyncInfo(modelId, cacheFileName, hashes[0], hashes[1], OPEN_YSM_SYNC_FORMAT, false);
     }
 
-    /** M-10:名字 == 内容 MD5 的口径,见 {@link ServerModelInfo#matchesCacheContent(String, byte[])}。 */
-    private static boolean isStoredLegacyCacheValid(File target, String expectedMd5) {
+    /**
+     * M-10:名字 == 内容 MD5 的口径,见 {@link ServerModelInfo#matchesCacheContent(String, byte[])}。
+     * <p>
+     * 包内可见（不是 private）：{@code ModelIndexCache} 判断"索引命中"时调用的就是这一份判定，
+     * 而不是自己再写一遍 —— 两边一旦分叉，索引就会重放一份完整路径不会复用的缓存。
+     */
+    static boolean isStoredLegacyCacheValid(File target, String expectedMd5) {
         if (expectedMd5 == null || !target.isFile()) {
             return false;
         }
@@ -143,7 +154,8 @@ public final class ModelCacheWriter {
         }
     }
 
-    private static boolean isStoredOpenYsmCacheValid(File target, long hash1, long hash2) {
+    /** 包内可见的理由同上：{@code ModelIndexCache} 必须用同一份签名判定，不能各写一份。 */
+    static boolean isStoredOpenYsmCacheValid(File target, long hash1, long hash2) {
         if (!target.isFile()) {
             return false;
         }

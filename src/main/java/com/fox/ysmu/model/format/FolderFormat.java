@@ -67,9 +67,16 @@ public final class FolderFormat {
                         return FileVisitResult.CONTINUE;
                     }
                     String modelId = ModelIdUtil.getInternalModelId(OpenYsmFormat.toModelName(rootPath, dir));
+                    ModelIndexCache.Source source = ModelIndexCache
+                        .Source.of(ModelIndexCache.Scanner.LEGACY_FOLDER, rootPath, dir);
+                    // 命中索引则跳过整个模型目录：不读 main.json/arm.json/贴图，不烘 ModelData，不加密。
+                    if (ModelIndexCache.restoreIfHit(source, modelId)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
                     ServerModelInfo info = cacheModel(dir, modelId);
                     if (info != null) {
                         CACHE_NAME_INFO.put(modelId, info);
+                        ModelIndexCache.remember(source, modelId, info, null);
                     }
                     return FileVisitResult.SKIP_SUBTREE;
                 }

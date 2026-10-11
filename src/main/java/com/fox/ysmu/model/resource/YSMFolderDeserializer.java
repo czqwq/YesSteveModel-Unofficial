@@ -174,7 +174,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
         this.model.properties.allCutout = getBool(propsObj, "all_cutout", false);
         this.model.properties.disablePreviewRotation = getBool(propsObj, "disable_preview_rotation", false);
         this.model.properties.guiNoLighting = getBool(propsObj, "gui_no_lighting", false);
-        this.model.properties.mergeMultilineExpr = getBool(propsObj, "merge_multiline_expr", true);
+        this.model.properties.mergeMultilineExpr = getBool(propsObj, "merge_multiline_expr", false);
         this.model.properties.guiForeground = getStr(propsObj, "gui_foreground", "");
         this.model.properties.guiBackground = getStr(propsObj, "gui_background", "");
 
@@ -724,7 +724,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
                         animation.boneAnimations.add(bone);
                     }
                 }
-                parseTimeline(animObj, animation);
+                parseTimeline(animObj, animation, this.model.properties.mergeMultilineExpr);
                 parseSoundEffects(animObj, animation);
             }
             file.animations.put(animation.name, animation);
@@ -791,7 +791,9 @@ public class YSMFolderDeserializer implements AutoCloseable {
         }
     }
 
-    private static void parseTimeline(JsonObject animObj, RawYsmModel.RawAnimation animation) {
+    // Upstream Animation.Deserializer.readTimeline:120-155: merging joins only string lines with
+    // a trailing newline, while the default preserves each line as a separate instruction.
+    static void parseTimeline(JsonObject animObj, RawYsmModel.RawAnimation animation, boolean mergeLines) {
         if (!hasObject(animObj, "timeline")) {
             return;
         }
@@ -803,13 +805,29 @@ public class YSMFolderDeserializer implements AutoCloseable {
             }
             RawYsmModel.RawTimelineEvent event = new RawYsmModel.RawTimelineEvent();
             event.timestamp = timestamp;
-            for (JsonElement value : asIterable(entry.getValue())) {
-                if (!value.isJsonNull()) {
-                    event.events.add(value.getAsString());
+            JsonElement value = entry.getValue();
+            if (value != null && value.isJsonArray()) {
+                StringBuilder merged = mergeLines ? new StringBuilder() : null;
+                for (JsonElement line : value.getAsJsonArray()) {
+                    if (line == null || line.isJsonNull() || !line.isJsonPrimitive()
+                        || !line.getAsJsonPrimitive().isString()) {
+                        continue;
+                    }
+                    if (mergeLines) {
+                        merged.append(line.getAsString()).append('\n');
+                    } else {
+                        event.events.add(line.getAsString());
+                    }
                 }
+                if (mergeLines) {
+                    event.events.add(merged.toString());
+                }
+            } else if (value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
+                event.events.add(value.getAsString());
             }
             animation.timelineEvents.add(event);
         }
+        animation.timelineEvents.sort((left, right) -> Float.compare(left.timestamp, right.timestamp));
     }
 
     private static void parseSoundEffects(JsonObject animObj, RawYsmModel.RawAnimation animation) {

@@ -53,7 +53,8 @@ public final class OpenYsmFormat {
                     }
 
                     String diskModelName = toModelName(rootPath, dir);
-                    cacheFolderModel(dir, ModelIdUtil.getInternalModelId(diskModelName));
+                    cacheFolderModel(dir, ModelIdUtil.getInternalModelId(diskModelName),
+                        ModelIndexCache.Source.of(ModelIndexCache.Scanner.OPEN_YSM, rootPath, dir));
                     return FileVisitResult.SKIP_SUBTREE;
                 }
 
@@ -71,7 +72,14 @@ public final class OpenYsmFormat {
         }
     }
 
-    private static void cacheFolderModel(Path dir, String modelId) {
+    /**
+     * {@code source} 是这个目录在 {@link ModelIndexCache} 里的身份（扫描器 + 扫描根 + 相对路径）。
+     * 命中索引时整段跳过：不解密、不解析 {@code ysm.json} 树、不烘 {@code ModelData}、不加密。
+     */
+    private static void cacheFolderModel(Path dir, String modelId, ModelIndexCache.Source source) {
+        if (ModelIndexCache.restoreIfHit(source, modelId)) {
+            return;
+        }
         try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(dir)) {
             RawYsmModel raw = deserializer.deserialize();
             raw.modelId = modelId;
@@ -96,10 +104,12 @@ public final class OpenYsmFormat {
                     dir,
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
+                ModelIndexCache.remember(source, modelId, info, null);
                 return;
             }
             OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
             OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
+            ModelIndexCache.remember(source, modelId, info, syncInfo);
         } catch (Exception | LinkageError e) {
             // S-02:类加载/链接期错误(缺类、版本不匹配)也应按"跳过并 warn"处理,而不是中断整次扫描。
             ysmu.LOG.warn("Failed to load OpenYSM folder model {}", dir, e);
@@ -115,6 +125,13 @@ public final class OpenYsmFormat {
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
                 ysmu.LOG.info("[YSMU-MODEL] Found OpenYSM .ysm file: {} (size={})", file.getFileName(), encrypted.length);
             }
+            // 模型名只由路径决定，先算出来才能问索引（原来这行在反序列化之后）。命中则整段跳过
+            // 解密→解压→反序列化→烘 ModelData→加密。
+            String modelId = ModelIdUtil.getInternalModelId(removeExtension(toModelName(rootPath, file)));
+            ModelIndexCache.Source source = ModelIndexCache.Source.of(ModelIndexCache.Scanner.OPEN_YSM, rootPath, file);
+            if (ModelIndexCache.restoreIfHit(source, modelId)) {
+                return;
+            }
             byte[] rawBytes = YsmCrypt.decryptYsmFile(encrypted);
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
                 ysmu.LOG.info("[YSMU-MODEL] Decrypted .ysm file {}: decompressed size={}", file.getFileName(), rawBytes.length);
@@ -122,7 +139,6 @@ public final class OpenYsmFormat {
             try (YSMBinaryDeserializer deserializer = new YSMBinaryDeserializer(rawBytes)) {
                 RawYsmModel raw = deserializer.deserializeKeepOpen();
                 deserializer.parseYSMFooter(raw);
-                String modelId = ModelIdUtil.getInternalModelId(removeExtension(toModelName(rootPath, file)));
                 raw.modelId = modelId;
                 if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
                     int texCount = raw.mainEntity != null ? raw.mainEntity.textures.size() : 0;
@@ -159,10 +175,12 @@ public final class OpenYsmFormat {
                         file,
                         RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
                         RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
+                    ModelIndexCache.remember(source, modelId, info, null);
                     return;
                 }
                 OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
                 OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
+                ModelIndexCache.remember(source, modelId, info, syncInfo);
             }
         } catch (UnsupportedOperationException e) {
             ysmu.LOG.warn("Unsupported OpenYSM binary model {}: {}", file, e.getMessage(), e);

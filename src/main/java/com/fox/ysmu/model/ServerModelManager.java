@@ -26,6 +26,7 @@ import com.fox.ysmu.Config;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ModelCacheWriter;
+import com.fox.ysmu.model.format.ModelIndexCache;
 import com.fox.ysmu.model.format.OpenYsmFormat;
 import com.fox.ysmu.model.format.OpenYsmSyncInfo;
 import com.fox.ysmu.model.format.PackFormat;
@@ -283,12 +284,28 @@ public final class ServerModelManager {
         // 且 id 已在 CACHE_NAME_INFO 里就整棵跳过"的豁免对它不成立，FolderFormat 会照常登记它），
         // config/ysmu/builtin/default 才是新的 ysm.json 包。顺序反过来会让残留的 legacy 版本覆盖内置版本，
         // 使 CACHE_NAME_INFO["default"] 与 OPEN_YSM_SYNC_INFO["default"] 指向两个不同的模型。
-        runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
-        runCacheStep("OpenYSM (custom)", () -> OpenYsmFormat.cacheAllModels(CUSTOM));
-        runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
-        runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
-        runCacheStep("OpenYSM (builtin)", () -> OpenYsmFormat.cacheAllModels(BUILT));
-        runCacheStep("legacy (builtin)", () -> cacheAllModels(BUILT));
+        //
+        // 索引侧车（ModelIndexCache）把六个 step 包起来：它为真时各扫描器会跳过已经烘过的源。它任何时候都
+        // 只是加速 —— 未命中、索引文件缺失/损坏/版本不符、缓存文件不在，都照旧走下面的完整路径，
+        // 所以没有索引时的行为与加它之前逐字节一致。
+        ModelIndexCache.beginReload();
+        try {
+            runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
+            runCacheStep("OpenYSM (custom)", () -> {
+                OpenYsmFormat.cacheAllModels(CUSTOM);
+                ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, CUSTOM);
+            });
+            runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
+            runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+            runCacheStep("OpenYSM (builtin)", () -> {
+                OpenYsmFormat.cacheAllModels(BUILT);
+                ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, BUILT);
+            });
+            runCacheStep("legacy (builtin)", () -> cacheAllModels(BUILT));
+        } finally {
+            // 与 beginReload 成对：合并本轮记录并原子落盘，失败只 warn。
+            ModelIndexCache.commitReload();
+        }
     }
 
     private static void runCacheStep(String name, Runnable step) {
@@ -390,7 +407,11 @@ public final class ServerModelManager {
 
     private static void cacheAllModels(Path rootPath) {
         YsmFormat.cacheAllModels(rootPath);
+        // 这一步里两个扫描器各自有独立的索引命名空间：某个扫描器整棵跑完，才允许 commit 丢掉它在这个根上的
+        // 旧条目（上游 ConvertedSourceIndexStore.replaceScopes:102-125 的同一形状）。
+        ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.LEGACY_YSM, rootPath);
         FolderFormat.cacheAllModels(rootPath);
+        ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.LEGACY_FOLDER, rootPath);
     }
 
     private static void initPassword() {
