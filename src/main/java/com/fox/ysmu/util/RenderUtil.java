@@ -4,7 +4,6 @@ import java.util.Collections;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
 import com.fox.ysmu.Config;
-import com.fox.ysmu.client.ClientProxy;
 import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ModelPreviewAnimationState;
 import net.geckominecraft.client.renderer.GlStateManager;
@@ -23,18 +22,22 @@ import org.joml.Quaternionf;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.util.vector.Quaternion;
+import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.compat.Axis;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.Utils;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.ysmu;
 import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.IAnimatableModel;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
+import software.bernie.geckolib3.geo.RenderContext;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
 import software.bernie.geckolib3.util.GeoStats;
@@ -316,11 +319,6 @@ public final class RenderUtil {
         GlStateManager.popMatrix();
     }
 
-    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
-        ResourceLocation modelId, ResourceLocation textureId, Consumer<CustomPlayerEntity> consumer) {
-        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, consumer, null, false);
-    }
-
     /**
      * 缩略图烘焙的完整入口：允许"姿态与上次真正画出去的相同就跳过几何提交"，并把离屏 FBO 的清除推迟到
      * 确实要画的那一刻。
@@ -334,84 +332,66 @@ public final class RenderUtil {
      *       共用同一个签名 key，打开只会互相顶掉（参考 {@code :532-533} 的同一句说明）。</li>
      * </ul>
      *
+     * <p>{@code preview} 是这一格自己的预览实体，由调用方持有：上游在 {@code PlayerModelScreen.java:56} 就是
+     * 每格一个 {@code CustomGuiPlayerEntity}（{@code CatalogModelButton.java:41} 持有它，{@code :129} 用它驱动
+     * preview/hover/focus 通道），所以格子的身份跨帧稳定，而且
+     * {@link CustomGuiPlayerEntity#determineImmutableContext} 会在这一格上生效 —— 上游正是靠它让一帧内只算一次
+     * 姿势（{@code client/gui/CustomGuiPlayerEntity.java:43-46}）。它的渲染器是这一格自己的
+     * （{@link CustomGuiPlayerEntity#getPreviewRenderer()}），因为 {@code AnimationController} 的 model fetcher 对
+     * 这个 animatable 返回的就是它自己的 {@code CustomPlayerModel}
+     * （{@code client/entity/CustomGuiPlayerEntity.java:32-36}），骨骼必须和控制器解析到的模型是同一个。
+     *
+     * @param hovered         {@code true} 时这一格播 hover 通道；{@code false} 回到 preview 通道
+     * @param focused         {@code true} 时这一格播 focus 通道（贴图页把"已选中"当 focus 传下来）
      * @param clearBeforeDraw 调用方传进来的 FBO 清除动作，可为 {@code null}
      * @param allowPoseSkip   是否允许姿态签名命中时跳过几何提交
      * @return {@code true} = 这一帧真的提交了几何；{@code false} = 姿态没变、复用了 FBO 里的画面（或模型不可用）。
      *         调用方据此决定要不要把耗时喂给 {@code PreviewRefreshPolicy}：跳过时不喂，否则估计成本会塌到零、
      *         刷新频率被推到上限，而每次 tick 的开销反而成倍增加（参考 {@code :351-356}）。
      */
-    public static boolean renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
-        ResourceLocation modelId, ResourceLocation textureId, Consumer<CustomPlayerEntity> consumer,
-        Runnable clearBeforeDraw, boolean allowPoseSkip) {
-        if (player == null) {
+    public static boolean renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer owner,
+        ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused,
+        CustomGuiPlayerEntity preview, Runnable clearBeforeDraw, boolean allowPoseSkip) {
+        if (owner == null || preview == null || Minecraft.getMinecraft().theWorld == null) {
             return false;
         }
+        preview.prepare(owner, modelId);
+        ModelPreviewAnimationState.forModel(modelId)
+            .apply(preview.getPreviewInfo(), hovered, focused, Minecraft.getSystemTime());
+        // Opening a GUI pauses single-player and the engine refuses to advance an animatable that has not opted in -
+        // without this the tile shows a frozen pose.
+        preview.getFactory()
+            .getOrCreateAnimationData(preview.hashCode()).shouldPlayWhilePaused = true;
+        // A GUI preview poses the shared GeoModel with the pack's preview animation and the world must never inherit
+        // that pose; the restore lives inside renderModel, because this path draws through IGeoRenderer#render rather
+        // than CustomPlayerRenderer#doRenderModel and so never reaches that renderer's own bracket.
+        //
+        // The bracket carries two more things: this frame's pass (inventoryPass, which renderModel attaches to the
+        // event it builds) and C-05's emission gate. `CustomPlayerRenderer.isPreviewRendering()` is what stops a
+        // preview from spawning world particles, and without this the tile path - which does run the model's
+        // controllers and timelines - was the one preview that still did.
+        CustomPlayerRenderer.beginPreviewRender(RenderContext.inventoryPass());
         try {
-            CustomPlayerRenderer renderer = ClientProxy.getInstance();
-            IAnimatable animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(modelId, CustomPlayerEntity::new);
-            if (animatable instanceof CustomPlayerEntity entity) {
-                consumer.accept(entity);
-                // A GUI preview poses the shared model with the pack's preview animation and the world must never
-                // inherit that pose (this port shares one model where upstream keeps a separate GUI entity); the pose
-                // restore lives inside renderModel, because this path draws through IGeoRenderer#render rather than
-                // CustomPlayerRenderer#doRenderModel and so never reaches that renderer's own bracket.
-                //
-                // The bracket here is for a different reader: C-05's emission gate. `CustomPlayerRenderer
-                // .isPreviewRendering()` is what stops a preview from spawning world particles, and without this the
-                // tile path - which does run the model's controllers and timelines - was the one preview that still
-                // did.
-                CustomPlayerRenderer.beginPreviewRender();
-                try {
-                    return renderModel(
-                        (double) pPosX,
-                        (double) pPosY,
-                        (float) pScale,
-                        player,
-                        modelId,
-                        textureId,
-                        renderer,
-                        entity,
-                        clearBeforeDraw,
-                        allowPoseSkip);
-                } finally {
-                    CustomPlayerRenderer.endPreviewRender();
-                }
-            }
-        } catch (ExecutionException e) {
-            ysmu.LOG.warn("Failed to render the YSM player model in the inventory GUI", e);
+            return renderModel(pPosX, pPosY, pScale, preview.getQueryPlayer(), modelId, textureId,
+                preview.getPreviewRenderer(), preview, clearBeforeDraw, allowPoseSkip);
+        } finally {
+            CustomPlayerRenderer.endPreviewRender();
         }
-        return false;
-    }
-
-    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
-        ResourceLocation modelId, ResourceLocation textureId) {
-        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, false, false);
-    }
-
-    /**
-     * Draws a model preview and drives its GUI animation channels, mirroring upstream's catalog card.
-     * <p>
-     * {@code hovered}/{@code focused} feed {@link ModelPreviewAnimationState}, which decides the preview, hover and
-     * focus animation names the entity's controllers then play. The animatable is also allowed to keep ticking while
-     * the game is paused, because opening a GUI pauses single-player and the engine refuses to advance an animatable
-     * that has not opted in - without it the preview would show a frozen pose.
-     */
-    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
-        ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused) {
-        renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, hovered, focused, null, false);
     }
 
     /** {@link #renderEntityInInventory(int, int, int, EntityPlayer, ResourceLocation, ResourceLocation, boolean,
-     * boolean)} plus the thumbnail-bake pair; see the {@code clearBeforeDraw}/{@code allowPoseSkip} javadoc there. */
-    public static boolean renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer player,
+     * boolean, CustomGuiPlayerEntity, Runnable, boolean)} without the thumbnail-bake pair; see the javadoc there. */
+    public static void renderEntityInInventory(int pPosX, int pPosY, int pScale, EntityPlayer owner,
         ResourceLocation modelId, ResourceLocation textureId, boolean hovered, boolean focused,
-        Runnable clearBeforeDraw, boolean allowPoseSkip) {
-        return renderEntityInInventory(pPosX, pPosY, pScale, player, modelId, textureId, entity -> {
-            ModelPreviewAnimationState.forModel(modelId)
-                .apply(entity.getPreviewInfo(), hovered, focused, Minecraft.getSystemTime());
-            entity.getFactory()
-                .getOrCreateAnimationData(entity.hashCode()).shouldPlayWhilePaused = true;
-        }, clearBeforeDraw, allowPoseSkip);
+        CustomGuiPlayerEntity preview) {
+        renderEntityInInventory(pPosX, pPosY, pScale, owner, modelId, textureId, hovered, focused, preview, null,
+            false);
+    }
+
+    /** Screen-owned form preview. Only its fake player is posed; the world owner supplies roaming identity. */
+    public static boolean renderFormPreview(int x, int y, int scale, EntityPlayer owner,
+        ResourceLocation modelId, ResourceLocation textureId, CustomGuiPlayerEntity preview) {
+        return renderEntityInInventory(x, y, scale, owner, modelId, textureId, false, false, preview, null, false);
     }
 
     /** 作废某模型的姿态签名（见 {@link PreviewPoseCache}）：FBO 被重建、翻页/换模型、悬停或 GUI 动画切换后
@@ -508,9 +488,9 @@ public final class RenderUtil {
         //  方法括起来）。这里括住同一段渲染（模型求值 + 提交），true 紧贴配对的 try，
         //  所以任何抛出路径都不会把标志留在 true 上。
         //
-        // rendered[0] = 这一帧是否真的提交了几何（姿态签名命中时跳过）。用数组是因为它要在
-        // withGuiEntityLighting 的 lambda 里写、在方法末尾读（参考 :541 的同一个形状）。
-        boolean[] rendered = { false };
+        // rendered = 这次调用是否真的提交了几何（姿态签名命中时跳过）；由共用的绘制体返回，
+        // 见 {@link #drawPreviewModel}。
+        boolean rendered = false;
         YSMSoundManager.setPreviewRendering(true);
         try {
             // The tile draws a detached preview entity, which has no player of its own; naming the owner here is what
@@ -536,71 +516,14 @@ public final class RenderUtil {
             GL11.glRotatef(135.0F, 0.0F, 1.0F, 0.0F);
             RenderHelper.enableStandardItemLighting();
             GL11.glRotatef(-135.0F, 0.0F, 1.0F, 0.0F);
-            withGuiEntityLighting(() -> {
-                AnimatedGeoModel provider = renderer.getGeoModelProvider();
-                ResourceLocation modelLocation = provider.getModelLocation(entity);
-                GeoModel model = provider.getModel(modelLocation);
-                // D-01: this path draws through IGeoRenderer#render instead of CustomPlayerRenderer#doRenderModel,
-                // and the renderer's own preview brace (previewRenderDepth -> ModelPoseSnapshot) is read only
-                // inside doRenderModel. The bracket around this call therefore never captured anything, so the
-                // tile's preview pose was left on the shared GeoModel for whichever path draws that model next
-                // (the world render and the HUD overlay both skip bones their animation does not drive).
-                // Upstream needs no brace here because a preview owns a dedicated entity; this port shares one
-                // model, so the tile has to put the pose back itself.
-                ModelPoseSnapshot pose = ModelPoseSnapshot.capture(model);
-                try {
-                    // C-07: the frame's partial tick, which is what upstream hands a catalog tile
-                    // (`CatalogModelButton.java:157-158` passes `Minecraft.getInstance().getFrameTime()` into
-                    // `RenderUtil.renderModelInGui`). The two limb values stay 0 because that is what upstream would
-                    // compute here too, not for convenience: it reads them off the preview entity's own walk animation
-                    // (`AnimatableEntity.java:287-296`), that entity is a stand-in which never walks, and no GUI or
-                    // preview code drives it.
-                    AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(
-                        entity,
-                        0,
-                        0,
-                        Minecraft.getMinecraft().timer.renderPartialTicks,
-                        false,
-                        Collections.emptyList());
-                    if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
-                        ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
-                    }
-                    // 姿态签名与上次真正画出去的相同 → 跳过几何提交，FBO 里的画面直接复用
-                    // （此时**不能**清 FBO，清除动作在下面才执行）。只跳过几何：上面那句
-                    // setLivingAnimations 照常跑 —— 眨眼/呼吸这类变化要先 tick 才可能被看见
-                    // （参考 util/RenderUtil.java:662-672 的同一条注释与顺序）。
-                    if (allowPoseSkip) {
-                        GeoStats.notePoseCheck();
-                        if (PreviewPoseCache.shouldSkip(
-                            ModelIdUtil.getMainId(modelId),
-                            previewPoseSignature(provider, model, textureId))) {
-                            GeoStats.notePoseSkip();
-                            return;
-                        }
-                    }
-                    if (clearBeforeDraw != null) {
-                        clearBeforeDraw.run();
-                    }
-                    Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
-                    diagnosePreviewPose(modelId, model);
-                    // The preview asks for a render type the way every upstream draw does - visible, not glowing, and
-                    // translucent when the model's art is - and hands it to the draw
-                    // (com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:18-39).
-                    renderer.render(
-                        model,
-                        entity,
-                        renderer.getRenderType(provider.getTextureLocation(entity), true, false,
-                            entity.hasTranslucentVertices()),
-                        0,
-                        1.0f,
-                        1.0f,
-                        1.0f,
-                        1.0f);
-                    rendered[0] = true;
-                } finally {
-                    pose.restore();
-                }
-            });
+            rendered = drawPreviewModel(
+                modelId,
+                textureId,
+                renderer,
+                entity,
+                clearBeforeDraw,
+                allowPoseSkip,
+                Minecraft.getMinecraft().timer.renderPartialTicks);
         } finally {
             YSMSoundManager.setPreviewRendering(false);
             RenderHelper.disableStandardItemLighting();
@@ -624,6 +547,106 @@ public final class RenderUtil {
             player.inventory.mainInventory[player.inventory.currentItem] = itemStacks[4];
             BackhandCompat.setOffhandItem(player, itemStacks[5]);
         }
+        return rendered;
+    }
+
+    /**
+     * Draws one preview animatable - the model its caller has already put on it - and puts the frame's pose back
+     * afterwards.
+     * <p>
+     * <b>This is the single preview draw the catalog and settings-panel previews go through</b>
+     * ({@link #renderModel}). What
+     * makes a preview safe is therefore written once, not once per caller: the pose brace that stops a preview from
+     * leaving its pose on the shared {@code GeoModel} (D-01 below), the frame's event carrying the pass the caller's
+     * preview bracket declared, the animatable's own hash code as the engine's unique id, the texture the model
+     * resolves for itself, and the render type every draw in this port asks for
+     * ({@code com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:18-39}).
+     * <p>
+     * What the two callers genuinely differ in stays with them, because it belongs to their placement rather than to
+     * the draw: {@link #renderModel} applies the tile's translate/scale/rotation and its own state isolation and
+     * rotates by the tile's fixed {@code yRotGui}, while the paper doll is placed by {@link #renderPlayerEntity}, is
+     * rotated by the live body yaw, and isolates nothing - the entity it poses is the player being previewed, not a
+     * stand-in.
+     *
+     * @param partialTicks the frame's partial tick. For a catalog tile this is upstream's value, the one
+     *                     {@code CatalogModelButton.java:157-158} passes as {@code Minecraft.getInstance()
+     *                     .getFrameTime()}; the two limb values stay 0 because that is what upstream computes there
+     *                     too - it reads them off the preview entity's own walk animation
+     *                     ({@code AnimatableEntity.java:287-296}), and a preview entity never walks
+     * @param allowPoseSkip whether a catalog tile's pose signature may skip the geometry submission; the HUD doll
+     *                      passes {@code false} - it has no thumbnail to keep and is drawn once per bake
+     * @param clearBeforeDraw the caller's FBO clear, run only once the draw is really going to happen; may be
+     *                        {@code null}
+     * @return {@code true} when geometry was submitted
+     */
+    private static boolean drawPreviewModel(ResourceLocation modelId, ResourceLocation textureId,
+        GeoReplacedEntityRenderer renderer, CustomPlayerEntity entity, Runnable clearBeforeDraw, boolean allowPoseSkip,
+        float partialTicks) {
+        boolean[] rendered = { false };
+        withGuiEntityLighting(() -> {
+            AnimatedGeoModel provider = renderer.getGeoModelProvider();
+            ResourceLocation modelLocation = provider.getModelLocation(entity);
+            GeoModel model = provider.getModel(modelLocation);
+            // D-01: this path draws through IGeoRenderer#render instead of CustomPlayerRenderer#doRenderModel,
+            // and the renderer's own preview brace (previewRenderDepth -> ModelPoseSnapshot) is read only
+            // inside doRenderModel. The bracket around this call therefore never captured anything, so the
+            // tile's preview pose was left on the shared GeoModel for whichever path draws that model next
+            // (the world render and the HUD overlay both skip bones their animation does not drive).
+            // Upstream needs no brace here because a preview owns a dedicated entity; this port shares one
+            // model, so the tile has to put the pose back itself.
+            ModelPoseSnapshot pose = ModelPoseSnapshot.capture(model);
+            try {
+                AnimationEvent<CustomPlayerEntity> predicate = new AnimationEvent<>(
+                    entity,
+                    0,
+                    0,
+                    partialTicks,
+                    false,
+                    Collections.emptyList());
+                // The pass this frame belongs to, attached to the event the way the engine's own renderer attaches
+                // it to the events it builds (CustomPlayerRenderer#buildAnimationEvent). The bracket the caller
+                // opened is what says which pass this is - the inventory pass for the two GUI callers, the paper
+                // doll for the HUD.
+                predicate.setRenderContext(CustomPlayerRenderer.currentPreviewContext());
+                if (renderer.getGeoModelProvider() instanceof IAnimatableModel) {
+                    ((IAnimatableModel<CustomPlayerEntity>) renderer.getGeoModelProvider()).setLivingAnimations(entity, entity.hashCode(), predicate);
+                }
+                // 姿态签名与上次真正画出去的相同 → 跳过几何提交，FBO 里的画面直接复用
+                // （此时**不能**清 FBO，清除动作在下面才执行）。只跳过几何：上面那句
+                // setLivingAnimations 照常跑 —— 眨眼/呼吸这类变化要先 tick 才可能被看见
+                // （参考 util/RenderUtil.java:662-672 的同一条注释与顺序）。
+                if (allowPoseSkip) {
+                    GeoStats.notePoseCheck();
+                    if (PreviewPoseCache.shouldSkip(
+                        ModelIdUtil.getMainId(modelId),
+                        previewPoseSignature(provider, model, textureId))) {
+                        GeoStats.notePoseSkip();
+                        return;
+                    }
+                }
+                if (clearBeforeDraw != null) {
+                    clearBeforeDraw.run();
+                }
+                Minecraft.getMinecraft().getTextureManager().bindTexture(provider.getTextureLocation(entity));
+                diagnosePreviewPose(modelId, model);
+                // The preview asks for a render type the way every upstream draw does - visible, not glowing, and
+                // translucent when the model's art is - and hands it to the draw
+                // (com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:18-39).
+                renderer.render(
+                    model,
+                    entity,
+                    renderer.getRenderType(provider.getTextureLocation(entity), true, false,
+                        entity.hasTranslucentVertices()),
+                    0,
+                    1.0f,
+                    1.0f,
+                    1.0f,
+                    1.0f);
+                rendered[0] = true;
+            } finally {
+                pose.restore();
+            }
+        });
         return rendered[0];
     }
 
@@ -689,6 +712,7 @@ public final class RenderUtil {
             // Diagnostic only.
         }
     }
+
 
     /**
      * Draws the "extra player" overlay - the paper doll the HUD shows.
@@ -790,8 +814,7 @@ public final class RenderUtil {
 
             GL11.glTranslatef(0.0F, player.yOffset, 0.0F);
             withGuiEntityLighting(
-                () -> RenderManager.instance
-                    .renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, partialTicks));
+                () -> RenderManager.instance.renderEntityWithPosYaw(player, 0.0D, 0.0D, 0.0D, 0.0F, partialTicks));
         } finally {
             player.prevRenderYawOffset = savePrevBody;
             player.renderYawOffset = saveBody;

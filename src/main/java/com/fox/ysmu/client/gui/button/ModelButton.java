@@ -2,6 +2,8 @@ package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
+import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
@@ -48,6 +50,22 @@ public class ModelButton extends GuiButton {
     private boolean modelCacheWasFocused;
     /** 自动模式的墙钟累加器;只在 {@code Config.GUI_MODEL_PREVIEW_REFRESH < 0} 时使用。 */
     private final PreviewRefreshPolicy.Tracker previewRefresh = new PreviewRefreshPolicy.Tracker();
+    /**
+     * This tile's own preview animatable, created on the first bake and released by {@link #dispose()}.
+     * <p>
+     * Upstream gives every catalog card its own {@code CustomGuiPlayerEntity} - ten of them live in
+     * {@code PlayerModelScreen.java:56} and {@code CatalogModelButton.java:41} keeps the one its card draws with - so
+     * the card's identity is stable across frames and {@code CustomGuiPlayerEntity#determineImmutableContext}
+     * ({@code client/gui/CustomGuiPlayerEntity.java:43-46}) applies to it. This port used to draw every tile through
+     * one animatable cached per model id ({@code AnimatableCacheUtil.ANIMATABLE_CACHE}), i.e. a plain
+     * {@code CustomPlayerEntity} - the class the world draws with - which declares nothing and therefore could never
+     * present one stable pose per frame.
+     * <p>
+     * Created lazily rather than in the constructor because this screen is also reachable from the main menu, where
+     * there is no player and no world: {@link CustomGuiPlayerEntity#prepare} has nothing to prepare there and the tile
+     * is not drawn at all ({@code RenderUtil.renderEntityInInventory} returns early).
+     */
+    private CustomGuiPlayerEntity preview;
 
     public ModelButton(int id, int pX, int pY, Pair<ResourceLocation, List<ResourceLocation>> modelInfo,
                        ModelSelectionTarget target) {
@@ -62,21 +80,21 @@ public class ModelButton extends GuiButton {
     }
 
     /**
-     * CU-15 / CU-08（展示侧兜底）: 返回该模型应当应用的默认贴图。
-     * 贴图列表为空时返回 {@code null}（调用方跳过渲染与点击），避免 {@code get(0)} 抛
-     * {@code IndexOutOfBoundsException}（渲染期抛出会崩客户端）；非空时优先使用
-     * {@code Config.DEFAULT_MODEL_TEXTURE}，因为列表第 0 项的顺序会被 PlayerTextureScreen 的历史排序影响。
+     * Upstream's CatalogModelCardState.java:222-224 uses the model's declared default for the tile and selection.
+     * Reuse the renderer's model-local resolver rather than maintaining a second texture ladder. Empty texture
+     * lists still return null here, because a catalog tile must skip rendering and selection of a textureless model.
      */
     private ResourceLocation defaultTexture() {
-        List<ResourceLocation> textures = this.modelInfo.getRight();
+        return defaultTexture(this.modelInfo.getLeft(), this.modelInfo.getRight());
+    }
+
+    @Nullable
+    static ResourceLocation defaultTexture(ResourceLocation modelId, @Nullable List<ResourceLocation> textures) {
         if (textures == null || textures.isEmpty()) {
             return null;
         }
-        ResourceLocation preferred = ModelIdUtil.getSubModelId(this.modelInfo.getLeft(), Config.DEFAULT_MODEL_TEXTURE);
-        if (textures.contains(preferred)) {
-            return preferred;
-        }
-        return textures.get(0);
+        return CustomPlayerModel.resolveTexture(
+            modelId, textures, null, ClientModelManager.DECLARED_DEFAULT_TEXTURES.get(modelId));
     }
 
     /**
@@ -113,6 +131,20 @@ public class ModelButton extends GuiButton {
         this.fboCache.delete();
         this.previewRefresh.reset();
         this.modelCacheDirty = true;
+        // The tile's own animatable goes with it: an AnimationFactory that outlives its button keeps an FML ticker
+        // registered for a screen that no longer exists (CustomGuiPlayerEntity#close).
+        if (this.preview != null) {
+            this.preview.close();
+            this.preview = null;
+        }
+    }
+
+    /** This tile's preview animatable; see the field. Never {@code null} after the first call. */
+    private CustomGuiPlayerEntity previewEntity() {
+        if (this.preview == null) {
+            this.preview = new CustomGuiPlayerEntity();
+        }
+        return this.preview;
     }
 
     @Override
@@ -246,8 +278,9 @@ public class ModelButton extends GuiButton {
      *   <li>参考用 {@code ClientModelManager.SYNC_IN_PROGRESS} 在同步期间暂停烘焙;本仓的对应门是
      *       {@code isModelPublished}(调用方已经问过),所以这里不再重复判断。</li>
      *   <li>参考的悬停/焦点动画由它自己算动画名并写进实体;本仓把 {@code hovered}/{@code focused} 交给
-     *       {@code RenderUtil.renderEntityInInventory} 的 8 参数重载,由 {@code ModelPreviewAnimationState}
-     *       决定通道 —— 所以"动画名变了"这个重烘焙触发条件在这里就是悬停/选中状态的变化。</li>
+     *       {@code RenderUtil.renderEntityInInventory} 的 {@code hovered}/{@code focused}/{@code preview}
+     *       重载,由 {@code ModelPreviewAnimationState} 决定通道 —— 所以"动画名变了"这个重烘焙触发条件在这里就是
+     *       悬停/选中状态的变化。</li>
      *   <li>FBO 的清除从"烘焙前直接清"改成回调:姿态命中时不会走到清除,否则先清后跳过就是一张空白缩略图
      *       (参考 {@code :313-314})。</li>
      * </ul>
@@ -331,6 +364,7 @@ public class ModelButton extends GuiButton {
                 texture,
                 hovered && animations,
                 focused && animations,
+                this.previewEntity(),
                 // 注意:清除动作作为回调传进去,只有真的决定要画时才执行 —— 姿态没变会被跳过,
                 // 先清就会留下空白缩略图(参考 ModelButton.java:313-314)。
                 () -> {

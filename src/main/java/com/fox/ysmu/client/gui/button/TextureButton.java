@@ -2,6 +2,7 @@ package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
 import com.fox.ysmu.client.gui.ModelSelectionTarget;
 import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
 import com.fox.ysmu.util.FboCache;
@@ -38,6 +39,13 @@ public class TextureButton extends GuiButton {
     private boolean modelCacheWasSelected;
     /** 自动模式的墙钟累加器;只在 {@code Config.GUI_MODEL_PREVIEW_REFRESH < 0} 时使用。 */
     private final PreviewRefreshPolicy.Tracker previewRefresh = new PreviewRefreshPolicy.Tracker();
+    /**
+     * This tile's own preview animatable, created on the first bake and released by {@link #dispose()}; the same shape
+     * and the same reason as {@code ModelButton}'s field - upstream gives every catalog tile its own
+     * {@code CustomGuiPlayerEntity} ({@code PlayerTextureScreen.java:38,67}), so the tile's identity is stable across
+     * frames and the preview entity's immutability applies to it.
+     */
+    private CustomGuiPlayerEntity preview;
 
     public TextureButton(int id, int pX, int pY, ResourceLocation modelId, ResourceLocation textureId, ModelSelectionTarget target) {
         super(id, pX, pY, 54, 102, "");
@@ -60,6 +68,19 @@ public class TextureButton extends GuiButton {
         this.fboCache.delete();
         this.previewRefresh.reset();
         this.modelCacheDirty = true;
+        // The tile's own animatable goes with it; see ModelButton#dispose.
+        if (this.preview != null) {
+            this.preview.close();
+            this.preview = null;
+        }
+    }
+
+    /** This tile's preview animatable; see the field. Never {@code null} after the first call. */
+    private CustomGuiPlayerEntity previewEntity() {
+        if (this.preview == null) {
+            this.preview = new CustomGuiPlayerEntity();
+        }
+        return this.preview;
     }
 
     @Override
@@ -162,7 +183,7 @@ public class TextureButton extends GuiButton {
             try {
                 long bakeStart = System.nanoTime();
                 RenderUtil.renderEntityInInventory(this.xPosition + this.width / 2, this.yPosition + this.height / 2 + 24,
-                    35, mc.thePlayer, modelId, textureId, hovered, selected);
+                    35, mc.thePlayer, modelId, textureId, hovered, selected, this.previewEntity());
                 PreviewRefreshPolicy.noteBake((System.nanoTime() - bakeStart) / 1.0e6F);
             } finally {
                 GL11.glMatrixMode(GL11.GL_PROJECTION);

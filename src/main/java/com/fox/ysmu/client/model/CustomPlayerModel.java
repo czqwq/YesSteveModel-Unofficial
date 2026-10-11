@@ -183,7 +183,23 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         clearHeadPoseOffsets();
         List extraData = animationEvent.getExtraData();
         MolangParser parser = GeckoLibCache.getInstance().parser;
-        if (!Minecraft.getMinecraft()
+        if (animatable instanceof com.fox.ysmu.client.entity.CustomGuiPlayerEntity preview
+            && preview.getQueryPlayer() != null) {
+            // Upstream CustomGuiPlayerEntity owns its query entity, physics and processor. The approved off-model
+            // forms use the same shape, not the world owner temporarily posed by an inventory renderer.
+            EntityModelData previewData = new EntityModelData();
+            previewData.isSitting = preview.getQueryPlayer().isRiding();
+            previewData.isChild = preview.getQueryPlayer().isChild();
+            previewData.netHeadYaw = preview.getQueryPlayer().rotationYawHead - preview.getQueryPlayer().renderYawOffset;
+            previewData.headPitch = preview.getQueryPlayer().rotationPitch;
+            AnimationRegister.setParserValue(animationEvent, parser, previewData, preview.getQueryPlayer(), false);
+            try {
+                super.setLivingAnimations(animatable, instanceId, animationEvent);
+                com.fox.ysmu.client.roaming.ModelFormExecution.drain(preview);
+            } finally {
+                MolangPhysicsRuntime.end();
+            }
+        } else if (!Minecraft.getMinecraft()
             .isGamePaused() && extraData.size() == 1
             && extraData.get(0) instanceof EntityModelData data
             && animatable instanceof CustomPlayerEntity customPlayer
@@ -192,6 +208,10 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             AnimationRegister.setParserValue(animationEvent, parser, data, player, customPlayer.firesHumanoidHooks());
             try {
                 super.setLivingAnimations(animatable, instanceId, animationEvent);
+                // Upstream AnimationProcessor.java:259-265 executes form tasks in postProcess, after animation.
+                if (customPlayer.firesHumanoidHooks()) {
+                    com.fox.ysmu.client.roaming.ModelFormExecution.drain(customPlayer);
+                }
                 this.codeAnimation(animationEvent, data, player);
             } finally {
                 MolangPhysicsRuntime.end();

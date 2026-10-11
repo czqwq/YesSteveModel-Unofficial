@@ -45,9 +45,9 @@ public class PlayerTextureScreen extends GuiScreen {
         // 泄漏一张 GL 贴图(参考 PlayerTextureScreen.java:583-585 的同一处理)。
         this.disposePreviewButtons();
         this.buttonList.clear();
-        // Same as the model screen: a fresh visit starts the preview animations over.
+        // Same as the model screen: a fresh visit starts the preview animations over, and each tile owns (and
+        // disposes) its own animatable, so ANIMATABLE_CACHE is not cleared here - see PlayerModelScreen#initGui.
         com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
-        com.fox.ysmu.util.AnimatableCacheUtil.ANIMATABLE_CACHE.invalidateAll();
         com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;

@@ -46,6 +46,7 @@ import com.fox.ysmu.network.message.HandshakeMessage;
 import com.fox.ysmu.network.message.RequestLoadModel;
 import com.fox.ysmu.network.message.SetPlayAnimation;
 import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
+import software.bernie.geckolib3.geo.RenderContext;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.SessionScope;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
@@ -147,6 +148,8 @@ public class ClientEventHandler {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
+        // Reference ClientEventHandler.java:134-137: drive existing password/entity waits without a pool worker.
+        com.fox.ysmu.util.TickScheduler.client().runDueTasks();
         // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
         // below, which only guards the one-shot model load. Cheap when nothing changed.
         com.fox.ysmu.client.roaming.ClientRoamingSync.flushPending();
@@ -317,11 +320,29 @@ public class ClientEventHandler {
      */
     private static void renderSelfGuiPlayer(CustomPlayerRenderer renderer, EntityPlayer player, float partialTicks) {
         PlayerPreviousRotationSnapshot snapshot = PlayerPreviousRotationSnapshot.capture(player);
-        // This is a preview render, not the world: it plays the pack's preview animation, whose pose must not leak
-        // into the world's own animation state (upstream keeps a separate entity for exactly this reason).
-        CustomPlayerRenderer.beginPreviewRender();
+        // This is a preview bracket, not the world pass: it is what makes CustomPlayerRenderer restore the pose the
+        // draw leaves on the shared GeoModel (previewRenderDepth -> ModelPoseSnapshot) and what marks the frame as a
+        // preview for the emission gate.
+        //
+        // The pass is the page's own: with a screen open this one entry point is drawing the world-while-a-screen-is-up
+        // pass, and without one it is the HUD paper doll. Upstream splits the two across two setters
+        // (util/RenderUtil.java:445 for the doll, mixin/client/InventoryScreenMixin.java:16 for the inventory doll), and
+        // its world pass sets neither; this port has one entry point for the first two, so the screen decides, which is
+        // the answer FrameRenderQueries inferred before the context existed. The two known residuals of that heuristic
+        // are unchanged by this method and recorded here: the doll behind a non-covering screen still reads as the
+        // inventory pass, and a screen open during the world pass makes that pass the inventory pass.
+        CustomPlayerRenderer.beginPreviewRender(
+            Minecraft.getMinecraft().currentScreen != null ? RenderContext.inventoryPass()
+                : RenderContext.paperDollPass());
         try {
             syncPreviousRotationsToPreview(player);
+            // REVERTED (42c): this used to branch on `RenderUtil.isPlayerPreviewPass()` and draw the HUD doll through
+            // its own preview animatable. That changed the doll's placement (it is drawn on the matrix
+            // `RenderUtil#renderPlayerEntity` already set up, and the tile-style framing does not compose with it) and
+            // dropped its layers, while the flicker it was meant to remove remained. The doll goes back through the
+            // world renderer, exactly as before, so `HUD_FOLLOW_*`, the `0 - player.yOffset` placement and the layer
+            // pass (held item, head slot, elytra) are all unchanged. See
+            // `.agent/phase42-immutable-render-context.md` for the reverted approach and what remains open.
             RenderUtil.withGuiEntityLighting(() -> renderer.doRender(
                 player,
                 0,
@@ -534,6 +555,13 @@ public class ClientEventHandler {
         if (!moveKey || mc.currentScreen != null || player == null) {
             return;
         }
+        // D1: the roulette's movement lock. Upstream returns before stopping the animation when the lock is on
+        // (PlayerMoveEvent.java:44-46), which is the whole point of the lock: play an extra animation while walking.
+        // This must stay *after* isMoveKey(): that call consumes the movement key's one-shot pressTime (CU-04), and
+        // the lock decides only whether we stop, never whether the signal is consumed.
+        if (com.fox.ysmu.client.input.WheelAnimationLock.isLocked()) {
+            return;
+        }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         if (eep != null && eep.isPlayAnimation()) {
             NetworkHandler.CHANNEL.sendToServer(SetPlayAnimation.stop());
@@ -646,6 +674,8 @@ public class ClientEventHandler {
      */
     private static void clearClientRuntimeState() {
         ClientModelManager.clearConnectionState();
+        RequestLoadModel.clearPendingLoads();
+        com.fox.ysmu.util.TickScheduler.client().clear();
         RemotePlayerAnimationQueries.clear();
         RemotePlayerMotionStates.clear();
         RemoteAnimationVariables.clear();
@@ -659,7 +689,10 @@ public class ClientEventHandler {
         // 的注释把这条前提写得很清楚，并因此**故意不碰**渲染线程读的普通 HashMap。所以这一项不在本线程直接清，
         // 而是按本仓既有的"要碰渲染线程状态就回客户端线程"约定排队（AGENTS.md 的 Network and Threading
         // Rules）。清的是"换服务器后同一个模型 id 可能指向另一份几何"这类残留，晚一帧无影响。
-        Minecraft.getMinecraft().func_152344_a(RenderUtil::clearPreviewPoseCache);
+        Minecraft.getMinecraft().func_152344_a(() -> {
+            RenderUtil.clearPreviewPoseCache();
+            com.fox.ysmu.client.roaming.ModelFormExecution.clear();
+        });
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
         // 防滑步的平滑倍速同样按玩家 UUID 保存，是同一类不会自然释放的 per-player 状态：不清的话
@@ -675,6 +708,9 @@ public class ClientEventHandler {
         // message again - the state the reference's own field comment ("this session", client/ClientEventHandler.java:53)
         // describes but never implements, because it never writes the field false. See the field's javadoc.
         setWelcomeShown(false);
+        // D1: the roulette's movement lock is a per-session client preference, so a disconnect/new world drops it
+        // instead of leaving the next session locked. Upstream keeps it in a static with no reset at all.
+        com.fox.ysmu.client.input.WheelAnimationLock.reset();
     }
 
     private static boolean isVanillaPlayer(ResourceLocation modelId) {

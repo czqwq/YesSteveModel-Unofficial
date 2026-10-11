@@ -1,5 +1,7 @@
 package com.fox.ysmu.client.renderer;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,6 +16,7 @@ import net.minecraftforge.common.MinecraftForge;
 import org.jetbrains.annotations.Nullable;
 
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.entity.CustomFirstPersonArmEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
@@ -27,8 +30,10 @@ import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
+import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
+import software.bernie.geckolib3.geo.RenderContext;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
@@ -54,9 +59,19 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * <p>
      * A preview plays an animation of its own and writes it into the shared {@code GeoModel}, so the world would
      * inherit that pose afterwards; the preview paths therefore bracket themselves with
-     * {@link #beginPreviewRender()}/{@link #endPreviewRender()} and this renderer restores the pose in between.
+     * {@link #beginPreviewRender(RenderContext)}/{@link #endPreviewRender()} and this renderer restores the pose in
+     * between.
      */
     private static int previewRenderDepth;
+
+    /**
+     * The render pass of each open preview bracket, innermost first; see {@link #beginPreviewRender(RenderContext)}.
+     * <p>
+     * The depth alone answers "is a preview being drawn"; the pass answers "which one", which is what the pack-facing
+     * {@code ysm.rendering_in_inventory} / {@code ysm.rendering_in_paperdoll} queries and the frame's immutability bit
+     * are read from ({@link software.bernie.geckolib3.geo.RenderContext}).
+     */
+    private static final Deque<RenderContext> previewContexts = new ArrayDeque<>();
 
     @SuppressWarnings("all")
     public CustomPlayerRenderer() {
@@ -191,9 +206,18 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         return true;
     }
 
-    /** Marks the start of a preview render (model GUI, information screen, HUD overlay). */
-    public static void beginPreviewRender() {
+    /**
+     * Marks the start of a preview render (model GUI, information screen, HUD overlay) drawn in {@code context}.
+     * <p>
+     * Upstream carries the same fact as ambient flags - {@code RenderUtil.setRenderingInInventory(true)} around its
+     * texture screen ({@code util/RenderUtil.java:108}), {@code setRenderingInPaperDoll(true)} around its HUD doll
+     * ({@code :445}) - and reads them back at event-creation time ({@code extractRenderContext}, {@code :57-67}). This
+     * port keeps that shape on the bracket it already had, so the pass is available to the event the engine builds
+     * for the same frame.
+     */
+    public static void beginPreviewRender(RenderContext context) {
         previewRenderDepth++;
+        previewContexts.push(context == null ? RenderContext.NONE : context);
     }
 
     /** Marks the end of a preview render; safe with nesting and in a {@code finally}. */
@@ -201,11 +225,57 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         if (previewRenderDepth > 0) {
             previewRenderDepth--;
         }
+        if (!previewContexts.isEmpty()) {
+            previewContexts.pop();
+        }
     }
 
     /** Whether a preview render is currently in progress. */
     public static boolean isPreviewRendering() {
         return previewRenderDepth > 0;
+    }
+
+    /**
+     * The pass of the innermost open preview bracket, or {@code null} when no bracket is open - i.e. the world pass,
+     * which upstream also classifies as neither GUI flag.
+     */
+    @Nullable
+    public static RenderContext currentPreviewContext() {
+        return previewContexts.peek();
+    }
+
+    /**
+     * Attaches this frame's pass to every event this renderer builds.
+     * <p>
+     * The host builds its own event for the GUI tiles and the settings panel's form preview
+     * ({@code RenderUtil#renderModel}), but the world pass, the HUD doll and the first-person arm all take the event
+     * the engine builds in {@code GeoReplacedEntityRenderer#buildAnimationEvent}
+     * ({@code GeoReplacedEntityRenderer#doRender:88} and {@code FirstPersonHandRenderer#poseFirstPersonArm:290}). This
+     * override is the host's only reach into those, and without it the HUD doll's frame would answer "neither pass"
+     * where {@code FrameRenderQueries} used to infer the paper doll.
+     */
+    @Override
+    public AnimationEvent<CustomPlayerEntity> buildAnimationEvent(EntityLivingBase entity, float partialTicks,
+        CustomPlayerEntity eventAnimatable) {
+        AnimationEvent<CustomPlayerEntity> event = super.buildAnimationEvent(entity, partialTicks, eventAnimatable);
+        event.setRenderContext(renderContextFor(eventAnimatable));
+        return event;
+    }
+
+    /**
+     * The pass an event built by this renderer belongs to.
+     * <p>
+     * The arm answers first because it is its own animatable <em>and</em> its own pass, and its event is built outside
+     * every preview bracket ({@code FirstPersonHandRenderer} draws the held item, not a preview). Upstream answers
+     * {@code firstPersonMod} from {@code FirstPersonCompat.isRenderingPlayer()}; in this port the first-person pass
+     * <em>is</em> that arm's frame, which is also how {@code FirstPersonModHideVariable} identifies it.
+     */
+    private static RenderContext renderContextFor(CustomPlayerEntity eventAnimatable) {
+        if (eventAnimatable instanceof CustomFirstPersonArmEntity) {
+            return RenderContext.firstPersonPass();
+        }
+        RenderContext preview = currentPreviewContext();
+        return preview == null ? RenderContext.NONE : preview;
     }
 
     /**
