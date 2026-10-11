@@ -38,6 +38,10 @@ final class EntityQueryStubs {
     /** A living non-player: answers the living-only names and 20 for {@code ysm.food_level}. */
     static final class PigStub extends EntityPig {
 
+        void setJumpInput(boolean jumping) {
+            this.isJumping = jumping;
+        }
+
         PigStub() {
             super(null);
         }

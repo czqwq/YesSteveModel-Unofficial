@@ -101,6 +101,20 @@ class YsmSoundFunctionTest {
         assertDoesNotThrow(() -> parse("ysm.play_sound('horn','horn')"));
     }
 
+    @Test
+    void numericAndStringIdsUseUpstreamNamespacesAndDefaults() {
+        assertEquals(Integer.valueOf(-17), YsmSoundFunction.soundId(17));
+        assertEquals(Integer.valueOf(0), YsmSoundFunction.soundId(0));
+        assertEquals(null, YsmSoundFunction.soundId(-17));
+        int pooled = software.bernie.geckolib3.core.molang.MolangStringPool.intern("custom-id-not-asset");
+        assertEquals(Integer.valueOf(pooled), YsmSoundFunction.soundId(pooled));
+        assertEquals(0.001f, YsmSoundFunction.configuredValue(-3));
+        assertEquals(1000f, YsmSoundFunction.configuredValue(2000));
+        assertEquals(0.5f, YsmSoundFunction.configuredValue(0.5));
+        assertParses("ysm.play_sound(17,'horn',7)");
+        assertParses("ysm.stop_sound(17)");
+    }
+
     private static void assertParses(String expression) {
         assertDoesNotThrow(() -> parse(expression), "应能解析: " + expression);
     }

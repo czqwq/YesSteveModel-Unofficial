@@ -78,7 +78,7 @@ class EntityQueryBindingsTest {
         Set<String> bound = new HashSet<>(MolangParser.VARIABLES.keySet());
         Set<String> declared = new HashSet<>(Arrays.asList(EntityQueryBindings.PUBLISHED_NAMES));
 
-        assertEquals(59, EntityQueryBindings.PUBLISHED_NAMES.length, "the count is part of the credential");
+        assertEquals(61, EntityQueryBindings.PUBLISHED_NAMES.length, "the count is part of the credential");
         assertEquals(EntityQueryBindings.PUBLISHED_NAMES.length, declared.size(), "the list must not repeat a name");
         assertEquals(declared, bound, "PUBLISHED_NAMES must be exactly what apply() writes");
     }
@@ -104,6 +104,39 @@ class EntityQueryBindingsTest {
         assertEquals(0.0D, value("query.health"), 0.0D, "a boat is not a living entity");
         assertEquals(0.0D, value("ysm.has_helmet"), 0.0D, "a boat is not a player");
         assertEquals(0.0D, value("ysm.food_level"), 0.0D, "a boat is neither player nor living entity");
+    }
+
+    /** Upstream's playerVar guard, not a living jump-input field, decides applicability. */
+    @Test
+    void airborneSubEntitiesResetPlayerJumping() {
+        PigStub pig = new PigStub();
+        pig.setJumpInput(true); // 1.7.10's protected isJumping exists, but upstream does not read it.
+        for (net.minecraft.entity.Entity entity : new net.minecraft.entity.Entity[] { new BoatStub(), pig }) {
+            entity.onGround = false;
+            entity.motionY = 0.0D; // apex: neither motion nor input makes a non-player applicable
+            this.parser.setValue("query.is_jumping", () -> 1.0D);
+
+            EntityQueryBindings.apply(this.parser, entity, 0.5F);
+
+            assertEquals(0.0D, value("query.is_jumping"), 0.0D);
+        }
+    }
+
+    @Test
+    void rebindingPreservesParsedVariableIdentityAndRestoresTheNextFramesSupplier() {
+        for (String name : EntityQueryBindings.PUBLISHED_NAMES) {
+            this.parser.setValue(name, () -> -1234.0D);
+        }
+        LazyVariable jumping = MolangParser.VARIABLES.get("query.is_jumping");
+        EntityQueryBindings.apply(this.parser, new BoatStub(), 0.5F);
+        // Cached parsed expressions keep the LazyVariable identity, but must see the replacement supplier.
+        org.junit.jupiter.api.Assertions.assertSame(jumping, MolangParser.VARIABLES.get("query.is_jumping"));
+        assertEquals(0.0D, jumping.get());
+        for (String name : EntityQueryBindings.PUBLISHED_NAMES) {
+            this.parser.setValue(name, () -> -1234.0D);
+        }
+        assertEquals(-1234.0D, jumping.get());
+        assertEquals(-1234.0D, value("query.distance_from_camera"));
     }
 
     /** Two real entities in a row: the second one's values replace the first one's, name for name. */

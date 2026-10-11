@@ -9,7 +9,6 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.EtFuturumCompat;
 import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
-import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
 import com.fox.ysmu.client.animation.molang.CtrlArmorFunction;
 import com.fox.ysmu.client.animation.molang.CtrlHoldFunction;
 import com.fox.ysmu.client.animation.molang.CtrlItemFunction;
@@ -28,20 +27,29 @@ import com.fox.ysmu.client.animation.molang.QueryItemNameAnyFunction;
 import com.fox.ysmu.client.animation.molang.QueryItemTagFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionDeltaFunction;
 import com.fox.ysmu.client.animation.molang.QueryPositionFunction;
+import com.fox.ysmu.client.animation.molang.Rot2CameraFunction;
 import com.fox.ysmu.client.animation.molang.YsmDebugDumpFunction;
+import com.fox.ysmu.client.animation.molang.YsmDeferFunction;
 import com.fox.ysmu.client.animation.molang.YsmEffectLevelFunction;
+import com.fox.ysmu.client.animation.molang.YsmEntityQueries;
 import com.fox.ysmu.client.animation.molang.YsmModVersionFunction;
 import com.fox.ysmu.client.animation.molang.YsmSoundFunction;
 import com.fox.ysmu.client.animation.molang.YsmSyncFunction;
 import com.fox.ysmu.client.animation.molang.YsmRelativeBlockNameFunction;
+import com.fox.ysmu.client.animation.molang.YsmWorldQueries;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
+import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangStringPool;
+import software.bernie.geckolib3.core.molang.functions.BoneColor;
+import software.bernie.geckolib3.core.molang.functions.BoneGlow;
+import software.bernie.geckolib3.core.molang.functions.BoneTransparency;
 import software.bernie.geckolib3.model.provider.data.EntityModelData;
 import software.bernie.geckolib3.molang.util.PersonView;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -167,6 +175,205 @@ public class AnimationRegister {
         parser.register(new LazyVariable("false", 0));
         registerQueryVariables(parser);
         registerYsmVariables(parser);
+        registerPackFacingVariables(parser);
+    }
+
+    /**
+     * The pack-facing names this task adds to the keyframe path's registry: upstream's
+     * {@code ysm.first_person_mod_hide} (A-3), the "1.7.10 has a value source, it was just never wired up" group from
+     * {@code .agent/audit-pack-facing-surface.md} §3 (A-5), the {@code query.any/all_animations_finished} pair (A-6),
+     * and the names of mods that have no 1.7.10 counterpart (A-6, {@link #registerThirdPartyCompatPlaceholders}).
+     *
+     * <p>Why registering matters even for the names whose value is a constant: an unknown <em>variable</em> is not an
+     * error in this legacy parser - {@code MolangParser#getVariable} creates it as a silent 0 - so a missing name and a
+     * name that is legitimately false are indistinguishable to a pack author. Registering each one with its upstream
+     * default makes "this name is answered" explicit, and the audit's §3 table is the list of names that were silently
+     * reading 0 while upstream answered something real.
+     *
+     * <p>Two kinds of value live here, and the difference is the input they need:
+     * <ul>
+     * <li>values that belong to the <em>frame entity</em> (or its world) are bound once with a supplier reading
+     * {@link MolangFrameContext}, which is published per frame for players and sub-entities alike - so these work on
+     * the arrow/vehicle path too, which never reaches {@link #setParserValue};</li>
+     * <li>values that belong to <em>which pass this frame is</em> (the animatable, the crosshair of the local client,
+     * the controller the engine is processing) are only known while the frame's {@link AnimationEvent} is in hand, so
+     * they are registered here and bound per frame in {@link #setYsmValues}.</li>
+     * </ul>
+     *
+     * <p>Package-private rather than private, like {@code EntityQueryBindings#PUBLISHED_NAMES} is public: a unit test
+     * registers this group onto a fresh parser and checks the names and defaults without the once-per-JVM
+     * {@link #registerVariables} guard getting in the way.
+     */
+    static void registerPackFacingVariables(MolangParser parser) {
+        // ---- A-3: ysm.first_person_mod_hide --------------------------------------------------------------
+        // Upstream: playerVar("first_person_mod_hide", new FirstPersonModHideVariable()) (YSMBinding.java:152).
+        // It was registered as a commented-out constant FALSE (the line above registerYsmVariables' end), which is
+        // still "never true" for a pack. The value is bound per frame in setYsmValues; see the variable class.
+        parser.register(new LazyVariable("ysm.first_person_mod_hide", MolangUtils.FALSE));
+
+        // ---- A-5: values whose source is the frame entity's world or the local client's crosshair ---------
+        // SOURCE(上游 1.20): YSMBinding.java:89 (weather), :90 (dimension_name), :101 (block_light),
+        //   :102 (sky_light), :108 (is_open_air), :109 (eye_in_water), :126 (ladder_facing),
+        //   :177-178 (hit_target_id / hit_target_type). Every method in YsmWorldQueries names its own substitute.
+        parser.register(new LazyVariable("ysm.weather", 0));
+        parser.setValue("ysm.weather", YsmWorldQueries::weather);
+        parser.register(new LazyVariable("ysm.dimension_name", MolangStringPool.EMPTY_ID));
+        parser.setValue("ysm.dimension_name", YsmWorldQueries::dimensionName);
+        parser.register(new LazyVariable("ysm.block_light", 0));
+        parser.setValue("ysm.block_light", YsmWorldQueries::blockLight);
+        parser.register(new LazyVariable("ysm.sky_light", 0));
+        parser.setValue("ysm.sky_light", YsmWorldQueries::skyLight);
+        parser.register(new LazyVariable("ysm.is_open_air", MolangUtils.FALSE));
+        parser.setValue("ysm.is_open_air", YsmWorldQueries::isOpenAir);
+        parser.register(new LazyVariable("ysm.eye_in_water", MolangUtils.FALSE));
+        parser.setValue("ysm.eye_in_water", YsmWorldQueries::eyeInWater);
+        parser.register(new LazyVariable("ysm.ladder_facing", 0));
+        parser.setValue("ysm.ladder_facing", YsmWorldQueries::ladderFacing);
+        parser.register(new LazyVariable("ysm.hit_target_id", MolangStringPool.EMPTY_ID));
+        parser.setValue("ysm.hit_target_id", YsmWorldQueries::hitTargetId);
+        parser.register(new LazyVariable("ysm.hit_target_type", MolangStringPool.EMPTY_ID));
+        parser.setValue("ysm.hit_target_type", YsmWorldQueries::hitTargetType);
+
+        // ---- A-5: values whose source is the frame entity itself ------------------------------------------
+        // SOURCE(上游 1.20): YSMBinding.java:111 (air_supply), :149 (attack_time), :158 (attack_damage),
+        //   :161 (movement_speed), :162 (knockback_resistance), :135-137 (xxa / yya / zza),
+        //   :97 (input_horizontal), :94 (ground_speed2), :92 (time_delta), :129-130 (entity_type / is_player).
+        //   See YsmEntityQueries.
+        parser.register(new LazyVariable("ysm.air_supply", 0));
+        parser.setValue("ysm.air_supply", YsmEntityQueries::airSupply);
+        parser.register(new LazyVariable("ysm.attack_time", 0));
+        parser.setValue("ysm.attack_time", YsmEntityQueries::attackTime);
+        // ysm.is_player / ysm.entity_type: upstream's livingEntityVar pair from the same getEntityType() helper
+        // (YSMBinding.java:129-131). `is_player` is the one a pack branches on ("only for players"), and it used to
+        // read a silent 0, i.e. every such branch took its non-player side.
+        parser.register(new LazyVariable("ysm.is_player", MolangUtils.FALSE));
+        parser.setValue("ysm.is_player", YsmEntityQueries::isPlayer);
+        parser.register(new LazyVariable("ysm.entity_type", MolangStringPool.EMPTY_ID));
+        parser.setValue("ysm.entity_type", YsmEntityQueries::entityType);
+        parser.register(new LazyVariable("ysm.attack_damage", 0));
+        parser.setValue("ysm.attack_damage", YsmEntityQueries::attackDamage);
+        parser.register(new LazyVariable("ysm.movement_speed", 0));
+        parser.setValue("ysm.movement_speed", YsmEntityQueries::movementSpeed);
+        parser.register(new LazyVariable("ysm.knockback_resistance", 0));
+        parser.setValue("ysm.knockback_resistance", YsmEntityQueries::knockbackResistance);
+        parser.register(new LazyVariable("ysm.xxa", 0));
+        parser.setValue("ysm.xxa", YsmEntityQueries::xxa);
+        parser.register(new LazyVariable("ysm.yya", 0));
+        parser.setValue("ysm.yya", YsmEntityQueries::yya);
+        parser.register(new LazyVariable("ysm.zza", 0));
+        parser.setValue("ysm.zza", YsmEntityQueries::zza);
+        parser.register(new LazyVariable("ysm.input_horizontal", 0));
+        parser.setValue("ysm.input_horizontal", YsmEntityQueries::inputHorizontal);
+        parser.register(new LazyVariable("ysm.ground_speed2", 0));
+        parser.setValue("ysm.ground_speed2", YsmEntityQueries::groundSpeed2);
+        // Upstream has this name as well as query.delta_time (YSMBinding.java:92 vs QueryBinding.java:63, the same
+        // expression); this port had only the latter (written by the engine per animation). Bound to that store
+        // rather than to a second frame clock - see YsmEntityQueries#timeDelta.
+        parser.register(new LazyVariable("ysm.time_delta", 1.0D / 20.0D));
+        parser.setValue("ysm.time_delta", YsmEntityQueries::timeDelta);
+
+        // ---- A-5: values that belong to which render pass this frame is (bound per frame in setYsmValues) -----
+        // SOURCE(上游 1.20): YSMBinding.java:151 (texture_name), :99 (rendering_in_paperdoll),
+        //   :100 (rendering_in_inventory). See FrameRenderQueries for the pass rules and the one residual.
+        parser.register(new LazyVariable("ysm.texture_name", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("ysm.rendering_in_inventory", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ysm.rendering_in_paperdoll", MolangUtils.FALSE));
+
+        // ---- A-6: the two animation-completion queries on the keyframe path -------------------------------
+        // Upstream binds them at QueryBinding.java:55-56 (`var`, from the controller context). The controller path
+        // here already answers them (OpenYsmControllerExpressionEvaluator#finishedAnimations), but nothing registered
+        // them for an animation file, so the same name was real in a controller condition and a silent 0 in a
+        // keyframe. The value is bound per frame in setYsmValues.
+        parser.register(new LazyVariable("query.any_animation_finished", MolangUtils.FALSE));
+        parser.register(new LazyVariable("query.all_animations_finished", MolangUtils.FALSE));
+
+        // ---- A-6: the names of mods that have no 1.7.10 counterpart ---------------------------------------
+        registerThirdPartyCompatPlaceholders(parser);
+    }
+
+    /**
+     * A-6: the 40 names belonging to mods that are not installed (24 {@code ctrl.*} and 16 {@code tlm.*}), registered
+     * as the constants upstream registers when the mod is absent.
+     *
+     * <p><b>Why register names for mods that cannot be installed here.</b> Upstream does it for exactly that reason:
+     * {@code CarryOnCompat#addEmptyBinding} carries the comment "没有安装此模组时，这些 molang 应该存在，否则会报错"
+     * ({@code client/compat/carryon/CarryOnCompat.java:49-54}) and {@code TLMBinding}'s class comment says the same
+     * for the maid mod's names ("为了兼容女仆新增的 molang，即使女仆模组未安装，也应该存在，否则动画会报错",
+     * {@code client/animation/molang/TLMBinding.java:7-9}). A pack writes the condition once and ships it; a client
+     * without the mod must still evaluate the rest of that expression. Some of these names are read by this port's own
+     * bundled assets - {@code builtin/default/animations/im.animation.json} reads {@code ctrl.im_delta} and
+     * {@code ctrl.im_pitch} in keyframe expressions - so "no 1.7.10 mod has them" does not mean "nothing reads them".
+     *
+     * <p>Types and defaults are upstream's, name by name, from the {@code addEmptyBinding} bodies: the type
+     * ({@code var} / {@code entityVar} / {@code livingEntityVar} / {@code playerVar} / {@code clientPlayerVar}) is
+     * recorded because it is part of the contract (upstream answers the registered default when the context entity is
+     * not of that type), but this legacy parser has a single flat variable table, so what is registered here is the
+     * default value itself. Booleans are {@code MolangUtils.FALSE}/{@code TRUE}, the numbers are upstream's own
+     * literals, and the string defaults are {@code StringUtils.EMPTY}, whose pooled id is
+     * {@link MolangStringPool#EMPTY_ID} - the same 0 a string comparison against {@code ''} lands on.
+     *
+     * <p>No value source is invented for any of them: a pack reading one gets upstream's "the mod is not there"
+     * answer, and there is nothing in 1.7.10 that could make it anything else.
+     */
+    private static void registerThirdPartyCompatPlaceholders(MolangParser parser) {
+        // ---- TACZ (TACZCompat.java:42-50, all livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.tac_hold_gun", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_gun_type", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("ctrl.tac_gun_id", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("ctrl.tac_is_fire", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_is_aim", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_is_reload", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_is_melee", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_is_draw", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.tac_fire_mode", MolangStringPool.EMPTY_ID));
+
+        // ---- Immersive Melodies (ImmersiveMelodiesCompat.java:33-37, all livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.im_pitch", 0));
+        parser.register(new LazyVariable("ctrl.im_volume", 0));
+        parser.register(new LazyVariable("ctrl.im_current", 0));
+        parser.register(new LazyVariable("ctrl.im_delta", 0));
+        parser.register(new LazyVariable("ctrl.im_time", 0));
+
+        // ---- Carry On (CarryOnCompat.java:53-54, livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.carryon_type", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("ctrl.carryon_is_princess", MolangUtils.FALSE));
+
+        // ---- SWEM (SwemCompat.java:41-42, livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.swem_is_ride", MolangUtils.FALSE));
+        parser.register(new LazyVariable("ctrl.swem_state", MolangStringPool.EMPTY_ID));
+
+        // ---- Create (CreateCompat.java:34-36, playerVar; the same default on both branches) ----
+        parser.register(new LazyVariable("ctrl.create_hanging_skyhook", MolangUtils.FALSE));
+        // ---- Sophisticated Backpacks (SophisticatedCompat.java:72, livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.has_sophisticated_backpack", MolangUtils.FALSE));
+        // ---- Iron's Spells 'n Spellbooks (IronsSpellBooksCompat.java:44, clientPlayerVar) ----
+        parser.register(new LazyVariable("ctrl.iss_animation", MolangStringPool.EMPTY_ID));
+        // ---- ParCool (ParCoolCompat.java:89, livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.parcool_state", MolangStringPool.EMPTY_ID));
+        // ---- SlashBlade (SlashBladeCompat.java:80, livingEntityVar) ----
+        parser.register(new LazyVariable("ctrl.slashblade_animation", MolangStringPool.EMPTY_ID));
+        // ---- Better Combat (BetterCombatCompat.java:34, clientPlayerVar) ----
+        parser.register(new LazyVariable("ctrl.bcombat_attack_animation", MolangStringPool.EMPTY_ID));
+
+        // ---- Touhou Little Maid (TlmClientCompat.java:118-133, all livingEntityVar) ----
+        parser.register(new LazyVariable("tlm.is_begging", MolangUtils.FALSE));
+        parser.register(new LazyVariable("tlm.is_sitting", MolangUtils.FALSE));
+        parser.register(new LazyVariable("tlm.has_backpack", MolangUtils.FALSE));
+        parser.register(new LazyVariable("tlm.favorability_point", 0));
+        parser.register(new LazyVariable("tlm.favorability_level", 0));
+        parser.register(new LazyVariable("tlm.task_id", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("tlm.schedule", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("tlm.activity", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("tlm.gomoku_win_count", 0));
+        // Upstream's odd one out: the rank default is 1, not 0 (TlmClientCompat.java:127).
+        parser.register(new LazyVariable("tlm.gomoku_rank", 1));
+        parser.register(new LazyVariable("tlm.game_statue", MolangStringPool.EMPTY_ID));
+        parser.register(new LazyVariable("tlm.backpack_type", MolangStringPool.EMPTY_ID));
+        // is_entity is *true* by default (TlmClientCompat.java:130): a name that is not a maid is an ordinary entity.
+        parser.register(new LazyVariable("tlm.is_entity", MolangUtils.TRUE));
+        parser.register(new LazyVariable("tlm.is_statue", MolangUtils.FALSE));
+        parser.register(new LazyVariable("tlm.is_garage_kit", MolangUtils.FALSE));
+        parser.register(new LazyVariable("tlm.show_item", MolangStringPool.EMPTY_ID));
     }
 
     /**
@@ -295,6 +502,20 @@ public class AnimationRegister {
         //   functions/RideCheck.java:28-72（type = vehicle/passenger，matcher = $实体ID / #实体标签）。
         // 1.7.10 没有实体标签管理器，所以只有 $ 那一半能回答（见 CtrlRideFunction 的类注释）。
         functions.put("ctrl.ride", CtrlRideFunction.class);
+        // A-4: the three per-bone render functions upstream registers under the `ysm.` prefix
+        // (YSMBinding.java:83-85 `function("bone_color"/"bone_transparency"/"bone_glow", …)`, mounted under `ysm` by
+        // CustomMolangParser.java:47). The port had them only under their bare names (MolangParser.doCoreRemaps), and
+        // an unknown *function* is not a silent 0 like an unknown variable: the whole keyframe expression fails to
+        // parse and the channel is dropped. Both spellings stay: the bare name is this port's existing extension, and
+        // the prefixed one is what a pack written for upstream calls.
+        functions.put("ysm.bone_color", BoneColor.class);
+        functions.put("ysm.bone_transparency", BoneTransparency.class);
+        functions.put("ysm.bone_glow", BoneGlow.class);
+        // A-4: query.rotation_to_camera(axis) - upstream QueryBinding.java:47, body Rot2Camera.java:9-27.
+        functions.put("query.rotation_to_camera", Rot2CameraFunction.class);
+        // A-4: ysm.defer(name, args...) - upstream YSMBinding.java:191, body functions/Defer.java:8-21. See
+        // YsmDeferFunction for why the port's implementation is a no-op rather than a new deferral mechanism.
+        functions.put("ysm.defer", YsmDeferFunction.class);
     }
 
     /** One line, not one per repeat, so a caller that re-runs registration cannot spam the log. */
@@ -443,7 +664,8 @@ public class AnimationRegister {
         //   `entityVar("dump_biome", …)`.
         YsmDebugDumpFunction.registerDumpVariables(parser);
 
-        // parser.register(new LazyVariable("ysm.first_person_mod_hide", MolangUtils.FALSE));
+        // ysm.first_person_mod_hide used to be the commented-out constant below; it is registered (with a real value)
+        // by registerPackFacingVariables together with the rest of this task's names.
     }
 
     public static void setParserValue(AnimationEvent<CustomPlayerEntity> animationEvent, MolangParser parser,
@@ -496,13 +718,7 @@ public class AnimationRegister {
         // player-only names and the two remote-player refinements below are written afterwards, so they win.
         EntityQueryBindings.apply(parser, player, partialTicks);
         parser.setValue("query.actor_count", () -> mc.theWorld.loadedEntityList.size());
-        // 相机到实体的距离：第三人称必须算上镜头后退（原实现在本机玩家上恒为 0，
-        // 见 CameraDistanceQuery 的类注释）。相机是本机玩家的，所以这个名字只对玩家帧有意义：子实体帧
-        // (载具/投射物)按"不适用"返回 0，而不是返回本机玩家到镜头的距离。上游对任意实体都会给出到相机的距离
-        // (它读 context 的 entity)，本仓的 CameraDistanceQuery 是玩家形状的 —— 见 task-23 汇报里的遗留项。
-        parser.setValue(
-            "query.distance_from_camera",
-            () -> MolangFrameContext.getPlayer() == null ? 0.0D : CameraDistanceQuery.forPlayer(player));
+        // query.distance_from_camera is owned by EntityQueryBindings for players and sub-entities alike.
         // 头朝向来自帧数据(AnimationEvent/EntityModelData)，不是实体状态：上游把它注册成 `var`（读 ctx.data()，
         // YSMBinding.java:87-88），所以只有玩家帧有值。子实体帧没有 EntityModelData，按 0 回答。
         parser.setValue(
@@ -524,8 +740,9 @@ public class AnimationRegister {
 
     private static void setStateQueryValues(MolangParser parser, EntityPlayer player, Minecraft mc) {
         parser.setValue("query.is_first_person", () -> MolangUtils.booleanToFloat(mc.gameSettings.thirdPersonView == 0));
-        // 跳跃是**输入**状态（本仓 isPlayerJumping 读移动输入），上游对非玩家实体没有等价输入源，
-        // 所以子实体帧按"不适用"返回 0。
+        // Player refinement of the shared binding: isPlayerJumping is an airborne predicate, NOT jump input.
+        // Upstream QueryBinding.java:102 is playerVar with the same exclusions; non-player frames are reset by
+        // EntityQueryBindings. Preserve the port's remote flying/onGround handling here.
         parser.setValue(
             "query.is_jumping",
             () -> MolangFrameContext.getPlayer() == null ? 0.0D
@@ -539,7 +756,23 @@ public class AnimationRegister {
 
     private static void setWorldQueryValues(MolangParser parser, EntityPlayer player, Minecraft mc) {
         parser.setValue("query.moon_phase", () -> mc.theWorld.getMoonPhase());
-        parser.setValue("query.time_of_day", () -> MolangUtils.normalizeTime(mc.theWorld.getWorldTime()));
+        // A-1: `query.time_of_day` is the fraction of a day in [0,1) and `query.time_stamp` is the raw world time;
+        // upstream binds exactly those two (geckolib3/core/molang/builtin/QueryBinding.java:61-62:
+        // `normalizeTime(level.getDayTime())` and `level.getDayTime()`), and its normalizeTime is
+        // `((float)(timestamp + 6000L) / 24000) % 1` - the phase that puts midnight at 0 and dawn at 0.25
+        // (com/elfmcys/ysm/geckolib3/util/MolangUtils.java:30-32 in the upstream tree).
+        //
+        // The implementation called here is that one, and it was already vendored: the port carries two
+        // `MolangUtils.normalizeTime` methods, and the legacy one this line used to call
+        // (software/bernie/geckolib3/util/MolangUtils.java:8-10) is `timestamp / 24000` - no modulo and no phase, so
+        // 1.7.10's ever-growing World#getWorldTime() made `query.time_of_day` a number like 41.7 instead of a
+        // fraction of a day. That is a real defect against upstream, not a formatting difference: a pack asking
+        // `query.time_of_day > 0.5` for "night" got an answer that is true for most of the day after day two, and the
+        // controller path returned the raw timestamp for the same name (see the A-1 branch in
+        // OpenYsmControllerExpressionEvaluator#queryValue, which now calls the same method).
+        parser.setValue(
+            "query.time_of_day",
+            () -> software.bernie.geckolib3.molang.util.MolangUtils.normalizeTime(mc.theWorld.getWorldTime()));
         parser.setValue("query.time_stamp", () -> mc.theWorld.getWorldTime());
     }
 
@@ -572,13 +805,20 @@ public class AnimationRegister {
                 .toString();
             ResourceLocation hookModelId = animationEvent.getAnimatable()
                 .getMainModel();
-            if (PackUserFunctions.consumeInitPending(hookPlayerKey, hookModelId)) {
-                PackUserFunctions.fireHook("player_init", hookModelId);
+            boolean ui = com.fox.ysmu.client.renderer.CustomPlayerRenderer.isPreviewRendering();
+            Object soundOwner = ui ? animationEvent.getAnimatable() : player;
+            try (AutoCloseable soundScope = com.fox.ysmu.client.audio.MolangSoundContext.push(
+                soundOwner, ui ? null : player, hookModelId, null, ui, true)) {
+                if (PackUserFunctions.consumeInitPending(hookPlayerKey, hookModelId)) {
+                    PackUserFunctions.fireHook("player_init", hookModelId);
+                }
+                PackUserFunctions.fireHook(
+                    "player_update",
+                    hookModelId,
+                    PackUserFunctions.frameTicked(hookPlayerKey, animationEvent.getAnimationTick()) ? 1.0D : 0.0D);
+            } catch (Exception failure) {
+                com.fox.ysmu.ysmu.LOG.warn("Failed to execute player MoLang hook in its sound scope", failure);
             }
-            PackUserFunctions.fireHook(
-                "player_update",
-                hookModelId,
-                PackUserFunctions.frameTicked(hookPlayerKey, animationEvent.getAnimationTick()) ? 1.0D : 0.0D);
         }
 
         // ysm.has_mainhand / has_offhand / has_helmet / has_chest_plate / has_leggings / has_boots / has_elytra and
@@ -612,6 +852,54 @@ public class AnimationRegister {
         // EntityQueryBindings now, each with upstream's guard (livingEntityVar / playerVar / clientPlayerVar):
         // a boat answers false/0 for them instead of the local player's value, and a living non-player answers the
         // living-level ones (food_level is 20, matching YSMBinding.java:342-350).
+
+        // A-3 / A-5 / A-6: the values whose input is this frame's own AnimationEvent - which animatable is being
+        // drawn (the first-person arm, the selected texture, the screen-owned preview), which render pass that is,
+        // and the controller the engine is currently processing. Nothing else carries that, so unlike the
+        // MolangFrameContext-backed A-5 names (bound once at registration) these are rebound every frame. Their rules
+        // and their upstream sources live in FirstPersonModHideVariable, FrameRenderQueries and finishedAnimation().
+        parser.setValue("ysm.first_person_mod_hide", () -> FirstPersonModHideVariable.value(animationEvent));
+        parser.setValue("ysm.texture_name", () -> FrameRenderQueries.textureName(animationEvent));
+        parser.setValue("ysm.rendering_in_inventory", () -> FrameRenderQueries.renderingInInventory(animationEvent));
+        parser.setValue("ysm.rendering_in_paperdoll", () -> FrameRenderQueries.renderingInPaperdoll(animationEvent));
+        parser.setValue("query.any_animation_finished", () -> finishedAnimation(animationEvent));
+        parser.setValue("query.all_animations_finished", () -> finishedAnimation(animationEvent));
+    }
+
+    /**
+     * A-6: whether the controller the engine is processing right now has finished its animation - the value behind
+     * {@code query.any_animation_finished} / {@code query.all_animations_finished} on the keyframe path.
+     *
+     * <p>Upstream binds both as {@code var}s read from the controller context
+     * ({@code geckolib3/core/molang/builtin/QueryBinding.java:55-56}) and documents the two as the same answer, because
+     * a controller plays a single animation at a time ("目前控制器只能同时播放单一动画，所以两个 molang 都是一样的结果",
+     * {@code :54}); its coded controller sets both from the one {@code animationPlayer.currentAnimFinished()}
+     * ({@code geckolib3/core/controller/CodedAnimationController.java:103-104}). This port has that one flag on the
+     * engine's controller: {@code AnimationController#hasCurrentAnimationFinished()} ({@code AnimationController.java:370-371},
+     * set at {@code :1292}/{@code :1301} when the clip passes its end).
+     *
+     * <p>Why the <em>event's</em> controller: {@code AnimationProcessor} sets it to each controller immediately before
+     * that controller processes ({@code AnimationProcessor.java:196}), and keyframe {@code IValue}s are evaluated
+     * inside that processing ({@code AnimationController#getAnimationPointAtTick:1593-1617}), so the field is the
+     * controller whose animation file is being sampled. The event published here is the same object the processor
+     * mutates - {@code AnimatedGeoModel#setLivingAnimations:80-89} hands its {@code predicate} to
+     * {@code tickAnimation} - so a supplier closing over it reads the live field.
+     *
+     * <p><b>One gap, recorded rather than papered over:</b> a concurrent (Bedrock state machine) playback evaluates
+     * its children's keyframes with a <em>child</em> event the engine creates per child
+     * ({@code AnimationController#processConcurrent:1084-1091}), so during concurrent playback this reads the parent
+     * controller's flag - which the parent does not set, because it delegates instead of running its own animation.
+     * A faithful answer there needs the child's completion state, which the engine does not expose to the keyframe
+     * evaluator; the controller path's own answer for the same name
+     * ({@code OpenYsmControllerExpressionEvaluator#finishedAnimations}) is about the Bedrock runtime's states, not
+     * about this controller.
+     */
+    private static double finishedAnimation(AnimationEvent<?> animationEvent) {
+        AnimationController<?> controller = animationEvent == null ? null : animationEvent.getController();
+        if (controller == null) {
+            return MolangUtils.FALSE;
+        }
+        return MolangUtils.booleanToFloat(controller.hasCurrentAnimationFinished());
     }
 
     // hasCape / getEquipmentCount / getMaxUseDuration / getSlotValue moved to EntityQueryBindings together with the
@@ -637,18 +925,45 @@ public class AnimationRegister {
         return MolangUtils.booleanToFloat(player.isPlayerSleeping() || isBlinkTime);
     }
 
-    private static boolean isPlayerOnGround(EntityPlayer player) {
+    /**
+     * A-2: whether the player this frame is drawn for is on the ground. 1.7.10 does not sync {@code onGround} for a
+     * remote player, so the port extrapolates it through {@link RemotePlayerMotionStates} - the same refinement the
+     * entity-query table documents.
+     *
+     * <p>Public because the controller-path evaluator asks the very same question
+     * ({@code OpenYsmControllerExpressionEvaluator#isOnGround}) and a second copy of this rule is how
+     * {@code ctrl.fly} / {@code query.is_jumping} drifted from the keyframe path's states in the first place. The null
+     * guard is for the detached evaluation the evaluator also supports (a condition with no actor), which upstream's
+     * typed bindings answer false for.
+     */
+    public static boolean isPlayerOnGround(EntityPlayer player) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (player == null || mc == null) {
+            return false;
+        }
         // 本地玩家
-        if (player == Minecraft.getMinecraft().thePlayer) {
+        if (player == mc.thePlayer) {
             return player.onGround;
         } else {
             return RemotePlayerMotionStates.isOnGround(player);
         }
     }
 
-    private static boolean isPlayerFlying(EntityPlayer player) {
+    /**
+     * A-2: whether the player is flying, in the sense upstream's {@code QueryBinding} means it - the flight ability,
+     * or for a remote player the value the port extrapolates. <b>Elytra gliding is not flight here</b>, and that is
+     * deliberate: upstream's own {@code isFlying} ({@code geckolib3/core/molang/builtin/QueryBinding.java:115-121},
+     * used by {@code query.is_jumping} at {@code :102}) tests the flying ability only, and the glide has its own state
+     * ({@code elytra_fly}, registered at {@code registerFlyingStates}) and its own query. Counting the glide as flight
+     * was the controller path's divergence - see the note on the evaluator's delegation.
+     */
+    public static boolean isPlayerFlying(EntityPlayer player) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (player == null || mc == null) {
+            return false;
+        }
         // 本地玩家
-        if (player == Minecraft.getMinecraft().thePlayer) {
+        if (player == mc.thePlayer) {
             return player.capabilities.isFlying;
         } else {
             return RemotePlayerMotionStates.isFlying(player);
@@ -658,7 +973,8 @@ public class AnimationRegister {
     // A-15's moveInputVertical moved to EntityQueryBindings: its only caller was the ysm.input_vertical binding, and
     // the table needs it for the same name. It was already a pure function of the entity (position delta + the
     // interpolated body yaw, upstream MoveInputVariable.java:9-29), so parameterising it by the entity costs nothing
-    // and a vehicle now reads its own movement direction instead of its rider's.
+    // and a vehicle now reads its own movement direction instead of its rider's. A-5's sibling ysm.input_horizontal
+    // lives there too, as the same rule with a sine instead of a cosine.
 
     /**
      * Whether the player is in the airborne phase that plays the model's {@code jump} clip.
@@ -684,9 +1000,29 @@ public class AnimationRegister {
      * model's own {@code animations/main.animation.json}) back to neutral and out again. Remote players never had the
      * condition, so one player's jump looked different depending on who was watching it. The whole airborne phase is
      * now a single state for everyone, which is what upstream does.
+     * <p>
+     * A-2: the controller path's {@code query.is_jumping} / {@code ctrl.jump} now call this method instead of keeping
+     * their own copy with the removed condition still in it, so the two paths cannot disagree again. See the
+     * delegation note in {@code OpenYsmControllerExpressionEvaluator#isJumping}.
      */
-    private static boolean isPlayerJumping(EntityPlayer player) {
-        return !isPlayerFlying(player) && !player.isRiding() && !isPlayerOnGround(player) && !player.isInWater();
+    public static boolean isPlayerJumping(EntityPlayer player) {
+        if (player == null) {
+            return false;
+        }
+        return isPlayerJumping(
+            isPlayerFlying(player),
+            player.isRiding(),
+            isPlayerOnGround(player),
+            player.isInWater());
+    }
+
+    /**
+     * A-2: the rule itself, so the decision table is testable without an {@link EntityPlayer} (1.7.10's
+     * {@code EntityPlayer} constructor needs a live world and cannot exist in a unit JVM). Every caller above passes
+     * the frame's facts in, and no caller adds a term of its own: the two paths agree because there is one expression.
+     */
+    static boolean isPlayerJumping(boolean flying, boolean riding, boolean onGround, boolean inWater) {
+        return !flying && !riding && !onGround && !inWater;
     }
 
     /**

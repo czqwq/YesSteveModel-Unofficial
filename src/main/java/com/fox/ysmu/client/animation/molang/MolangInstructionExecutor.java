@@ -73,6 +73,15 @@ public final class MolangInstructionExecutor {
     }
 
     public static void execute(String instructions) {
+        execute(instructions, null);
+    }
+
+    /**
+     * Executes one timeline instruction string. {@code attribution} is a diagnostic label (controller/animation
+     * name) carried into the failure line so the log names WHERE a malformed instruction came from, not just the
+     * fragment itself.
+     */
+    public static void execute(String instructions, String attribution) {
         if (StringUtils.isBlank(instructions)) {
             return;
         }
@@ -81,7 +90,7 @@ public final class MolangInstructionExecutor {
         try {
             statements = MolangParser.splitStatements(instructions);
         } catch (MolangException e) {
-            warnExecutionFailure(instructions, e);
+            warnExecutionFailure(instructions, e, attribution);
             return;
         }
         for (String statement : statements) {
@@ -96,6 +105,7 @@ public final class MolangInstructionExecutor {
                     continue;
                 }
                 result.get();
+                noteInstructionExecuted();
                 noteAssignmentOwner(result);
             } catch (Exception e) {
                 // 只有真失败了才说"这个函数没注册"：以前是在解析**前**拿字面名去查 parser.functions，
@@ -103,7 +113,7 @@ public final class MolangInstructionExecutor {
                 // 会先被报成"未注册"，紧接着同一条指令又解析、执行成功 —— 一条自相矛盾的日志。
                 // 现在这两步都建立在失败事实上：真失败才报告，报告的名字也限于真正缺的那些。
                 warnUnregisteredFunctions(parser, trimmed);
-                warnExecutionFailure(trimmed, e);
+                warnExecutionFailure(trimmed, e, attribution);
             }
         }
     }
@@ -252,10 +262,46 @@ public final class MolangInstructionExecutor {
         return isIdentifierStart(c) || (c >= '0' && c <= '9') || c == '.' || c == '$' || c == ':';
     }
 
-    private static void warnExecutionFailure(String instruction, Exception e) {
+    /**
+     * DIAGNOSTIC (temporary): the first failure of each distinct instruction is reported once, which is why the log
+     * cannot say whether a failure happens on one frame or on every frame. This additionally counts the repeats and
+     * prints one line per second, so "the instruction fails once" and "the instruction fails 60 times a second" are
+     * distinguishable - the difference between a startup hiccup and a per-frame defect.
+     */
+    private static final java.util.Map<String, long[]> FAILURE_COUNTS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static long failureLogAt;
+    private static long executedCount;
+
+    private static void warnExecutionFailure(String instruction, Exception e, String attribution) {
+        long[] counter = FAILURE_COUNTS.computeIfAbsent(instruction, ignored -> new long[1]);
+        counter[0]++;
         if (WARNED_INSTRUCTIONS.add(instruction)) {
             ysmu.LOG
-                .warn("Failed to execute OpenYSM timeline Molang instruction '{}': {}", instruction, e.getMessage());
+                .warn("Failed to execute OpenYSM timeline Molang instruction '{}' from [{}]: {}", instruction,
+                    attribution == null ? "?" : attribution, e.getMessage());
         }
+        long now = System.currentTimeMillis();
+        if (now - failureLogAt >= 1000L) {
+            failureLogAt = now;
+            StringBuilder line = new StringBuilder();
+            for (java.util.Map.Entry<String, long[]> entry : FAILURE_COUNTS.entrySet()) {
+                line.append('[')
+                    .append(entry.getValue()[0])
+                    .append("x ")
+                    .append(entry.getKey())
+                    .append("] ");
+            }
+            ysmu.LOG.warn(
+                "timeline instruction failures so far (executed={} distinct={}): {}",
+                executedCount,
+                FAILURE_COUNTS.size(),
+                line.toString()
+                    .trim());
+        }
+    }
+
+    /** DIAGNOSTIC (temporary): how many instructions this client has actually run, for the failure line above. */
+    public static void noteInstructionExecuted() {
+        executedCount++;
     }
 }

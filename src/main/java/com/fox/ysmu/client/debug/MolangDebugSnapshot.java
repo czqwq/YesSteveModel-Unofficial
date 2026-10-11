@@ -12,6 +12,7 @@ import net.minecraft.util.ChatComponentText;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvaluator;
+import com.fox.ysmu.client.animation.molang.EntityQueryScope;
 import com.fox.ysmu.client.gui.debug.DebugOverlay;
 import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
@@ -125,49 +126,75 @@ public final class MolangDebugSnapshot {
     /**
      * 读取单个变量的当前值。
      *
+     * <p><b>读取带实体。</b>本类每次可能落到 {@link MolangParser#VARIABLES} 上的读取，都套在
+     * {@link #publishForRead(EntityPlayer)} 里：那张表里的 {@code query.*}/{@code ysm.*} 是"最后一次 apply 的那个
+     * 实体"的闭包（{@code EntityQueryBindings.apply}），而 overlay 画在帧末、{@code /ysm query} 在客户端 tick 里
+     * 读，两者都不是绘制本身 —— 没有这一层，它们读到的是本帧最后画的那个可绑定实体（可能是载具或箭），不是被问的
+     * 玩家。上游没有这个问题：它的每次读取都带 {@code IContext.entity()}
+     * （{@code geckolib3/core/molang/context/IContext.java:23-24}），本类的读取点就是那句结构在本仓的落点。</p>
+     *
      * @param name 变量名，如 {@code "ysm.person_view"}、{@code "query.health"}、{@code "v.roaming.bq_eye"}
      * @return 变量值，如果未知则返回 {@code NaN}
      */
     public static double queryVariable(String name) {
         // 语法糖：q. → query.，/ysm query 可直接输 q.xxx
         name = expandSearchAlias(name);
-        // ctrl.* 必须最先检查 —— MolangParser.VARIABLES 中可能有
-        // computeIfAbsent 残留的默认值 0.0 条目，会覆盖动态评估结果。
-        if (name.startsWith("ctrl.")) {
-                EntityPlayer p = localPlayerOrNull();
-            if (p == null) return Double.NaN;
-            return OpenYsmControllerExpressionEvaluator
-                .evaluateCtrlState(name.substring("ctrl.".length()), p);
-        }
-        // 动画完成查询是控制器条件里动态计算的，MolangParser.VARIABLES 里的
-        // 静态注册值恒为 0，这里返回控制器求值缓存的最新真实值。
-        if ("query.any_animation_finished".equals(name)) {
-            return OpenYsmControllerExpressionEvaluator.getLastAnyAnimationFinished();
-        }
-        if ("query.all_animations_finished".equals(name)) {
-            return OpenYsmControllerExpressionEvaluator.getLastAllAnimationsFinished();
-        }
-        // 1. 静态注册变量 (query.* / ysm.* / math.*)
-        software.bernie.geckolib3.core.molang.LazyVariable var =
-            MolangParser.VARIABLES.get(name);
-        if (var != null) {
-            return var.get();
-        }
-        // 2. v.* 变量 — 先查最近一帧 ScopeState 快照（嵌套赋值/动画 timeline
-        //    写入的真实值，如 v.wet），再查本地玩家的漫游变量（GUI/轮盘设置的
-        //    值），最后回退 MolangParser.VARIABLES（顶层赋值写入的）。
-        if (name.startsWith("v.")) {
-            Double frameVal = MolangPhysicsRuntime.getLastFrameVariable(name);
-            if (frameVal != null) return frameVal;
-            Double roamingVal = roamingVariables().get(name);
-            if (roamingVal != null) return roamingVal;
-            // 也查一下 MolangParser.VARIABLES（InstrutionExecutor 写入的）
-            software.bernie.geckolib3.core.molang.LazyVariable gVar =
+        try (EntityQueryScope.Publication ignored = publishForRead(localPlayerOrNull())) {
+            // ctrl.* 必须最先检查 —— MolangParser.VARIABLES 中可能有
+            // computeIfAbsent 残留的默认值 0.0 条目，会覆盖动态评估结果。
+            if (name.startsWith("ctrl.")) {
+                    EntityPlayer p = localPlayerOrNull();
+                if (p == null) return Double.NaN;
+                return OpenYsmControllerExpressionEvaluator
+                    .evaluateCtrlState(name.substring("ctrl.".length()), p);
+            }
+            // 动画完成查询是控制器条件里动态计算的，MolangParser.VARIABLES 里的
+            // 静态注册值恒为 0，这里返回控制器求值缓存的最新真实值。
+            if ("query.any_animation_finished".equals(name)) {
+                return OpenYsmControllerExpressionEvaluator.getLastAnyAnimationFinished();
+            }
+            if ("query.all_animations_finished".equals(name)) {
+                return OpenYsmControllerExpressionEvaluator.getLastAllAnimationsFinished();
+            }
+            // 1. 静态注册变量 (query.* / ysm.* / math.*)
+            software.bernie.geckolib3.core.molang.LazyVariable var =
                 MolangParser.VARIABLES.get(name);
-            if (gVar != null) return gVar.get();
+            if (var != null) {
+                return var.get();
+            }
+            // 2. v.* 变量 — 先查最近一帧 ScopeState 快照（嵌套赋值/动画 timeline
+            //    写入的真实值，如 v.wet），再查本地玩家的漫游变量（GUI/轮盘设置的
+            //    值），最后回退 MolangParser.VARIABLES（顶层赋值写入的）。
+            if (name.startsWith("v.")) {
+                Double frameVal = MolangPhysicsRuntime.getLastFrameVariable(name);
+                if (frameVal != null) return frameVal;
+                Double roamingVal = roamingVariables().get(name);
+                if (roamingVal != null) return roamingVal;
+                // 也查一下 MolangParser.VARIABLES（InstrutionExecutor 写入的）
+                software.bernie.geckolib3.core.molang.LazyVariable gVar =
+                    MolangParser.VARIABLES.get(name);
+                if (gVar != null) return gVar.get();
+                return Double.NaN;
+            }
             return Double.NaN;
         }
-        return Double.NaN;
+    }
+
+    /**
+     * 一次读取期间，把 {@code player} 的 {@code query.*} / {@code ysm.*} 发布进共享表，读完还原。
+     *
+     * <p>这就是"读取永远带实体"在本仓的等价实现（上游 {@code IContext.entity()}，见
+     * {@code geckolib3/core/molang/context/IContext.java:23-24}）：帧内的绘制有自己的发布时序，帧外的读取在这里自己
+     * 发布。{@code player} 为 null（未进世界、或单测 JVM 里没有客户端，见 {@link #localPlayerOrNull()}）时返回空
+     * 发布，调用点本来就写好的分支不变。</p>
+     */
+    private static EntityQueryScope.Publication publishForRead(EntityPlayer player) {
+        if (player == null) {
+            return EntityQueryScope.NOTHING;
+        }
+        return EntityQueryScope.publishForRead(
+            software.bernie.geckolib3.resource.GeckoLibCache.getInstance().parser,
+            player);
     }
 
     /**
@@ -191,38 +218,40 @@ public final class MolangDebugSnapshot {
     public static Map<String, Double> queryWildcard(String pattern) {
         pattern = expandSearchAlias(pattern);
         Map<String, Double> result = new LinkedHashMap<>();
-        if (!pattern.endsWith("*")) {
-            double v = queryVariable(pattern);
-            if (!Double.isNaN(v)) result.put(pattern, v);
-            return result;
-        }
-        String prefix = pattern.substring(0, pattern.length() - 1);
-        // 扫描 MolangParser.VARIABLES 中的所有注册变量
-        for (Map.Entry<String, software.bernie.geckolib3.core.molang.LazyVariable> entry
-            : MolangParser.VARIABLES.entrySet()) {
-            if (entry.getKey().startsWith(prefix)) {
-                result.put(entry.getKey(), entry.getValue().get());
+        try (EntityQueryScope.Publication ignored = publishForRead(localPlayerOrNull())) {
+            if (!pattern.endsWith("*")) {
+                double v = queryVariable(pattern);
+                if (!Double.isNaN(v)) result.put(pattern, v);
+                return result;
             }
-        }
-        // v.roaming.* 通配符 — 扫描本地玩家的漫游变量
-        if ("v.roaming.*".equals(pattern) || "v.*".equals(pattern)) {
-            for (Map.Entry<String, Double> entry : roamingVariables().entrySet()) {
-                result.put(entry.getKey(), entry.getValue());
-            }
-            // 补充最近一帧 ScopeState 快照：动画嵌套赋值（如 v.wet）写入的值
-            // 不在漫游表里，也不在 MolangParser.VARIABLES，需从这里读。
-            for (Map.Entry<String, Double> entry
-                : MolangPhysicsRuntime.getLastFrameVariables().entrySet()) {
-                if ("v.*".equals(pattern) || entry.getKey().startsWith("v.roaming.")) {
-                    result.put(entry.getKey(), entry.getValue());
+            String prefix = pattern.substring(0, pattern.length() - 1);
+            // 扫描 MolangParser.VARIABLES 中的所有注册变量
+            for (Map.Entry<String, software.bernie.geckolib3.core.molang.LazyVariable> entry
+                : MolangParser.VARIABLES.entrySet()) {
+                if (entry.getKey().startsWith(prefix)) {
+                    result.put(entry.getKey(), entry.getValue().get());
                 }
             }
+            // v.roaming.* 通配符 — 扫描本地玩家的漫游变量
+            if ("v.roaming.*".equals(pattern) || "v.*".equals(pattern)) {
+                for (Map.Entry<String, Double> entry : roamingVariables().entrySet()) {
+                    result.put(entry.getKey(), entry.getValue());
+                }
+                // 补充最近一帧 ScopeState 快照：动画嵌套赋值（如 v.wet）写入的值
+                // 不在漫游表里，也不在 MolangParser.VARIABLES，需从这里读。
+                for (Map.Entry<String, Double> entry
+                    : MolangPhysicsRuntime.getLastFrameVariables().entrySet()) {
+                    if ("v.*".equals(pattern) || entry.getKey().startsWith("v.roaming.")) {
+                        result.put(entry.getKey(), entry.getValue());
+                    }
+                }
+            }
+            // query.* 通配符 — 补充动画完成查询的真实动态值
+            if (prefix.startsWith("query.")) {
+                addAnimationFinishedEntries(result);
+            }
+            return result;
         }
-        // query.* 通配符 — 补充动画完成查询的真实动态值
-        if (prefix.startsWith("query.")) {
-            addAnimationFinishedEntries(result);
-        }
-        return result;
     }
 
     /**
@@ -300,30 +329,34 @@ public final class MolangDebugSnapshot {
      */
     public static Map<String, Double> getAllVariables(EntityPlayer player) {
         Map<String, Double> result = new LinkedHashMap<>();
-        // MolangParser.VARIABLES 中的静态注册变量
-        for (Map.Entry<String, LazyVariable> entry : MolangParser.VARIABLES.entrySet()) {
-            result.put(entry.getKey(), entry.getValue().get());
-        }
-        // v.roaming.* 漫游变量
-        result.putAll(roamingVariables(player));
-        // 最近一帧 ScopeState 快照 — 覆盖 VARIABLES 中的默认值，反映动画嵌套赋值
-        // （如 v.wet）写入的真实帧值，并补充非 roaming 的 v.*（如 v.anim_ctrl）。
-        for (Map.Entry<String, Double> entry : MolangPhysicsRuntime.getLastFrameVariables().entrySet()) {
-            result.put(entry.getKey(), entry.getValue());
-        }
-        // ctrl.* 动态状态 — 使用 evaluator 的实时评估
-        if (player != null) {
-            // 状态名与判定都来自控制器路径那一份，别在这里再抄一个列表
-            // （抄漏 walk 就会显示"走路时 ctrl.idle=1"）。
-            for (String s : OpenYsmControllerExpressionEvaluator.CONTROLLER_STATE_NAMES) {
-                result.put("ctrl." + s,
-                    OpenYsmControllerExpressionEvaluator.evaluateCtrlState(s, player));
+        // 见 queryVariable 的说明：整趟读取期间发布 player 自己的 query.*/ysm.*，读完还原。overlay 每帧只走这一趟，
+        // 所以发布/还原各一次 —— 表里的值原本是本帧最后画的那个实体的。player 为 null 时是空发布，行为不变。
+        try (EntityQueryScope.Publication ignored = publishForRead(player)) {
+            // MolangParser.VARIABLES 中的静态注册变量
+            for (Map.Entry<String, LazyVariable> entry : MolangParser.VARIABLES.entrySet()) {
+                result.put(entry.getKey(), entry.getValue().get());
             }
+            // v.roaming.* 漫游变量
+            result.putAll(roamingVariables(player));
+            // 最近一帧 ScopeState 快照 — 覆盖 VARIABLES 中的默认值，反映动画嵌套赋值
+            // （如 v.wet）写入的真实帧值，并补充非 roaming 的 v.*（如 v.anim_ctrl）。
+            for (Map.Entry<String, Double> entry : MolangPhysicsRuntime.getLastFrameVariables().entrySet()) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+            // ctrl.* 动态状态 — 使用 evaluator 的实时评估
+            if (player != null) {
+                // 状态名与判定都来自控制器路径那一份，别在这里再抄一个列表
+                // （抄漏 walk 就会显示"走路时 ctrl.idle=1"）。
+                for (String s : OpenYsmControllerExpressionEvaluator.CONTROLLER_STATE_NAMES) {
+                    result.put("ctrl." + s,
+                        OpenYsmControllerExpressionEvaluator.evaluateCtrlState(s, player));
+                }
+            }
+            // 覆盖静态注册的动画完成查询，显示控制器条件求值出的真实动态值，
+            // 并补充各控制器单独的结果（query.<q>@<geckoControllerName>）。
+            addAnimationFinishedEntries(result);
+            return result;
         }
-        // 覆盖静态注册的动画完成查询，显示控制器条件求值出的真实动态值，
-        // 并补充各控制器单独的结果（query.<q>@<geckoControllerName>）。
-        addAnimationFinishedEntries(result);
-        return result;
     }
 
     /**
@@ -356,64 +389,67 @@ public final class MolangDebugSnapshot {
     public static Map<String, Double> resolveVariables(String pattern) {
         // 语法糖：q. → query.，/ysm query 可直接输 q.xxx
         pattern = expandSearchAlias(pattern);
-        // 1. 精确匹配
-        double exact = queryVariable(pattern);
-        if (!Double.isNaN(exact)) {
+        // 见 queryVariable 的说明：一次 /ysm query 的整趟匹配都在同一个实体作用域里读，读完还原。
+        try (EntityQueryScope.Publication ignored = publishForRead(localPlayerOrNull())) {
+            // 1. 精确匹配
+            double exact = queryVariable(pattern);
+            if (!Double.isNaN(exact)) {
+                Map<String, Double> result = new LinkedHashMap<>();
+                result.put(pattern, exact);
+                return result;
+            }
+            // 2. 通配符 * 前缀匹配
+            if (pattern.contains("*")) {
+                String prefix = pattern.substring(0, pattern.lastIndexOf('*'));
+                Map<String, Double> result = new LinkedHashMap<>();
+                for (Map.Entry<String, software.bernie.geckolib3.core.molang.LazyVariable> entry
+                    : MolangParser.VARIABLES.entrySet()) {
+                    if (entry.getKey().startsWith(prefix)) {
+                        result.put(entry.getKey(), entry.getValue().get());
+                    }
+                }
+                // v.roaming.* 通配符
+                if ((prefix.equals("v.") || prefix.equals("v.roaming.")) && result.isEmpty()) {
+                    result.putAll(roamingVariables());
+                }
+                // ctrl.* 通配符 — 使用动态评估
+                if (prefix.equals("ctrl.")) {
+                    addDynamicCtrlStates(result);
+                }
+                // query.* 通配符 — 补充动画完成查询的真实动态值
+                if (prefix.startsWith("query.")) {
+                    addAnimationFinishedEntries(result);
+                }
+                if (!result.isEmpty()) return result;
+            }
+            // 3. 模糊子串匹配（不包含通配符但也不是精确匹配）
             Map<String, Double> result = new LinkedHashMap<>();
-            result.put(pattern, exact);
-            return result;
-        }
-        // 2. 通配符 * 前缀匹配
-        if (pattern.contains("*")) {
-            String prefix = pattern.substring(0, pattern.lastIndexOf('*'));
-            Map<String, Double> result = new LinkedHashMap<>();
+            String lower = pattern.toLowerCase(java.util.Locale.ROOT);
             for (Map.Entry<String, software.bernie.geckolib3.core.molang.LazyVariable> entry
                 : MolangParser.VARIABLES.entrySet()) {
-                if (entry.getKey().startsWith(prefix)) {
+                if (entry.getKey().toLowerCase(java.util.Locale.ROOT).contains(lower)) {
                     result.put(entry.getKey(), entry.getValue().get());
                 }
             }
-            // v.roaming.* 通配符
-            if ((prefix.equals("v.") || prefix.equals("v.roaming.")) && result.isEmpty()) {
-                result.putAll(roamingVariables());
-            }
-            // ctrl.* 通配符 — 使用动态评估
-            if (prefix.equals("ctrl.")) {
-                addDynamicCtrlStates(result);
-            }
-            // query.* 通配符 — 补充动画完成查询的真实动态值
-            if (prefix.startsWith("query.")) {
-                addAnimationFinishedEntries(result);
-            }
-            if (!result.isEmpty()) return result;
-        }
-        // 3. 模糊子串匹配（不包含通配符但也不是精确匹配）
-        Map<String, Double> result = new LinkedHashMap<>();
-        String lower = pattern.toLowerCase(java.util.Locale.ROOT);
-        for (Map.Entry<String, software.bernie.geckolib3.core.molang.LazyVariable> entry
-            : MolangParser.VARIABLES.entrySet()) {
-            if (entry.getKey().toLowerCase(java.util.Locale.ROOT).contains(lower)) {
-                result.put(entry.getKey(), entry.getValue().get());
-            }
-        }
-        // v. 模糊匹配 — 扫描本地玩家的漫游变量
-        if (lower.startsWith("v.") || lower.startsWith("v.roaming.")) {
-            String needle = lower.startsWith("v.roaming.") ? lower.substring(10) : lower.substring(2);
-            for (Map.Entry<String, Double> entry : roamingVariables().entrySet()) {
-                if (entry.getKey().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
-                    result.put(entry.getKey(), entry.getValue());
+            // v. 模糊匹配 — 扫描本地玩家的漫游变量
+            if (lower.startsWith("v.") || lower.startsWith("v.roaming.")) {
+                String needle = lower.startsWith("v.roaming.") ? lower.substring(10) : lower.substring(2);
+                for (Map.Entry<String, Double> entry : roamingVariables().entrySet()) {
+                    if (entry.getKey().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                        result.put(entry.getKey(), entry.getValue());
+                    }
                 }
             }
+            // ctrl.* 模糊匹配 — 使用动态评估
+            if (lower.startsWith("ctrl.")) {
+                addDynamicCtrlStates(result);
+            }
+            // 模糊匹配动画完成查询 — 用真实动态值覆盖静态 0
+            if (lower.contains("animation_finished")) {
+                addAnimationFinishedEntries(result);
+            }
+            return result;
         }
-        // ctrl.* 模糊匹配 — 使用动态评估
-        if (lower.startsWith("ctrl.")) {
-            addDynamicCtrlStates(result);
-        }
-        // 模糊匹配动画完成查询 — 用真实动态值覆盖静态 0
-        if (lower.contains("animation_finished")) {
-            addAnimationFinishedEntries(result);
-        }
-        return result;
     }
 
     /** 把动态 ctrl.* 状态评估结果加入 result */
@@ -449,31 +485,35 @@ public final class MolangDebugSnapshot {
         // 于是 query.* / ysm.* 里依赖实体的那批函数（is_item_name_any、relative_block_has_any_tag、
         // equipped_enchantment_level、position …）都会拿到 null 而返回 0，看起来像"功能没实现"。
         // 求值期间借用本地玩家，结束后还原，让 /ysm debug eval 成为这些函数的验证入口。
-        net.minecraft.entity.Entity previousEntity =
-            com.fox.ysmu.client.particle.ParticleEffectUtil.getCurrentEntity();
-        com.fox.ysmu.client.particle.ParticleEffectUtil.setCurrentEntity(player);
-        try {
-            software.bernie.geckolib3.core.molang.MolangParser parser =
-                software.bernie.geckolib3.resource.GeckoLibCache.getInstance().parser;
-            software.bernie.geckolib3.core.molang.expressions.MolangExpression expr =
-                parser.parseExpression(expression);
-            double result = expr.get();
-            player.addChatMessage(prefixed(
-                "message.yes_steve_model.debug.eval_result", sanitize(expression), formatValue(result)));
-        } catch (Exception e) {
-            player.addChatMessage(prefixed(
-                "message.yes_steve_model.debug.eval_error", sanitize(expression),
-                sanitize(String.valueOf(e.getMessage()))));
-        } finally {
-            com.fox.ysmu.client.particle.ParticleEffectUtil.setCurrentEntity(previousEntity);
-            java.util.List<String> added = new java.util.ArrayList<>();
-            for (String key : software.bernie.geckolib3.core.molang.MolangParser.VARIABLES.keySet()) {
-                if (!keysBefore.contains(key)) {
-                    added.add(key);
+        // 变量面同理（上面的 publishForRead）：求值时 query.health 这类名字在这张表里指向的也必须是本地玩家，
+        // 而不是本帧最后画的那个实体。
+        try (EntityQueryScope.Publication queries = publishForRead(player)) {
+            net.minecraft.entity.Entity previousEntity =
+                com.fox.ysmu.client.particle.ParticleEffectUtil.getCurrentEntity();
+            com.fox.ysmu.client.particle.ParticleEffectUtil.setCurrentEntity(player);
+            try {
+                software.bernie.geckolib3.core.molang.MolangParser parser =
+                    software.bernie.geckolib3.resource.GeckoLibCache.getInstance().parser;
+                software.bernie.geckolib3.core.molang.expressions.MolangExpression expr =
+                    parser.parseExpression(expression);
+                double result = expr.get();
+                player.addChatMessage(prefixed(
+                    "message.yes_steve_model.debug.eval_result", sanitize(expression), formatValue(result)));
+            } catch (Exception e) {
+                player.addChatMessage(prefixed(
+                    "message.yes_steve_model.debug.eval_error", sanitize(expression),
+                    sanitize(String.valueOf(e.getMessage()))));
+            } finally {
+                com.fox.ysmu.client.particle.ParticleEffectUtil.setCurrentEntity(previousEntity);
+                java.util.List<String> added = new java.util.ArrayList<>();
+                for (String key : software.bernie.geckolib3.core.molang.MolangParser.VARIABLES.keySet()) {
+                    if (!keysBefore.contains(key)) {
+                        added.add(key);
+                    }
                 }
-            }
-            for (String key : added) {
-                software.bernie.geckolib3.core.molang.MolangParser.VARIABLES.remove(key);
+                for (String key : added) {
+                    software.bernie.geckolib3.core.molang.MolangParser.VARIABLES.remove(key);
+                }
             }
         }
     }

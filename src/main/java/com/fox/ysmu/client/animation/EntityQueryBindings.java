@@ -8,6 +8,7 @@ import net.minecraft.item.EnumAction;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.MathHelper;
 
+import com.fox.ysmu.client.animation.molang.CameraDistanceQuery;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.BlockingCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
@@ -17,8 +18,8 @@ import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.util.MolangUtils;
 
 /**
- * The {@code query.*} / {@code ysm.*} values that are a <b>pure function of the entity being drawn</b>, published for
- * whichever entity the current frame belongs to.
+ * The entity-scoped {@code query.*} / {@code ysm.*} values, published for whichever entity the current frame belongs
+ * to. Camera distance additionally reads the render-view camera, but its target is always the entity being drawn.
  *
  * <p>Why this exists as one place. The world path binds these names to the local player every frame
  * ({@code AnimationRegister#setParserValue}), because 1.7.10's legacy {@code MolangParser} is stateless with respect to
@@ -37,8 +38,10 @@ import software.bernie.geckolib3.util.MolangUtils;
  * <p><b>What is not here.</b> The names whose value is frame data or camera state rather than the drawn entity stay on
  * the player path, because a sub-entity frame has no source for them at all: the {@code AnimationEvent}-derived head
  * angles ({@code query.head_x_rotation} / {@code head_y_rotation} / {@code head_z_rotation}, {@code ysm.head_yaw} /
- * {@code ysm.head_pitch}), {@code ysm.is_close_eyes}, {@code query.distance_from_camera} and {@code query.is_jumping}.
- * Those are guarded there by "the frame subject is a player" and answer 0 otherwise. The world-level names
+ * {@code ysm.head_pitch}) and {@code ysm.is_close_eyes}.
+ * Those are guarded there by "the frame subject is a player" and answer 0 otherwise. Camera distance is bound here
+ * against the drawn entity; jumping is also bound here, but remains player-only as upstream's typed registration
+ * requires (not a living entity's jump input). The world-level names
  * ({@code query.actor_count}, {@code query.time_of_day}, {@code query.time_stamp}, {@code query.moon_phase}) and the
  * camera/input ones ({@code query.is_first_person}, {@code ysm.person_view}) are deliberately left unguarded: their
  * upstream bindings are not entity state either, so a sub-entity frame reading them reads the same value the player
@@ -62,13 +65,13 @@ public final class EntityQueryBindings {
         "query.walk_distance", "query.body_y_rotation", "query.body_x_rotation", "query.cardinal_facing_2d",
         "query.eye_target_x_rotation", "query.eye_target_y_rotation", "query.is_swimming", "query.ground_speed",
         "query.yaw_speed", "query.vertical_speed", "query.position_delta", "ysm.is_passenger",
-        "ysm.delta_movement_length", "ysm.on_ladder", "ysm.input_vertical",
+        "ysm.delta_movement_length", "ysm.on_ladder", "ysm.input_vertical", "query.distance_from_camera",
         // living entity
         "query.health", "query.max_health", "query.hurt_time", "query.is_sprinting", "query.is_sneaking",
         "query.is_sleeping", "ysm.is_sneak", "ysm.is_sleep", "ysm.armor_value", "ysm.hurt_time", "ysm.swinging",
         "ysm.swing_time", "ysm.mainhand_charged_crossbow", "ysm.food_level",
         // player
-        "query.is_eating", "query.is_using_item", "query.is_blocking", "query.item_in_use_duration",
+        "query.is_jumping", "query.is_eating", "query.is_using_item", "query.is_blocking", "query.item_in_use_duration",
         "query.item_max_use_duration", "query.item_remaining_use_duration", "query.equipment_count",
         "query.has_cape", "query.player_level", "ysm.has_helmet", "ysm.has_chest_plate", "ysm.has_leggings",
         "ysm.has_boots", "ysm.has_mainhand", "ysm.has_offhand", "ysm.swinging_arm", "ysm.offhand_charged_crossbow",
@@ -110,6 +113,9 @@ public final class EntityQueryBindings {
         parser.setValue("query.body_y_rotation", () -> (double) MathHelper.wrapAngleTo180_float(entity.rotationYaw));
         parser.setValue("query.is_swimming", () -> MolangUtils.booleanToFloat(entity.isInWater()));
         parser.setValue("ysm.is_passenger", () -> MolangUtils.booleanToFloat(entity.isRiding()));
+        // Upstream QueryBinding.java:67 uses the camera position and the context entity's current origin, not
+        // the camera entity's origin. Keep the existing player calculation; sub-entities use the same camera helper.
+        parser.setValue("query.distance_from_camera", () -> CameraDistanceQuery.forEntity(entity, partialTicks));
 
         // Movement. The per-tick deltas, because 1.7.10 does not sync motionX/Z for a living entity and the port's
         // own remote-player branch reads the same deltas for exactly that reason
@@ -163,6 +169,11 @@ public final class EntityQueryBindings {
         // "whatever the local player has". The same guards are applied here; each value is otherwise the expression
         // the player path already used.
         EntityPlayer player = entity instanceof EntityPlayer ? (EntityPlayer) entity : null;
+        // QueryBinding.java:102,115-120 registers playerVar, not livingEntityVar or a jump-input field.
+        // PlayerVariable.java:14-15 rejects non-players, including airborne pigs. The player path subsequently
+        // refines flying/onGround using its existing remote-player sync/extrapolation, unchanged.
+        parser.setValue("query.is_jumping", () -> MolangUtils.booleanToFloat(player != null
+            && !player.capabilities.isFlying && !player.isRiding() && !player.onGround && !player.isInWater()));
         parser.setValue("query.is_sleeping", () -> MolangUtils.booleanToFloat(living != null && living.isPlayerSleeping()));
         // 1.7.10 keeps the item-in-use accessors on EntityPlayer only (EntityPlayer.java:196-213), which is why this
         // whole family is player-guarded rather than living-guarded as upstream's is.
@@ -257,6 +268,26 @@ public final class EntityQueryBindings {
      * identical on both branches, so this stays one rule with one substitution.
      */
     private static double moveInputVertical(Entity entity, float partialTicks) {
+        return moveInput(entity, partialTicks, true);
+    }
+
+    /**
+     * A-5: the sibling of {@link #moveInputVertical} - the same quantity's sideways component, upstream's
+     * {@code MoveInputVariable#getHorizontal} ({@code .../variable/MoveInputVariable.java:31-51}), which is that
+     * method's cosine replaced by a sine and nothing else. Registered by {@code AnimationRegister} as
+     * {@code ysm.input_horizontal} (upstream {@code YSMBinding.java:97}, an {@code entityVar}, so it is read for
+     * whichever entity the frame belongs to).
+     */
+    public static double moveInputHorizontal(Entity entity, float partialTicks) {
+        return moveInput(entity, partialTicks, false);
+    }
+
+    /**
+     * One implementation for both components: the frame entity's horizontal movement as an angle relative to the yaw
+     * it faces by, returned as {@code cos} (the forward component, upstream's {@code getVertical}) or {@code sin} (the
+     * sideways one, {@code getHorizontal}).
+     */
+    private static double moveInput(Entity entity, float partialTicks, boolean forwardComponent) {
         double deltaX = entity.posX - entity.prevPosX;
         double deltaZ = entity.posZ - entity.prevPosZ;
         if (Math.sqrt(deltaX * deltaX + deltaZ * deltaZ) < 1.0E-4D) {
@@ -273,7 +304,8 @@ public final class EntityQueryBindings {
         float entityYawDeg = 90.0F - MathHelper.wrapAngleTo180_float(-yawDeg);
         float relativeDeg = MathHelper.wrapAngleTo180_float(moveAngleDeg - entityYawDeg);
         // 0.017453292F is degrees-to-radians, the same literal the port already uses for the body-yaw particle rotation.
-        return MathHelper.cos(relativeDeg * 0.017453292F);
+        float radians = relativeDeg * 0.017453292F;
+        return forwardComponent ? MathHelper.cos(radians) : MathHelper.sin(radians);
     }
 
     /** The player path's helper, unchanged (1.7.10 counts item use down; see AnimationRegister's note). */
@@ -286,8 +318,15 @@ public final class EntityQueryBindings {
         }
     }
 
-    /** Horizontal per-tick distance in the port's {@code query.ground_speed} unit (blocks per tick x 20). */
-    private static double groundSpeed(Entity entity) {
+    /**
+     * Horizontal per-tick distance in the port's {@code query.ground_speed} unit (blocks per tick x 20).
+     *
+     * <p>Public because A-5's {@code ysm.ground_speed2} is the same quantity under its other upstream name: upstream
+     * computes that one as {@code 20 * |frame position delta| / renderTickDelta}
+     * ({@code YSMBinding.java:276-280} over {@code model/EntityStateTracker.java:57-75}), whose quotient is this same
+     * per-tick distance. See {@code YsmEntityQueries#groundSpeed2}.
+     */
+    public static double groundSpeed(Entity entity) {
         double dx = entity.posX - entity.prevPosX;
         double dz = entity.posZ - entity.prevPosZ;
         return Math.sqrt(dx * dx + dz * dz) * 20.0D;
