@@ -17,6 +17,8 @@ import com.eliotlash.mclib.math.functions.rounding.Round;
 import com.eliotlash.mclib.math.functions.rounding.Trunc;
 import com.eliotlash.mclib.math.functions.utility.*;
 
+import software.bernie.geckolib3.core.molang.MolangException;
+
 public class MathBuilder {
 
     public Map<String, Variable> variables = new HashMap<String, Variable>();
@@ -339,6 +341,22 @@ public class MathBuilder {
                 }
             }
             op = leftOp;
+        }
+        // 走到这里说明 while 循环从未进入（`seekLastOperator` 没找到任何二元运算符），于是 `lastOp == -1`
+        // 且 `op == -1`：符号表里没有任何运算符可用，下面那句 `symbols.get(lastOp)` 就是 `get(-1)` ——
+        // 抛的是 `ArrayIndexOutOfBoundsException: -1`，一个**裸的运行时异常**，调用方只能看到"表达式解析失败"
+        // 而看不出是"这里根本没有运算符可寻"。
+        //
+        // 实测来源（Owner 的客户端日志，`[` 每秒约 30 次）：timeline 里传进来的指令本身是残缺片段，符号表
+        // 只剩一个非运算符 token，`size == 1` / `size == 2` 两个分支都不匹配（它们要求的是变量、`[...]` 访问
+        // 或函数调用），于是落到这里。解析器无法把它变成一个值，这是**输入的问题**，不是崩溃点的问题；
+        // 改成抛 `MolangException` 让上层按"这条指令解析失败"处理（`MolangInstructionExecutor` 已经这么做了），
+        // 而不是让一个越界异常冒充解析错误。
+        //
+        // 上游没有这个形状：它自带词法器与 Pratt 解析（`molang/parser/MolangParserImpl.java`），
+        // 残缺输入在那里是"语法错误"，不是数组越界。
+        if (lastOp < 0) {
+            throw new MolangException("no operator found in expression: " + symbols);
         }
         Operation operation = this.operationForOperator((String) symbols.get(lastOp));
         return new Operator(
