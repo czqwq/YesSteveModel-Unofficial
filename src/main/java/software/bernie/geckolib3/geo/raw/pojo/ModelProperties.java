@@ -49,8 +49,13 @@ public class ModelProperties implements Serializable {
      * {@code forceTranslucent}. The port parses and syncs that field already and now carries it here too, under a
      * {@code ysm_} name like the other host-specific properties.
      * <p>
-     * Nothing reads it yet. Upstream's only consumer is its native bake, which cannot be read from here, so the
-     * absence is recorded as a divergence rather than filled with an invented consumer.
+     * The texture-specific MaterialBake/MaterialDrawSession consumer follows the native reference:
+     * {@code tmp/YesSteveModel-Native-dev/modules/gfx/src/bake/baked_model.cc:685-734} partitions faces by
+     * texture alpha, then applies this flag only to six-face cubes. Mixed/partial-alpha faces remain translucent;
+     * the flag selects their culling partition, not a global cutout render type. Its renderer filters back faces
+     * using transformed face planes and winding ({@code renderer/cube/transform_common.h:31-48}).
+     * The CPU port leaves shared geometry unchanged and applies culling from transformed clip planes/winding.
+     * External textures without CPU pixels retain the legacy fallback. See {@code .agent/task32-material-execplan.md}.
      */
     private Boolean forceCulling;
 

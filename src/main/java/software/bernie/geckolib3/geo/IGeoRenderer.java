@@ -101,9 +101,15 @@ public interface IGeoRenderer<T> {
 
         // builder.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
         tess.startDrawing(GL11.GL_QUADS);// , DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
-        // Render all top level bones
-        for (GeoBone group : model.topLevelBones) {
-            renderRecursively(tess, animatable, group, red, green, blue, alpha);
+        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
+            software.bernie.geckolib3.geo.material.MaterialDrawSession.begin(
+                model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
+        try {
+            for (GeoBone group : model.topLevelBones) {
+                renderRecursively(tess, animatable, group, red, green, blue, alpha);
+            }
+        } finally {
+            session.close(tess);
         }
 
         software.bernie.geckolib3.util.GeoStats.noteFlush();
@@ -149,6 +155,9 @@ public interface IGeoRenderer<T> {
             MATRIX_STACK.transformBone(bone);
 
             if (isBoneRenderOverriden(animatable, bone)) {
+                if (software.bernie.geckolib3.geo.material.MaterialDrawSession.active() != null) {
+                    software.bernie.geckolib3.geo.material.MaterialDrawSession.active().drain(builder);
+                }
                 drawOverridenBone(animatable, bone);
                 return;
             }
@@ -183,6 +192,10 @@ public interface IGeoRenderer<T> {
 
                 // Per-bone texture override: if this bone specifies a different texture,
                 // bind it before rendering cubes and restore afterwards.
+                software.bernie.geckolib3.geo.material.MaterialDrawSession materialSession =
+                    software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
+                ITextureObject savedSource = materialSession == null ? null : materialSession.source();
+                int savedMaterialTexture = materialSession == null ? -1 : materialSession.texture();
                 int savedTextureId = -1;
                 if (bone.textureOverride != null) {
                     savedTextureId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
@@ -191,6 +204,7 @@ public interface IGeoRenderer<T> {
                     if (overrideTex != null) {
                         flushBatch(builder);
                         GlStateManager.bindTexture(overrideTex.getGlTextureId());
+                        if (materialSession != null) materialSession.setTexture(bone.textureOverride);
                     }
                 }
 
@@ -200,12 +214,12 @@ public interface IGeoRenderer<T> {
                     if (emissive) {
                         GlStateManager.enableLighting();
                     }
-                }
-
-                // Restore the original texture binding after rendering this bone's cubes.
-                if (savedTextureId >= 0) {
-                    flushBatch(builder);
-                    GlStateManager.bindTexture(savedTextureId);
+                    if (materialSession != null) materialSession.restoreSource(savedSource, savedMaterialTexture);
+                    // Restore binding on failures too; otherwise the next bone can inherit an override.
+                    if (savedTextureId >= 0) {
+                        flushBatch(builder);
+                        GlStateManager.bindTexture(savedTextureId);
+                    }
                 }
             }
             if (!bone.childBonesAreHiddenToo()) {
@@ -309,6 +323,13 @@ public interface IGeoRenderer<T> {
      */
     default void renderBoneCubes(Tessellator builder, GeoBone bone,
         float red, float green, float blue, float alpha) {
+        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
+            software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
+        if (session != null && session.classified()) {
+            for (GeoCube cube : bone.childCubes) renderCube(builder, cube, red, green, blue, alpha);
+            return;
+        }
+        if (session != null) session.drain(builder);
         // Single scan: detect whether we have neg/pos cubes at all.
         boolean anyNeg = false, anyPos = false;
         for (GeoCube c : bone.childCubes) {
@@ -346,6 +367,18 @@ public interface IGeoRenderer<T> {
         Tessellator.instance.startDrawing(GL11.GL_QUADS);
     }
 
+    /** Direct first-arm root uses the same material owner after its outer alignment/mirror is applied. */
+    default void renderMaterialRoot(T animatable, GeoModel model, GeoBone root, ResourceLocation texture, YsmRenderType type) {
+        Tessellator builder = Tessellator.instance;
+        builder.startDrawing(GL11.GL_QUADS);
+        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
+            software.bernie.geckolib3.geo.material.MaterialDrawSession.begin(
+                model != null && model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
+        try { renderRecursively(builder, animatable, root, 1, 1, 1, 1); }
+        finally { session.close(builder); }
+        software.bernie.geckolib3.util.TessellatorBufferKeep.draw(builder);
+    }
+
     default void renderCube(Tessellator builder, GeoCube cube, float red, float green, float blue, float alpha) {
         // 原来这里是 push + moveToPivot + rotate + moveBackFromPivot + pop（入栈拷贝 25 个浮点、
         // 5 次模型矩阵乘法 + 6 次法线矩阵乘法）。现在算出 cube 的最终矩阵但**不入栈**：
@@ -357,6 +390,9 @@ public interface IGeoRenderer<T> {
 
         final javax.vecmath.Matrix4f model = MATRIX_STACK.getCubeModelMatrix();
         final javax.vecmath.Matrix3f normalMatrix = MATRIX_STACK.getCubeNormalMatrix();
+        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
+            software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
+        if (session != null && session.collect(cube, model, normalMatrix, red, green, blue, alpha)) return;
 
         for (GeoQuad quad : cube.quads) {
             if (quad == null) continue;
