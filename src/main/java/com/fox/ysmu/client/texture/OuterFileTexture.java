@@ -18,7 +18,74 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.ysmu;
 
-public class OuterFileTexture extends AbstractTexture {
+public class OuterFileTexture extends AbstractTexture implements software.bernie.geckolib3.geo.material.MaterialSource {
+
+    private final java.util.Map<Integer, BufferedImage> componentImages = new java.util.LinkedHashMap<>();
+    private final java.util.Map<Integer, byte[]> componentData = new java.util.LinkedHashMap<>();
+    private final java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
+        java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> materialCache = new java.util.IdentityHashMap<>();
+    private final java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
+        java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> forcedMaterialCache = new java.util.IdentityHashMap<>();
+    private BufferedImage materialImage;
+    private final TextureGpuAccounting accounting = new TextureGpuAccounting(ModelTextureRegistry::onTextureGpuBytesChanged);
+
+    public OuterFileTexture(BufferedImage image, java.util.Map<Integer, BufferedImage> components) {
+        this(image);
+        this.componentImages.putAll(components);
+    }
+
+    public OuterFileTexture(byte[] data, java.util.Map<Integer, byte[]> components) {
+        this(data);
+        this.componentData.putAll(components);
+    }
+
+    public java.util.Map<Integer, PbrComponentTexture> preparePbr(IResourceManager manager) throws IOException {
+        java.util.Map<Integer, PbrComponentTexture> result = new java.util.LinkedHashMap<>();
+        try {
+            for (int role = 1; role <= 2; role++) {
+                BufferedImage pixels = componentImages.get(role);
+                if (pixels == null && componentData.containsKey(role)) pixels = decode(componentData.get(role));
+                if (pixels != null) {
+                    PbrComponentTexture component = new PbrComponentTexture(pixels, this);
+                    result.put(role, component);
+                    component.loadTexture(manager);
+                }
+            }
+            return result;
+        } catch (Exception failure) {
+            for (PbrComponentTexture component : result.values()) component.close();
+            throw new IOException("Could not prepare PBR components", failure);
+        }
+    }
+
+    void componentBytesChanged(long delta) {
+        accounting.components(delta);
+    }
+
+    @Override
+    public boolean materialAvailable() { return materialImage != null; }
+
+    @Override
+    public java.util.List<software.bernie.geckolib3.geo.material.BakedFace> materialFaces(
+        software.bernie.geckolib3.geo.render.built.GeoCube cube, boolean forceCulling) {
+        java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
+            java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> cache = forceCulling ? forcedMaterialCache : materialCache;
+        return cache.computeIfAbsent(cube, key -> software.bernie.geckolib3.geo.material.MaterialBake.bake(
+            key.quads, materialImage, forceCulling));
+    }
+
+    @Override
+    public void deleteGlTexture() {
+        com.fox.ysmu.client.compat.PbrInvalidation.delete(this.glTextureId,
+            com.fox.ysmu.client.compat.AngelicaPbrCompat::invalidate, this::deleteBaseGlTexture);
+        this.uploaded = false;
+        if (this.gpuBytes != 0) {
+            accounting.base(0);
+            this.gpuBytes = 0;
+        }
+    }
+
+    private void deleteBaseGlTexture() { super.deleteGlTexture(); }
 
     /** 单个贴图负载的字节上限（第一道防线：解码前先拦掉超大/伪装成 PNG 的数据）。 */
     private static final int MAX_DATA_BYTES = 8 * 1024 * 1024;
@@ -136,6 +203,7 @@ public class OuterFileTexture extends AbstractTexture {
      */
     void setRegistryId(ResourceLocation registryId) {
         this.registryId = registryId;
+        accounting.own();
     }
 
     /**
@@ -146,7 +214,11 @@ public class OuterFileTexture extends AbstractTexture {
      * {@link #getGlTextureId()} 的重上传分支，形成递归。
      */
     private void uploadImage(BufferedImage source) {
-        BufferedImage toUpload = downscale(source);
+        // PBR upstream uploads original packed component pixels; keep base matching without invented resampling.
+        BufferedImage toUpload = componentImages.isEmpty() && componentData.isEmpty() ? downscale(source) : source;
+        this.materialImage = toUpload;
+        this.materialCache.clear();
+        this.forcedMaterialCache.clear();
         boolean blur = false; // 是否使用模糊/线性过滤
         // clamp = true，即 GL_CLAMP / 边缘拉伸，这也是上游所依赖的平台默认：它的纹理经由 1.20 的 TextureManager
         // 上传，采样器默认 CLAMP_TO_EDGE。
@@ -175,7 +247,7 @@ public class OuterFileTexture extends AbstractTexture {
         // 所以帧存就是 w×h×4——与参考分支的算法一致（参考 ClientModelManager.java 的
         // onTextureGpuBytesChanged 由 OuterFileTexture:132-133 以 toUpload 的尺寸喂入）。
         long bytes = (long) toUpload.getWidth() * toUpload.getHeight() * 4L;
-        ModelTextureRegistry.onTextureGpuBytesChanged(bytes - this.gpuBytes);
+        accounting.base(bytes);
         this.gpuBytes = bytes;
         ModelTextureRegistry.enforceVramBudget();
     }
@@ -322,10 +394,7 @@ public class OuterFileTexture extends AbstractTexture {
     public void freeGlTexture() {
         this.deleteGlTexture();
         this.uploaded = false;
-        if (this.gpuBytes > 0) {
-            ModelTextureRegistry.onTextureGpuBytesChanged(-this.gpuBytes);
-            this.gpuBytes = 0;
-        }
+        // deleteGlTexture invalidates host components and clears the base accounting exactly once.
     }
 
     /** Whether the pixel data is currently on the GPU. */
@@ -345,16 +414,12 @@ public class OuterFileTexture extends AbstractTexture {
      */
     void forgetGpuAccounting() {
         this.registryId = null;
-        long bytes = this.gpuBytes;
-        this.gpuBytes = 0L;
-        if (bytes > 0L) {
-            ModelTextureRegistry.onTextureGpuBytesChanged(-bytes);
-        }
+        accounting.forget();
     }
 
     /** VRAM footprint (bytes) of the uploaded copy; 0 while it is not uploaded. */
     public long getGpuBytes() {
-        return this.gpuBytes;
+        return accounting.total();
     }
 
     /**
