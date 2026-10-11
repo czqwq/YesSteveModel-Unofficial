@@ -13,6 +13,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
+import software.bernie.geckolib3.geo.ImmutableFramePose;
 
 public class AnimationData {
 
@@ -28,6 +29,17 @@ public class AnimationData {
     public Double startTick;
     public Object ticker;
     public boolean shouldPlayWhilePaused = false;
+
+    /**
+     * 本帧已经产出过的不可变姿势（{@link ImmutableFramePose}），{@code null} 表示还没产出过。
+     *
+     * <p>按 animatable 存放：{@code AnimationData} 就是 animatable 的逐实例状态（一个 animatable 一个
+     * uniqueID），而 {@code AnimatedGeoModel} 是所有 animatable 共用的一份模型。上游把这份状态直接放在
+     * animatable 自己身上（{@code tmp/YesSteveModel-dev-1.20 .../geckolib3/model/AnimatableEntity.java:52} 的
+     * {@code mainRenderData}，配合 {@code :55-58} 的帧标志），本仓的 animatable 是宿主类、只实现
+     * {@code IAnimatable}，所以唯一能放它的地方就是这里。</p>
+     */
+    public ImmutableFramePose immutableFrame;
 
     /**
      * Instantiates a new Animation controller collection.
