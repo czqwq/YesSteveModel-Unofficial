@@ -1,322 +1,176 @@
-# AGENTS.md
-
-## Project Snapshot
-
-YSMU is a Minecraft Forge 1.7.10 mod that ports Yes Steve Model/OpenYSM-style player models back to 1.7.10. The mod id is `ysmu`, the root package is `com.fox.ysmu`, and the Forge entry point is `src/main/java/com/fox/ysmu/ysmu.java`.
-
-The build uses the GTNH Gradle convention plugin through `settings.gradle.kts` and `build.gradle.kts`. `gradle.properties` targets Minecraft `1.7.10`, Forge `10.13.4.1614`, MCP stable `12`, enables Mixins, and enables modern Java through **JVM Downgrader** (`enableModernJavaSyntax = jvmDowngrader`, `downgradeTargetVersion = 8`) so the source may use Java 9+ syntax and stdlib while the jar still carries JVM 8 class files. Runtime/development dependencies are declared in `dependencies.gradle`. The GeckoLib 3 animation engine is **vendored into this repository** under `src/main/java/{software,com/eliotlash,net/geckominecraft}` as a one-time source snapshot; it is not an external mod and not a jar in `libs/`. See `PROVENANCE.md`.
-
-The current focus of work is to port OpenYSM. The OpenYSM code should be carefully analyzed and the implementation should be closely followed.
-
-## Upstream Fidelity
-
-**When upstream already implements a feature, implement it the way upstream does. Do not home-grow a mechanism for something upstream has already solved.**
-
-The reference is `tmp/YesSteveModel-dev-1.20`. Read it before changing behaviour, and cite the upstream file and line in the commit, the ExecPlan entry, or the code comment that the change rests on. A change whose only justification is "it seemed reasonable" is not finished.
-
-- **Find the upstream mechanism first.** For a behaviour change, locate what upstream does for the same problem - it is usually one class and a handful of lines - and port that shape, including the fallback it picks when the data is missing.
-- **Do not invent where upstream has nothing.** If upstream has no equivalent (for example YSMU's host-facing `EntityModelRenderApi`, which upstream does not have), do not invent a new predicate or a new semantic. Record the difference as a finding and let the owner arbitrate; a locally invented mechanism is a defect even when it works.
-- **A port-specific addition needs a port-specific reason** - a 1.7.10 constraint, or the port's own architecture (one shared renderer for the world, the HUD overlay and the GUI). Say which, and keep the addition as small as possible.
-- **Never add state upstream does not keep** to work around a timing difference. If a value is not available yet, the upstream-shaped answers are to resolve it through the structure that owns it (upstream resolves a texture *name* inside the model that was loaded), or to carry it as an explicit override, or to wait. Tracking "what I have already done" in a side set and gating on it has already produced one shipped regression here: a texture id set that rejected the player's own Minecraft skin for the built-in `steve`/`alex` models, which upstream draws by handing the skin to the renderer as a render-event override.
-- **Do not copy an upstream bug.** Cite the behaviour, not the typo - for example upstream reads a render event's texture override *before* posting the event, so its own field never sees what its listener set; the port reads it after. **The same applies to the reference branch** (`tmp/YesSteveModel-Unofficial-perf-previewUI`), which the owner's standing instruction says to copy verbatim: it is a completed port, not a correct one, and it carries defects upstream does not have. One is measured - its `com/eliotlash/mclib/math/functions/utility/DieRoll.java:26-28` (and `DieRollInteger.java`) never increments its roll counter and multiplies by `getArg(2) - getArg(2)`, i.e. zero, so a pack calling `math.die_roll` hangs the client thread, while upstream's own `.../geckolib3/core/molang/builtin/math/DieRoll.java:14-30` is correct. Copying it verbatim would have carried the hang in. So copy the reference's structure and comments freely, but read every loop, every divisor and every early return against upstream before keeping it, and record what you refused to copy.
-
-### Known divergences from upstream
-
-Every place where this port answers a question differently from `tmp/YesSteveModel-dev-1.20`. Each is either resolved
-(say how) or waiting for the owner. Being listed here is not a licence to invent a third answer: pick upstream's
-shape, or record why 1.7.10 or the port's own architecture cannot.
-
-- **Molang variable names are case-insensitive.** Upstream canonicalises every identifier through
-  `MolangNames.identifier` (`api/molang/MolangNames.java:29-35`, `toLowerCase(Locale.ROOT)`). The port now does the
-  same in one rule, `MolangParser.canonicalVariableName`, used by the parser's own registry, by
-  `RemoteAnimationVariables.normalize` (the wire path) and by the physics scope's variable table. Before it, a pack's
-  `v.roaming.C` was stored as written and looked up lower-cased, so it read as 0 and every `v.roaming.C==0?...` took
-  its first branch: the pack's own settings toggles silently did nothing. Resolved - see
-  `.agent/phase18-glow-and-roaming-case.md`.
-- **Per-bone glow, transparency and colour.** Upstream keeps them in a 14-float-per-bone attribute array
-  (`geckolib3/model/AnimatedGeoBone.java:9-16`, packing at `:201-211`) and consumes it in its native renderer
-  (`natives/render/NativeModelState.java:57-66`). The port carries the same values with the same packing on
-  `GeoBone` and registers the same three names (`bone_color`, `bone_transparency`, `bone_glow`) in `MolangParser`,
-  but draws them with the fixed-function pipeline: a glow level >= 0 renders the bone unlit, because 1.7.10 has no
-  per-bone lightmap. The level stays on the bone so a brightness mapping can be added once it can be checked against
-  upstream instead of guessed. Port-specific by a 1.7.10 constraint.
-- **The client's texture ladder has no rung for the model's own declared default.** Upstream resolves the texture
-  inside the model that was loaded - requested name, then `settings.defaultTexture` (which
-  `RawModelAssembler:189-196` fills with the first texture when the pack declares none), then the first entry
-  (`format/schema/model/ModelManifestLookup.java:10-29`). The port parses and syncs that same field
-  (`YSMFolderDeserializer:170` and `:1031`, `RawYsmModel:210`, `YSMBinarySerializer:483` /
-  `YSMBinaryDeserializer:611`) but the client ladder put the global `Config.DEFAULT_MODEL_TEXTURE` in that rung
-  (`CustomPlayerModel.textureFor`), so it only differed for a pack that declares `default_texture`. Resolved: the
-  engine's `ModelProperties` gained a `defaultTexture` (`ysm_default_texture`), `RawYsmModelAdapter` injects it beside
-  `ysm_render_layers_first`, `ClientModelManager.DECLARED_DEFAULT_TEXTURES` carries it with the same hygiene as
-  `RENDER_LAYERS_FIRST`, and `CustomPlayerModel.resolveTexture` uses it between the selection and the constant,
-  validating it against the model's own texture list the way upstream's `containsTexture` does.
-  `Config.DEFAULT_MODEL_TEXTURE` keeps its exact role. `ResolveTextureLadderTest` guards it.
-- **Two sync channels can deliver the same folder model.** Upstream syncs one channel. The port has a legacy and an
-  OpenYSM channel, and for a folder model they serialise differently - the baked side re-emits the JSON pretty
-  printed with the pack's floats widened to doubles, which is 3.0 MB of geometry against 9.0 MB for
-  `wine_fox/05_magical`, with the six textures byte-identical. The duplicate check hashes those bytes, so it never
-  matched: every `wine_fox/*` model was registered six times per session against three for each `.ysm` pack, and each
-  re-registration parked the geometry, dropped the ready marker and the installed animations, and left the model
-  drawing the built-in default for about a second - the flicker. Resolved by giving each model one channel:
-  `SyncModelFiles` no longer offers a model the OpenYSM index carries, and only while
-  `Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL` is on, so built-in models and models `OpenYsmFormat` cannot produce a payload
-  for stay legacy-only. `CACHE_NAME_INFO` keeps its entry either way - it is also the registry that stops the legacy
-  folder scanner rescanning a directory the OpenYSM scanner already registered.
-- **Render state is chosen as a type before the draw, the way upstream chooses a `RenderType`.** Upstream has one
-  entry point, `IGeoRenderer#getRenderType(texture, visible, glowing, translucent)`
-  (`geckolib3/geo/IGeoRenderer.java:33-39`), returning `CustomTranslucentRenderType` - which wraps
-  `RenderType.entityTranslucent`, i.e. blending and culling - when the model has a translucent vertex, and
-  `RenderType.entityCutoutNoCull` (alpha test, no blending, no culling) when it does not, and it hands that type to
-  the draw as a parameter (`:18-26`). The port has the same shape: `YsmRenderType` is 1.7.10's stand-in for
-  `RenderType` (the platform has none), `IGeoRenderer#getRenderType` carries upstream's name, parameters, defaults and
-  both branches, and `render(model, animatable, type, ...)` applies the type instead of deciding. The port adds no
-  `getRenderType` override, because the engine's default body *is* upstream's rule. `hasTranslucentVertices` is
-  upstream's name from `GeoModelState:73-74`; upstream reads a native vertex count, and the port substitutes the
-  host's answer from the texture about to be bound - the same input upstream's bake gets - with that substitution
-  stated in the javadoc. The first-person arm does not go through `render`, so `FirstPersonHandRenderer` asks
-  `getRenderType` the same question the world path asks - visible, not glowing, `hasTranslucentVertices` on the arm's
-  own animatable - and applies that type's state in `prepareCustomArmState`, with `render`'s own rules
-  (`IGeoRenderer.java:77-95`). The roll applies that state around a mirrored arm matrix and resets
-  `glFrontFace(GL11.GL_CCW)` afterwards, because the mirror makes the model's own front faces back faces
-  (`CustomPlayerItemInHandLayer.java:107` is the same correction for the mirrored held item).
-  History worth keeping: the arm used to hardcode upstream's *arm* answer, `CustomTranslucentRenderType` - which
-  upstream's `CustomFirstPersonArmRenderer:39` really does use unconditionally, but which in 1.20 applies itself
-  through the handed-over type and in 1.7.10 has to be applied by hand. Commit 67f8044 wrote that state as
-  `disableAlpha() + enableCull()`: for an opaque model that is the opposite of the `entityCutoutNoCull` the world
-  path draws the same geometry with, so an alpha-0 texel was not discarded (the black patch over the unlit inside of
-  the far face) and culling dropped a face of a flat or single-layer piece (the see-through holes). The grey
-  single-texel back faces of `wine_fox/05_magical`'s flat decals that culling was added for are handled by the
-  clamped texture upload (see the texture-wrap entry below), not by the arm's cull state.
-  Two gaps are recorded rather than invented: 1.7.10 has no outline pass, so the glowing branch draws nothing
-  (`getRenderType` returns null); and the engine keeps its port-only 0.001 inflate on a zero-thickness cube, which
-  upstream does not have (`GeoBuilder.java:100-116`), because removing it would make a flat decal's two faces exactly
-  coplanar on the cutout-no-cull branch and z-fight. `all_cutout` is upstream's `forceCulling`
-  (`format/parser/pojo/manifest/settings/ModelProperties.java:35-36`); the port already parses and syncs it
-  (`RawYsmModel:214`, `YSMFolderDeserializer:174`, `YSMBinarySerializer:491` / `YSMBinaryDeserializer:620`) and now
-  carries it to the client as `ysm_all_cutout` into the engine's `ModelProperties.forceCulling`. **Nothing consumes
-  it**, because upstream's only consumer is its native bake - carried and recorded rather than given an invented
-  consumer, and it changes no behaviour while nothing reads it.
-  History worth keeping: an earlier attempt dropped the degenerate faces inside `GeoCube`, which acts on geometry
-  **every** model shares, and it broke models that had rendered correctly; it was reverted. Do not let a predicate of
-  that kind act on shared geometry, and do not add a method upstream does not have - the improvised
-  `shouldCullBackFaces` was deleted for exactly that reason.
-  Two mappings were settled by reading rather than guessing. Upstream's `RenderFirstPlayerBackground` is the
-  first-person **arm**'s background pass, not the HUD overlay; its counterpart here is `FirstPersonHandRenderer`,
-  which applies that pass's state. The HUD extra-player overlay (`ClientEventHandler#renderSelfGuiPlayer`) is
-  port-only - upstream has no equivalent - so it goes through `doRender` and takes the same per-model answer as the
-  world. And upstream's third geo renderer, `GeoProjectilesRenderer`, has no counterpart in this engine, so there is
-  no third place that has to ask for a type.
-- **Model textures are uploaded clamped, not repeated.** Upstream relies on the platform default: its textures go
-  through 1.20's `TextureManager`, whose sampler is `CLAMP_TO_EDGE`. The port's `OuterFileTexture` passed
-  `clamp = false`, i.e. `GL_REPEAT`. That matters because a pack marks the faces it does not want with a zero
-  `uv_size` - `wine_fox/05_magical`'s `ysmGlowdamofazhen3` declares `south` as `uv [256, 0], uv_size [0, 0]` - upstream
-  builds those faces anyway (`GeoBuilder:186-193` skips only a face whose uv data is missing), and all four of that
-  face's uvs normalize to `u = 1.0`. Clamped, that is the last texel of the row, which is transparent in every skin
-  of that pack, so the face is invisible; repeated, it wraps to the first texel, which is opaque grey in `magic.png`
-  and `water.png`, and the face becomes a 60×60 opaque slab over the model's art. Measured: `magic.png` is `A255
-  RGB(57,51,67)` at (0,0) and `A0` at (255,0). `OuterFileTextureWrapTest` pins both halves. Resolved - and note that
-  this fix lives in the port, so it needs the YSMU jar rebuilt, not just Geckolib.
-- **`EntityModelRenderApi.isModelLoaded` is a port-only query.** Upstream's host-facing surface is events
-  (`RenderModelEvent`, `RenderLayerEvent`, `RegisterRenderStateModifierEvent`, `RegisterModelLocatorEvent`) with no
-  readiness query at all. The port returns true for a parked model while the renderer is drawing the built-in
-  default. Open: an owner decision, recorded rather than resolved.
-- **The first-person arm is posed by its own animatable, its own controller set and its own condition table.** Upstream
-  ticks a `CustomFirstPersonArmEntity` every frame
-  (`client/renderer/CustomFirstPersonArmRenderer.java:27-28`), drives it with `fp.arm.misc` / `fp.arm.parallel_<i>` /
-  `fp.arm.armor_<slot>` (`client/controller/collections/FPArmControllerCollection.java:22-32`) off a second animation
-  store and a second condition manager (`ModelRenderTargetAssembler.java:53-60`), and shares one controller map with
-  the body. The port now does the same (`CustomFirstPersonArmEntity`, `FPArmConditionManager`,
-  `AnimationDomain#controllerSetId`), because the arm's bones had never entered an `AnimationProcessor` at all and it
-  drew at its bind pose. One deliberate divergence: upstream decides which `fp.arm.*` and `parallel_<i>` controllers
-  exist while it builds the model's resource set and skips an animation with no bone channels
-  (`ParallelControllerDiscovery.java:64-71`), while the port registers one fixed set per animatable and routes at
-  runtime. That divergence is **not** harmless, and it was shipped as one: a fixed pool asks the engine for a name the
-  current model does not declare, `AnimationController#setAnimation` returns before filling `animationQueue` and
-  before updating `currentAnimationBuilder`, so the controller keeps the old builder, re-evaluates it as changed on
-  the next frame, and prints `Could not load animation: parallelN. Is it missing?` once per frame while the controller
-  is left with no fallback - observed as `parallel0`/`parallel5`/`parallel7` repeating in a live client, and as the
-  LaPluma walk regression before it. The port's counterpart of upstream's discovery-time filter is a runtime existence
-  check at the hand-over: `AnimationManager#playParallelIfPresent` asks `hasAnimation` (which installs the model's
-  animations first, exactly as `definesAnimation` does) and answers `PlayState.STOP` when the name is absent - the
-  ending SOURCE itself uses and documents (`client/animation/AnimationManager.java:852-855`, reason at `:822-823`).
-  `ParallelAnimationExistenceGuardTest` pins it for the body and for the arm, including that the arm is asked only
-  from the `fp_arm` domain and the body only from `main`. Resolved - see `.agent/phase23-first-person-arm-pose.md`.
-  One consequence of the same split stays recorded rather than patched: the default-animation fallback is per domain
-  (`ModelRenderTargetLoader.java:375-379` with `DefaultAnimationKey.java:36-38`, where `fp_arm` alone maps to
-  `player/first-person`), so a *legacy* three-set default payload (`extra`/`main`/`arm`, i.e. one baked before
-  `animations/fp.arm.animation.json` existed) can never fill the first-person fallback, and that domain stays empty
-  until the model's own pack declares `fp_arm` or the built-in default is re-copied. Upstream has the same hole for a
-  payload that declares no `fp_arm` set, so this is the format's behaviour, not a missing port mapping.
-- **`vehicle.origin` has nothing to port.** Upstream's `VehicleOriginController` is not "rotate by the entity's yaw";
-  it is a compat hook that takes a quaternion from exactly two providers, `SimplePlaneCompat.getRotation` (Simple
-  Planes' `PlaneEntity`) and `ImmersiveAircraftCompat.getRotation` (Immersive Aircraft's `AircraftEntity`)
-  (`VehicleOriginController.java:57-69`). Both are 1.20 mods with no 1.7.10 counterpart, and the port has no compat
-  wrapper for either. With neither installed, upstream's controller leaves `rotation` null and visits no bone queue -
-  i.e. the renderer's own yaw decides the orientation, which is exactly what the port does. Recorded rather than given
-  an invented "entity yaw origin controller", which upstream does not have. Two neighbouring gaps in the same area are
-  recorded too: a vehicle's `timeline` (`ysm.particle`) never dispatches, because the dispatch needs the particle
-  subsystem's paired scopes (`ParticleEffectUtil.setCurrentEntity`/`beginProjectileTransform` plus
-  `MolangPhysicsRuntime.beginProjectileBones`); and the hand-written vehicle sampler reads only the shared variable
-  table, so a vehicle animation reading `query.*` reads 0 - the right fix is to feed the sampler from the same binding
-  table the world path uses, not to hand-pick names, which would be half-real and half-zero.
-
-## Cross-Project Ownership
-
-GeckoLib, YSMU and Touhou Little Maid are all first-party projects of the same owner:
-
-- **GeckoLib** (mod id `geckolib`): `E:\IDEA\Geckolib`, symlinked into this workspace as `tmp/Geckolib`. The
-  engine is **vendored into this repository** as a one-time source snapshot under `src/main/java/{software,
-  com/eliotlash,net/geckominecraft}`, so it is no longer a mod YSMU depends on and no longer a jar in `libs/`.
-  Its `@Mod` was removed and the engine now ships inside the YSMU jar. `PROVENANCE.md` records where the snapshot
-  came from and the ownership rule that follows; `E:\IDEA\Geckolib` is no longer a copy to sync from.
-- **YSMU**: this repository.
-- **Touhou Little Maid**: `E:\IDEA\TouhouLittleMaid`, with its 1.20 reference source under `tmp/TouhouLittleMaid-1.20`.
-
-Any of the three may be changed at any time. A feature must never be blocked, simplified, half-done or
-duplicated merely because the code that would implement it lives in another of the three repositories. If the
-cleanest implementation belongs there, change it there and say so in the ExecPlan. For the vendored engine the
-"other repository" is no longer the place to change it: those three trees are third-party compatibility code
-**owned by this repository** now, so an engine change is made here, and it must be as narrow as the defect and
-recorded as a deviation from the snapshot (see `PROVENANCE.md`).
-
-The rule that must survive is a **runtime** property, not an editing restriction:
-
-- Each mod must still load and run without the others installed. YSMU is now self-contained: it needs no
-  `geckolib` mod at runtime, and a `geckolib-*.jar` in the mods folder must be deleted because FML's single class
-  loader would otherwise see two copies of `software.bernie.geckolib3`.
-- YSMU and Touhou Little Maid stay optional to each other at runtime, and both already degrade cleanly when
-  the other is absent (a mod-id probe plus a reflective bridge). That is one way to keep the property, not a
-  ban on the two being compiled against each other. When a feature is genuinely better served by a
-  compile-time coupling, propose it explicitly instead of contorting the design around it.
-- Prefer one implementation to two. The same table, clip list or rule set existing in two of these
-  repositories is a defect: a rename lands in only one of them and the wrong half is silent.
+### AGENTS.md
+项目概览
 
-## ExecPlans
+YSMU 是一个 Minecraft Forge 1.7.10 模组，将 Yes Steve Model/OpenYSM 风格的玩家模型移植回 1.7.10。模组 id 为 ysmu，根包为 com.fox.ysmu，Forge 入口点为 src/main/java/com/fox/ysmu/ysmu.java。
 
-When writing complex features or significant refactors, use an ExecPlan (as described in .agent/PLANS.md) from design to implementation.
+构建通过 settings.gradle.kts 和 build.gradle.kts 使用 GTNH Gradle 约定插件。gradle.properties 目标为 Minecraft 1.7.10、Forge 10.13.4.1614、MCP stable 12，启用 Mixins，并通过 JVM Downgrader 启用现代 Java（enableModernJavaSyntax = jvmDowngrader，downgradeTargetVersion = 8），因此源码可使用 Java 9+ 语法和标准库，而 jar 仍携带 JVM 8 类文件。运行时/开发依赖在 dependencies.gradle 中声明。GeckoLib 3 动画引擎已内置于本仓库，位于 src/main/java/{software,com/eliotlash,net/geckominecraft}，作为一次性源码快照；它不是外部模组，也不在 libs/ 中。参见 PROVENANCE.md。
 
-## Repository Layout
+当前工作重点是移植 OpenYSM。应仔细分析 OpenYSM 代码，并严格遵循其实现。
 
-- `src/main/java/com/fox/ysmu`: project-specific mod code.
-- `src/main/java/com/fox/ysmu/client`: client-only rendering, GUI, keybinds, animation predicates, texture/model registration, and upload state.
-- `src/main/java/com/fox/ysmu/model`: server-side model discovery, built-in model copying, cache generation, and folder/`.ysm` model format handling.
-- `src/main/java/com/fox/ysmu/network`: Forge `SimpleNetworkWrapper` setup and packet classes.
-- `src/main/java/com/fox/ysmu/eep`: 1.7.10 `IExtendedEntityProperties` state for selected model/texture, active animation, starred models, and each player's roaming variables.
-- `src/main/java/com/fox/ysmu/event`: GTNHLib event subscribers for common player sync and client rendering events.
-- `src/main/java/com/fox/ysmu/compat`: optional-mod compatibility wrappers. Keep Backhand and similar direct calls behind these wrappers.
-- `src/main/java/com/fox/ysmu/mixin`: Mixins only. `gradle.properties` restricts Mixins to package `com.fox.ysmu.mixin`.
-- `src/main/java/software`, `src/main/java/com/eliotlash`, `src/main/java/net/geckominecraft`: the vendored GeckoLib 3 engine (327 files: 275/48/4). Third-party compatibility code owned by this repository - keep engine edits narrow and record every deviation. The trees are byte-identical to the snapshot except `software/bernie/geckolib3/GeckoLib.java`, whose `@Mod` and `preInit` were removed. See `PROVENANCE.md`.
-- `src/main/resources/assets/ysmu/custom`: built-in model assets copied into `config/ysmu/custom` during reload.
-- `src/main/resources/assets/ysmu/lang`: `en_US.lang` and `zh_CN.lang`. Keep new translation keys in sync.
-- `src/main/resources/mixins.ysmu.json`: Mixin config. It lists `MixinEntityArrow` in `mixins` and `MixinItemRenderer`, `MixinEffectRenderer`, `client.MixinRenderArrow` in `client`. Read the file rather than this line before adding one - this line said "only `MixinItemRenderer`" for several days after the other three had landed.
-- `src/main/resources/META-INF/ysmu_at.cfg`: access transformers for the Minecraft internals YSMU touches (`ItemRenderer`, `EntityRenderer`, `Minecraft.timer`, `RenderHelper`). The engine's own two accesses are already in this file, because the engine ships inside this jar.
-- `tools/convert_new_ysm.py` and `tools/convert.md`: conversion utility and documentation for newer OpenYSM-style model directories.
-
-## Minecraft and Forge Sources
-
-RetroFuturaGradle already decompiles the patched game sources into the workspace. Read them in place with the file tools instead of opening the jars:
-
-- `build/rfg/minecraft-src/java`: decompiled Minecraft + Forge 1.7.10 sources (stable-12 names, Forge patches applied).
-- `build/rfg/minecraft-src/resources`: the matching resources.
-- `build/rfg/launcher-src`: the bundled launcher sources.
-
-Do not extract or decompile the jars in `build/rfg` (`mcp_patched_minecraft-sources.jar`, `srg_patched_minecraft-sources.jar`, `recompiled_minecraft-1.7.10.jar`, `srg_merged_minecraft.jar`). They contain the same sources as `minecraft-src`, so unpacking them only wastes time and litters the workspace. Check vanilla/Forge behavior first - dimension travel, respawn, `IExtendedEntityProperties` cloning, event firing order, render and texture reload hooks - directly under `build/rfg/minecraft-src/java`, and only fall back to the jars when that directory is missing. `build/` is generated output: never commit it, and never add workspace files to it.
-
-## Runtime Flow
-
-Startup begins in `ysmu.java`. `CommonProxy.preInit` loads `Config`, calls `ServerModelManager.reloadPacks()`, and logs the version. `CommonProxy.init` registers network packets through `NetworkHandler.init()`. `ClientProxy.init` additionally registers animation states/Molang variables, the custom player renderer, and key bindings.
-
-`ServerModelManager.reloadPacks()` creates `config/ysmu`, `custom`, `export`, and `cache` directories, force-copies built-in models into `config/ysmu/custom`, initializes `cache/server/PASSWORD`, and rebuilds encrypted server cache files for both folder models and `.ysm` files.
-
-Model sync starts with the server sending `RequestSyncModel`. The client replies with cached MD5 names via `SyncModelFiles`. The server sends an encrypted password (`SendModelPassword`), asks the client to load cache hits (`RequestLoadModel`), and sends missing cache files (`SendModelFile`). The client decrypts and registers models through `ClientModelManager.registerAll()`.
-
-Client rendering cancels vanilla `RenderPlayerEvent.Pre` in `ClientEventHandler` and delegates to `CustomPlayerRenderer`. `CustomPlayerRenderer` chooses model/texture state from `ExtendedModelInfo` or NPC overrides, posts `SpecialPlayerRenderEvent`, then renders through the GeckoLib replacement renderer. First-person hand rendering is split between `RenderHandEvent` and the Angelica-specific `MixinItemRenderer` path.
-
-The HUD "extra player" overlay (`ClientEventHandler.renderSelfGuiPlayer`, a preview render) draws that same local player through the same renderer and therefore the same `AnimationData`, so one frame reaches `AnimationController.process` twice for one entity at one `seekTime`. The engine must stay idempotent under that: the second process may not drop the animation a transition is moving to (`AnimationController.process` only polls `animationQueue` when it is non-empty). When it did, the controller never left `AnimationState.Transitioning` and the model rendered the transition's first frame forever - which appears as "walking animates but sprinting does not, in third person only", because in first person the HUD overlay is the only pass. See `.agent/phase7-geckolib-dependency.md`; `AnimationControllerTransitionTest` guards it.
-
-The engine is **vendored**, not a required separate mod, and `ysmu.java` therefore no longer declares `dependencies = "required-after:geckolib"`. Where the engine needs host knowledge it goes through an interface, and YSMU implements it: `CustomPlayerEntity` implements `IMolangPhysicsScope` so `software.bernie.geckolib3.core.molang.MolangPhysicsRuntime` can key its per-frame MoLang scope, and `ClientEventHandler` pushes remote animation variables into the engine's `core.molang.RemoteAnimationVariables`. YSMU no longer ships a Molang physics runtime of its own.
-
-## Model and Resource Rules
-
-Folder models live under `config/ysmu/custom/<model name>` and must include `main.json`, `arm.json`, and at least one `.png`. Optional animation files are `main.animation.json`, `arm.animation.json`, and `extra.animation.json`; missing animation files fall back to the built-in default animations.
-
-`.ysm` files in `config/ysmu/custom` are also scanned. Only files containing `main.json`, `arm.json`, and at least one `.png` are cached.
-
-Model images are normalised to PNG while a model is parsed. `ModelImageConverter` decodes BMP/JPEG/WebP/AVIF with the decoders vendored in `libs/ImageStream--SNAPSHOT.jar` (the library upstream OpenYSM declares as `com.github.OpenYSM:ImageStream`) and re-encodes them as PNG, mirroring upstream's `YSMClientMapper`; PNG is passed through untouched and an undecodable image is kept as-is with one warning per format. Clients therefore only ever receive PNG, and `ClientModelMetadataRegistry` keeps its own format guard for older caches. That jar is embedded into the mod jar unrelocated by the block at the end of `dependencies.gradle`, because the GTNH convention relocates `shadowImplementation` dependencies to `com/fox/ysmu/shadow/...`, which would break both the direct decoder calls and the `META-INF/services/javax.imageio.spi.*` names.
-
-The model-selection and texture screens animate each tile through `ModelPreviewRegistry` (the model's `preview_animation` from the sync payload, `idle` when it declares none) plus `ModelPreviewAnimationState`, the port of upstream's `CatalogModelPreviewAnimationState`. A model opts into the extra channels simply by defining animations named `hover`, `hover_fadeout` and `focus`; the fade-out window is that animation's length. `RenderUtil.renderEntityInInventory(..., hovered, focused)` drives the state machine and sets `AnimationData.shouldPlayWhilePaused` on the preview animatable, because opening a GUI pauses single-player and the engine otherwise refuses to advance its clock - without that flag the tiles render as frozen poses.
-
-A model's per-player settings are *roaming variables*: named floats that packs read as `v.roaming.<name>` and that the model's `模型设置` panel (declared as `extra_animation_buttons[].config_forms` in `ysm.json`) writes. The panel, the local copy and the server authority are `ModelConfigScreen`, `ClientRoamingStore` and `ExtendedRoamingVariables`; `ModelConfigRegistry` remembers which model declares which forms, and `ClientRoamingKeys` remembers the 32-bit namespace key of each model, which is derived from `RawProperties.sha256` by `ModelRoamingKey` so client and server agree without an extra payload field. The server is the authority: the client reports deltas through `C2SRoamingChanges` (serverbound id 99) and adopts the map the server echoes in `S2CRoamingState` (clientbound id 20), which also reaches every client tracking that player. Bounds live only in `ModelRoamingLimits`. A detached GUI preview reads the local player's values for the model it draws through `IMolangPhysicsScope.getMolangVariables`, because it has no entity for the engine to look roaming variables up by - that is what stops a preview tile from reading zero while the world reads the stored value.
-
-Packs assume a roaming variable outlives a single frame: a `timeline` statement such as `v.roaming.player_size=v.roaming.player_size?v.roaming.player_size:1` runs once per animation restart and every later frame reads what it assigned, and `parallel1` scales the whole model from it (`"MRoot":{"scale":"v.roaming.player_size"}`). That only works while the engine's MoLang scope is stable, so `MolangPhysicsRuntime.ScopeKey` compares the owning entity, model and animation **by value** - never by object identity. A GUI tile rebuilds `setMainModel(ModelIdUtil.getMainId(modelId))` on every rendered frame, so an identity component in that key would hand the tile a fresh, empty scope per frame, the variable would read 0 and the model would blink out; the world is unaffected because there the key is the player's UUID. `MolangScopeKeyStabilityTest` guards this.
-
-`ModelIdUtil` normalizes model names for `ResourceLocation`. Safe ids match `[a-z0-9._-]+`; unsafe names are encoded as `_name_` plus UTF-8 hex. Use `ModelIdUtil` helpers instead of hand-building model, main, arm, or texture ids.
-
-Built-in model assets in `src/main/resources/assets/ysmu/custom` are copied into the runtime config directory on reload. Be careful when changing these assets because the runtime reload path intentionally overwrites the built-in copies. The one exception is a directory the user replaced with an OpenYSM model pack: when `config/ysmu/custom/<name>/ysm-pack.json` exists, the built-in copy for that name is skipped and logged (`ServerModelManager.builtInModelTarget`) and the directory counts as a pack root, not a model (`ServerModelManager.isPackRoot`). A pack root holds model directories, its `ysm-pack.png` is a cover and never a model texture, and its `ysm-pack.json` (name/description/lang) travels to clients in the OpenYSM sync index so the model selection GUI can label the folder with the pack's own name and cover.
-
-## Network and Threading Rules
-
-Packet ids in `NetworkHandler` are part of the wire protocol. Add new ids when needed; do not renumber existing ids. Keep packet side registration explicit and consistent with the handler behavior.
-
-Do not perform heavy file IO, encryption/decryption, or model parsing directly on a packet handler path. Existing code uses `ThreadTools.THREAD_POOL` for background work and `Minecraft.func_152344_a(...)` when client-side model or texture registration must return to the client thread.
-
-The model password must be available before cached model files can decrypt. Preserve the `SendModelPassword` before `RequestLoadModel` relationship and the retry behavior in `RequestLoadModel`.
-
-The OpenYSM sync cache is named from the model's own sha256 plus `ModelCacheWriter.OPEN_YSM_BAKE_VERSION`, never from the payload bytes, and its signature check only proves the file belongs to that hash. Bump that constant whenever the baked payload changes meaning - the serializer, `RawYsmModelAdapter`, or which parts of a model the deserializer bakes - because otherwise a payload written by an older build (for example one with no geometry, from before cubes were baked into faces) keeps being served to clients whose cache hashes match as well. That is how ten models stayed invisible across reloads and restarts while a fresh bake and every local test looked correct.
-
-## Compatibility Notes
-
-Runtime prerequisites are UniMixins and GTNHLib. The animation engine is part of this mod, so a `geckolib-*.jar` must not be installed alongside it. Development/runtime extras include NotEnoughItems, Nashorn, Angelica, Backhand and JUnit as declared in `dependencies.gradle`.
-
-Use `@EventBusSubscriber` from GTNHLib for event subscribers following the existing pattern. Client-only subscribers should specify `side = Side.CLIENT`.
-
-Use `BackhandCompat` and `AngelicaCompat` rather than scattering optional-mod API calls through core logic. Keep compatibility checks resilient when the optional mod is absent.
-
-## Coding Conventions
-
-Follow `.editorconfig`: UTF-8, LF line endings, 4-space Java indentation, 2-space Markdown/JSON/YAML indentation, final newline, and no trailing whitespace except in `.lang` files.
-
-On Windows PowerShell, read UTF-8 files with `-Encoding UTF8`; otherwise Chinese README, comments, and lang files may display as mojibake.
-
-Modern Java is enabled by **JVM Downgrader**, not Jabel: `gradle.properties` sets `enableModernJavaSyntax = jvmDowngrader` with `downgradeTargetVersion = 8`, so the source may use both modern *syntax* and Java 9+ *stdlib APIs* (for example `java.lang.ref.Cleaner`, which upstream's `CustomTextureManager` uses) while the produced jar still carries JVM 8 class files. That works because the downgrader rewrites those API calls onto its own stubs, which are resolved from `xyz.wagyourtail.jvmdowngrader:jvmdowngrader-java-api`; `jvmDowngraderStubsProvider` is deliberately left empty (see the comment in `gradle.properties` for why, and revisit it if a real Java 8 launcher failure is reported). The code already uses pattern variables. When a Java 9+ API is used, say in the code why the runtime needs it - the mod's normal runtime here is a modern JVM where such APIs are native, and the downgrade path is what keeps older launchers working.
-
-Preserve existing public names and legacy casing, including the lowercase `ysmu` mod class. The GeckoLib animation engine is **vendored into this repository** (`src/main/java/software`, `src/main/java/com/eliotlash`, `src/main/java/net/geckominecraft`). Those trees are third-party compatibility code owned by this repository, so an engine fix is made here - keep the edit as narrow as the defect, do not refactor or re-style the vendored code around it, and record every deviation from the snapshot in `.agent/` and in `PROVENANCE.md`. `E:\IDEA\Geckolib` is the source of the snapshot only and is no longer a copy to sync from.
-
-When adding user-facing text, update both `en_US.lang` and `zh_CN.lang`. When adding config fields, update `Config`, the relevant GUI screen if applicable, and translation keys.
-
-**A translation string consumed by `ChatComponentTranslation` may only use `%s`.** 1.7.10's `ChatComponentTranslation#initializeFromFormat` throws `ChatComponentTranslationFormatException("Unsupported format: ...")` for every specifier whose conversion character is not `s` (`build/rfg/minecraft-src/java/net/minecraft/util/ChatComponentTranslation.java:121-124`; `%%` is the only other accepted form), and it does so lazily, from `getFormattedText`/`getUnformattedTextForChat` (`:202`, `:212`) - i.e. while the chat is being drawn. So a `%d` in a chat key does not fail loudly at the call site: the message simply never renders. The reference branch is a 1.20 port, where `TranslatableComponent` does accept `%d`, so copying its chat strings verbatim carries a 1.20 rule into 1.7.10 - that is exactly how `commands.yes_steve_model.loadlocal.complete` shipped with three `%d` and three `int` arguments and `/ysmclient load`'s completion line never appeared. Format the numbers first (`String.format(Locale.ROOT, "%.2f", (double) ms)` or `String.valueOf(n)`) and keep `%s` in both lang files. `I18n.format` is unaffected - it goes through `String.format`, so the GUI's own `%d` keys are fine.
-
-When adding model animation states, register names and priorities through `AnimationRegister`/`AnimationManager`, and ensure `ConditionManager.addTest` can classify conditional animation names.
-
-Animation-file expressions are evaluated by the legacy `software.bernie.geckolib3.core.molang.MolangParser` (a `MathBuilder` subclass in `com.eliotlash.mclib.math`), not by the engine's newer MoLang VM, so a Bedrock operator missing from `Operation` breaks a whole channel instead of raising anything visible: `"scale": "v.player_size??1"` failed to tokenise, the channel evaluated to 0 and ten model packs rendered as nothing. Add pack-facing operators to `com.eliotlash.mclib.math.Operation` (the lookup is table-driven) and cover them in `MolangParserCompatibilityTest`.
-
-## Gradle and Verification
-
-Gradle may be run directly, but a running build occupies the project: the daemon holds the build
-outputs and the source tree, so editing while it runs can conflict with it or lose work. Start a build
-only as the **final confirmation**, once every change is finished and no other agent or subagent is
-still working in this workspace. Never start a build in the middle of a task.
-
-**A contributor's "done" is not verification, and a parse-only check is not a compile.** When a
-subagent is told not to run Gradle, all it can honestly report is that it read its own work - so the
-build it hands back must be run before its changes are believed. Measured on one batch here: eight
-files reported "done, syntax-checked" produced three compile errors in main code (a record component
-renamed on one side of a call, and a static nested type selected through a parameterized outer type)
-and five in test code (an interface method the senders never implemented, and an instance method
-called statically), and seventeen further tests failed at runtime - because a parse check sees none
-of those. Run the suite, and read the failing assertions rather than the report that says they pass.
-
-Run the narrowest task that answers the question, from the repository root:
-
-- `.\gradlew.bat compileJava` - fastest "does it still compile" check
-- `.\gradlew.bat test` - unit tests
-- `.\gradlew.bat build` - final confirmation only, when all work is done and nothing else is holding the tree
-- `.\gradlew.bat runClient`
-- `.\gradlew.bat runServer`
-
-Do not assemble a classpath by scanning the Gradle cache to typecheck a change. It is slow and it
-produces misleading errors, because several versions of the same jar end up on that classpath. Run the
-Gradle task instead.
-
-`src/test` holds the JUnit 5 sources that cover resource formats, sync packets, security helpers, and Molang physics. Because Gradle 9 no longer injects test-framework implementation dependencies, `testRuntimeClasspath` must keep the explicit `junit-platform-launcher` entry, and `fastutil` (used by mod code and pulled in transitively only for compilation) must stay declared for tests. CI delegates build/test and tagged releases to reusable GTNH workflows in `.github/workflows`.
+上游保真
+当上游已实现某功能时，按上游方式实现。不要为上游已解决的问题自行发明机制。
+
+参考为 tmp/YesSteveModel-dev-1.20。更改行为前先阅读，并在提交、ExecPlan 条目或代码注释中引用所依据的上游文件与行号。仅以“看起来合理”为理由的更改不算完成。
+
+先找到上游机制。 对于行为更改，定位上游对同一问题的处理——通常是一个类加少量几行——并移植其形态，包括数据缺失时的回退方案。
+
+上游没有的就不要发明。 如果上游没有对应实现（例如 YSMU 面向宿主的 EntityModelRenderApi，上游没有），不要发明新谓词或新语义。将差异记录为发现，交由所有者裁决；本地发明的机制即使能工作也是缺陷。
+
+移植特有的新增需要移植特有的理由——1.7.10 限制，或移植自身的架构（世界、HUD 叠加层和 GUI 共用一个渲染器）。说明是哪种，并尽量保持新增最小。
+
+绝不添加上游不保存的状态来绕开时序差异。如果值尚不可用，上游形态的答案是：通过拥有它的结构解析（上游在已加载的模型内解析纹理名称），或作为显式覆盖传递，或等待。用侧边集合跟踪“我已经做了什么”并据此门控，已在此处产生过一次已发布的回归：一个纹理 id 集合拒绝了玩家自己的 Minecraft 皮肤用于内置 steve/alex 模型，而上游通过将皮肤作为渲染事件覆盖交给渲染器来绘制。
+
+不要复制上游的 bug。 引用行为，而非笔误——例如上游在发布渲染事件之前读取纹理覆盖，因此其自身字段从未看到监听器设置的内容；移植在之后读取。同一规则适用于参考分支（tmp/YesSteveModel-Unofficial-perf-previewUI），所有者长期指令要求逐字复制：它是完成的移植，而非正确的移植，且带有上游没有的缺陷。其中一个已实测——其 com/eliotlash/mclib/math/functions/utility/DieRoll.java:26-28（及 DieRollInteger.java）从不递增掷骰计数器，且乘以 getArg(2) - getArg(2)，即零，因此调用 math.die_roll 的包会挂起客户端线程，而上游自己的 .../geckolib3/core/molang/builtin/math/DieRoll.java:14-30 是正确的。逐字复制会引入该挂起。所以可自由复制参考的结构和注释，但在保留前，对照上游检查每个循环、每个除数和每个提前返回，并记录你拒绝复制的内容。
+
+已知与上游的差异
+此处移植对同一问题的回答与 tmp/YesSteveModel-dev-1.20 不同的每一处。每处要么已解决（说明方式），要么等待所有者。列在此处不是发明第三种答案的许可：选择上游形态，或记录为何 1.7.10 或移植自身架构无法做到。
+
+Molang 变量名不区分大小写。 上游通过 MolangNames.identifier（api/molang/MolangNames.java:29-35，toLowerCase(Locale.ROOT)）规范化每个标识符。移植现在在一条规则 MolangParser.canonicalVariableName 中做同样的事，由解析器自身的注册表、RemoteAnimationVariables.normalize（网络路径）以及物理作用域的变量表使用。此前，包的 v.roaming.C 按原样存储但查找时小写，因此读作 0，每个 v.roaming.C==0?... 都走第一分支：包自身的设置开关静默失效。已解决——见 .agent/phase18-glow-and-roaming-case.md。
+
+逐骨骼发光、透明度和颜色。 上游将其保存在每骨骼 14 个浮点的属性数组中（geckolib3/model/AnimatedGeoBone.java:9-16，打包于 :201-211），并在其原生渲染器中消费（natives/render/NativeModelState.java:57-66）。移植在 GeoBone 上以相同打包方式携带相同值，并在 MolangParser 中注册相同的三个名称（bone_color、bone_transparency、bone_glow），但用固定功能管线绘制：发光等级 >= 0 时骨骼无光照渲染，因为 1.7.10 没有逐骨骼光照图。等级保留在骨骼上，以便日后可对照上游而非猜测添加亮度映射。因 1.7.10 限制而属移植特有。
+
+客户端的纹理阶梯没有模型自身声明默认值的层级。 上游在已加载的模型内解析纹理——请求名称，然后 settings.defaultTexture（RawModelAssembler:189-196 在包未声明时用第一个纹理填充），然后第一个条目（format/schema/model/ModelManifestLookup.java:10-29）。移植解析并同步同一字段（YSMFolderDeserializer:170 和 :1031、RawYsmModel:210、YSMBinarySerializer:483 / YSMBinaryDeserializer:611），但客户端阶梯在该层放了全局 Config.DEFAULT_MODEL_TEXTURE（CustomPlayerModel.textureFor），因此仅对声明了 default_texture 的包有差异。已解决：引擎的 ModelProperties 新增 defaultTexture（ysm_default_texture），RawYsmModelAdapter 将其注入 ysm_render_layers_first 旁，ClientModelManager.DECLARED_DEFAULT_TEXTURES 以与 RENDER_LAYERS_FIRST 相同的卫生方式携带它，CustomPlayerModel.resolveTexture 在选中项与常量之间使用它，并像上游的 containsTexture 一样对照模型自身纹理列表验证。Config.DEFAULT_MODEL_TEXTURE 保持其确切角色。ResolveTextureLadderTest 守护它。
+
+两个同步通道可投递同一文件夹模型。 上游同步一个通道。移植有 legacy 和 OpenYSM 两个通道，对文件夹模型它们序列化方式不同——烘焙侧重新发出美化打印的 JSON，包的浮点扩宽为 double，即 3.0 MB 几何对 wine_fox/05_magical 的 9.0 MB，六个纹理字节相同。重复检查对这些字节哈希，因此从未匹配：每个 wine_fox/* 模型每会话注册六次，而每个 .ysm 包三次，每次重新注册会停放几何、丢弃就绪标记和已安装动画，使模型约一秒内绘制内置默认——即闪烁。已解决：每个模型一个通道——SyncModelFiles 不再向 OpenYSM 索引携带的模型提供，且仅在 Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL 开启时，因此内置模型和 OpenYsmFormat 无法生成载荷的模型保持仅 legacy。CACHE_NAME_INFO 两种方式都保留条目——它也是阻止 legacy 文件夹扫描器重新扫描 OpenYSM 扫描器已注册目录的注册表。
+
+渲染状态在绘制前作为类型选择，如同上游选择 RenderType。 上游有一个入口 IGeoRenderer#getRenderType(texture, visible, glowing, translucent)（geckolib3/geo/IGeoRenderer.java:33-39），当模型有半透明顶点时返回 CustomTranslucentRenderType——包装 RenderType.entityTranslucent，即混合与剔除——否则返回 RenderType.entityCutoutNoCull（alpha 测试、无混合、无剔除），并将该类型作为参数交给绘制（:18-26）。移植形态相同：YsmRenderType 是 1.7.10 中 RenderType 的替代（平台没有），IGeoRenderer#getRenderType 携带上游的名称、参数、默认值和两个分支，render(model, animatable, type, ...) 应用类型而非决定。移植不添加 getRenderType 覆盖，因为引擎的默认实现就是上游规则。hasTranslucentVertices 是上游在 GeoModelState:73-74 的名称；上游读取原生顶点数，移植用宿主对即将绑定纹理的回答替代——与上游烘焙相同的输入——并在 javadoc 中说明。第一人称手臂不经过 render，因此 FirstPersonHandRenderer 向 getRenderType 问与世界路径相同的问题——可见、不发光、手臂自身 animatable 的 hasTranslucentVertices——并在 prepareCustomArmState 中应用该类型状态，遵循 render 自身规则（IGeoRenderer.java:77-95）。角色在镜像手臂矩阵周围应用该状态，之后重置 glFrontFace(GL11.GL_CCW)，因为镜像使模型自身正面成为背面（CustomPlayerItemInHandLayer.java:107 对镜像手持物品是相同修正）。
+值得保留的历史：手臂曾硬编码上游的手臂答案 CustomTranslucentRenderType——上游 CustomFirstPersonArmRenderer:39 确实无条件使用，但在 1.20 中通过移交的类型自行应用，而在 1.7.10 中必须手动应用。提交 67f8044 将该状态写为 disableAlpha() + enableCull()：对不透明模型，这与世界路径绘制相同几何所用的 entityCutoutNoCull 相反，因此 alpha-0 纹素未被丢弃（远面未光照内侧的黑色斑块），剔除又去掉了平面或单层片的一个面（透明孔洞）。wine_fox/05_magical 平面贴花的灰色单纹素背面曾为剔除而加，现由夹紧纹理上传处理（见下方纹理环绕条目），而非手臂剔除状态。
+记录两个缺口而非发明：1.7.10 无轮廓通道，因此发光分支不绘制（getRenderType 返回 null）；引擎在零厚度立方体上保留移植特有的 0.001 膨胀，上游没有（GeoBuilder.java:100-116），因为移除会使平面贴花两面在 cutout-no-cull 分支上完全共面并 z-fight。all_cutout 是上游的 forceCulling（format/parser/pojo/manifest/settings/ModelProperties.java:35-36）；移植已解析并同步它（RawYsmModel:214、YSMFolderDeserializer:174、YSMBinarySerializer:491 / YSMBinaryDeserializer:620），现将其作为 ysm_all_cutout 带到客户端至引擎的 ModelProperties.forceCulling。现由 MaterialDrawSession 中纹理拥有的逐面 alpha 分区和裁剪平面/绕序 CPU 朝向消费，包括直接手臂入口。连续绘制段联合排序其半透明面；层、任意回调和嵌套绘制是排空边界。无 CPU 像素的外部纹理保留旧渲染器回退。源码接线已编译，但实时 GL/shader 一致性尚未验证。可用原生源（tmp/YesSteveModel-Native-dev/modules/gfx/src/bake/baked_model.cc:685-734）分类每个面的 UV 像素并为六面立方体选择剔除分区；半透明面保持半透明。绘制时朝向使用变换后的面平面和绕序。无条件 GL 剔除开关不是该机制。见 .agent/task28-material-consumers.md。
+值得保留的历史：早前尝试在 GeoCube 内丢弃退化面，作用于所有模型共享的几何，破坏了正确渲染的模型；已回退。不要让此类谓词作用于共享几何，也不要添加上游没有的方法——临时 shouldCullBackFaces 因此被删除。
+两个映射通过阅读而非猜测确定。上游的 RenderFirstPlayerBackground 是第一人称手臂的背景通道，不是 HUD 叠加层；此处对应 FirstPersonHandRenderer，它应用该通道状态。HUD 额外玩家叠加层（ClientEventHandler#renderSelfGuiPlayer）是移植特有——上游无对应——因此走 doRender 并取与世界相同的逐模型答案。上游第三个 geo 渲染器 GeoProjectilesRenderer 在此引擎无对应，因此没有第三处需要询问类型。
+
+模型纹理以夹紧方式上传，而非重复。 上游依赖平台默认：其纹理经 1.20 的 TextureManager，采样器为 CLAMP_TO_EDGE。移植的 OuterFileTexture 传入 clamp = false，即 GL_REPEAT。这很重要，因为包用零 uv_size 标记不想要的面——wine_fox/05_magical 的 ysmGlowdamofazhen3 声明 south 为 uv [256, 0], uv_size [0, 0]——上游仍构建这些面（GeoBuilder:186-193 仅跳过 uv 数据缺失的面），该面四个 uv 全归一化为 u = 1.0。夹紧时是行的最后一个纹素，在该包每个皮肤中透明，因此面不可见；重复时环绕到第一个纹素，在 magic.png 和 water.png 中是不透明灰色，面变成模型艺术上 60×60 的不透明板。实测：magic.png 在 (0,0) 为 A255 RGB(57,51,67)，在 (255,0) 为 A0。OuterFileTextureWrapTest 固定两半。已解决——注意此修复在移植中，因此需重建 YSMU jar，而不仅是 Geckolib。
+
+EntityModelRenderApi.isModelLoaded 是移植特有查询。 上游面向宿主的表面是事件（RenderModelEvent、RenderLayerEvent、RegisterRenderStateModifierEvent、RegisterModelLocatorEvent），无就绪查询。移植对停放模型返回 true，而渲染器正在绘制内置默认。开放：所有者决策，记录而非解决。
+
+第一人称手臂由其自身 animatable、控制器集和条件表摆姿势。 上游每帧 tick CustomFirstPersonArmEntity（client/renderer/CustomFirstPersonArmRenderer.java:27-28），以 fp.arm.misc / fp.arm.parallel_<i> / fp.arm.armor_<slot>（client/controller/collections/FPArmControllerCollection.java:22-32）驱动，基于第二动画存储和第二条件管理器（ModelRenderTargetAssembler.java:53-60），并与身体共享一个控制器映射。移植现同样（CustomFirstPersonArmEntity、FPArmConditionManager、AnimationDomain#controllerSetId），因为手臂骨骼此前从未进入 AnimationProcessor，绘制为绑定姿势。一处刻意差异：上游在构建模型资源集时决定存在哪些 fp.arm.* 和 parallel_<i> 控制器，并跳过无骨骼通道的动画（ParallelControllerDiscovery.java:64-71），而移植为每个 animatable 注册固定集并在运行时路由。该差异并非无害，且已作为缺陷发布：固定池向引擎请求当前模型未声明的名称，AnimationController#setAnimation 在填充 animationQueue 和更新 currentAnimationBuilder 前返回，控制器保留旧 builder，下一帧重新评估为已更改，每帧打印 Could not load animation: parallelN. Is it missing?，控制器无回退——实测为 parallel0/parallel5/parallel7 在实机重复，以及此前的 LaPluma 行走回归。移植对上游发现时过滤的对应是交接时的运行时存在检查：AnimationManager#playParallelIfPresent 询问 hasAnimation（先安装模型动画，与 definesAnimation 完全一样），名称缺失时返回 PlayState.STOP——SOURCE 自身使用并记录的结局（client/animation/AnimationManager.java:852-855，原因在 :822-823）。ParallelAnimationExistenceGuardTest 为身体和手臂固定，包括手臂仅从 fp_arm 域询问，身体仅从 main。已解决——见 .agent/phase23-first-person-arm-pose.md。
+同一分裂的一个后果记录而非修补：默认动画回退按域（ModelRenderTargetLoader.java:375-379 与 DefaultAnimationKey.java:36-38，其中 fp_arm 单独映射到 player/first-person），因此legacy 三集默认载荷（extra/main/arm，即在 animations/fp.arm.animation.json 存在前烘焙）永远无法填充第一人称回退，该域保持空，直到模型自身包声明 fp_arm 或内置默认被重新复制。上游对未声明 fp_arm 集的载荷有同样缺口，因此这是格式行为，不是缺失的移植映射。
+
+vehicle.origin 无可移植。 上游的 VehicleOriginController 不是“按实体偏航旋转”；它是只从两个提供者取四元数的兼容钩子，SimplePlaneCompat.getRotation（Simple Planes 的 PlaneEntity）和 ImmersiveAircraftCompat.getRotation（Immersive Aircraft 的 AircraftEntity）（VehicleOriginController.java:57-69）。两者都是 1.20 模组，无 1.7.10 对应，移植也没有任一兼容包装。两者都未安装时，上游控制器 rotation 为 null 且不访问骨骼队列——即渲染器自身偏航决定朝向，正是移植所做。记录而非发明“实体偏航原点控制器”，上游没有。先前相邻的时间线和查询绑定缺口已在 ccb8acd 解决：车辆时间线分派使用粒子子系统的配对实体/变换/骨骼作用域，EntityQueryBindings 向玩家、车辆和箭路径提供相同的实体参数化绑定表。不要把这些旧缺口算作仍缺失。
+
+ExecPlans
+编写复杂功能或重大重构时，从设计到实现使用 ExecPlan（见 .agent/PLANS.md）。
+
+仓库布局
+src/main/java/com/fox/ysmu：项目特定模组代码。
+
+src/main/java/com/fox/ysmu/client：仅客户端渲染、GUI、按键绑定、动画谓词、纹理/模型注册和上传状态。
+
+src/main/java/com/fox/ysmu/model：服务端模型发现、内置模型复制、缓存生成和文件夹/.ysm 模型格式处理。
+
+src/main/java/com/fox/ysmu/network：Forge SimpleNetworkWrapper 设置和数据包类。
+
+src/main/java/com/fox/ysmu/eep：1.7.10 IExtendedEntityProperties 状态，用于所选模型/纹理、活动动画、收藏模型及每个玩家的 roaming 变量。
+
+src/main/java/com/fox/ysmu/event：GTNHLib 事件订阅者，用于公共玩家同步和客户端渲染事件。
+
+src/main/java/com/fox/ysmu/compat：可选模组兼容包装。将 Backhand 等直接调用置于这些包装后。
+
+src/main/java/com/fox/ysmu/mixin：仅 Mixins。gradle.properties 将 Mixins 限制在包 com.fox.ysmu.mixin。
+
+src/main/java/software、src/main/java/com/eliotlash、src/main/java/net/geckominecraft：内置 GeckoLib 3 引擎（327 文件：275/48/4）。本仓库拥有的第三方兼容代码——保持引擎编辑窄小并记录每次偏离。除 software/bernie/geckolib3/GeckoLib.java（@Mod 和 preInit 已移除）外，树与快照字节相同。见 PROVENANCE.md。
+
+src/main/resources/assets/ysmu/custom：重载时复制到 config/ysmu/custom 的内置模型资产。
+
+src/main/resources/assets/ysmu/lang：en_US.lang 和 zh_CN.lang。保持新翻译键同步。
+
+src/main/resources/mixins.ysmu.json：Mixin 配置。在 mixins 中列出 MixinEntityArrow，在 client 中列出 MixinItemRenderer、MixinEffectRenderer、client.MixinRenderArrow。添加前阅读文件而非此行——此行在其他三个已落地后仍说“仅 MixinItemRenderer”数日。
+
+src/main/resources/META-INF/ysmu_at.cfg：YSMU 触及的 Minecraft 内部访问转换器（ItemRenderer、EntityRenderer、Minecraft.timer、RenderHelper）。引擎自身两个访问已在此文件，因为引擎随本 jar 发布。
+
+tools/convert_new_ysm.py 和 tools/convert.md：较新 OpenYSM 风格模型目录的转换工具与文档。
+
+Minecraft 和 Forge 源
+RetroFuturaGradle 已将修补后的游戏源反编译到工作区。用文件工具就地阅读，而非打开 jar：
+
+build/rfg/minecraft-src/java：反编译的 Minecraft + Forge 1.7.10 源（stable-12 名称，已应用 Forge 补丁）。
+
+build/rfg/minecraft-src/resources：匹配资源。
+
+build/rfg/launcher-src：捆绑启动器源。
+
+不要提取或反编译 build/rfg 中的 jar（mcp_patched_minecraft-sources.jar、srg_patched_minecraft-sources.jar、recompiled_minecraft-1.7.10.jar、srg_merged_minecraft.jar）。它们与 minecraft-src 相同，解包只浪费时间并弄乱工作区。先在 build/rfg/minecraft-src/java 下检查原版/Forge 行为——维度旅行、重生、IExtendedEntityProperties 克隆、事件触发顺序、渲染和纹理重载钩子——仅当该目录缺失时才回退到 jar。build/ 是生成输出：绝不提交，绝不向其中添加工作区文件。
+
+运行时流程
+启动始于 ysmu.java。CommonProxy.preInit 加载 Config，调用 ServerModelManager.reloadPacks()，记录版本。CommonProxy.init 通过 NetworkHandler.init() 注册网络数据包。ClientProxy.init 额外注册动画状态/Molang 变量、自定义玩家渲染器和按键绑定。
+
+ServerModelManager.reloadPacks() 创建 config/ysmu、custom、export、cache 目录，强制复制内置模型到 config/ysmu/custom，初始化 cache/server/PASSWORD，并为文件夹模型和 .ysm 文件重建加密服务器缓存文件。
+
+模型同步始于服务器发送 RequestSyncModel。客户端通过 SyncModelFiles 回复缓存 MD5 名称。服务器发送加密密码（SendModelPassword），要求客户端加载缓存命中（RequestLoadModel），并发送缺失缓存文件（SendModelFile）。客户端解密并通过 ClientModelManager.registerAll() 注册模型。
+
+客户端渲染在 ClientEventHandler 中取消原版 RenderPlayerEvent.Pre，委托给 CustomPlayerRenderer。CustomPlayerRenderer 从 ExtendedModelInfo 或 NPC 覆盖选择模型/纹理状态，发布 SpecialPlayerRenderEvent，然后通过 GeckoLib 替换渲染器渲染。第一人称手部渲染分为 RenderHandEvent 和 Angelica 特定的 MixinItemRenderer 路径。
+
+HUD“额外玩家”叠加层（ClientEventHandler.renderSelfGuiPlayer，预览渲染）通过同一渲染器和同一 AnimationData 绘制同一本地玩家，因此一帧对一个实体在一个 seekTime 到达 AnimationController.process 两次。引擎必须对此幂等：第二次处理不得丢弃过渡正移向的动画（AnimationController.process 仅在 animationQueue 非空时轮询）。曾如此时，控制器从不离开 AnimationState.Transitioning，模型永远渲染过渡第一帧——表现为“行走有动画但冲刺没有，仅第三人称”，因为第一人称中 HUD 叠加层是唯一通道。见 .agent/phase7-geckolib-dependency.md；AnimationControllerTransitionTest 守护它。
+
+引擎是内置的，不是必需的独立模组，因此 ysmu.java 不再声明 dependencies = "required-after:geckolib"。引擎需要宿主知识时通过接口，YSMU 实现它：CustomPlayerEntity 实现 IMolangPhysicsScope，使 software.bernie.geckolib3.core.molang.MolangPhysicsRuntime 能键控其逐帧 MoLang 作用域，ClientEventHandler 将远程动画变量推入引擎的 core.molang.RemoteAnimationVariables。YSMU 不再自带 Molang 物理运行时。
+
+模型和资源规则
+文件夹模型位于 config/ysmu/custom/<模型名> 下，必须包含 main.json、arm.json 和至少一个 .png。可选动画文件为 main.animation.json、arm.animation.json 和 extra.animation.json；缺失动画文件回退到内置默认动画。
+
+config/ysmu/custom 中的 .ysm 文件也会被扫描。仅包含 main.json、arm.json 和至少一个 .png 的文件被缓存。
+
+模型图像在解析时规范化为 PNG。ModelImageConverter 用 libs/ImageStream--SNAPSHOT.jar 中内置的解码器（上游 OpenYSM 声明为 com.github.OpenYSM:ImageStream 的库）解码 BMP/JPEG/WebP/AVIF 并重新编码为 PNG，镜像上游的 YSMClientMapper；PNG 原样通过，无法解码的图像保持原样并每格式警告一次。因此客户端只接收 PNG，ClientModelMetadataRegistry 为旧缓存保留自己的格式守卫。该 jar 由 dependencies.gradle 末尾块未重定位地嵌入模组 jar，因为 GTNH 约定将 shadowImplementation 依赖重定位到 com/fox/ysmu/shadow/...，会破坏直接解码器调用和 META-INF/services/javax.imageio.spi.* 名称。
+
+模型选择和纹理屏幕通过 ModelPreviewRegistry（同步载荷中的模型 preview_animation，未声明时为 idle）加 ModelPreviewAnimationState（上游 CatalogModelPreviewAnimationState 的移植）动画化每个图块。模型只需定义名为 hover、hover_fadeout 和 focus 的动画即可选择额外通道；淡出窗口是该动画长度。RenderUtil.renderEntityInInventory(..., hovered, focused) 驱动状态机并在预览 animatable 上设置 AnimationData.shouldPlayWhilePaused，因为打开 GUI 会暂停单人游戏，引擎否则拒绝推进时钟——无该标志图块渲染为冻结姿势。
+
+模型的逐玩家设置是 roaming 变量：包读取为 v.roaming.<name> 的命名浮点，由模型的 模型设置 面板（在 ysm.json 中声明为 extra_animation_buttons[].config_forms）写入。面板、本地副本和服务器权威是 ModelConfigScreen、ClientRoamingStore 和 ExtendedRoamingVariables；ModelConfigRegistry 记住哪个模型声明哪些表单，ClientRoamingKeys 记住每个模型的 32 位命名空间键，由 RawProperties.sha256 经 ModelRoamingKey 派生，使客户端和服务器无需额外载荷字段即可一致。服务器是权威：客户端通过 C2SRoamingChanges（服务器绑定 id 99）报告增量并采纳服务器在 S2CRoamingState（客户端绑定 id 20）中回显的映射，该映射也到达跟踪该玩家的每个客户端。边界仅在 ModelRoamingLimits。分离的 GUI 预览通过 IMolangPhysicsScope.getMolangVariables 读取本地玩家为所绘制模型的值，因为它没有实体供引擎查找 roaming 变量——这阻止预览图块在世界读取存储值时读零。
+
+包假设 roaming 变量活过单帧：如 v.roaming.player_size=v.roaming.player_size?v.roaming.player_size:1 的 timeline 语句每次动画重启运行一次，之后每帧读取其赋值，parallel1 由此缩放整个模型（"MRoot":{"scale":"v.roaming.player_size"}）。仅当引擎 MoLang 作用域稳定时有效，因此 MolangPhysicsRuntime.ScopeKey 按值比较所属实体、模型和动画——绝不按对象标识。GUI 图块每渲染帧重建 setMainModel(ModelIdUtil.getMainId(modelId))，因此该键中的标识组件会给图块每帧新的空作用域，变量读 0 且模型闪烁消失；世界不受影响，因为键是玩家 UUID。MolangScopeKeyStabilityTest 守护此。
+
+ModelIdUtil 为 ResourceLocation 规范化模型名。安全 id 匹配 [a-z0-9._-]+；不安全名编码为 _name_ 加 UTF-8 十六进制。使用 ModelIdUtil 助手而非手工构建模型、主、手臂或纹理 id。
+
+src/main/resources/assets/ysmu/custom 中的内置模型资产在重载时复制到运行时配置目录。更改这些资产时要小心，因为运行时重载路径故意覆盖内置副本。唯一例外是用户替换为 OpenYSM 模型包的目录：当 config/ysmu/custom/<name>/ysm-pack.json 存在时，该名称的内置副本被跳过并记录（ServerModelManager.builtInModelTarget），目录计为包根而非模型（ServerModelManager.isPackRoot）。包根持有模型目录，其 ysm-pack.png 是封面从不是模型纹理，其 ysm-pack.json（名称/描述/语言）随 OpenYSM 同步索引到达客户端，使模型选择 GUI 能用包自身名称和封面标记文件夹。
+
+网络和线程规则
+NetworkHandler 中的数据包 id 是线协议的一部分。需要时添加新 id；不要重编号现有 id。保持数据包侧注册显式并与处理器行为一致。
+
+不要在数据包处理器路径上执行重型文件 IO、加密/解密或模型解析。现有代码用 ThreadTools.THREAD_POOL 做后台工作，用 Minecraft.func_152344_a(...) 在客户端模型或纹理注册必须返回客户端线程时。
+
+模型密码必须在缓存模型文件可解密前可用。保持 SendModelPassword 在 RequestLoadModel 之前的关系及 RequestLoadModel 中的重试行为。
+
+OpenYSM 同步缓存由模型自身 sha256 加 ModelCacheWriter.OPEN_YSM_BAKE_VERSION 命名，绝不由载荷字节命名，其签名检查只证明文件属于该哈希。当烘焙载荷含义变化时提升该常量——序列化器、RawYsmModelAdapter 或反序列化器烘焙模型的哪些部分——否则旧构建写入的载荷（例如无几何，在立方体烘焙为面之前）会继续提供给缓存哈希同样匹配的客户端。这就是十个模型跨重载和重启保持不可见，而新烘焙和每个本地测试看起来正确的原因。
+
+兼容性说明
+运行时先决条件是 UniMixins 和 GTNHLib。动画引擎是本模组的一部分，因此不得同时安装 geckolib-*.jar。开发/运行时额外项包括 NotEnoughItems、Nashorn、Angelica、Backhand 和 JUnit，如 dependencies.gradle 所声明。
+
+按现有模式对事件订阅者使用 GTNHLib 的 @EventBusSubscriber。仅客户端订阅者应指定 side = Side.CLIENT。
+
+使用 BackhandCompat 和 AngelicaCompat，而非将可选模组 API 调用散落在核心逻辑中。可选模组缺失时保持兼容检查弹性。
+
+编码约定
+遵循 .editorconfig：UTF-8、LF 行尾、Java 4 空格缩进、Markdown/JSON/YAML 2 空格缩进、末尾换行，除 .lang 文件外无尾随空白。
+
+在 Windows PowerShell 上，用 -Encoding UTF8 读取 UTF-8 文件；否则中文 README、注释和 lang 文件可能显示为乱码。
+
+现代 Java 由 JVM Downgrader 启用，而非 Jabel：gradle.properties 设置 enableModernJavaSyntax = jvmDowngrader 和 downgradeTargetVersion = 8，因此源码可使用现代语法和 Java 9+ 标准库 API（例如上游 CustomTextureManager 使用的 java.lang.ref.Cleaner），而生成的 jar 仍携带 JVM 8 类文件。这可行是因为 downgrader 将这些 API 调用重写到自己的桩，桩从 xyz.wagyourtail.jvmdowngrader:jvmdowngrader-java-api 解析；jvmDowngraderStubsProvider 故意留空（原因见 gradle.properties 注释，若报告真实 Java 8 启动器失败则重新考虑）。代码已使用模式变量。使用 Java 9+ API 时在代码中说明运行时为何需要——模组的正常运行时是现代 JVM，此类 API 原生，降级路径是保持旧启动器可用的原因。
+
+保留现有公共名称和遗留大小写，包括小写 ysmu 模组类。GeckoLib 动画引擎已内置于本仓库（src/main/java/software、src/main/java/com/eliotlash、src/main/java/net/geckominecraft）。这些树是本仓库拥有的第三方兼容代码，因此引擎修复在此进行——保持编辑与缺陷一样窄，不要围绕它重构或重新设计内置代码，并在 .agent/ 和 PROVENANCE.md 中记录每次偏离快照。E:\IDEA\Geckolib 仅是快照来源，不再是同步来源。
+
+添加面向用户文本时，更新 en_US.lang 和 zh_CN.lang。添加配置字段时，更新 Config、相关 GUI 屏幕（如适用）和翻译键。
+
+ChatComponentTranslation 消费的翻译字符串只能使用 %s。 1.7.10 的 ChatComponentTranslation#initializeFromFormat 对每个转换字符不是 s 的说明符抛出 ChatComponentTranslationFormatException("Unsupported format: ...")（build/rfg/minecraft-src/java/net/minecraft/util/ChatComponentTranslation.java:121-124；%% 是唯一其他接受形式），且是惰性的，从 getFormattedText/getUnformattedTextForChat（:202、:212）——即绘制聊天时。因此聊天键中的 %d 不会在调用点响亮失败：消息只是从不渲染。参考分支是 1.20 移植，其中 TranslatableComponent 接受 %d，因此逐字复制其聊天字符串会将 1.20 规则带入 1.7.10——这正是 commands.yes_steve_model.loadlocal.complete 带三个 %d 和三个 int 参数发布且 /ysmclient load 完成行从未出现的原因。先格式化数字（String.format(Locale.ROOT, "%.2f", (double) ms) 或 String.valueOf(n)）并在两个 lang 文件中保留 %s。I18n.format 不受影响——它经 String.format，因此 GUI 自己的 %d 键没问题。
+
+添加模型动画状态时，通过 AnimationRegister/AnimationManager 注册名称和优先级，并确保 ConditionManager.addTest 能分类条件动画名称。
+
+动画文件表达式由 legacy software.bernie.geckolib3.core.molang.MolangParser（com.eliotlash.mclib.math 中的 MathBuilder 子类）求值，而非引擎较新的 MoLang VM，因此 Operation 中缺失的 Bedrock 操作符会破坏整个通道而不引发可见错误："scale": "v.player_size??1" 无法分词，通道求值为 0，十个模型包渲染为空白。将面向包的操作符添加到 com.eliotlash.mclib.math.Operation（查找是表驱动的）并在 MolangParserCompatibilityTest 中覆盖。
+
+Gradle 与验证
+Gradle 可直接运行，但运行中的构建占用项目：守护进程持有构建输出和源码树，因此运行时编辑可能冲突或丢失工作。仅作为最终确认启动构建，在所有更改完成且无其他代理或子代理仍在此工作区工作时。绝不在任务中途启动构建。
+
+贡献者的“完成”不是验证，仅解析检查不是编译。 当子代理被要求不运行 Gradle 时，它只能诚实报告阅读了自己的工作——因此其交回的构建必须在更改被相信前运行。此处一批实测：八个文件报告“完成，已语法检查”产生主代码三个编译错误（记录组件在调用一侧重命名，以及通过参数化外部类型选择静态嵌套类型）和测试代码五个（发送者从未实现的接口方法，以及静态调用的实例方法），另有十七个测试运行时失败——因为解析检查看不到这些。运行套件，并阅读失败断言而非报告说通过。
+
+从仓库根运行回答问题的最窄任务：
+
+.\gradlew.bat compileJava - 最快的“仍能编译”检查
+
+.\gradlew.bat test - 单元测试
+
+.\gradlew.bat build - 仅最终确认，所有工作完成且无其他占用树时
+
+.\gradlew.bat runClient
+
+.\gradlew.bat runServer
+
+不要通过扫描 Gradle 缓存组装类路径来类型检查更改。它慢且产生误导错误，因为同一 jar 的多个版本会进入该类路径。改为运行 Gradle 任务。
+
+src/test 持有覆盖资源格式、同步数据包、安全助手和 Molang 物理的 JUnit 5 源。因为 Gradle 9 不再注入测试框架实现依赖，testRuntimeClasspath 必须保留显式 junit-platform-launcher 条目，且 fastutil（模组代码使用，仅传递拉入用于编译）必须为测试保留声明。CI 将构建/测试和标记发布委托给 .github/workflows 中的可重用 GTNH 工作流。

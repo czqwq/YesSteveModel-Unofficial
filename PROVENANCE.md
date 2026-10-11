@@ -25,6 +25,69 @@ the part of it that is written against this snapshot.
 
 ## Deviations recorded against this snapshot
 
+- **The immutable render context, ported into six engine files.** A GUI preview must present one stable pose for a
+  whole frame; upstream gets that from its `RenderContext`'s `immutable` bit
+  (`tmp/YesSteveModel-dev-1.20 .../geckolib3/geo/RenderContext.java:9-21`), resolved through the animatable's
+  whitelist (`.../model/AnimatableEntity.java:452-461`) and consumed by `tickAnimation`'s
+  `mutableRender` (`:344`) with `shouldUpdate`/`shouldTick` (`:373-374`) and a single `mainRenderData` for an
+  immutable context (`:265-277`). Recorded in full in `.agent/phase42-track-f-engine.md`.
+  - **`software/bernie/geckolib3/geo/RenderContext.java` - new, upstream's own type.** A record carrying the four
+    bits this port can answer (`firstPersonMod`, `inventory`, `paperDoll`, `immutable`), `withImmutable` (`:16-21`),
+    a `NONE` constant (the mutable context an engine-built event carries) and one factory per pass. Upstream's
+    `level`, `irisShadow` and `offScreen` fields and its `nativeType()` (`:9`, `:23-28`) are deliberately **not**
+    modelled: this port has no native renderer layer and no Iris shadow pass, and upstream's only extraction point
+    passes `offScreen` as `false` (`util/RenderUtil.java:57-67`).
+  - **`software/bernie/geckolib3/geo/ImmutableFramePose.java` - new, the port's stand-in for upstream's extracted
+    model state.** `AnimatableEntity:255-263` extracts the posed model into `GeoRenderData.modelState` and `:265-277`
+    reuses it; this port's renderer draws the live `GeoBone`s and every preview draw restores a `ModelPoseSnapshot`
+    (`com.fox.ysmu.client.render.ModelPoseSnapshot`), so the smallest equivalent is a nine-float-per-bone record
+    written back onto the bones. It holds no bone reference, so it cannot keep released geometry alive.
+  - **`software/bernie/geckolib3/core/IAnimatable.java` - `determineImmutableContext(RenderContext)`, default
+    `false`.** Upstream asks its animatable the same question (`AnimatableEntity:456-461`, with
+    `client/gui/CustomGuiPlayerEntity.java:43-46` answering true); its own default reads the three flags this port
+    does not model, so the port's default is false and only an animatable that declares otherwise enters the path.
+  - **`software/bernie/geckolib3/core/event/predicate/AnimationEvent.java` - the event carries the context.**
+    `getRenderContext()` is never null (`RenderContext.NONE` until a caller attaches one) and `setRenderContext`
+    normalises null to it, so every engine-built event (`AnimatedGeoModel:71`, `AnimationController:1084`,
+    `GeoEntityRenderer:107`) keeps today's mutable behaviour. Upstream's event carries the same value
+    (`.../core/event/predicate/AnimationEvent.java:15`, read at `AnimatableEntity:343`).
+  - **`software/bernie/geckolib3/core/manager/AnimationData.java` - one `immutableFrame` field.** Upstream keeps this
+    per-frame state on the animatable (`AnimatableEntity:52`, `:55-58`); this port's animatables are host classes
+    implementing `IAnimatable` while `AnimatedGeoModel` is shared by all of them, so the per-animatable state lands
+    on the object that already is per-animatable.
+  - **`software/bernie/geckolib3/model/AnimatedGeoModel.java` - the gate.** `setLivingAnimations` resolves
+    `immutable = context.immutable() || animatable.determineImmutableContext(context)` and, for an immutable context
+    whose frame already produced a pose, writes that pose back and returns before
+    `animationProcessor.tickAnimation` (`:376-386` is the branch it replaces). The frame is the render tick
+    (`seekTime`, upstream's `renderTicks`, `AnimatableEntity:342`). The union of the two declaration routes is
+    upstream's own effective semantics: `resolveRenderContext`'s context always comes from
+    `RenderUtil.extractRenderContext()` with `immutable = false` (`:57-67`, so the whitelist never downgrades
+    anything), while `client/entity/CustomEntity.java:247` hands an already-immutable context straight to
+    `update(float, RenderContext)`. `AnimationProcessor` and `AnimationController` are untouched, so the HUD/world
+    double-process invariant (`AGENTS.md` Runtime Flow, `.agent/phase7-geckolib-dependency.md`) is unaffected: that
+    path is mutable by default and every engine-built event is `RenderContext.NONE`.
+
+- **Authored concurrent Bedrock controller players (verification pending).**
+  `AnimationController` owns one holder per state animation, each with independent processed-clock completion,
+  events and sound token, and folds weighted position/rotation sums and scale products. Legacy sequential queues
+  remain. State progression uses visited zero-player destinations, name-derived hierarchy (depth 5), segmented
+  transition values and per-child blend weights. LOOP/HOLD completion uses `>`; PLAY_ONCE completion starts at `>=`
+  when ending begins. The initial universal-strict-boundary finding was corrected from deeper source review.
+  See `.agent/task30-animation-finished-deviation.md` for upstream sources, the port-specific same-tick HUD guard,
+  and unverified runtime acceptance. No shortest-path consumer was invented.
+
+
+- **`software/bernie/geckolib3/geo/raw/pojo/ModelProperties.java` — `forceCulling` documentation corrected.**
+  The native consumer is available at `tmp/YesSteveModel-Native-dev/modules/gfx/src/bake/baked_model.cc:685-734`:
+  it chooses culling partitions for full six-face cubes without turning translucent faces opaque. Rendering then
+  uses transformed face planes and winding. The initial edit changed documentation only; task32 now adds texture-owned
+  immutable per-face alpha partitions, clip-plane/winding CPU culling and per-segment translucent ordering to
+  `IGeoRenderer`, including its direct-arm entry. Shared `GeoCube` geometry is unchanged. `MaterialSource` is the
+  host interface for CPU texture pixels; unavailable pixels keep the legacy fallback. See
+  `.agent/task32-material-execplan.md` for native bake/transform evidence and optional Angelica publication,
+  holder invalidation and GPU-accounting ownership. Shader visual parity and arbitrary callback GL state remain
+  unverified; continuous segments do not sort across layers or callbacks.
+
 - **`software/bernie/geckolib3/geo/GeoReplacedEntityRenderer.java` - the frame's animation event moved into a method,
   so a second animatable of the same entity can be ticked with it.** `doRender` built the `EntityModelData` and the
   `AnimationEvent` inline and kept four of its inputs in locals for the layer pass; the port's first-person arm is a
