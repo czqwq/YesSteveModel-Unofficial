@@ -68,9 +68,11 @@ public final class OpenYsmPlayerControllerRuntime {
         if (event == null || event.getController() == null || event.getAnimatable() == null) {
             return null;
         }
+        event.getController().setAuthoredCodedTransition(null);
         CustomPlayerEntity animatable = event.getAnimatable();
-        EntityPlayer player = animatable.getPlayer();
+        EntityPlayer player = animatable.getQueryPlayer();
         if (player == null) {
+            event.getController().clearConcurrentAnimations();
             return null;
         }
         // Install this model's animations before reading the controller table, for the same reason the animation
@@ -90,6 +92,7 @@ public final class OpenYsmPlayerControllerRuntime {
         ControllerSet set = OpenYsmAnimationControllerRegistry
             .get(com.fox.ysmu.client.animation.AnimationDomain.controllerSetId(animationId));
         if (set == null) {
+            event.getController().clearConcurrentAnimations();
             return null;
         }
 
@@ -100,6 +103,7 @@ public final class OpenYsmPlayerControllerRuntime {
                 return result;
             }
         }
+        event.getController().clearConcurrentAnimations();
         return null;
     }
 
@@ -109,6 +113,7 @@ public final class OpenYsmPlayerControllerRuntime {
      * 行为一字未改。
      */
     public static void clear() {
+        for (RuntimeState state : STATES.values()) stopRuntimePlayers(state);
         STATES.clear();
     }
 
@@ -137,6 +142,7 @@ public final class OpenYsmPlayerControllerRuntime {
                 continue;
             }
             RuntimeState state = entry.getValue();
+            stopRuntimePlayers(state);
             state.lastSelectedAnimationState = "";
             state.lastSelectedAnimation = "";
         }
@@ -164,6 +170,7 @@ public final class OpenYsmPlayerControllerRuntime {
             }
             if (controllerName == null || matchesControllerName(controllerName, key.openYsmControllerName)
                 || matchesControllerName(controllerName, key.geckoControllerName)) {
+                stopRuntimePlayers(entry.getValue());
                 it.remove();
             }
         }
@@ -184,7 +191,9 @@ public final class OpenYsmPlayerControllerRuntime {
         java.util.Iterator<Map.Entry<StateKey, RuntimeState>> it = STATES.entrySet()
             .iterator();
         while (it.hasNext()) {
-            if (playerId.equals(it.next().getKey().playerId)) {
+            Map.Entry<StateKey, RuntimeState> entry = it.next();
+            if (playerId.equals(entry.getKey().playerId)) {
+                stopRuntimePlayers(entry.getValue());
                 it.remove();
             }
         }
@@ -249,7 +258,13 @@ public final class OpenYsmPlayerControllerRuntime {
 
     private static PlayState tryApplyController(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
         ResourceLocation animationId, String geckoControllerName, ControllerMatch match) {
+        return tryApplyController(event, player, animationId, geckoControllerName, match, 1, "");
+    }
+
+    private static PlayState tryApplyController(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
+        ResourceLocation animationId, String geckoControllerName, ControllerMatch match, int depth, String hierarchy) {
         RuntimeState runtimeState = runtimeState(player, animationId, geckoControllerName, match.controller.name);
+        runtimeState.engineController = event.getController();
         // 跳过依赖未加载模组的并行控制器（如 player.parallel_3）。
         // 没有 TacZ 时并行控制器的 transition 条件永远无法满足，
         // 导致卡在 default 状态循环播放带有音效关键帧的动画。
@@ -265,6 +280,7 @@ public final class OpenYsmPlayerControllerRuntime {
             boolean isParallel = ctrlName != null
                 && (ctrlName.startsWith("parallel_") || ctrlName.startsWith("pre_parallel_"));
             if (isParallel) {
+                stopRuntimePlayers(runtimeState);
                 runtimeState.currentState = "";
                 runtimeState.lastSelectedAnimationState = "";
                 runtimeState.lastSelectedAnimation = "";
@@ -277,44 +293,71 @@ public final class OpenYsmPlayerControllerRuntime {
             event,
             player,
             runtimeState);
+        event.getController().useBedrockCompletionBoundary(true);
         prepareFrameVariables(geckoControllerName, player, runtimeState, context);
+        boolean initializing = !match.controller.states.containsKey(runtimeState.currentState);
         State state = ensureState(event, player, match.controller, runtimeState, context);
         if (state == null) {
             return null;
         }
-        for (int i = 0; i < 4; i++) {
-            State nextState = applyTransition(event, player, match.controller, state, runtimeState, context);
-            if (nextState == state) {
-                break;
-            }
-            state = nextState;
-        }
+        runtimeState.activeState = state;
+        state = advanceStates(state, initializing,
+            current -> selectTransition(match.controller, current, context),
+            (previous, target) -> {
+                if (runtimeState.subState != null) {
+                    exitHierarchy(runtimeState.subState, event, player);
+                    runtimeState.subState = null;
+                }
+                OpenYsmControllerExpressionEvaluator.executeStatements(previous.onExit, context);
+                runtimeState.currentState = target.name;
+                runtimeState.activeState = target;
+                runtimeState.enteredTick = event.getAnimationTick();
+                runtimeState.lastSelectedAnimationState = "";
+                runtimeState.lastSelectedAnimation = "";
+                OpenYsmControllerExpressionEvaluator.executeStatements(target.onEntry, context);
+                playStateSounds(target, player);
+            });
 
-        String animationName = selectAnimation(state, match.preferredAnimationName, context);
-        reportDroppedEntries(animationId, geckoControllerName, state, animationName, context);
-        if (StringUtils.isBlank(animationName) || !animationExists(animationId, animationName)) {
+        if (state.subEntryName() != null && depth < 5) {
+            String subHierarchy = hierarchy.isEmpty() ? state.subEntryName() : hierarchy + "." + state.subEntryName();
+            ControllerSet set = OpenYsmAnimationControllerRegistry.get(
+                com.fox.ysmu.client.animation.AnimationDomain.controllerSetId(animationId));
+            String rootName = hierarchy.isEmpty() ? match.controller.name
+                : match.controller.name.substring(0, match.controller.name.length() - hierarchy.length() - 1);
+            Controller child = set == null ? null : set.controllers.get(rootName + "." + subHierarchy);
+            if (child != null) {
+                runtimeState.subState = runtimeState(player, animationId, geckoControllerName, child.name);
+                return tryApplyController(event, player, animationId, geckoControllerName,
+                    new ControllerMatch(child, null), depth + 1, subHierarchy);
+            }
+        }
+        if ("ysm-builtin".equals(state.name)) {
+            // HybridAnimationController:68-80 keeps Bedrock state ticking while coded fallback supplies the pose.
+            event.getController().clearConcurrentAnimations();
+            event.getController().setAuthoredCodedTransition(state.blendTransition != null
+                ? state.blendTransition : software.bernie.geckolib3.core.controller.BlendTransition.linear(
+                    state.blendTransitionTicks >= 0 ? state.blendTransitionTicks : event.getController().transitionLengthTicks));
             return null;
         }
-        if (SWING_CONTROLLER.equals(geckoControllerName) && "attack_empty".equals(animationName)) {
-            return null;
+        List<software.bernie.geckolib3.core.controller.AnimationController.ConcurrentAnimation> entries = new ArrayList<>();
+        if (state.playerCount() != 0) {
+            for (AnimationEntry entry : state.animations) {
+                // Every entry owns a player even when its condition is false.
+                entries.add(new software.bernie.geckolib3.core.controller.AnimationController.ConcurrentAnimation(
+                    entry.animationName, animationEntryActive(entry, context)));
+            }
         }
-        if (state.blendTransitionTicks >= 0f) {
-            event.getController().transitionLengthTicks = state.blendTransitionTicks;
-        }
-        applyPlaybackSpeed(event, player, geckoControllerName, animationName);
-        applyAnimation(event, runtimeState, state, animationName);
+        software.bernie.geckolib3.core.controller.BlendTransition blend = state.blendTransition != null
+            ? state.blendTransition : software.bernie.geckolib3.core.controller.BlendTransition.linear(
+                state.blendTransitionTicks >= 0 ? state.blendTransitionTicks : event.getController().transitionLengthTicks);
+        event.getController().setConcurrentAnimations(state, entries, blend, event.getAnimationTick());
+        runtimeState.lastSelectedAnimationState = state.name;
+        if (!entries.isEmpty()) applyPlaybackSpeed(event, player, geckoControllerName, entries.get(0).name);
         return PlayState.CONTINUE;
     }
 
-    /**
-     * 播放倍速（stride × anim_speed）：OpenYSM 控制器路径。防滑步仅对主身体控制器
-     * （{@code main_controller} / {@code player.pre_main}）生效，{@code anim_speed} 对所有控制器
-     * 生效。形状照参考分支 {@code OpenYsmPlayerControllerRuntime.java:595-609}。
-     * <p>
-     * 与参考的唯一差异：参考用 {@code existing.get(0)}（它合并后的主动画名），本仓该路径没有
-     * 合并动画这一步，所以直接传本帧真正播放的 {@code animationName}（{@code selectAnimation}
-     * 的结果），语义相同。{@code player==null}（GUI 预览）在本方法入口已被 {@link #tryApply} 挡掉。
-     */
+    /** Port-only stride matching stays a shared outer rate. Per-clip anim_speed is evaluated
+     * by each child, never multiplied into the parent using the first entry's expression. */
     private static void applyPlaybackSpeed(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
         String geckoControllerName, String animationName) {
         // 总开关先短路：关闭时（默认）这条路径不做任何玩家/动画文件查询。
@@ -325,7 +368,29 @@ public final class OpenYsmPlayerControllerRuntime {
         AnimationFile file = animId == null ? null : ClientModelManager.animationFileFor(animId);
         boolean isBody = MAIN_CONTROLLER.equals(geckoControllerName)
             || com.fox.ysmu.util.ControllerUtils.OPENYSM_PRE_MAIN_CONTROLLER.equals(geckoControllerName);
-        MovementSpeedMatcher.applyPlaybackSpeed(event.getController(), player, animationName, isBody, file);
+        double stride = isBody ? MovementSpeedMatcher.computeMultiplier(player, animationName,
+            MovementSpeedMatcher.DEFAULT_PROVIDER, MovementSpeedMatcher.cycleSeconds(file, animationName)) : 1d;
+        event.getController().setAnimationSpeed(stride);
+        // Each child evaluates its own anim_speed; the first clip must not set every child's multiplier.
+    }
+
+    private static void stopRuntimePlayers(RuntimeState state) {
+        if (state.engineController != null) state.engineController.clearConcurrentAnimations();
+    }
+
+    private static void exitHierarchy(RuntimeState state, AnimationEvent<CustomPlayerEntity> event, EntityPlayer player) {
+        exitHierarchy(state, exiting -> OpenYsmControllerExpressionEvaluator.executeStatements(exiting.activeState.onExit,
+            new OpenYsmControllerExpressionEvaluator.Context(event, player, exiting)));
+    }
+
+    static void exitHierarchy(RuntimeState state, java.util.function.Consumer<RuntimeState> exitStatements) {
+        if (state.subState != null) exitHierarchy(state.subState, exitStatements);
+        if (state.activeState != null) exitStatements.accept(state);
+        stopRuntimePlayers(state);
+        state.subState = null;
+        state.activeState = null;
+        state.currentState = "";
+        state.lastSelectedAnimationState = "";
     }
 
     private static RuntimeState runtimeState(EntityPlayer player, ResourceLocation animationId,
@@ -350,6 +415,7 @@ public final class OpenYsmPlayerControllerRuntime {
             return null;
         }
         runtimeState.currentState = initial.name;
+        runtimeState.activeState = initial;
         runtimeState.enteredTick = event.getAnimationTick();
         runtimeState.lastSelectedAnimationState = "";
         runtimeState.lastSelectedAnimation = "";
@@ -358,27 +424,39 @@ public final class OpenYsmPlayerControllerRuntime {
         return initial;
     }
 
-    private static State applyTransition(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
-        Controller controller, State state, RuntimeState runtimeState,
+    /** Upstream BedrockAnimationController:95-106,213-256: only zero-player states chain;
+     * a repeated destination stops before entry/exit side effects. Conditions do not change player count. */
+    static State advanceStates(State state, boolean initializing, java.util.function.Function<State, State> next,
+        java.util.function.BiConsumer<State, State> transition) {
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        if (initializing) {
+            visited.add(state.name);
+            if (state.playerCount() != 0) {
+                return state;
+            }
+        }
+        while (true) {
+            State target = next.apply(state);
+            if (target == null || !visited.add(target.name)) {
+                return state;
+            }
+            transition.accept(state, target);
+            state = target;
+            if (state.playerCount() != 0) {
+                return state;
+            }
+        }
+    }
+
+    private static State selectTransition(Controller controller, State state,
         OpenYsmControllerExpressionEvaluator.Context context) {
         for (Transition transition : state.transitions) {
-            State target = controller.states.get(transition.targetState);
-            if (target == null) {
-                continue;
+            if (OpenYsmControllerExpressionEvaluator.evaluateBoolean(transition.condition, context)) {
+                // Upstream stops at the first true transition, including a missing destination.
+                return controller.states.get(transition.targetState);
             }
-            if (!OpenYsmControllerExpressionEvaluator.evaluateBoolean(transition.condition, context)) {
-                continue;
-            }
-            OpenYsmControllerExpressionEvaluator.executeStatements(state.onExit, context);
-            runtimeState.currentState = target.name;
-            runtimeState.enteredTick = event.getAnimationTick();
-            runtimeState.lastSelectedAnimationState = "";
-            runtimeState.lastSelectedAnimation = "";
-            OpenYsmControllerExpressionEvaluator.executeStatements(target.onEntry, context);
-            playStateSounds(target, player);
-            return target;
         }
-        return state;
+        return null;
     }
 
     /**
@@ -402,26 +480,6 @@ public final class OpenYsmPlayerControllerRuntime {
                 com.fox.ysmu.client.audio.YSMSoundManager.playSound(player, soundName, 1.0f, 1.0f);
             }
         }
-    }
-
-    private static String selectAnimation(State state, String preferredAnimationName,
-        OpenYsmControllerExpressionEvaluator.Context context) {
-        if (state.animations.isEmpty()) {
-            return null;
-        }
-        if (StringUtils.isNotBlank(preferredAnimationName)) {
-            for (AnimationEntry entry : state.animations) {
-                if (preferredAnimationName.equals(entry.animationName)) {
-                    return animationEntryActive(entry, context) ? entry.animationName : null;
-                }
-            }
-        }
-        for (AnimationEntry entry : state.animations) {
-            if (animationEntryActive(entry, context)) {
-                return entry.animationName;
-            }
-        }
-        return null;
     }
 
     private static boolean animationEntryActive(AnimationEntry entry,
@@ -498,6 +556,10 @@ public final class OpenYsmPlayerControllerRuntime {
         boolean sameState = state.name.equals(runtimeState.lastSelectedAnimationState);
         boolean changedInSameState = sameState && StringUtils.isNotBlank(runtimeState.lastSelectedAnimation)
             && !runtimeState.lastSelectedAnimation.equals(animationName);
+        if (!sameState) {
+            // Upstream transition indicatesReload for every holder, even when two states name the same clip.
+            event.getController().markNeedsReload();
+        }
         runtimeState.lastAnimation = animationName;
         runtimeState.lastSelectedAnimationState = state.name;
         runtimeState.lastSelectedAnimation = animationName;
@@ -963,8 +1025,40 @@ public final class OpenYsmPlayerControllerRuntime {
     /** The prefix the engine registers scoped variables under (`ScopedMolangVariable#getName`). */
     private static final String VARIABLE_PREFIX = "v.";
 
+    static final class FinishedAnimations {
+        final boolean any;
+        final boolean all;
+
+        FinishedAnimations(boolean any, boolean all) {
+            this.any = any;
+            this.all = all;
+        }
+    }
+
     static final class RuntimeState {
         String currentState = "";
+        State activeState;
+        RuntimeState subState;
+        software.bernie.geckolib3.core.controller.AnimationController<?> engineController;
+
+        /** One reduction shared by any/all and by future concurrent child players.
+         * Unplayed entries are unfinished, never assigned the selected clip's completion. */
+        FinishedAnimations finishedAnimations(java.util.function.Predicate<AnimationEntry> applies,
+            java.util.function.Predicate<AnimationEntry> finished) {
+            boolean any = false;
+            boolean all = true;
+            int count = 0;
+            if (activeState != null) {
+                for (AnimationEntry entry : activeState.animations) {
+                    if (!applies.test(entry)) continue;
+                    count++;
+                    boolean done = finished.test(entry);
+                    any |= done;
+                    all &= done;
+                }
+            }
+            return new FinishedAnimations(count == 0 || any, all);
+        }
         String lastAnimation = "";
         String lastSelectedAnimationState = "";
         String lastSelectedAnimation = "";

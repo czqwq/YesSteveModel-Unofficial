@@ -698,13 +698,23 @@ public final class OpenYsmAnimationControllerRegistry {
         if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
             state.blendTransitionTicks = Math.max(0f, element.getAsFloat() * 20f);
         } else if (element.isJsonObject()) {
-            float maxSeconds = 0f;
+            java.util.SortedMap<Double, Double> points = new java.util.TreeMap<>();
             for (Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet()) {
                 try {
-                    maxSeconds = Math.max(maxSeconds, Float.parseFloat(entry.getKey()));
+                    points.put(Double.parseDouble(entry.getKey()) * 20d, entry.getValue().getAsDouble());
                 } catch (NumberFormatException ignored) {}
             }
-            state.blendTransitionTicks = maxSeconds * 20f;
+            if (!points.isEmpty()) {
+                double[] ticks = new double[points.size()];
+                double[] values = new double[points.size()];
+                int i = 0;
+                for (Map.Entry<Double, Double> point : points.entrySet()) {
+                    ticks[i] = point.getKey();
+                    values[i++] = point.getValue();
+                }
+                state.blendTransition = new software.bernie.geckolib3.core.controller.BlendTransition(ticks, values);
+                state.blendTransitionTicks = (float) ticks[ticks.length - 1];
+            }
         }
     }
 

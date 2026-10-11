@@ -13,7 +13,7 @@ import net.minecraft.util.MathHelper;
 
 import org.apache.commons.lang3.StringUtils;
 
-import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
+import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
@@ -1412,7 +1412,8 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return event.getAnimationTick() / 20.0d;
             }
             if ("all_animations_finished".equals(name) || "any_animation_finished".equals(name)) {
-                return allAnimationsFinished() ? TRUE : FALSE;
+                OpenYsmPlayerControllerRuntime.FinishedAnimations result = finishedAnimations();
+                return ("any_animation_finished".equals(name) ? result.any : result.all) ? TRUE : FALSE;
             }
             if ("ground_speed".equals(name)) {
                 return horizontalSpeed();
@@ -1476,7 +1477,23 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("hurt_time".equals(name)) {
                 return player.hurtTime;
             }
-            if ("time_of_day".equals(name) || "time_stamp".equals(name)) {
+            // A-1: `query.time_of_day` is the fraction of a day in [0,1) and `query.time_stamp` is the raw world
+            // time; upstream binds exactly those two (geckolib3/core/molang/builtin/QueryBinding.java:61-62) and
+            // normalizes the first with `((float)(timestamp + 6000L) / 24000) % 1`
+            // (com/elfmcys/ysm/geckolib3/util/MolangUtils.java:30-32 upstream).
+            //
+            // They used to share one branch that returned the raw `getWorldTime()`, so a controller condition written
+            // as `query.time_of_day < 0.5` ("is it night") was false in every normal world and `> 0.5` true - the
+            // keyframe path normalized the same name while this path did not ("one name, two answers"). The value now
+            // comes from the *same* implementation the keyframe path publishes with
+            // (AnimationRegister#setWorldQueryValues calls this same method; there is no second copy of the
+            // arithmetic here), so the two paths cannot disagree about the phase either.
+            if ("time_of_day".equals(name)) {
+                Minecraft mc = Minecraft.getMinecraft();
+                return mc.theWorld == null ? 0.0d
+                    : software.bernie.geckolib3.molang.util.MolangUtils.normalizeTime(mc.theWorld.getWorldTime());
+            }
+            if ("time_stamp".equals(name)) {
                 Minecraft mc = Minecraft.getMinecraft();
                 return mc.theWorld == null ? 0.0d : mc.theWorld.getWorldTime();
             }
@@ -1836,38 +1853,66 @@ public final class OpenYsmControllerExpressionEvaluator {
             return com.fox.ysmu.client.animation.molang.CtrlItemMatcher.itemId(stack);
         }
 
-        private boolean allAnimationsFinished() {
-            Animation current = event.getController() == null ? null : event.getController().getCurrentAnimation();
-            if (current == null || current.animationLength == null || current.animationLength <= 0.0d) {
-                return false;
-            }
-            return event.getAnimationTick() - state.enteredTick >= current.animationLength;
+        private OpenYsmPlayerControllerRuntime.FinishedAnimations finishedAnimations() {
+            // BedrockAnimationController:227-243 reads previous processed holder conditions,
+            // before this frame reevaluates activation. Newly entered states have no applied players yet.
+            return state.finishedAnimations(
+                entry -> state.activeState != null && state.currentState.equals(state.lastSelectedAnimationState)
+                    && event.getController().concurrentAnimationApplies(state.activeState.animations.indexOf(entry)),
+                entry -> event.getController().concurrentAnimationFinished(state.activeState.animations.indexOf(entry)));
         }
 
+        /**
+         * A-2: the same question the keyframe path asks, answered by the same implementation.
+         *
+         * <p>This used to be a second copy of the local/remote split ({@code Minecraft.getMinecraft().thePlayer} vs
+         * {@code RemotePlayerMotionStates}), which is how the two paths could drift apart in the first place. It now
+         * delegates to {@link com.fox.ysmu.client.animation.AnimationRegister#isPlayerOnGround}, which the animation
+         * states ({@code run}/{@code walk}/{@code jump}/...) are themselves gated on - one rule, so a controller
+         * condition and the state it selects cannot disagree about whether the actor is standing.
+         */
         private boolean isOnGround() {
-            if (player == Minecraft.getMinecraft().thePlayer) {
-                return player.onGround;
-            }
-            return RemotePlayerMotionStates.isOnGround(player);
+            return AnimationRegister.isPlayerOnGround(player);
         }
 
+        /**
+         * A-2: whether the player is flying, taken from the keyframe path's implementation.
+         *
+         * <p><b>Two deliberate changes from what this method used to be.</b> It counted Et Futurum Requiem's elytra
+         * glide as flight ({@code EtFuturumCompat.isElytraFlying}) while the {@code fly} state and
+         * {@code query.is_jumping} on the keyframe path did not, so a gliding player was "flying" in a controller
+         * condition and "jumping" in the animation file - the exact divergence A-2 is about. Upstream does not count
+         * the glide as flight either: {@code QueryBinding#isFlying} ({@code geckolib3/core/molang/builtin/
+         * QueryBinding.java:115-121}, which {@code query.is_jumping} at {@code :102} uses) reads the flying ability
+         * only, and the glide has its own dedicated state ({@code elytra_fly}, registered in
+         * {@code AnimationRegister#registerFlyingStates}) and its own controller query ({@code ctrl.elytra_fly},
+         * {@code isControllerStateDirect}), both of which still answer from {@code EtFuturumCompat}. The history is
+         * kept because it was a real fix for a real symptom - see below - and it is now answered by the same source as
+         * the state it was meant to fix.
+         *
+         * <p>History: {@code ctrl.fly=false} while {@code isJumping()=true} made a glide read as a jump; with the glide
+         * excluded from both sides, {@code query.is_jumping} is true during a glide on <em>both</em> paths (upstream's
+         * airborne predicate cannot tell a glide from a fall) and the {@code elytra_fly} state still wins over
+         * {@code jump} by priority ({@code HIGH} against {@code NORMAL}).
+         */
         private boolean isFlying() {
-            if (player == null) return false;
-            // 鞘翅滑翔也算"在飞"：参考库的 isFlying 先查 EtFuturumCompat.isElytraFlying
-            // (reference branch same file:1585-1595)。少了这一下，滑翔中的玩家
-            // ctrl.fly=false 而 isJumping()=true，滑翔会被判成跳跃。
-            if (EtFuturumCompat.isElytraFlying(player)) {
-                return true;
-            }
-            if (player == Minecraft.getMinecraft().thePlayer) {
-                return player.capabilities.isFlying;
-            }
-            return RemotePlayerMotionStates.isFlying(player);
+            return AnimationRegister.isPlayerFlying(player);
         }
 
+        /**
+         * A-2: the airborne predicate behind {@code query.is_jumping} and {@code ctrl.jump}, delegating to
+         * {@link com.fox.ysmu.client.animation.AnimationRegister#isPlayerJumping}.
+         *
+         * <p><b>Removed: {@code && motionYState(0.0d) != 0}.</b> The keyframe path deleted that term with a written
+         * record of the defect it caused ({@code AnimationRegister#isPlayerJumping}'s javadoc: {@code motionY} is
+         * exactly 0 at the apex of a jump, so for that tick the local player dropped out of the jump state and the arms
+         * snapped back to neutral and out again, while remote players - which never had the term - looked different).
+         * This path had kept it, so the same tick answered {@code query.is_jumping} = 0 and {@code ctrl.jump} = 0 in a
+         * controller condition while the animation file's {@code query.is_jumping} and the {@code jump} state read 1.
+         * The whole airborne phase is one state on both paths now, which is upstream's rule.
+         */
         private boolean isJumping() {
-            return !isFlying() && !player.isRiding() && !isOnGround() && !player.isInWater()
-                && motionYState(0.0d) != 0;
+            return AnimationRegister.isPlayerJumping(player);
         }
 
         private double horizontalSpeed() {

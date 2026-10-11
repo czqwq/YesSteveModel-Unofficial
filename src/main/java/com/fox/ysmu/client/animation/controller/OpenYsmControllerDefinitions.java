@@ -92,6 +92,14 @@ final class OpenYsmControllerDefinitions {
         final List<String> soundEffects = new ArrayList<>();
         float blendTransitionTicks = -1f;
         boolean blendViaShortestPath;
+        software.bernie.geckolib3.core.controller.BlendTransition blendTransition;
+
+        String subEntryName() {
+            return name.startsWith("ysm-entry-") ? name.substring("ysm-entry-".length()) : null;
+        }
+        int playerCount() {
+            return "ysm-builtin".equals(name) || subEntryName() != null ? 0 : animations.size();
+        }
     }
 
     static final class AnimationEntry {
