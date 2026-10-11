@@ -20,6 +20,7 @@ import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.data.PlayerMotionState;
+import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.eep.ExtendedRoamingVariables;
 import com.fox.ysmu.eep.ExtendedStarModels;
@@ -221,6 +222,12 @@ public class CommonEventHandler {
         if (ExtendedRoamingVariables.get(player) == null) {
             ExtendedRoamingVariables.register(player);
         }
+        // Forge only calls loadNBTData on an IExtendedEntityProperties that was already registered at
+        // EntityConstructing, so a grant table registered lazily is an in-memory table that never persists.
+        // `api/ModelAuthorization` reads this one; see `.agent/` task-9 briefing.
+        if (ExtendedAuthModels.get(player) == null) {
+            ExtendedAuthModels.register(player);
+        }
     }
 
     private static void syncTrackedPlayerMotionState(EntityPlayer trackingPlayer, EntityPlayer trackedPlayer) {
@@ -248,6 +255,14 @@ public class CommonEventHandler {
         ExtendedRoamingVariables newRoamingProps = ExtendedRoamingVariables.get(newPlayer);
         if (oldRoamingProps != null && newRoamingProps != null) {
             newRoamingProps.copyFrom(oldRoamingProps);
+        }
+
+        // Dimension travel / respawn clones the player, so the grant table has to travel with it; otherwise a
+        // granted player loses their grants on every portal and falls back to the default model.
+        ExtendedAuthModels oldAuthProps = ExtendedAuthModels.get(oldPlayer);
+        ExtendedAuthModels newAuthProps = ExtendedAuthModels.get(newPlayer);
+        if (oldAuthProps != null && newAuthProps != null) {
+            newAuthProps.copyFrom(oldAuthProps);
         }
     }
 

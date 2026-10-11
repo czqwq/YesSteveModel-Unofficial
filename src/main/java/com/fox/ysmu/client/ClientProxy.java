@@ -29,6 +29,7 @@ public class ClientProxy extends CommonProxy {
         // The earliest client-only entry point: record the client thread here so the model manager's off-thread
         // install guard is meaningful from mod init, not only from the first resource reload or tick.
         ClientModelManager.markClientThread();
+        com.fox.ysmu.client.compat.AngelicaPbrCompat.init();
         // 必须先注册 Molang 钩子：GeckoLibCache.getInstance() 首次调用即构造
         // MolangParser（new MolangParser() 内执行 doCoreRemaps），ysm.*/ctrl.*/query.*
         // 函数注册必须在该构造之前就位，否则运行时解析器缺失这些函数。
@@ -80,6 +81,9 @@ public class ClientProxy extends CommonProxy {
         // entities owns its own `AnimationProcessor`.
         GeoReplacedEntityRenderer.registerReplacedEntity(CustomFirstPersonArmEntity.class, CUSTOM_PLAYER_RENDERER);
         ClientRegistry.registerKeyBinding(AnimationRouletteKey.ANIMATION_ROULETTE_KEY);
+        // D1: registering the lock key puts it in the controls menu so it can be rebound and persists; the key
+        // itself still works unregistered, which is why upstream gets away with declaring it without this line.
+        ClientRegistry.registerKeyBinding(AnimationRouletteKey.LOCK_ROULETTE_KEY);
         ExtraAnimationKey.registerKeyBindings();
         ClientRegistry.registerKeyBinding(ExtraPlayerConfigKey.EXTRA_PLAYER_RENDER_KEY);
         ClientRegistry.registerKeyBinding(PlayerModelScreenKey.PLAYER_MODEL_KEY);

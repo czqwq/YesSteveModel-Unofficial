@@ -199,19 +199,37 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         data.getAnimationControllers()
             .values()
             .forEach(controller -> {
-                controller
-                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions));
-                // A pack's `sound_effects` keyframes, which the port parsed and synced but never played. The owner is
-                // the entity behind this animatable; an NPC or a GUI preview has none and falls into the sound
-                // manager's local slot, which is also what keeps two players running the same model from sharing
-                // bookkeeping for controllers they both name `cap_controller`.
+                controller.registerPlaybackStoppedListener(com.fox.ysmu.client.audio.MolangSoundPlayback::stopAll);
+                controller.registerCustomInstructionListener(event -> {
+                    try (com.fox.ysmu.client.audio.MolangSoundContext ignored = soundContext(event.getController())) {
+                        // Diagnostic attribution (controller name) rides along so a malformed timeline instruction
+                        // failure names its controller instead of leaving a bare fragment.
+                        MolangInstructionExecutor.execute(event.instructions, event.getController().getName());
+                    }
+                });
+                // Player/NPC world sounds belong to their real entity, not the renderer's shared animatable.
+                // Detached GUI tiles own an independent UI scope; each concurrent holder owns its local token.
                 controller.registerSoundListener(
                     event -> {
-                        String ctrlName = event.getController().getName();
-                        com.fox.ysmu.client.audio.YSMSoundManager.onSoundKeyframe(
-                            getPlayer(), ctrlName, event.sound, getMainModel());
+                        try (com.fox.ysmu.client.audio.MolangSoundContext ignored = soundContext(event.getController())) {
+                            String ctrlName = event.getController().getName();
+                            com.fox.ysmu.client.audio.YSMSoundManager.onSoundKeyframe(
+                                getPlayer(), ctrlName, event.sound, getMainModel());
+                        }
                     });
             });
+    }
+
+    /** Detached GUI animatables override the query owner without changing preview predicate routing. */
+    public EntityPlayer getQueryPlayer() { return getPlayer(); }
+
+    private com.fox.ysmu.client.audio.MolangSoundContext soundContext(AnimationController<?> controller) {
+        net.minecraft.entity.Entity entity = getMolangEntity();
+        boolean ui = entity == null || this instanceof CustomGuiPlayerEntity;
+        // World renderer reuses one animatable: the real entity is the stable owner.
+        Object owner = ui ? this : entity == null ? this : entity;
+        return com.fox.ysmu.client.audio.MolangSoundContext.push(owner, ui ? null : entity,
+            getMainModel(), controller.getPlaybackOwnerToken(), ui, controller.allowsEmitting());
     }
 
     public ResourceLocation getMainModel() {

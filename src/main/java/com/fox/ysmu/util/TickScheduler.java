@@ -33,6 +33,7 @@ public final class TickScheduler {
 
     private final LongSupplier clock;
     private final List<Task> tasks = new CopyOnWriteArrayList<>();
+    private boolean driving;
 
     public TickScheduler(LongSupplier clock) {
         this.clock = clock;
@@ -45,10 +46,10 @@ public final class TickScheduler {
 
     /**
      * 注册一个每 {@code intervalMs} 执行一次的任务，立即开始计时（首次执行在一个间隔之后，
-     * 与 {@code scheduleAtFixedRate} 的语义一致）。任务抛异常即自动注销并打一条 WARN：
+     * 错过多个间隔时只执行一次，不补跑）。任务抛异常即自动注销并打一条 WARN：
      * 每 tick 重复打印同一个异常比丢失一个计时任务更糟。
      */
-    public Handle scheduleEvery(long intervalMs, Runnable action) {
+    public synchronized Handle scheduleEvery(long intervalMs, Runnable action) {
         if (intervalMs < 1) {
             throw new IllegalArgumentException("intervalMs must be positive");
         }
@@ -59,18 +60,29 @@ public final class TickScheduler {
 
     /** 推进一次：执行所有到期任务。仅由驱动方调用（客户端 tick / 测试）。 */
     public void runDueTasks() {
-        long now = clock.getAsLong();
-        for (Task task : tasks) {
-            if (task.cancelled) {
-                tasks.remove(task);
-                continue;
+        // Never hold the scheduler monitor across callbacks: packet threads may schedule while a callback locks
+        // its own owner. A callback can also drive again after advancing the clock; reject nested/concurrent drives.
+        synchronized (this) {
+            if (driving) return;
+            driving = true;
+        }
+        try {
+            long now = clock.getAsLong();
+            for (Task task : tasks) {
+                if (task.cancelled) {
+                    tasks.remove(task);
+                    continue;
+                }
+                if (now - task.lastRunMs < task.intervalMs) {
+                    continue;
+                }
+                task.lastRunMs = now;
+                task.fire();
             }
-            if (now - task.lastRunMs < task.intervalMs) {
-                continue;
+        } finally {
+            synchronized (this) {
+                driving = false;
             }
-            // 先记时间再执行：任务体内的耗时（含被取消）不应导致下一轮立刻重入。
-            task.lastRunMs = now;
-            task.fire();
         }
     }
 
@@ -80,7 +92,7 @@ public final class TickScheduler {
     }
 
     /** 卸载会话时清空（连接断开 / 客户端退出）。 */
-    public void clear() {
+    public synchronized void clear() {
         for (Task task : tasks) {
             task.cancelled = true;
         }
