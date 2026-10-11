@@ -5,6 +5,7 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.network.NetHandlerPlayServer;
 import net.minecraft.network.NetworkManager;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Tags;
@@ -56,9 +57,12 @@ public final class NetworkHandler {
      * unknown discriminator, so the handshake has to reject the pair first with a readable message, exactly as
      * versions 3 and 4 do. Nothing existing is renumbered or reused; 35 is the first free clientbound id above the
      * highest in use (34).</li>
+     * <li>7: serverbound id 101/clientbound id 36 carry full roulette expressions plus the target model identity.
+     * The server authorizes only the sender's current model; clients reject stale world/generation/model contexts.
+     * This is distinct from numeric ysm.sync arguments. Unknown discriminators must fail the handshake before use.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 6;
+    public static final int NETWORK_PROTOCOL = 7;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -84,9 +88,9 @@ public final class NetworkHandler {
     private static final int SERVERBOUND_HANDSHAKE = 97;
     /**
      * NF-01: client to server, drop the model-selection grant the server handed out for one entity. The client
-     * hook exists ({@code PlayerModelScreen.onGuiClosed} reads {@code ModelSelectionTarget.getGrantId()}) but does
-     * not send anything yet, because the send line lives in {@code client/gui/**}, outside this task's inScope.
-     * The id is appended after 97; nothing existing is renumbered.
+     * sends it from {@code PlayerModelScreen.onGuiClosed} ({@code client/gui/PlayerModelScreen.java:512-516}) when
+     * {@code ModelSelectionTarget.getGrantId() != -1}; the server releases only the sender's own grant, so a forged
+     * entity id cannot revoke somebody else's. The id is appended after 97; nothing existing is renumbered.
      */
     private static final int SERVERBOUND_REVOKE_MODEL_GUI_GRANT = 98;
     /**
@@ -94,6 +98,10 @@ public final class NetworkHandler {
      * settings change, server to client answers with the authoritative map. Appended after 98 and 19; nothing
      * existing is renumbered.
      */
+    // Version 7: full roulette programs use their own self-authorized channel, not ysm.sync.
+    // Unknown FML discriminators disconnect old peers, so handshake rejects older protocol versions.
+    private static final int SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION = 101;
+    private static final int CLIENTBOUND_EXECUTE_ROULETTE_EXPRESSION = 36;
     private static final int SERVERBOUND_ROAMING_CHANGES = 99;
     private static final int CLIENTBOUND_ROAMING_STATE = 20;
 
@@ -248,9 +256,19 @@ public final class NetworkHandler {
             C2SRoamingChanges.class,
             SERVERBOUND_ROAMING_CHANGES,
             Side.SERVER);
+        CHANNEL.registerMessage(
+            C2SSubmitRouletteExpression.Handler.class,
+            C2SSubmitRouletteExpression.class,
+            SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION,
+            Side.SERVER);
     }
 
     private static void registerClientboundMessages() {
+        CHANNEL.registerMessage(
+            S2CExecuteRouletteExpression.Handler.class,
+            S2CExecuteRouletteExpression.class,
+            CLIENTBOUND_EXECUTE_ROULETTE_EXPRESSION,
+            Side.CLIENT);
         CHANNEL.registerMessage(
             SendModelFile.Handler.class,
             SendModelFile.class,
@@ -425,6 +443,56 @@ public final class NetworkHandler {
         CHANNEL.sendToAllAround(
             message,
             new NetworkRegistry.TargetPoint(entity.dimension, entity.posX, entity.posY, entity.posZ, range));
+    }
+
+    /**
+     * The same broadcast as {@link #sendToTrackingPlayers}, minus one player - the sender of a request whose own
+     * client has already applied the same change locally.
+     *
+     * <p><b>Why this cannot be {@code sendToAllAround}.</b> 1.7.10's FML has no exclusion: the target type has five
+     * fields and no "except" field ({@code NetworkRegistry.TargetPoint}, {@code NetworkRegistry.java:82-104}), and
+     * {@code FMLOutboundHandler.ALLAROUNDPOINT.selectNetworks} walks the whole {@code playerEntityList} with no
+     * exclusion branch ({@code FMLOutboundHandler.java:189-209}). The sender's own squared distance to its own
+     * position is 0, which passes the range test at {@code :201}, so the sender is always a recipient of
+     * {@code sendToAllAround}. The exclusion therefore has to happen here, one {@code CHANNEL.sendTo} per recipient,
+     * with {@link TrackingRecipients} reproducing FML's two selection rules. The shared
+     * {@link #sendToTrackingPlayers} is deliberately left untouched: the roaming, NPC and vehicle broadcasts rely on
+     * including the entity's own player, which is what the reference does.
+     *
+     * <p><b>First use: the roulette-expression echo</b> ({@code C2SSubmitRouletteExpression.Handler}), where the
+     * sender's client must not execute the program twice. The echo is a <em>remote-playback</em> statement - the
+     * recipients' clients resolve {@code entityId} and run the program against that entity - so excluding the sender
+     * does not leave the sender's own screen without the effect: it applied it locally at click time.
+     *
+     * @param excluded the player who must not receive the message; {@code null} means "nobody to exclude", which
+     *                 would make this a plain {@code sendToAllAround} and is treated as a programming error by the
+     *                 caller rather than silently re-broadcasting
+     */
+    public static void sendToTrackingPlayersExcept(IMessage message, Entity tracked, EntityPlayerMP excluded,
+        double range) {
+        if (message == null || tracked == null || tracked.worldObj == null || excluded == null) {
+            return;
+        }
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            return;
+        }
+        // Same point, same rule, same dimension test as sendToTrackingPlayers above and as FML's own selection.
+        for (EntityPlayerMP player : TrackingRecipients
+            .excludingSender(excluded, server.getConfigurationManager().playerEntityList)) {
+            if (TrackingRecipients.withinTargetPoint(
+                tracked.dimension,
+                tracked.posX,
+                tracked.posY,
+                tracked.posZ,
+                player.dimension,
+                player.posX,
+                player.posY,
+                player.posZ,
+                range)) {
+                CHANNEL.sendTo(message, player);
+            }
+        }
     }
 
     /** Server-side send entry: tells nearby clients to drop an entity's model override. */
