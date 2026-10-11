@@ -297,6 +297,52 @@ public final class YSMSoundManager {
     }
 
     /**
+     * 服务端转发的 {@code /ysm playsound} 的客户端执行体:{@code soundName} 为空表示列出本客户端已解密的音效。
+     *
+     * <p>它之所以在这里而不是在 {@code S2CPlaySound.Handler} 里:那个类在**专用服务器**注册数据包时会被
+     * FML 反射实例化({@code SimpleNetworkWrapper.instantiate} → {@code Class.newInstance}),验证器于是要解析
+     * 该类里出现的客户端类型。1.7.10 的 {@code Minecraft.thePlayer} 类型是
+     * {@code net.minecraft.client.entity.EntityClientPlayerMP},FML 的 {@code SideTransformer} 在服务端拒绝它,
+     * 整个 {@code init} 阶段因此抛 {@code NoClassDefFoundError} 并崩服。把动作放在只会在客户端加载的这里,
+     * 数据包类就只剩纯数据 + 一次委托(与 {@code S2CRoamingState}/{@code PacketQueryMolangVar} 同一形态)。
+     */
+    public static void handlePlaySoundRequest(final String soundName) {
+        Minecraft.getMinecraft()
+            .func_152344_a(() -> {
+                Minecraft mc = Minecraft.getMinecraft();
+                if (mc.thePlayer == null) {
+                    return;
+                }
+                if (soundName == null || soundName.isEmpty()) {
+                    listSounds(mc);
+                    return;
+                }
+                // modelId 传 null:`playSound` 的无模型上下文分支会按名字在全部已注册模型音效里找,
+                // 找不到再走命名空间音效(SoundHandler / 本地高版本资产)——这正是命令语义
+                // ("播放这个名字的音效"),不需要知道当前模型。
+                playSound(mc.thePlayer, soundName, null, 1.0f, 1.0f);
+                mc.thePlayer.addChatMessage(
+                    new net.minecraft.util.ChatComponentText("§6§l[§aYSM§6§l]§r Playing sound: " + soundName));
+            });
+    }
+
+    /** 列出本客户端内存里已解密的模型音效(键形如 {@code model::name})。 */
+    private static void listSounds(Minecraft mc) {
+        Map<String, byte[]> sounds = getSoundFiles();
+        if (sounds.isEmpty()) {
+            mc.thePlayer
+                .addChatMessage(new net.minecraft.util.ChatComponentText("§6§l[§aYSM§6§l]§r No cached sounds."));
+            return;
+        }
+        mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText("§6§l[§aYSM§6§l]§r Cached sounds (in-memory):"));
+        for (Map.Entry<String, byte[]> e : sounds.entrySet()) {
+            mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
+                "  §e" + e.getKey() + "§r → §7" + e.getValue().length + " bytes"));
+        }
+        mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText("§6Use §e/ysm playsound <name>§6 to play one."));
+    }
+
+    /**
      * 由关键帧音效监听器调用。记录该音效来自哪个 GeckoLib 控制器，
      * 以便当该控制器/动画停止时能清理对应音效。
      */
