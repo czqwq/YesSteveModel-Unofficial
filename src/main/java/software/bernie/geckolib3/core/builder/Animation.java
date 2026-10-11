@@ -35,6 +35,8 @@ public class Animation implements Serializable {
      *  倍率相乘。仅标量倍率，不支持任意时间曲线——需要自定义时间推进请用
      *  {@link #animTimeUpdate}。二进制 .ysm 暂不支持。 */
     public String animSpeed;
+    /** Upstream AnimationPlayer:317-368: evaluated separately in each player's animation context. */
+    public String blendWeight;
     public List<BoneAnimation> boneAnimations;
     public List<EventKeyFrame<String>> soundKeyFrames;
     public List<ParticleEventKeyFrame> particleKeyFrames;

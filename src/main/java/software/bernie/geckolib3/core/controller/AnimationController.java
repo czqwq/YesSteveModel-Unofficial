@@ -77,6 +77,106 @@ public class AnimationController<T extends IAnimatable> {
      * The name of the animation controller
      */
     private final String name;
+    private final Object playbackOwnerToken = new Object();
+    private java.util.function.Consumer<Object> playbackStopped = token -> {};
+    private boolean emitting = true;
+    private boolean beginningHold;
+    private boolean bedrockPlayer;
+    private double endingStarted = Double.NaN;
+    private double endingLength;
+    private final Map<String, double[][]> endingOffsets = new HashMap<>();
+
+    public Object getPlaybackOwnerToken() { return playbackOwnerToken; }
+    public boolean allowsEmitting() { return emitting; }
+    public void registerPlaybackStoppedListener(java.util.function.Consumer<Object> listener) {
+        playbackStopped = listener == null ? token -> {} : listener;
+    }
+    private void stopPlaybackScope() { playbackStopped.accept(playbackOwnerToken); }
+
+    private final List<ConcurrentPlayer<T>> concurrentPlayers = new ArrayList<>();
+    private boolean concurrentMode;
+    private Object concurrentStateKey;
+    private double lastConcurrentPredicateTick = Double.NaN;
+    private double concurrentStartTick;
+    private BlendTransition concurrentTransition = BlendTransition.linear(0);
+    private BlendTransition authoredCodedTransition;
+
+    /** HybridAnimationController:73: only authored builtin handover overrides the coded player's curve. */
+    public void setAuthoredCodedTransition(BlendTransition transition) {
+        authoredCodedTransition = transition;
+        if (transition != null) transitionLengthTicks = transition.length();
+    }
+    private final HashMap<String, BoneSnapshot> concurrentSnapshots = new HashMap<>();
+
+    /** Authored entry descriptors contain activation, not a sequential playlist. */
+    public static final class ConcurrentAnimation {
+        public final String name;
+        public final boolean applies;
+        public ConcurrentAnimation(String name, boolean applies) {
+            this.name = name;
+            this.applies = applies;
+        }
+    }
+    private static final class ConcurrentPlayer<A extends IAnimatable> {
+        final AnimationController<A> controller;
+        boolean applies = true;
+        ConcurrentPlayer(AnimationController<A> controller) { this.controller = controller; }
+    }
+
+    public void setConcurrentAnimations(Object stateKey, List<ConcurrentAnimation> entries,
+        BlendTransition transition, double absoluteTick) {
+        boolean changed = !concurrentMode || !Objects.equals(stateKey, concurrentStateKey);
+        concurrentMode = true;
+        if (changed) {
+            for (ConcurrentPlayer<T> holder : concurrentPlayers) holder.controller.releaseAnimationResources();
+            concurrentPlayers.clear();
+            stopPlaybackScope();
+            concurrentStateKey = stateKey;
+            concurrentStartTick = absoluteTick;
+            concurrentTransition = transition;
+            concurrentSnapshots.clear();
+            for (ConcurrentAnimation entry : entries) {
+                ConcurrentPlayer<T> holder = new ConcurrentPlayer<>(new AnimationController<>(animatable, name, 0,
+                    event -> {
+                        event.getController().useBedrockCompletionBoundary(true);
+                        return PlayState.CONTINUE;
+                    }));
+                holder.controller.bedrockPlayer = true;
+                holder.controller.endingLength = transitionLengthTicks;
+                holder.controller.soundListener = soundListener;
+                holder.controller.particleListener = particleListener;
+                holder.controller.customInstructionListener = customInstructionListener;
+                holder.controller.playbackStopped = playbackStopped;
+                holder.controller.timelinePlaybackListener = timelinePlaybackListener;
+                holder.controller.setAnimation(new AnimationBuilder().addAnimation(entry.name));
+                if (holder.controller.currentAnimation == null && holder.controller.animationQueue.isEmpty()) {
+                    // AnimationPlayer:75,124-142: unresolved entry stays IDLE with finished=true.
+                    holder.controller.currentAnimationFinished = true;
+                }
+                concurrentPlayers.add(holder);
+            }
+        }
+        for (int i = 0; i < concurrentPlayers.size(); i++) concurrentPlayers.get(i).applies = entries.get(i).applies;
+    }
+
+    public boolean concurrentAnimationFinished(int index) {
+        return index < concurrentPlayers.size() && concurrentPlayers.get(index).controller.hasCurrentAnimationFinished();
+    }
+    public double concurrentAnimationTick(int index) {
+        return index < concurrentPlayers.size() ? concurrentPlayers.get(index).controller.getSyncTick() : 0;
+    }
+    public boolean concurrentAnimationApplies(int index) {
+        return index < concurrentPlayers.size() && concurrentPlayers.get(index).applies;
+    }
+
+    public void clearConcurrentAnimations() {
+        for (ConcurrentPlayer<T> holder : concurrentPlayers) holder.controller.releaseAnimationResources();
+        concurrentPlayers.clear();
+        concurrentMode = false;
+        concurrentStateKey = null;
+        lastConcurrentPredicateTick = Double.NaN;
+        concurrentSnapshots.clear();
+    }
 
     protected AnimationState animationState = AnimationState.Stopped;
 
@@ -257,6 +357,19 @@ public class AnimationController<T extends IAnimatable> {
     private ITimelinePlaybackListener timelinePlaybackListener;
     public Queue<Animation> animationQueue = new LinkedList<>();
     public Animation currentAnimation;
+    // Upstream AnimationPlayer:75,205-219,428: at least one real playback completed,
+    // including LOOP/HOLD. Host conditions must not reconstruct another clock.
+    private boolean currentAnimationFinished;
+    private boolean bedrockCompletionBoundary;
+
+    /** Opt-in for authored Bedrock controllers; legacy sequential controllers retain their >= boundary. */
+    public void useBedrockCompletionBoundary(boolean enabled) {
+        bedrockCompletionBoundary = enabled;
+    }
+
+    public boolean hasCurrentAnimationFinished() {
+        return currentAnimationFinished;
+    }
     public AnimationBuilder currentAnimationBuilder = new AnimationBuilder();
     public boolean shouldResetTick = false;
     private final HashMap<String, BoneSnapshot> boneSnapshots = new HashMap<>();
@@ -297,6 +410,7 @@ public class AnimationController<T extends IAnimatable> {
      * animation states.
      */
     public void setAnimation(AnimationBuilder builder) {
+        if (concurrentMode) clearConcurrentAnimations();
         // YSMU: Handle same-builder resubmission — restart PLAY_ONCE when Stopped,
         // or restart LOOP when currentAnimation was lost (e.g. after cache clear).
         if (builder != null && !builder.getRawAnimationList()
@@ -359,6 +473,7 @@ public class AnimationController<T extends IAnimatable> {
                     } else {
                         animationQueue = animations;
                     }
+                    stopPlaybackScope();
                     currentAnimationBuilder = builder;
 
                     // Always clear stale currentAnimation when a new animation is queued,
@@ -371,6 +486,9 @@ public class AnimationController<T extends IAnimatable> {
                     // by the Transitioning→Running transition check in process() which
                     // polls from the queue when currentAnimation is null.
                     this.currentAnimation = null;
+                    this.currentAnimationFinished = false;
+                    this.endingStarted = Double.NaN;
+                    this.endingOffsets.clear();
                     resetEventKeyFrames();
 
                     // Reset the adjusted tick to 0 on next animation process call
@@ -420,6 +538,7 @@ public class AnimationController<T extends IAnimatable> {
         this.animationQueue = animations;
         this.currentAnimationBuilder = builder;
         this.currentAnimation = this.animationQueue.poll();
+        this.currentAnimationFinished = false;
         this.tickOffset = absoluteTick - Math.max(0.0D, elapsedTick);
         this.shouldResetTick = false;
         this.animationState = AnimationState.Running;
@@ -656,6 +775,24 @@ public class AnimationController<T extends IAnimatable> {
     public void process(double tick, AnimationEvent<T> event, Map<String, IBone> boneByName,
         HashMap<String, Pair<IBone, BoneSnapshot>> boneSnapshotCollection, MolangParser parser,
         boolean crashWhenCantFindBone) {
+        if (concurrentMode && boneNameToBone != boneByName) clearConcurrentAnimations();
+        if (concurrentMode) {
+            event.setController(this);
+            PlayState concurrentResult = Double.compare(tick, lastConcurrentPredicateTick) == 0
+                ? PlayState.CONTINUE : testAnimationPredicate(event);
+            lastConcurrentPredicateTick = tick;
+            if (concurrentResult == PlayState.STOP) {
+                clearConcurrentAnimations();
+                stopPlaybackScope();
+                discardPendingPoints();
+                animationState = AnimationState.Stopped;
+                return;
+            }
+            if (concurrentMode) {
+                processConcurrent(tick, event, boneByName, boneSnapshotCollection, parser, crashWhenCantFindBone);
+                return;
+            }
+        }
         parser.setValue("query.life_time", tick / 20);
         if (currentAnimation != null) {
             IAnimatableModel<T> model = getModel(this.animatable);
@@ -694,6 +831,7 @@ public class AnimationController<T extends IAnimatable> {
             // Ensure currentAnimation is set from the queue if not already
             if (this.currentAnimation == null && this.animationQueue.size() != 0) {
                 this.currentAnimation = this.animationQueue.poll();
+                this.currentAnimationFinished = false;
             }
         }
         if (animationState == AnimationState.Running) {
@@ -717,9 +855,19 @@ public class AnimationController<T extends IAnimatable> {
         // The timeline scheduler must not read it from this point; the definitive
         // report is emitted inside processCurrentAnimation() below.
         // This tests the animation predicate
+        ITimelinePlaybackListener previousTimelineListener = this.timelinePlaybackListener;
         this.timelinePlaybackListener = ITimelinePlaybackListener.NONE;
+        this.bedrockCompletionBoundary = false;
         PlayState playState = this.testAnimationPredicate(event);
+        if (bedrockPlayer && this.timelinePlaybackListener == ITimelinePlaybackListener.NONE)
+            this.timelinePlaybackListener = previousTimelineListener;
+        if (concurrentMode) {
+            lastConcurrentPredicateTick = actualTick;
+            processConcurrent(actualTick, event, boneByName, boneSnapshotCollection, parser, crashWhenCantFindBone);
+            return;
+        }
         if (playState == PlayState.STOP || (currentAnimation == null && animationQueue.size() == 0)) {
+            if (animationState != AnimationState.Stopped) stopPlaybackScope();
             // The animation should transition to the model's initial state
             animationState = AnimationState.Stopped;
             justStopped = true;
@@ -789,6 +937,8 @@ public class AnimationController<T extends IAnimatable> {
             }
             if (currentAnimation != null) {
                 setAnimTime(parser, 0);
+                double transitionPointTick = authoredCodedTransition == null ? tick
+                    : authoredCodedTransition.progress(tick) * transitionLengthTicks;
                 // Reuse boneNameToBone map built by createInitialQueues instead
                 // of building a second HashMap from modelRendererList.
                 for (BoneAnimation boneAnimation : currentAnimation.boneAnimations) {
@@ -819,21 +969,21 @@ public class AnimationController<T extends IAnimatable> {
                         boneAnimationQueue.rotationXQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.rotationValueX - initialSnapshot.rotationValueX,
                                 xPoint.animationStartValue));
                         boneAnimationQueue.rotationYQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.rotationValueY - initialSnapshot.rotationValueY,
                                 yPoint.animationStartValue));
                         boneAnimationQueue.rotationZQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.rotationValueZ - initialSnapshot.rotationValueZ,
                                 zPoint.animationStartValue));
@@ -849,21 +999,21 @@ public class AnimationController<T extends IAnimatable> {
                         boneAnimationQueue.positionXQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.positionOffsetX,
                                 xPoint.animationStartValue));
                         boneAnimationQueue.positionYQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.positionOffsetY,
                                 yPoint.animationStartValue));
                         boneAnimationQueue.positionZQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.positionOffsetZ,
                                 zPoint.animationStartValue));
@@ -879,21 +1029,21 @@ public class AnimationController<T extends IAnimatable> {
                         boneAnimationQueue.scaleXQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.scaleValueX,
                                 xPoint.animationStartValue));
                         boneAnimationQueue.scaleYQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.scaleValueY,
                                 yPoint.animationStartValue));
                         boneAnimationQueue.scaleZQueue.add(
                             AnimationPoint.obtain(
                                 null,
-                                tick,
+                                transitionPointTick,
                                 transitionLengthTicks,
                                 boneSnapshot.scaleValueZ,
                                 zPoint.animationStartValue));
@@ -907,6 +1057,138 @@ public class AnimationController<T extends IAnimatable> {
             // Actually run the animation
             processCurrentAnimation(tick, actualTick, parser, crashWhenCantFindBone);
         }
+    }
+
+    private void processConcurrent(double tick, AnimationEvent<T> event, Map<String, IBone> bones,
+        HashMap<String, Pair<IBone, BoneSnapshot>> snapshots, MolangParser parser, boolean crash) {
+        createInitialQueues(bones);
+        if (concurrentSnapshots.isEmpty()) {
+            snapshots.forEach((name, pair) -> concurrentSnapshots.put(name, new BoneSnapshot(pair.getRight())));
+        }
+        double elapsed = Math.max(0, tick - concurrentStartTick);
+        boolean beginning = elapsed < concurrentTransition.length();
+        double progress = beginning ? concurrentTransition.progress(elapsed) : 1;
+        Map<String, double[][]> folded = new HashMap<>();
+        for (ConcurrentPlayer<T> holder : concurrentPlayers) {
+            AnimationController<T> child = holder.controller;
+            child.emitting = holder.applies && !beginning;
+            child.beginningHold = beginning;
+            double speed = getAnimationSpeed();
+            Animation speedAnimation = child.currentAnimation != null ? child.currentAnimation : child.animationQueue.peek();
+            if (speedAnimation != null && speedAnimation.animSpeed != null) {
+                parser.setValue("query.anim_time", child.getSyncTick() / 20d);
+                try { speed *= parser.parseExpression(speedAnimation.animSpeed).get(); }
+                catch (Exception ignored) { speed = 1; }
+            }
+            child.setAnimationSpeed(speed);
+            AnimationEvent<T> childEvent = new AnimationEvent<>(animatable, event.getLimbSwing(),
+                event.getLimbSwingAmount(), event.getPartialTick(), event.isMoving(), event.getExtraData());
+            childEvent.animationTick = event.animationTick;
+            childEvent.setController(child);
+            // Beginning blend holds all child playback clocks at zero, then advances them together.
+            try {
+                child.process(beginning ? concurrentStartTick : tick - concurrentTransition.length(), childEvent,
+                    bones, snapshots, parser, crash);
+            } finally {
+                event.setController(this);
+            }
+            double weight = 1;
+            Animation animation = child.currentAnimation;
+            if (animation != null && animation.blendWeight != null) {
+                try { weight = parser.parseExpression(animation.blendWeight).get(); }
+                catch (Exception ignored) { weight = 0; }
+            }
+            boolean ending = !Double.isNaN(child.endingStarted);
+            double fade = 1;
+            if (ending) {
+                double endingTick = tick - concurrentTransition.length() - child.endingStarted;
+                fade = child.endingLength > 0 ? Math.max(0, 1 - endingTick / child.endingLength) : 0;
+            }
+            for (BoneAnimationQueue queue : child.getActiveBoneAnimationQueues()) {
+                double[][] raw = new double[][] { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 1, 1, 1, 0 } };
+                foldChannel(raw[0], queue.rotationXQueue, queue.rotationYQueue, queue.rotationZQueue,
+                    1, false, true, child);
+                foldChannel(raw[1], queue.positionXQueue, queue.positionYQueue, queue.positionZQueue,
+                    1, false, true, child);
+                foldChannel(raw[2], queue.scaleXQueue, queue.scaleYQueue, queue.scaleZQueue,
+                    1, true, true, child);
+                String boneName = queue.bone.getName();
+                if (!ending) child.endingOffsets.put(boneName, raw);
+                else raw = child.endingOffsets.getOrDefault(boneName, raw);
+                double[][] values = folded.computeIfAbsent(boneName, ignored -> new double[][] {
+                    { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 1, 1, 1, 0 } });
+                if (holder.applies) {
+                    for (int channel = 0; channel < 3; channel++) {
+                        if (raw[channel][3] == 0 || ending && fade == 0) continue;
+                        for (int axis = 0; axis < 3; axis++) {
+                            values[channel][axis] = channel == 2
+                                ? values[channel][axis] * (1 + (raw[channel][axis] - 1) * weight * fade)
+                                : values[channel][axis] + raw[channel][axis] * weight * fade;
+                        }
+                        values[channel][3] = 1;
+                    }
+                }
+            }
+        }
+        event.setController(this);
+        for (Map.Entry<String, double[][]> entry : folded.entrySet()) {
+            IBone bone = bones.get(entry.getKey());
+            if (bone == null) continue;
+            BoneAnimationQueue queue = getOrCreateQueue(entry.getKey());
+            markActiveBoneAnimationQueue(queue);
+            double[][] v = entry.getValue();
+            BoneSnapshot from = concurrentSnapshots.get(entry.getKey());
+            if (beginning && from != null) {
+                if (v[0][3] != 0) blendRotation(v[0], from, bone.getInitialSnapshot(), progress);
+                if (v[1][3] != 0) {
+                    v[1][0] = from.positionOffsetX + progress * (v[1][0] - from.positionOffsetX);
+                    v[1][1] = from.positionOffsetY + progress * (v[1][1] - from.positionOffsetY);
+                    v[1][2] = from.positionOffsetZ + progress * (v[1][2] - from.positionOffsetZ);
+                }
+                if (v[2][3] != 0) {
+                    v[2][0] = from.scaleValueX + progress * (v[2][0] - from.scaleValueX);
+                    v[2][1] = from.scaleValueY + progress * (v[2][1] - from.scaleValueY);
+                    v[2][2] = from.scaleValueZ + progress * (v[2][2] - from.scaleValueZ);
+                }
+            }
+            emitFold(v[0], queue.rotationXQueue, queue.rotationYQueue, queue.rotationZQueue);
+            emitFold(v[1], queue.positionXQueue, queue.positionYQueue, queue.positionZQueue);
+            emitFold(v[2], queue.scaleXQueue, queue.scaleYQueue, queue.scaleZQueue);
+        }
+    }
+
+    private static void foldChannel(double[] result, AnimationPointQueue x, AnimationPointQueue y,
+        AnimationPointQueue z, double weight, boolean scale, boolean applies, AnimationController<?> child) {
+        AnimationPoint[] points = { x.poll(), y.poll(), z.poll() };
+        if (points[0] != null && points[1] != null && points[2] != null && applies) {
+            for (int i = 0; i < 3; i++) {
+                double value = software.bernie.geckolib3.core.util.MathUtil.lerpValues(points[i],
+                    child.easingType, child.customEasingMethod);
+                result[i] = scale ? result[i] * (1 + (value - 1) * weight) : result[i] + value * weight;
+            }
+            result[3] = 1;
+        }
+        for (AnimationPoint point : points) if (point != null) point.recycle();
+    }
+
+    private static void emitFold(double[] values, AnimationPointQueue x, AnimationPointQueue y,
+        AnimationPointQueue z) {
+        if (values[3] == 0) return;
+        x.add(AnimationPoint.obtain(null, 0, 0, values[0], values[0]));
+        y.add(AnimationPoint.obtain(null, 0, 0, values[1], values[1]));
+        z.add(AnimationPoint.obtain(null, 0, 0, values[2], values[2]));
+    }
+
+    /** Upstream MathUtil:26-46: quaternion nlerp once after summing rotation targets. */
+    private static void blendRotation(double[] target, BoneSnapshot from, BoneSnapshot initial, double progress) {
+        org.joml.Quaternionf a = new org.joml.Quaternionf().rotateZYX(from.rotationValueZ,
+            from.rotationValueY, from.rotationValueX);
+        org.joml.Quaternionf b = new org.joml.Quaternionf().rotateZYX((float) target[2] + initial.rotationValueZ,
+            (float) target[1] + initial.rotationValueY, (float) target[0] + initial.rotationValueX);
+        a.nlerp(b, (float) progress, b);
+        target[0] = Math.atan2(b.y * b.z + b.w * b.x, 0.5 - b.x * b.x - b.y * b.y) - initial.rotationValueX;
+        target[1] = Math.asin(Math.max(-1, Math.min(1, -2 * (b.x * b.z - b.w * b.y)))) - initial.rotationValueY;
+        target[2] = Math.atan2(b.x * b.y + b.w * b.z, 0.5 - b.y * b.y - b.z * b.z) - initial.rotationValueZ;
     }
 
     private void setAnimTime(MolangParser parser, double tick) {
@@ -960,7 +1242,7 @@ public class AnimationController<T extends IAnimatable> {
         // YSMU: anim_time_update — 逐动画自定义时间推进（Bedrock 风格）。
         // 表达式每帧求值，返回动画时间（秒）；query.anim_time = 上一帧时间，
         // query.delta_time = 本帧时间增量（秒）。未提供该字段时走默认时间推进。
-        boolean customTime = currentAnimation.animTimeUpdate != null
+        boolean customTime = !beginningHold && currentAnimation.animTimeUpdate != null
             && !currentAnimation.animTimeUpdate.isEmpty();
         if (customTime) {
             if (this.lastAnimTimeAnimation != currentAnimation) {
@@ -1004,8 +1286,24 @@ public class AnimationController<T extends IAnimatable> {
         // Preserve the evaluated pre-wrap position: raw wall-time deltas are not
         // equivalent when anim_time_update or animationSpeed changes.
         double timelineUnwrappedTick = tick;
-        // Animation has ended
-        if (tick >= currentAnimation.animationLength) {
+        if (bedrockPlayer && !beginningHold && currentAnimation.loop == EDefaultLoopTypes.PLAY_ONCE
+            && tick >= currentAnimation.animationLength) {
+            // AnimationPlayer:163-168,286-313: once enters ending at >= and immediately reports finished.
+            currentAnimationFinished = true;
+            if (Double.isNaN(endingStarted)) {
+                endingStarted = actualTick;
+                stopPlaybackScope();
+            }
+            tick = currentAnimation.animationLength;
+        }
+        // Upstream AnimationPlayer:205-219 uses strict > for LOOP/HOLD.
+        if (tick > currentAnimation.animationLength) {
+            currentAnimationFinished = true;
+        }
+        // Legacy sequential playlists keep their exact-end termination. Authored Bedrock states
+        // opt in so a PLAY_ONCE is not stopped before its strict completion boundary is reached.
+        if (bedrockCompletionBoundary ? tick > currentAnimation.animationLength
+            : tick >= currentAnimation.animationLength) {
             if (currentAnimation.loop == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
                 tick = Math.max(0.0D, currentAnimation.animationLength);
             } else if (!currentAnimation.loop.isRepeatingAfterEnd()) {
@@ -1020,6 +1318,7 @@ public class AnimationController<T extends IAnimatable> {
                 if (peek == null) {
                     // No more animations left, stop the animation controller
                     this.animationState = AnimationState.Stopped;
+                    stopPlaybackScope();
                     this.lastSyncActualTick = -1.0d;
                     return;
                 } else {
@@ -1121,6 +1420,7 @@ public class AnimationController<T extends IAnimatable> {
     }
 
     private void processKeyFrameEvents(double tick) {
+        if (beginningHold) return;
         if (soundListener != null) {
             for (EventKeyFrame<String> soundKeyFrame : currentAnimation.soundKeyFrames) {
                 if (!this.executedKeyFrames.contains(soundKeyFrame) && tick >= soundKeyFrame.getStartTick()) {
@@ -1129,7 +1429,7 @@ public class AnimationController<T extends IAnimatable> {
                         tick,
                         soundKeyFrame.getEventData(),
                         this);
-                    soundListener.playSound(event);
+                    if (emitting) soundListener.playSound(event);
 
                     this.executedKeyFrames.add(soundKeyFrame);
                 }
@@ -1147,7 +1447,7 @@ public class AnimationController<T extends IAnimatable> {
                         particleEventKeyFrame.locator,
                         particleEventKeyFrame.script,
                         this);
-                    particleListener.summonParticle(event);
+                    if (emitting) particleListener.summonParticle(event);
 
                     this.executedKeyFrames.add(particleEventKeyFrame);
                 }
@@ -1163,7 +1463,7 @@ public class AnimationController<T extends IAnimatable> {
                         tick,
                         customInstructionKeyFrame.getEventData(),
                         this);
-                    customInstructionListener.executeInstruction(event);
+                    if (emitting) customInstructionListener.executeInstruction(event);
 
                     this.executedKeyFrames.add(customInstructionKeyFrame);
                 }
@@ -1204,9 +1504,12 @@ public class AnimationController<T extends IAnimatable> {
 
     /** Called only when the animation resource/session itself is retired. */
     public void releaseAnimationResources() {
+        clearConcurrentAnimations();
+        stopPlaybackScope();
         releaseBoneReferences(null);
         animationQueue.clear();
         currentAnimation = null;
+        currentAnimationFinished = false;
         lastAnimTimeAnimation = null;
         lastAnimTimeTick = -1;
         lastActualTick = -1;
@@ -1435,11 +1738,17 @@ public class AnimationController<T extends IAnimatable> {
     }
 
     public void markNeedsReload() {
+        clearConcurrentAnimations();
+        stopPlaybackScope();
         this.needsAnimationReload = true;
+        this.currentAnimationFinished = false;
     }
 
     public void clearAnimationCache() {
+        clearConcurrentAnimations();
+        stopPlaybackScope();
         this.currentAnimationBuilder = new AnimationBuilder();
+        this.currentAnimationFinished = false;
     }
 
     public double getAnimationSpeed() {
