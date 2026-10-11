@@ -108,7 +108,7 @@ public final class YSMSoundManager {
      * 会先停止所有活跃的 YSM 音源（防止音源泛滥）。
      */
     /** 检查 soundId 是否已在 1.7.10 的 SoundHandler 中注册。 */
-    private static boolean soundExistsInHandler(String soundId) {
+    static boolean soundExistsInHandler(String soundId) {
         if (soundId == null) return false;
         try {
             Minecraft mc = Minecraft.getMinecraft();
@@ -172,14 +172,26 @@ public final class YSMSoundManager {
 
     /** 播放归属键：模型持有者（触发者）的 UUID；null → 本地槽位（GUI 预览等无主场景）。 */
     public static String ownerKey(EntityPlayer owner) {
-        return owner == null ? LOCAL_OWNER : owner.getUniqueID()
-            .toString();
+        return owner == null ? LOCAL_OWNER : owner.getUniqueID().toString();
+    }
+
+    /** Resolve the owner through the world that owns it, never through the listener position. */
+    private static net.minecraft.entity.Entity sourceOwner(String ownerSlot) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null) return null;
+        if (LOCAL_OWNER.equals(ownerSlot)) return null;
+        if (mc.theWorld == null) return null;
+        for (Object value : mc.theWorld.loadedEntityList) {
+            net.minecraft.entity.Entity entity = (net.minecraft.entity.Entity) value;
+            if (entity.getUniqueID().toString().equals(ownerSlot)) return entity;
+        }
+        return null;
     }
 
     /**
      * 带归属的播放：{@code owner} 是"谁触发了这条音效"（决定归属槽位、供
-     * {@link #stopController}/{@link #stopSound} 定位），{@code hearer} 只是听者
-     * （1.7.10 下模型音效一律在本地玩家身上播放，见 {@link #updateSourcePositions} 的说明）。
+     * {@link #stopController}/{@link #stopSound} 定位）。实际源坐标按 owner 槽位解析实体，
+     * 不使用 hearer 代替 owner；GUI 走显式 MolangSoundContext。
      */
     static void playSound(String owner, EntityPlayer hearer, String soundName, ResourceLocation modelId, float volume,
         float pitch) {
@@ -237,7 +249,9 @@ public final class YSMSoundManager {
 
         // Step 2 — 原始音效名（如 minecraft:entity.arrow.shoot，1.7.10 原生）
         if (soundExistsInHandler(soundName)) {
-            handler.playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation(soundName), volume));
+            net.minecraft.entity.Entity source = sourceOwner(owner);
+            if (source != null) handler.playSound(new PositionedSoundRecord(new ResourceLocation(soundName),
+                volume, pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
             foundAny = true;
         }
 
@@ -247,7 +261,9 @@ public final class YSMSoundManager {
             if (Config.DEBUG_SOUND) {
                 ysmu.LOG.info("[YSMU-SOUND] namespace translation: '{}' → '{}'", soundName, translated);
             }
-            handler.playSound(PositionedSoundRecord.func_147674_a(translated, volume));
+            net.minecraft.entity.Entity source = sourceOwner(owner);
+            if (source != null) handler.playSound(new PositionedSoundRecord(translated,
+                volume, pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
             foundAny = true;
         }
 
@@ -314,6 +330,13 @@ public final class YSMSoundManager {
     public static void onSoundKeyframe(String ownerSlot, String controllerName, String soundName,
         ResourceLocation modelId) {
         if (controllerName == null || soundName == null) return;
+        MolangSoundContext context = MolangSoundContext.current();
+        if (context != null) {
+            // Upstream keyframes are anonymous instances owned by their playback context, not by asset name.
+            if (context.allowsEmitting()) MolangSoundPlayback.play(context.manager(false), context.entity(),
+                context.isUI(), 0, soundName, modelId, 0, 1f, 1f);
+            return;
+        }
         if (previewRendering) {
             // During GUI preview rendering, suppress sounds from parallel controllers
             // (which would otherwise spam keyframe sounds every animation loop cycle).
@@ -351,12 +374,12 @@ public final class YSMSoundManager {
             stopSound(ownerSlot, oldSound);
         }
         controllers.put(controllerName, soundName);
-        // 听者仍是本地玩家（1.7.10 下模型音效一律在本地玩家身上播放），但归属记在触发者头上。
+        // 源位置由持有者决定；UI 源通过显式求值上下文进入新 backend。
         playOwnerSound(ownerSlot, soundName, modelId);
     }
 
     /**
-     * 关键帧音效的实际播放（听者 = 本地玩家）。
+     * 关键帧音效的实际播放（source = 模型持有者，GUI = 显式 UI scope）。
      *
      * <p>这一步是**副作用**，它跑在 GeckoLib 动画 tick 的监听器里：任何失败（客户端还没起来、
      * 类解析不了）都只允许退化成"这次没声音"，绝不允许把动画 tick 或渲染帧带崩。
@@ -441,10 +464,7 @@ public final class YSMSoundManager {
         }
     }
 
-    /**
-     * 停止「该归属」播出的全部音效（{@code ysm.stop_all_sounds()} 不带 global 参数时的语义：
-     * 参考实现里 global=0 表示"停止当前实体上下文的播放实例"）。
-     */
+    /** 停止 legacy 归属槽位的全部音效；MoLang 由独立的 playback-context manager 管理。 */
     public static void stopAll(String ownerSlot) {
         Map<String, String> bySound = ACTIVE_SOURCES.remove(ownerSlot);
         if (bySound != null) {
@@ -459,8 +479,9 @@ public final class YSMSoundManager {
         CONTROLLER_SOUNDS.remove(ownerSlot);
     }
 
-    /** 停止所有 YSM 发出的音效（{@code ysm.stop_all_sounds(1)} 的 global 语义 / 模型切换清理） */
+    /** 宿主生命周期清理所有 YSM 音效；MoLang global 参数只选择当前 owner 的 global manager。 */
     public static void stopAll() {
+        MolangSoundPlayback.clear();
         if (Config.DEBUG_SOUND && activeSourceCount() > 0) {
             ysmu.LOG.info("[YSMU-SOUND-PROBE] {} stopAll ({} owner(s), {} active)", probeStamp(), ACTIVE_SOURCES.size(),
                 activeSourceCount());
@@ -476,6 +497,7 @@ public final class YSMSoundManager {
 
     /** 清掉某个持有者的全部音效状态（玩家登出/模型切换时用），不影响其他持有者。 */
     public static void clearOwner(EntityPlayer owner) {
+        if (owner != null) Minecraft.getMinecraft().func_152344_a(() -> MolangSoundPlayback.releaseOwner(owner));
         clearOwnerSlot(ownerKey(owner));
     }
 
@@ -522,13 +544,12 @@ public final class YSMSoundManager {
     }
 
     /**
-     * 把活跃音源的位置更新到玩家当前坐标（每 tick 由 ClientEventHandler 调用）。
-     * OpenAL 的 panning 基于音源相对听者的方位：若音源固定在播放时刻的位置而听者
-     * 移动，左右平移会立即造成左右声道跳变/混叠。把音源绑定在玩家身上后相对方位
-     * 恒定在正前方，panning 保持中央（第一人称自身音效语义上也正确）。
-     * 成本：活跃源数 × 1 次反射 setPosition，活跃源通常只有几个，可忽略。
+     * 每 tick 跟随模型持有者，而不是本地听者。上游 MinecraftSoundInstance:24-32
+     * 在 owner 移除后停止源；1.7.10 的 legacy 槽位通过 owning world 查找实体。
+     * GUI/无主播放应使用显式 MolangSoundContext，而不借用本地玩家的位置。
      */
     public static void updateSourcePositions() {
+        MolangSoundPlayback.tick();
         if (activeSourceCount() == 0) return;
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null || mc.thePlayer == null) return;
@@ -544,11 +565,16 @@ public final class YSMSoundManager {
                 return;
             }
         }
-        float px = (float) mc.thePlayer.posX;
-        float py = (float) mc.thePlayer.posY;
-        float pz = (float) mc.thePlayer.posZ;
-        for (Map<String, String> bySound : ACTIVE_SOURCES.values()) {
-            for (String src : bySound.values()) {
+        for (Map.Entry<String, Map<String, String>> entry : ACTIVE_SOURCES.entrySet()) {
+            net.minecraft.entity.Entity owner = sourceOwner(entry.getKey());
+            if (owner == null || owner.isDead) {
+                clearOwnerSlot(entry.getKey());
+                continue;
+            }
+            float px = (float) owner.posX;
+            float py = (float) owner.posY;
+            float pz = (float) owner.posZ;
+            for (String src : entry.getValue().values()) {
                 try {
                     sndSetPosition.invoke(ss, src, px, py, pz);
                 } catch (Exception ignored) {}
@@ -598,7 +624,7 @@ public final class YSMSoundManager {
      * 已预暖（cacheModelSounds），此处仅在边缘场景（如 /ysm playsound 直接播放
      * 从未使用过的模型）触发。
      */
-    private static byte[] getSoundBytes(String key) {
+    static byte[] getSoundBytes(String key) {
         byte[] bytes = SOUND_FILES.get(key);
         if (bytes != null) return bytes;
         ResourceLocation mainId = SOUND_SOURCES.get(key);
@@ -661,7 +687,7 @@ public final class YSMSoundManager {
      * cannot heal itself either. Re-reading the field is cheap (one reflective
      * get per call) and rebinds as soon as vanilla swaps the instance.
      */
-    private static Object resolveSndSystem() {
+    static Object resolveSndSystem() {
         Object current = readVanillaSndSystem();
         if (current != null) {
             if (sndSystem != null && current != sndSystem) {
@@ -791,7 +817,7 @@ public final class YSMSoundManager {
         }
     }
 
-    private static boolean isValidOgg(byte[] data) {
+    static boolean isValidOgg(byte[] data) {
         try (java.io.InputStream is = new java.io.ByteArrayInputStream(data)) {
             return isValidOggStream(is);
         } catch (IOException e) {
@@ -844,9 +870,11 @@ public final class YSMSoundManager {
         if (soundName != null) stopSound(ownerSlot, soundName);
         try {
             String srcName = "ysm_" + sourceCounter.incrementAndGet();
-            float px = (float) mc.thePlayer.posX;
-            float py = (float) mc.thePlayer.posY;
-            float pz = (float) mc.thePlayer.posZ;
+            net.minecraft.entity.Entity owner = sourceOwner(ownerSlot);
+            if (owner == null || owner.isDead) return;
+            float px = (float) owner.posX;
+            float py = (float) owner.posY;
+            float pz = (float) owner.posZ;
             java.net.URL url = oggPath.toUri().toURL();
 
             // paulscode SoundSystem selects the codec based on file extension.
@@ -886,11 +914,11 @@ public final class YSMSoundManager {
             java.net.URL absUrl = playPath.toAbsolutePath().toUri().toURL();
             try {
                 // boolean参数: priority=false, toLoop=false → 不循环播放
-                ss.getClass().getMethod("newSource", boolean.class, String.class,
+                ss.getClass().getMethod("newStreamingSource", boolean.class, String.class,
                     java.net.URL.class, String.class, boolean.class, float.class,
                     float.class, float.class, int.class, float.class)
                     .invoke(ss, false, srcName, absUrl, absUrl.toString(),
-                        false, px, py, pz, 0, 16f);
+                        false, px, py, pz, 2, 16f);
             } catch (NoSuchMethodException e) {
                 ysmu.LOG.warn("[YSMU-SOUND] newSource(URL) not available");
                 return;
@@ -927,9 +955,11 @@ public final class YSMSoundManager {
         if (mc.thePlayer == null) return; // world not fully loaded yet
         try {
             String srcName = "ysm_" + sourceCounter.incrementAndGet();
-            float px = (float) mc.thePlayer.posX;
-            float py = (float) mc.thePlayer.posY;
-            float pz = (float) mc.thePlayer.posZ;
+            net.minecraft.entity.Entity owner = sourceOwner(ownerSlot);
+            if (owner == null || owner.isDead) return;
+            float px = (float) owner.posX;
+            float py = (float) owner.posY;
+            float pz = (float) owner.posZ;
             final byte[] payload = data;
             java.net.URL url = new java.net.URL("file", "", -1,
                 "/ysmu_sounds/" + sanitize(soundName) + "_" + Integer.toHexString(data.length) + ".ogg",
@@ -947,10 +977,10 @@ public final class YSMSoundManager {
                 });
             try {
                 // boolean参数: priority=false, toLoop=false → 不循环播放
-                ss.getClass().getMethod("newSource", boolean.class, String.class,
+                ss.getClass().getMethod("newStreamingSource", boolean.class, String.class,
                     java.net.URL.class, String.class, boolean.class, float.class,
                     float.class, float.class, int.class, float.class)
-                    .invoke(ss, false, srcName, url, url.toString(), false, px, py, pz, 0, 16f);
+                    .invoke(ss, false, srcName, url, url.toString(), false, px, py, pz, 2, 16f);
             } catch (NoSuchMethodException e) {
                 ysmu.LOG.warn("[YSMU-SOUND] newSource(URL) not available");
                 return;
