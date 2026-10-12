@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 
+import com.fox.ysmu.Config;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.util.*;
@@ -351,7 +352,7 @@ public class ClientModelManager {
      */
     public static boolean isIdleEvictionSuppressed() {
         if (GUI_OPEN) return true;
-        long graceMs = (long) com.fox.ysmu.Config.GUI_POST_CLOSE_GRACE_SECONDS * 1000L;
+        long graceMs = (long) Config.GUI_POST_CLOSE_GRACE_SECONDS * 1000L;
         if (graceMs <= 0L) return false;
         return System.currentTimeMillis() - GUI_CLOSE_TIME < graceMs;
     }

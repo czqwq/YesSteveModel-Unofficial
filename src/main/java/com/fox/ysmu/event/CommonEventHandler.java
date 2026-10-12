@@ -4,6 +4,13 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import com.fox.ysmu.Config;
+import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime;
+import com.fox.ysmu.client.audio.YSMSoundManager;
+import com.fox.ysmu.client.particle.CustomParticleManager;
+import com.fox.ysmu.compat.LocalAssetProvider;
+import com.fox.ysmu.data.VehicleModelStates;
+import com.fox.ysmu.network.message.S2CVehicleModelState;
 import cpw.mods.fml.common.gameevent.TickEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import net.minecraft.entity.player.EntityPlayer;
@@ -58,7 +65,7 @@ public class CommonEventHandler {
             // 直接抛 ChatComponentTranslationFormatException），所以耗时先格式化再传；开关默认关闭，
             // 所以默认不会每个玩家登录都刷一条。
             long loadTimeMs = ServerModelManager.LAST_LOAD_TIME_MS;
-            if (loadTimeMs > 0 && com.fox.ysmu.Config.SHOW_MODEL_LOAD_CHAT) {
+            if (loadTimeMs > 0 && Config.SHOW_MODEL_LOAD_CHAT) {
                 event.player.addChatMessage(new net.minecraft.util.ChatComponentTranslation(
                     "message.yes_steve_model.model.reload.ready",
                     String.format(java.util.Locale.ROOT, "%.2f", (double) loadTimeMs)));
@@ -84,16 +91,16 @@ public class CommonEventHandler {
             // above describes, so they go with the NPC ones. Upstream never clears its vehicle capability, but there
             // the entity itself carries it; here a stale entry could be read by an unrelated entity that happens to
             // get the same id in the next session.
-            com.fox.ysmu.data.VehicleModelStates.clear();
+            VehicleModelStates.clear();
             EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
         }
         // 客户端世界卸载：上一份世界遗留的音效音源与"控制器→音效"归属表、弹射物控制器状态、自定义粒子
         // 都要清掉，否则它们会跟着进下一个世界（SOURCE CommonEventHandler.java:87-93）。
         if (event.world != null && event.world.isRemote) {
-            com.fox.ysmu.client.audio.YSMSoundManager.clear();
-            com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
-            com.fox.ysmu.client.particle.CustomParticleManager.clear();
+            YSMSoundManager.clear();
+            ProjectileControllerRuntime.clear();
+            CustomParticleManager.clear();
         }
     }
 
@@ -101,8 +108,8 @@ public class CommonEventHandler {
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
             // 高版本资源健康检查：配置了路径但加载失败时在 chat 提醒玩家（幂等，成本极低）
-            com.fox.ysmu.compat.LocalAssetProvider.warnIfMisconfigured();
-            com.fox.ysmu.client.particle.CustomParticleManager.tick();
+            LocalAssetProvider.warnIfMisconfigured();
+            CustomParticleManager.tick();
         }
     }
 
@@ -155,7 +162,7 @@ public class CommonEventHandler {
         // (event/CapabilityEvent.java:152-159): the state is broadcast when the owner mounts, which is before this
         // client could see the vehicle, so a late tracker is resent it here.
         if (event.entityPlayer instanceof EntityPlayerMP vehicleViewer) {
-            com.fox.ysmu.network.message.S2CVehicleModelState.resendTo(vehicleViewer, event.target);
+            S2CVehicleModelState.resendTo(vehicleViewer, event.target);
         }
     }
 

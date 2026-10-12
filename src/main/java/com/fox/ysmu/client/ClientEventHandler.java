@@ -1,6 +1,9 @@
 package com.fox.ysmu.client;
 
 import java.util.List;
+
+import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
+import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ConfigScreen;
 import com.fox.ysmu.client.gui.DisclaimerScreen;
 import com.fox.ysmu.client.gui.ExtraPlayerConfigScreen;
@@ -8,9 +11,13 @@ import com.fox.ysmu.client.gui.OpenModelFolderScreen;
 import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.fox.ysmu.client.gui.PlayerTextureScreen;
 import com.fox.ysmu.client.compat.AngelicaCompat;
+import com.fox.ysmu.client.input.WheelAnimationLock;
 import com.fox.ysmu.client.renderer.FirstPersonHandRenderer;
 import com.fox.ysmu.client.renderer.HudPreviewCache;
+import com.fox.ysmu.client.roaming.ClientRoamingStore;
+import com.fox.ysmu.client.roaming.ClientRoamingSync;
 import com.fox.ysmu.util.RenderUtil;
+import com.fox.ysmu.util.TickScheduler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.AbstractClientPlayer;
 import net.minecraft.client.entity.EntityClientPlayerMP;
@@ -140,7 +147,7 @@ public class ClientEventHandler {
         if (event.phase != TickEvent.Phase.START) {
             return;
         }
-        com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.beginRenderFrame();
+       ProjectileTimelineRuntime.beginRenderFrame();
     }
 
     @SubscribeEvent
@@ -149,13 +156,13 @@ public class ClientEventHandler {
             return;
         }
         // Reference ClientEventHandler.java:134-137: drive existing password/entity waits without a pool worker.
-        com.fox.ysmu.util.TickScheduler.client().runDueTasks();
+        TickScheduler.client().runDueTasks();
         // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
         // below, which only guards the one-shot model load. Cheap when nothing changed.
-        com.fox.ysmu.client.roaming.ClientRoamingSync.flushPending();
+        ClientRoamingSync.flushPending();
         // Keep playing model sounds centred on the listener; see YSMSoundManager#updateSourcePositions. No-op when
         // nothing is playing.
-        com.fox.ysmu.client.audio.YSMSoundManager.updateSourcePositions();
+        YSMSoundManager.updateSourcePositions();
         // Record this as the client thread, so the model manager can refuse to install animations from anywhere else
         // (a host mod may query clips from the server thread).
         ClientModelManager.markClientThread();
@@ -559,7 +566,7 @@ public class ClientEventHandler {
         // (PlayerMoveEvent.java:44-46), which is the whole point of the lock: play an extra animation while walking.
         // This must stay *after* isMoveKey(): that call consumes the movement key's one-shot pressTime (CU-04), and
         // the lock decides only whether we stop, never whether the signal is consumed.
-        if (com.fox.ysmu.client.input.WheelAnimationLock.isLocked()) {
+        if (WheelAnimationLock.isLocked()) {
             return;
         }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
@@ -626,7 +633,7 @@ public class ClientEventHandler {
      * （参考在 {@code :526} 无条件清 NPCData，本仓按连接语义收紧）。
      */
     private static void clearDepartedPlayerState(EntityPlayer loggedOut) {
-        com.fox.ysmu.client.audio.YSMSoundManager.clearOwner(loggedOut);
+        YSMSoundManager.clearOwner(loggedOut);
         RemoteAnimationVariables.clear(loggedOut);
         MovementSpeedMatcher.clearSmoothing(loggedOut);
         RemotePlayerAnimationQueries.clear();
@@ -680,7 +687,7 @@ public class ClientEventHandler {
         RemotePlayerMotionStates.clear();
         RemoteAnimationVariables.clear();
         // The roaming values belong to the server that just went away, and so do the pending reports for it.
-        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
+        ClientRoamingStore.clear();
         NPCData.clear();
         EntityClips.clear();
         // 缩略图的姿态签名按模型 id 存（PreviewPoseCache 是渲染线程专用的普通 HashMap，见它自己的 javadoc），

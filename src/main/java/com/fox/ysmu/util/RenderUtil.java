@@ -6,6 +6,7 @@ import java.util.function.Consumer;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ModelPreviewAnimationState;
+import com.fox.ysmu.client.gui.ModelPreviewRegistry;
 import net.geckominecraft.client.renderer.GlStateManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.OpenGlHelper;
@@ -444,7 +445,7 @@ public final class RenderUtil {
         GL11.glEnable(GL11.GL_DEPTH_TEST);
         // 与上游 RenderUtil:324-334 逐字对齐：位置/缩放/Z 轴翻转 180°；声明 disable_preview_rotation 的模型
         // 改为不俯仰并上移 5.5，否则俯仰 -10°。本移植原本在这里用的是自加的 -25° 三轴倾斜。
-        boolean disablePreviewRotation = com.fox.ysmu.client.gui.ModelPreviewRegistry
+        boolean disablePreviewRotation = ModelPreviewRegistry
             .previewRotationDisabled(modelId);
         // 上游 RenderUtil:360 的 yRotGui 同时喂给两个地方：身体/头部角度，以及
         // GeoReplacedEntityRenderer:71 的 setupRotations（LivingEntityRenderer 的实体朝向）。

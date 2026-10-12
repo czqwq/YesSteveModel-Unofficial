@@ -2,6 +2,7 @@ package com.fox.ysmu.mixin;
 
 import com.fox.ysmu.client.compat.AngelicaCompat;
 import com.fox.ysmu.client.renderer.FirstPersonHandRenderer;
+import com.fox.ysmu.compat.BackhandCompat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ItemRenderer;
 
@@ -23,7 +24,7 @@ public abstract class MixinItemRenderer {
      */
     @Inject(method = "renderItemInFirstPerson", at = @At("HEAD"))
     private void ysmu$suppressHiddenOffhand(float partialTicks, CallbackInfo ci) {
-        com.fox.ysmu.compat.BackhandCompat.suppressHiddenOffhandRender();
+        BackhandCompat.suppressHiddenOffhandRender();
     }
 
     @Inject(method = "renderItemInFirstPerson", at = @At("HEAD"), cancellable = true)
