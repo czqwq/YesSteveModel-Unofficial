@@ -16,6 +16,7 @@ import com.fox.ysmu.client.renderer.FirstPersonHandRenderer;
 import com.fox.ysmu.client.renderer.HudPreviewCache;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
 import com.fox.ysmu.client.roaming.ClientRoamingSync;
+import com.fox.ysmu.client.roaming.ModelFormExecution;
 import com.fox.ysmu.util.RenderUtil;
 import com.fox.ysmu.util.TickScheduler;
 import net.minecraft.client.Minecraft;
@@ -698,7 +699,7 @@ public class ClientEventHandler {
         // Rules）。清的是"换服务器后同一个模型 id 可能指向另一份几何"这类残留，晚一帧无影响。
         Minecraft.getMinecraft().func_152344_a(() -> {
             RenderUtil.clearPreviewPoseCache();
-            com.fox.ysmu.client.roaming.ModelFormExecution.clear();
+            ModelFormExecution.clear();
         });
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
@@ -710,14 +711,14 @@ public class ClientEventHandler {
         // Model sounds as well: the sources are still playing in the SoundSystem and their bytes belong to the
         // server that just went away, so leaving them would keep the previous server's audio going and keep a
         // stale owner table alive across the next join.
-        com.fox.ysmu.client.audio.YSMSoundManager.clear();
+        YSMSoundManager.clear();
         // The once-per-session welcome flag belongs to the session that just ended, so the next join shows the
         // message again - the state the reference's own field comment ("this session", client/ClientEventHandler.java:53)
         // describes but never implements, because it never writes the field false. See the field's javadoc.
         setWelcomeShown(false);
         // D1: the roulette's movement lock is a per-session client preference, so a disconnect/new world drops it
         // instead of leaving the next session locked. Upstream keeps it in a static with no reset at all.
-        com.fox.ysmu.client.input.WheelAnimationLock.reset();
+        WheelAnimationLock.reset();
     }
 
     private static boolean isVanillaPlayer(ResourceLocation modelId) {
