@@ -2,6 +2,8 @@ package com.fox.ysmu.client;
 
 import java.util.List;
 
+import javax.annotation.Nullable;
+
 import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ConfigScreen;
@@ -12,6 +14,8 @@ import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.fox.ysmu.client.gui.PlayerTextureScreen;
 import com.fox.ysmu.client.compat.AngelicaCompat;
 import com.fox.ysmu.client.input.WheelAnimationLock;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
+import com.fox.ysmu.client.render.ModelFailureNotifier;
 import com.fox.ysmu.client.renderer.FirstPersonHandRenderer;
 import com.fox.ysmu.client.renderer.HudPreviewCache;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
@@ -32,6 +36,7 @@ import net.minecraft.event.ClickEvent;
 import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.StatCollector;
+import net.minecraft.world.World;
 import net.minecraftforge.client.event.*;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
 
@@ -41,7 +46,6 @@ import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.MovementSpeedMatcher;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
-import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.data.EntityClips;
@@ -71,6 +75,16 @@ public class ClientEventHandler {
 
     private static boolean EXTRA_PLAYER = false;
     private static boolean pendingModelLoad;
+
+    /** Tick counter for the periodic prune of {@link AppliedModelRegistry}; see {@code onClientTick}. */
+    private static int appliedModelPruneTicker;
+
+    /**
+     * How long an applied-model record survives without its entity being found in the client world. The same ten
+     * minutes {@code NPCData}'s prune uses, and for the same reason: a chunk can be unloaded for a while and the
+     * entity still exists.
+     */
+    private static final long APPLIED_MODEL_RECORD_GRACE_MILLIS = 10L * 60L * 1000L;
 
     /**
      * The HUD paperdoll's FBO cache (row 44). Reference {@code client/ClientEventHandler.java:55-61}.
@@ -182,6 +196,21 @@ public class ClientEventHandler {
         // on-demand model loading: the parse happens off this thread and only the cache write and the texture upload
         // happen here, a few per tick, so a catalog of models fills in without ever blocking a frame.
         ClientModelManager.tick();
+        // Report model failures that have been collecting for their window, as one line per batch; upstream drives the
+        // same aggregation from a scheduler (ModelFailureNotificationAggregator:16-71) and this port from its tick.
+        ModelFailureNotifier.tick();
+        // Prune the per-entity applied-model records the same way NPCData's overrides are pruned on the server side:
+        // entity ids are never reused, so a record for an entity the client no longer has only wastes memory, and the
+        // grace keeps a temporarily unloaded entity from losing the model it is already showing. Every 1200 ticks,
+        // like that prune, because this only bounds a table that a few dozen entities write.
+        if (++appliedModelPruneTicker >= 1200) {
+            appliedModelPruneTicker = 0;
+            World world = Minecraft.getMinecraft().theWorld;
+            AppliedModelRegistry.retainAll(
+                System.currentTimeMillis(),
+                id -> world != null && world.getEntityByID(id) != null,
+                APPLIED_MODEL_RECORD_GRACE_MILLIS);
+        }
         if (!pendingModelLoad) {
             return;
         }
@@ -239,16 +268,24 @@ public class ClientEventHandler {
         }
     }
 
+    /**
+     * Upstream's {@code VanillaPlayerRenderEvent} ({@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/
+     * client/event/VanillaPlayerRenderEvent.java:24-42}): the built-in {@code steve}/{@code alex} models do not draw
+     * a texture of their own at all - they draw the player's actual Minecraft skin, which is not one of the pack's
+     * textures and therefore travels to the renderer as this event's override
+     * ({@code SpecialPlayerRenderEvent#setTextureLocationOverride}). The whole listener is that one assignment
+     * upstream; the renderer has already put the entity, the model and the selection onto the animatable
+     * ({@code CustomPlayerRenderer#applyEntityModel}) before it posts the event, and the first-person arm sets its own
+     * animatable up the same way, so nothing here has to touch them.
+     * <p>
+     * Upstream's second branch - no entry in the skin map, so use that model's own default skin - has no counterpart
+     * here: 1.7.10's {@code AbstractClientPlayer#getLocationSkin} already answers the loaded skin or the vanilla
+     * default ({@code textures/entity/steve.png}, {@code AbstractClientPlayer.java:49-52}), and that default is the
+     * only player default 1.7.10 ships (there is no {@code alex.png} - the slim variant reuses {@code steve.png}).
+     */
     @SubscribeEvent
     public static void onRenderPlayer(SpecialPlayerRenderEvent event) {
-        CustomPlayerEntity animatable = event.getCustomPlayer();
         if (isVanillaPlayer(event.getModelId()) && event.getEntity() instanceof AbstractClientPlayer clientPlayer) {
-            animatable.setEntity(clientPlayer);
-            animatable.setMainModel(ModelIdUtil.getMainId(event.getModelId()));
-            // The built-in steve/alex models draw the player's own Minecraft skin, which is not one of the pack's
-            // textures. Upstream hands such a texture to the renderer as an override rather than as the model's
-            // texture (see VanillaPlayerRenderEvent), which is what keeps it distinguishable from a pack texture that
-            // has simply not been uploaded.
             event.setTextureLocationOverride(clientPlayer.getLocationSkin());
         }
     }
@@ -266,8 +303,9 @@ public class ClientEventHandler {
             return;
         }
         CustomPlayerRenderer renderer = ClientProxy.getInstance();
-        if (renderer == null || !renderer.hasModelFor(event.entity)) {
-            // No YSM model for this client: leave the frame to the entity's own renderer rather than hiding it.
+        if (renderer == null || !renderer.hasModelFor(event.entity) || !renderer.canDrawFor(event.entity)) {
+            // No YSM model this client can draw: leave the frame to the entity's own renderer rather than hiding it.
+            // The second query is what covers a client whose built-in fallback is unusable (see onRender).
             return;
         }
         event.setCanceled(true);
@@ -300,8 +338,17 @@ public class ClientEventHandler {
         if (!player.equals(playerSelf) && Config.DISABLE_OTHER_MODEL) {
             return;
         }
-        event.setCanceled(true);
         CustomPlayerRenderer renderer = ClientProxy.getInstance();
+        // A client whose built-in fallback is unusable has nothing to draw for a model that is not published yet;
+        // cancelling the vanilla event would then hide the player. Leave the frame to the vanilla renderer instead -
+        // the same answer this port gives for DISABLE_SELF_MODEL and for a non-player entity with no model. Upstream
+        // treats its own default-initialization failure as exceptional (model-fallback.md:49-53); a port that cancels
+        // its host's renderer has to answer that exception with the host, not with an empty frame.
+        if (renderer == null || !renderer.canDrawFor(player)) {
+            ModelFailureNotifier.reportFallbackUnavailable();
+            return;
+        }
+        event.setCanceled(true);
         if ((mc.currentScreen != null || EXTRA_PLAYER) && player.equals(playerSelf)) {
             renderSelfGuiPlayer(renderer, player, event.partialRenderTick);
         } else {
@@ -691,6 +738,13 @@ public class ClientEventHandler {
         ClientRoamingStore.clear();
         NPCData.clear();
         EntityClips.clear();
+        // What each entity was shown with dies with the entities of the world that just went away. Cleared here as
+        // well as in ClientModelManager#clearRuntimeModelCaches (the sync path), because this is the point that runs
+        // when the connection ends without a following sync; the map is concurrent, so clearing it from this thread is
+        // the same kind of write the render thread does.
+        AppliedModelRegistry.clear();
+        // The failure notices belong to the session that ended; a new connection reports its own failures again.
+        ModelFailureNotifier.clear();
         // 缩略图的姿态签名按模型 id 存（PreviewPoseCache 是渲染线程专用的普通 HashMap，见它自己的 javadoc），
         // 而本方法会在 Netty 线程（ClientDisconnectionFromServerEvent，NetworkDispatcher.disconnect/close 里
         // post）或服务端线程（集成服的 PlayerLoggedOutEvent）上被调用 —— ClientModelManager#clearConnectionState
@@ -721,8 +775,30 @@ public class ClientEventHandler {
         WheelAnimationLock.reset();
     }
 
-    private static boolean isVanillaPlayer(ResourceLocation modelId) {
-            return modelId.getResourcePath().equals("steve") || modelId.getResourcePath().equals("alex");
+    /** Upstream's two built-in model ids ({@code VanillaPlayerRenderEvent.java:21-22}). */
+    private static final String VANILLA_STEVE = "misc/2_steve";
+    private static final String VANILLA_ALEX = "misc/1_alex";
+
+    /**
+     * Whether {@code modelId} is one of the built-in models that draw the player's own Minecraft skin.
+     * <p>
+     * Upstream compares the model id to the two names verbatim ({@code VanillaPlayerRenderEvent.java:44-46}), and the
+     * two models ship in this port's built-in pack under the same relative paths - but a model id must be a legal
+     * {@link ResourceLocation} path, so {@code ModelIdUtil} carries the folder part hex-encoded
+     * ({@code ysmu:_name_6d6973632f325f7374657665}, which is what the client registers and the server syncs), and the
+     * comparison has to decode it first ({@link ModelIdUtil#getModelDisplayName}). The two bare names are the same
+     * models as published before the built-in pack moved under {@code misc/}; matching them by full path (never by
+     * last segment, which would also catch a pack's own {@code wine_fox/alex}) keeps those installs working.
+     * <p>
+     * Package private rather than inlined so the rule can be pinned without a client, like
+     * {@link #shouldShowWelcome()}.
+     */
+    static boolean isVanillaPlayer(@Nullable ResourceLocation modelId) {
+        if (modelId == null) {
+            return false;
+        }
+        String path = ModelIdUtil.getModelDisplayName(modelId);
+        return VANILLA_STEVE.equals(path) || VANILLA_ALEX.equals(path) || "steve".equals(path) || "alex".equals(path);
     }
 
     private static final class PlayerPreviousRotationSnapshot {

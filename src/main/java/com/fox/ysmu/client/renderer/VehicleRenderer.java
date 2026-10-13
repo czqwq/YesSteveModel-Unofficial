@@ -43,6 +43,7 @@ import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime.Vehicle
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
+import com.fox.ysmu.client.render.ModelFailureNotifier;
 import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
 import com.fox.ysmu.data.VehicleModelStates;
@@ -129,6 +130,24 @@ public final class VehicleRenderer {
     /** Clears the once-per-message dedup table, so it reports again after a reload. */
     public static void clearWarnings() {
         LOGGED_RENDER_WARNS.clear();
+    }
+
+    /**
+     * Tells the player that this vehicle lost its YSM replacement, which is upstream's {@code STOPPED} outcome: the
+     * outcome for the entities that have no fallback target at all, since a vehicle's
+     * {@code fallbackRenderTargetId()} is {@code null} ({@code CustomVehicleEntity:37-40}) and the replacement is
+     * therefore revoked rather than replaced by the built-in default
+     * ({@code ClientModelRenderTargetManager:246-250} picks STOPPED exactly then).
+     * <p>
+     * Only once the owner's model is really ready, or was refused: while its payload is still being built the vehicle
+     * is drawn vanilla for a frame or two, and that is preparation, not a failure - upstream's outcome comes from a
+     * terminal {@code AcquireResult.Failed}, not from a pending one.
+     */
+    private static void reportReplacementRevoked(ResourceLocation modelId) {
+        ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+        if (ClientModelManager.isModelPublished(mainId) || ClientModelManager.isGeometryFailed(mainId)) {
+            ModelFailureNotifier.report(modelId, ModelFailureNotifier.Outcome.STOPPED);
+        }
     }
 
     /**
@@ -268,6 +287,7 @@ public final class VehicleRenderer {
             .get(geoId);
         if (model == null) {
             warnOnce("geo-not-found", "vehicle geometry {} is not registered for {}", geoId, modelId);
+            reportReplacementRevoked(modelId);
             return false;
         }
 

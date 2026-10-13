@@ -12,6 +12,7 @@ import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
@@ -40,8 +41,9 @@ import com.fox.ysmu.ysmu;
  *       under a synthetic per-registration id. See {@code CustomTextureManager}'s "The registration id" section.</li>
  *   <li>{@link #clear} is called from {@code ClientModelManager}'s {@code clearRuntimeModelCaches}, i.e. the existing
  *       model-unload / reconnect path ({@code prepareModelSync}), where the whole model list those textures belong to
- *       is dropped. It releases every holder immediately, which is upstream's explicit trigger
- *       ({@code CustomTextureManager.release}, upstream {@code :33-36}).</li>
+ *       is dropped. It releases every holder of that list immediately, which is upstream's explicit trigger
+ *       ({@code CustomTextureManager.release}, upstream {@code :33-36}) - except the built-in default model's, which is
+ *       not part of that list and stays registered; see {@link #clear(boolean)}.</li>
  *   <li>{@link #tick} is called from {@code ClientModelManager.tick}, the client tick, and is the same render-thread
  *       step upstream drives from its client tick (upstream {@code client/event/ClientTickEvent.java:28}).</li>
  * </ul>
@@ -70,7 +72,9 @@ import com.fox.ysmu.ysmu;
  *   <li>{@link #clear} runs in the same call as the model-list clear
  *       ({@code ClientModelManager.clearRuntimeModelCaches}), so no render site can still be told to bind a released
  *       id: {@code CustomPlayerModel.textureFor} resolves through that same model list and falls back to the built-in
- *       default while it is empty ({@code client/model/CustomPlayerModel.java:81-92}).</li>
+ *       default while it is empty ({@code client/model/CustomPlayerModel.java:81-92}). That fallback is why the built-in
+ *       default's own textures are held back from the release rather than re-created on demand - nothing re-registers
+ *       them on this path; see {@link #clear(boolean)}.</li>
  *   <li>A released texture is re-created on demand: the next model registration calls {@link #register} again, and a
  *       resource reload / re-sync re-requests the model and re-uploads every texture
  *       ({@code ClientModelManager.uploadTextures}). {@link #register} forgets the previous holder for that id, so a
@@ -150,8 +154,14 @@ public final class ModelTextureRegistry {
     }
 
     /**
-     * Releases every texture this registry owns and forgets the holders. Called from the existing model-unload /
-     * reconnect path; see the class javadoc. Never touches a texture outside this registry.
+     * Releases every holder that belongs to the connection-scoped model list - i.e. every model this client was
+     * synced - and forgets the holders. Called from the existing model-unload / reconnect path; see the class
+     * javadoc. Never touches a texture outside this registry.
+     *
+     * <p>The built-in default model's own textures are <b>kept</b>: it is not part of that list, its resources are
+     * initialized once per client session and upstream requires them to stay available for the whole session
+     * ({@code ClientModelRenderTargetManager}'s {@code defaultInitialization}/{@code requireAvailable}). The reason it
+     * cannot simply be released and re-uploaded like the other models is on {@link #clear(boolean)}.
      *
      * <p>Both of upstream's triggers are used here, in the order that matters: the strong holder is dropped first, so
      * the reachability trigger is armed; then the explicit release is upstream's second, immediate trigger
@@ -161,35 +171,77 @@ public final class ModelTextureRegistry {
      * the manager's id-based release onto whatever now owns that id.
      */
     public static void clear() {
-        // The LRU table is reset even when nothing is live: a texture that was already bound can still be collecting
-        // (or already have collected) its timestamp after this call, because its object stays reachable from the
-        // platform's texture map until the delayed release runs, and a stale timestamp would then outlive the
-        // registration it describes.
-        List<Holder> owned = new ArrayList<>(TEXTURES.values());
-        TEXTURES.clear();
-        TEXTURE_LAST_USED.clear();
+        clear(true);
+    }
+
+    /**
+     * {@link #clear()} with the pin on the built-in default model's textures switchable, so a test can also reach the
+     * "nothing survives" state. Production always passes {@code true}.
+     *
+     * <h4>Why the built-in default model's textures are pinned</h4>
+     * <p>{@code CustomPlayerModel.textureFor} answers {@code CustomPlayerModel.DEFAULT_TEXTURE} - that model's own
+     * texture id - for every entity whose real model this connection has not published yet, and the renderer draws the
+     * built-in default's geometry in exactly that state
+     * ({@code CustomPlayerRenderer#doRenderModel}, {@code CustomPlayerModel#getModel}). An id bound while the platform
+     * has no entry for it is answered by {@code TextureManager.bindTexture} with a fresh {@code SimpleTexture}, which
+     * looks the id up in the resource packs, cannot succeed and leaves the id pointing at the game's shared missing
+     * texture for the rest of the session - together with one {@code Failed to load texture} + {@code
+     * FileNotFoundException} log line. So the fallback's texture is not an ordinary model texture: it has to be
+     * registered for as long as anything may ask for it.
+     *
+     * <p>Releasing it here was a real defect: this method ran at every model sync while nothing re-registers the
+     * default model except {@code loadDefaultModel()} (a resource reload) or the server syncing it again, so the
+     * client could end up with a fallback whose texture no longer exists. The lazy asset eviction already pins this
+     * same model, and for the same reason ({@code AssetManager#tick}: "the built-in fallback model must stay
+     * resident" - it has no encrypted client cache to be restored from), which is where
+     * {@link ClientModelManager#isDefaultModelId} comes from.
+     */
+    static void clear(boolean keepBuiltInFallback) {
+        // Each released id loses its LRU entry together with its registration - including a timestamp written after
+        // an earlier clear by a bind of the released id, whose object stays reachable from the platform's texture
+        // map until the delayed release runs - so no stale timestamp can outlive the registration it describes. A
+        // pinned id keeps its own: it is still bindable, so its timestamp is still true.
+        List<Map.Entry<ResourceLocation, Holder>> owned = new ArrayList<>(TEXTURES.entrySet());
         int count = 0;
-        for (Holder entry : owned) {
+        for (Map.Entry<ResourceLocation, Holder> entry : owned) {
+            Holder holderEntry = entry.getValue();
+            if (keepBuiltInFallback && ClientModelManager.isDefaultModelId(entry.getKey())) {
+                // Pinned; see this method's javadoc. Not removed from TEXTURES, not forgotten from the budget and no
+                // release started, so it stays bindable for the session.
+                continue;
+            }
+            TEXTURES.remove(entry.getKey());
+            TEXTURE_LAST_USED.remove(entry.getKey());
             // Before the release starts, and for every entry including an already-replaced one: this drops the
             // texture's VRAM contribution and its ownership marker, and the marker is what stops the platform's
             // old-entry lookup from re-uploading a texture that is on its way out (see
             // OuterFileTexture#forgetGpuAccounting).
-            forgetGpuAccounting(entry.owner);
-            if (entry.holder == null) {
+            forgetGpuAccounting(holderEntry.owner);
+            if (holderEntry.holder == null) {
                 // Already replaced before this clear: its registration has no strong holder left, so the reachability
                 // trigger will start its delayed release on the next collection. An explicit release here would name
                 // an id that now belongs to the newer registration - the identity-checked Host#release declines it, so
                 // it would only add a no-op slot.
                 continue;
             }
-            entry.holder = null;
-            CustomTextureManager.release(entry.owner);
+            holderEntry.holder = null;
+            CustomTextureManager.release(holderEntry.owner);
             count++;
         }
-        // Defensive: no registration this registry owns survives this call, so nothing it tracks may keep the
-        // footprint above the budget. The GL names the released textures still hold are freed by their delayed
-        // release, not here.
+        // Defensive: the counter is rebuilt from the entries that survived, so nothing this registry no longer owns
+        // can keep the footprint above the budget - the guarantee the old unconditional reset provided. Rebuilding
+        // rather than dropping to zero is what keeps a pinned fallback's bytes visible to the budget; the released
+        // entries above already gave theirs back. The GL names they still hold are freed by their delayed release,
+        // not here.
+        if (!keepBuiltInFallback) {
+            TEXTURE_LAST_USED.clear();
+        }
         textureGpuBytes = 0L;
+        for (Holder survivor : TEXTURES.values()) {
+            if (survivor.owner instanceof OuterFileTexture outer) {
+                textureGpuBytes += outer.getGpuBytes();
+            }
+        }
         if (count > 0) {
             ysmu.LOG.info("YSM client released {} model texture(s) for a delayed free", count);
         }
@@ -368,6 +420,14 @@ public final class ModelTextureRegistry {
     /** Live registrations; diagnostics and tests only. */
     public static int size() {
         return TEXTURES.size();
+    }
+
+    /**
+     * Whether {@code id} currently has a live registration here; tests only, so a pinned id can be told from a
+     * released one ({@link #clear()}) without reaching into {@link #TEXTURES}.
+     */
+    static boolean isRegistered(@Nullable ResourceLocation id) {
+        return id != null && TEXTURES.containsKey(id);
     }
 
     /** A texture and the holder keeping its registration alive. */

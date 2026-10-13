@@ -163,4 +163,60 @@ class ClientModelManagerQuarantineTest {
             "a later frame must not be told to wait again, which is what would make it re-request the build");
         assertTrue(ClientModelManager.ensureGeometry(mainId()));
     }
+
+    /**
+     * The other half of the split: a failure the <em>environment</em> caused is not a content failure, so it must not
+     * mark the model dead for the rest of the connection. Upstream carries the same distinction into the failure kind
+     * it records - only {@code AssetLoadException.Reason.CONTENT} becomes {@code ResourceFailure.Kind.DETERMINISTIC}
+     * and everything else {@code TRANSIENT} ({@code model/resource/client/render/ModelRenderTargetLoader.java:107-131})
+     * - and freezes only the deterministic kind, per content version.
+     * <p>
+     * The rule is a pure predicate here because an {@code Error} cannot be provoked from a payload: malformed bytes
+     * throw {@code Exception}s, which is exactly what the classification is about.
+     */
+    @Test
+    void anEnvironmentFailureIsNotAContentFailure() {
+        assertTrue(
+            ClientModelManager.isTransientBuildFailure(new OutOfMemoryError("baking a large model")),
+            "an OOM says nothing about the bytes, so it must not quarantine the model for the connection");
+        assertTrue(ClientModelManager.isTransientBuildFailure(new LinkageError("half-loaded engine")));
+        assertFalse(
+            ClientModelManager.isTransientBuildFailure(new IllegalArgumentException("unknown format_version")),
+            "a malformed payload is content: the same bytes will throw again");
+        assertFalse(ClientModelManager.isTransientBuildFailure(new IllegalStateException("no usable layout")));
+    }
+
+    /**
+     * Whether the render paths may fall back on the built-in default at all, which is what decides between cancelling
+     * the vanilla renderer and leaving the entity to it ({@code CustomPlayerRenderer#canDrawFor}). It follows the
+     * fallback's own install: on when that model is really published, off again when a later install of it is refused
+     * - the refusal rolls the geometry back with it.
+     * <p>
+     * The end state is deliberately "installed": a real client is in it after startup, and the other tests that care
+     * about the built-in default install it themselves ({@code CustomPlayerModelTextureReadinessTest}).
+     */
+    @Test
+    void theBuiltInFallbacksAvailabilityFollowsItsOwnInstall() {
+        ResourceLocation fallback = new ResourceLocation(ysmu.MODID, "default");
+        try {
+            ClientModelManager.registerAll(defaultPayload(GeometryFixtures.buildableGeometry("main.json")), true);
+            assertTrue(
+                ClientModelManager.isFallbackAvailable(),
+                "the built-in default was installed, so every render path may fall back on it");
+            assertTrue(ClientModelManager.isModelPublished(ModelIdUtil.getMainId(fallback)));
+
+            ClientModelManager.registerAll(defaultPayload("{}".getBytes(StandardCharsets.UTF_8)), true);
+            assertFalse(
+                ClientModelManager.isFallbackAvailable(),
+                "a refused install of the fallback itself takes it away, geometry rollback included");
+        } finally {
+            ClientModelManager.registerAll(defaultPayload(GeometryFixtures.buildableGeometry("main.json")), true);
+        }
+    }
+
+    private static ModelData defaultPayload(byte[] mainGeometry) {
+        Map<String, byte[]> geometry = new LinkedHashMap<>();
+        geometry.put("main", mainGeometry);
+        return new ModelData("default", Type.FOLDER, geometry, new LinkedHashMap<>(), new LinkedHashMap<>());
+    }
 }

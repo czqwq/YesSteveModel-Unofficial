@@ -18,6 +18,7 @@ import org.jetbrains.annotations.Nullable;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomFirstPersonArmEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.client.render.ModelPoseSnapshot;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerHeadLayer;
@@ -106,7 +107,9 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * <p>
      * This is why the default substitution is not applied here: if a missing model resolved to
      * {@code ysmu:default/main} (which is loaded on every client), the model lookup below could never be
-     * null and this method could never report {@code false} for the case it exists to report.
+     * null and this method could never report {@code false} for the case it exists to report. An entity that
+     * already has an applied model ({@link AppliedModelRegistry}) is still drawn - upstream keeps the old lease
+     * for a pending or failed request instead of dropping the entity to its own renderer.
      *
      * @return {@code true} when a model was drawn or another listener claimed the frame; {@code false} when
      *         the requested model is unavailable to this client.
@@ -116,23 +119,107 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         return doRenderModel(entityObj, x, y, z, entityYaw, partialTicks, false);
     }
 
-    private boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
-        float partialTicks, boolean fallBackToDefault) {
-        ResourceLocation requested = applyEntityModel(entityObj);
-        ResourceLocation location;
+    /**
+     * What a frame draws for an entity - this port's form of upstream's <b>applied render target</b> rule, as one pure
+     * decision both consumers share: the draw path turns it into animatable state
+     * ({@link #resolveDrawnModel}) and the entry point that decides whether to cancel the vanilla renderer asks
+     * whether the chosen model is really installed ({@link #canDrawFor}).
+     * <p>
+     * Upstream installs a request's target into the entity's binding only once it is loaded
+     * ({@code EntityModelBinding#synchronize:145-167}, {@code installReady} on {@code AcquireResult.Ready}) and swaps
+     * {@code currentModelRenderTarget} under the same gate ({@code CustomEntity#applyBoundResource:133-145}), so while
+     * a newly selected model is still <i>Pending</i> or has <i>Failed</i> the entity keeps drawing the model it
+     * already had; its product contract says exactly that - "a consumer may keep the old ready lease while the new
+     * authoritative target is Pending or Failed; the humanoid uses the intrinsic default only when it has <b>no</b>
+     * old lease" ({@code docs/architecture/model-management/failure-and-recovery.md:36}). The built-in default is
+     * installed as the fallback only {@code if (resourceHolder == null)} ({@code EntityModelBinding:165-167}), or for
+     * a model id this connection has no content for at all ({@code :106-112}).
+     */
+    private enum Drawn {
+        /** The requested model itself, once it is published - the frame the swap happens on. */
+        REQUESTED,
+        /** The model the entity is already shown with, kept while the request is Pending or refused. */
+        APPLIED,
+        /** The built-in default: no override at all, an unknown id, or nothing applied yet. */
+        FALLBACK,
+        /** Nothing this renderer may draw; the caller keeps the entity on its own renderer. */
+        NONE
+    }
+
+    /**
+     * The pure form of {@link Drawn}; both consumers go through it, so the draw path and the "may I cancel the vanilla
+     * renderer?" query can never disagree about which model a frame would use.
+     *
+     * @param requested         the entity's requested main model id, or {@code null} when it has no usable override
+     * @param applied           what this entity is currently shown with; see {@link AppliedModelRegistry}
+     * @param fallBackToDefault whether the built-in default may stand in - false for a caller that owns its own
+     *                          fallback renderer and would rather draw that than YSM's generic model
+     */
+    private static Drawn selectDrawn(@Nullable ResourceLocation requested,
+        @Nullable AppliedModelRegistry.Applied applied, boolean fallBackToDefault) {
+        if (requested != null && ClientModelManager.isModelPublished(requested)) {
+            return Drawn.REQUESTED;
+        }
+        if (requested != null && AppliedModelRegistry.keepsAppliedModel(
+            false,
+            ClientModelManager.hasModelContent(requested),
+            applied != null && ClientModelManager.isModelPublished(applied.mainModelId()))) {
+            return Drawn.APPLIED;
+        }
+        return fallBackToDefault ? Drawn.FALLBACK : Drawn.NONE;
+    }
+
+    /**
+     * Puts the model the frame draws on the shared animatable and answers with its location; see {@link Drawn}.
+     *
+     * <p>{@link AppliedModelRegistry} is where "what this entity is already shown with" lives: upstream keeps it in
+     * the entity's own binding, which this port does not have (one shared animatable for every entity). Keeping that
+     * model means restoring its texture too, so geometry, texture, animations, scale and layer order all come from one
+     * model - upstream never shows an applied target's geometry with another target's resources.
+     *
+     * @return the main model id to draw, or {@code null} when this renderer must not draw the entity at all
+     */
+    @Nullable
+    private ResourceLocation resolveDrawnModel(EntityLivingBase entityObj, @Nullable ResourceLocation requested,
+        boolean fallBackToDefault) {
         if (requested == null) {
             if (!fallBackToDefault) {
                 // No override at all, so there is no YSM model for an external renderer to claim.
-                return false;
+                return null;
             }
-            location = this.modelProvider.getModelLocation(this.animatable);
-        } else if (isModelAvailable(requested)) {
-            location = requested;
-        } else if (fallBackToDefault) {
-            warnMissingModel(requested, entityObj);
-            location = CustomPlayerModel.DEFAULT_MAIN_MODEL;
-        } else {
-            warnMissingModel(requested, entityObj);
+            return this.modelProvider.getModelLocation(this.animatable);
+        }
+        // Not published yet: keep asking for it, because this is the call that submits the build - the acquire that
+        // upstream drives on every checkModelUpdate - and it has to happen while an applied model is being kept, or
+        // the switch would never finish.
+        ClientModelManager.ensureGeometry(requested);
+        AppliedModelRegistry.Applied applied = AppliedModelRegistry.applied(entityObj);
+        switch (selectDrawn(requested, applied, fallBackToDefault)) {
+            case REQUESTED:
+                return requested;
+            case APPLIED:
+                this.animatable.setMainModel(applied.mainModelId());
+                this.animatable.setTexture(applied.textureId());
+                return applied.mainModelId();
+            case FALLBACK:
+                // The built-in default's own pair: applyEntityModel left the animatable on the requested model, whose
+                // geometry is not there yet, and leaving it there would draw the default's geometry with that model's
+                // animation and scale. This is the substitution upstream makes by installing its default target into
+                // the binding when the requested one is not ready.
+                this.animatable.setMainModel(CustomPlayerModel.DEFAULT_MAIN_MODEL);
+                this.animatable.setTexture(CustomPlayerModel.DEFAULT_TEXTURE);
+                return CustomPlayerModel.DEFAULT_MAIN_MODEL;
+            default:
+                warnMissingModel(requested, entityObj);
+                return null;
+        }
+    }
+
+    private boolean doRenderModel(EntityLivingBase entityObj, double x, double y, double z, float entityYaw,
+        float partialTicks, boolean fallBackToDefault) {
+        ResourceLocation requested = applyEntityModel(entityObj);
+        ResourceLocation location = resolveDrawnModel(entityObj, requested, fallBackToDefault);
+        if (location == null) {
             return false;
         }
         SpecialPlayerRenderEvent renderEvent = new SpecialPlayerRenderEvent(
@@ -146,24 +233,21 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         // Read after the event has been posted, so the listeners have had their say: upstream reads it before, which
         // is why its renderer field never sees what its own vanilla-skin listener sets.
         this.textureOverride = renderEvent.getTextureLocationOverride();
-        GeoModel geoModel;
-        if (ClientModelManager.ensureGeometry(location)) {
-            geoModel = GeckoLibCache.getInstance()
-                .getGeoModels()
-                .get(location);
-        } else {
-            // Synced, but its geometry is still being built on the loader thread. Draw the built-in default for the
-            // few frames that takes: reporting a model that is on its way as missing would drop this entity to its
-            // vanilla renderer and it would never come back.
-            geoModel = GeckoLibCache.getInstance()
-                .getGeoModels()
-                .get(CustomPlayerModel.DEFAULT_MAIN_MODEL);
-        }
+        GeoModel geoModel = drawableGeometry(location);
         if (geoModel == null) {
+            // Nothing is drawable for this model on this connection: report it and leave the frame to whoever called
+            // us (a preview tile keeps its last image, an external renderer draws the entity itself). The built-in
+            // default is never silently substituted here any more - resolveDrawnModel already decided what belongs on
+            // screen, and drawing a different model's geometry under this model's texture is the mismatch upstream
+            // avoids by never mixing an applied target with another target's resources.
             warnMissingModel(location, entityObj);
             return false;
         }
         this.geoModel = geoModel;
+        // Upstream records the target when it is installed ({@code EntityModelBinding#installReady}), and that record
+        // is what the next frame keeps drawing while a newer selection is still Pending or has Failed. Recording here
+        // - the geometry resolved and the texture that goes with it known - is the same moment.
+        AppliedModelRegistry.install(entityObj, location, CustomPlayerModel.textureFor(this.animatable));
         // A preview may pose the model however its own animation wants; the world must not inherit that pose.
         ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
         // Bone-transform tracking for the draw (reference branch CustomPlayerRenderer.java:170/192):
@@ -289,13 +373,77 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      * A parked model counts as available here on purpose: this is the gate that keeps the entity on the YSM renderer,
      * and the path behind it is also what asks for the build. Answering false would hand the entity to its vanilla
      * renderer and, because nothing else asks for that build, it would stay parked for the session.
-     * {@link #isPublishedFor} is the narrower question, for callers that want to know whether the real model can be
-     * drawn right now.
+     * {@link ClientModelManager#isModelPublished} is the narrower question, for callers that want to know whether
+     * the real model can be drawn right now.
      */
     public boolean hasModelFor(EntityLivingBase entityObj) {
         // Pure query: must not touch the shared animatable, or asking whether an entity can be drawn would
         // itself change what the next entity renders with.
         return isModelAvailable(requestedModel(entityObj));
+    }
+
+    /**
+     * Whether this renderer can produce a frame for the entity right now, so a caller that has to decide between
+     * cancelling the vanilla renderer and leaving it alone can ask first. Pure query: it never touches the shared
+     * animatable and never submits a build (see {@link #hasModelFor}).
+     * <p>
+     * It asks the very same decision the draw path does ({@link #selectDrawn}), then whether the model that decision
+     * picked is really installed: cancelling the vanilla renderer and then finding no geometry to draw would hide the
+     * entity, which is the one outcome no branch of this must produce. Two states make that possible and both are
+     * answered here - the built-in fallback being unusable ({@code ClientModelManager#isFallbackAvailable}: its own
+     * install failed or was refused, so it can no longer stand in for anything), and a model whose geometry is not in
+     * the engine cache although it is selected.
+     * <p>
+     * Upstream has no equivalent branch: its default initialization is a startup requirement and a failure there is
+     * the documented exception ("humanoid 回退 default 失败时不要求继续恢复宿主",
+     * {@code docs/product-decisions/decisions/model-fallback.md:49-53}). A port that cancels the vanilla player
+     * renderer does have a host renderer to hand the entity back to, so it uses it - the same degradation this port
+     * uses for {@code DISABLE_SELF_MODEL} and for a non-player entity with no model
+     * ({@code ClientEventHandler#onRenderLiving}).
+     */
+    public boolean canDrawFor(EntityLivingBase entityObj) {
+        ResourceLocation requested = requestedModel(entityObj);
+        AppliedModelRegistry.Applied applied = AppliedModelRegistry.applied(entityObj);
+        switch (selectDrawn(requested, applied, true)) {
+            case REQUESTED:
+                return hasGeometry(requested);
+            case APPLIED:
+                return hasGeometry(applied.mainModelId());
+            case FALLBACK:
+                // The built-in default is the substitute this whole renderer is built around, and it is the one model
+                // that outlives a connection's model-list reset (#isFallbackAvailable), so only its own availability
+                // and its geometry being there decide.
+                return ClientModelManager.isFallbackAvailable()
+                    && hasGeometry(CustomPlayerModel.DEFAULT_MAIN_MODEL);
+            default:
+                return false;
+        }
+    }
+
+    /** Whether this model's geometry is really in the engine cache (a pure lookup: no build request, no marker). */
+    private static boolean hasGeometry(@Nullable ResourceLocation mainModelId) {
+        return mainModelId != null && GeckoLibCache.getInstance()
+            .getGeoModels()
+            .get(mainModelId) != null;
+    }
+
+    /**
+     * The geometry to draw for {@code location}, asking for a build first and then taking whatever the engine has.
+     * <p>
+     * The request goes out on every frame ({@code ensureGeometry} is also the port's acquire), but its <em>answer</em>
+     * is not the drawability check: a payload that is parked for a rebuild - which happens to the built-in default on
+     * every sync, because the server ships it too - makes that call answer "wait" while the geometry this client
+     * already installed is still in the engine cache and still the right thing to draw. Reading the cache directly is
+     * what the frame before this port's on-demand loading did, and it keeps such a window from hiding every player.
+     *
+     * @return the geometry for {@code location}, or {@code null} when this connection has none at all
+     */
+    @Nullable
+    private static GeoModel drawableGeometry(ResourceLocation location) {
+        ClientModelManager.ensureGeometry(location);
+        return GeckoLibCache.getInstance()
+            .getGeoModels()
+            .get(location);
     }
 
     /**

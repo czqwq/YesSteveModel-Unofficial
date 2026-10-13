@@ -139,21 +139,70 @@ class ClientModelManagerEvictionSupportTest {
         return mainId;
     }
 
+    /**
+     * The pinned model is the <b>built-in fallback</b>, by its literal id - not whatever
+     * {@code Config.DEFAULT_MODEL_ID} says. Upstream's rule is the same literal check
+     * ({@code ClientModelRenderTargetManager#isDefault:620-624}) and pins exactly those leases for the process;
+     * its configurable default is the <i>selection</i> default, an ordinary catalog entry. The two coincide only
+     * while nobody changes the config, which is why the case below moves the config out of the way.
+     */
     @Test
     void isDefaultModelIdAnswersForEveryShapeOfTheDefaultModelsIds() {
-        assertTrue(ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID)));
-        assertTrue(
-            ClientModelManager
-                .isDefaultModelId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID + "/main")));
-        assertTrue(
-            ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID + "/arm")));
+        String configured = Config.DEFAULT_MODEL_ID;
+        try {
+            assertTrue(ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, "default")));
+            assertTrue(ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, "default/main")));
+            assertTrue(ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, "default/arm")));
 
-        assertFalse(ClientModelManager.isDefaultModelId(new ResourceLocation("ysmu", "wine_fox/main")));
-        assertFalse(ClientModelManager.isDefaultModelId(new ResourceLocation("ysmu", "wine_fox")));
-        assertFalse(
-            ClientModelManager.isDefaultModelId(new ResourceLocation("minecraft", Config.DEFAULT_MODEL_ID + "/main")),
-            "the domain is part of the test: only this mod's own default model is pinned");
-        assertFalse(ClientModelManager.isDefaultModelId(null));
+            assertFalse(ClientModelManager.isDefaultModelId(new ResourceLocation("ysmu", "wine_fox/main")));
+            assertFalse(ClientModelManager.isDefaultModelId(new ResourceLocation("ysmu", "wine_fox")));
+            assertFalse(
+                ClientModelManager.isDefaultModelId(new ResourceLocation("minecraft", "default/main")),
+                "the domain is part of the test: only this mod's own default model is pinned");
+            assertFalse(ClientModelManager.isDefaultModelId(null));
+
+            // A renamed selection default is a different model; the fallback the renderer draws
+            // (CustomPlayerModel.DEFAULT_MAIN_MODEL) must not lose its pin because of it.
+            Config.DEFAULT_MODEL_ID = "wine_fox";
+            assertTrue(
+                ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, "default/main")),
+                "the built-in fallback stays pinned");
+            assertFalse(
+                ClientModelManager.isDefaultModelId(new ResourceLocation(ysmu.MODID, "wine_fox/main")),
+                "the configured selection default is an ordinary model, as it is upstream");
+        } finally {
+            Config.DEFAULT_MODEL_ID = configured;
+        }
+    }
+
+    /**
+     * {@link ClientModelManager#hasModelContent} answers "did this connection receive a payload for this model",
+     * which is the question that decides between keeping the model an entity is already shown with and falling back
+     * to the built-in default - upstream's catalog lookup ({@code ClientCatalogSnapshot#find}: empty for an id the
+     * client never received). A parked payload has content but is not published; a model this client never got has
+     * neither. Both id shapes are accepted, because the renderer passes a main id while the first-person arm passes
+     * the model's own.
+     */
+    @Test
+    void hasModelContentAnswersForRegisteredPayloadsWhateverTheirBuildState() {
+        ResourceLocation model = new ResourceLocation("ysmu", "content_probe");
+        ResourceLocation mainId = ModelIdUtil.getMainId(model);
+        assertFalse(ClientModelManager.hasModelContent(null));
+        assertFalse(ClientModelManager.hasModelContent(model));
+        assertFalse(ClientModelManager.hasModelContent(mainId));
+
+        // The registration index is the texture list, so indexing the model is what "has content" means; writing it
+        // directly keeps this a predicate test with no parked payload left behind for another test class in this JVM.
+        ClientModelManager.MODELS.put(model, new java.util.ArrayList<>());
+        try {
+            assertTrue(ClientModelManager.hasModelContent(model), "the registered payload is content");
+            assertTrue(ClientModelManager.hasModelContent(mainId), "and a sub-model id answers for its model");
+            assertFalse(
+                ClientModelManager.isModelPublished(mainId),
+                "content is what the connection received, not what it has built");
+        } finally {
+            ClientModelManager.MODELS.remove(model);
+        }
     }
 
     /**

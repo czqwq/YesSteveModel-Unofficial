@@ -88,6 +88,27 @@ the part of it that is written against this snapshot.
   holder invalidation and GPU-accounting ownership. Shader visual parity and arbitrary callback GL state remain
   unverified; continuous segments do not sort across layers or callbacks.
 
+- **`software/bernie/geckolib3/geo/material/MaterialFacing.java` — a mirrored draw is not CPU-culled (phase45).**
+  The port mirrors the model in two of its draws, both vanilla conventions it follows: the biped arm
+  (`FirstPersonHandRenderer#alignGeckoArmToVanillaBipedArm`, `glScalef(1, -1, 1)`) and the inventory preview / paper
+  doll (`RenderUtil#renderPlayerEntity`, `glScalef(-scale, scale, scale)`; vanilla's own
+  `GuiInventory.func_147046_a:94` is the same shape). Live client report: the arms of every opaque-skinned built-in
+  model showed holes and see-through cubes, the bodies did not. Cause: the native facing rule the material path
+  ports (`render_state_impl.inc:35-50`) takes its sign from the determinant of the chain its cofactors come from, so
+  a mirror turned "the side the viewer sees" into "the side the viewer is behind" - and only cubes whose six faces
+  are opaque get the culling partition that drops faces (`MaterialBake:44-53`), which is why arms were affected and
+  bodies were not. The native renderer is safe here because its orientation sign is accumulated **per bone**
+  (`pose_stack_impl.inc:53-60`, consumed at `render_state_impl.inc:55-62`) and its outer matrix never mirrors
+  (upstream's own arm mirror is the even-handed `scale(-1, -1, 1)`); the port's mirrors sit in the middle of the
+  model-to-eye chain, where a segment cannot undo them from its own matrices. `MaterialFacing.mirrored(Matrix4f)`
+  detects them (handedness of the model-to-eye matrix, never of a model-to-clip one) and
+  `MaterialFacing.culled(face, coefficient, mirrored)` then keeps the faces - for a closed model that is the same
+  picture, since the far faces stay behind the near ones for the depth test and the segment draws with GL culling off
+  anyway (`MaterialDrawSession#drain`). Unmirrored draws are byte-for-byte the previous behaviour. Verified by
+  `MaterialFacingSortTest` (11 tests in the package, including the real built-in arm asset baked cube by cube);
+  `.agent/phase45-mirrored-draw-face-culling.md` records the evidence and the one remaining gap (the paper doll's own
+  `glFrontFace` half, left for the owner).
+
 - **`software/bernie/geckolib3/geo/GeoReplacedEntityRenderer.java` - the frame's animation event moved into a method,
   so a second animatable of the same entity can be ticked with it.** `doRender` built the `EntityModelData` and the
   `AnimationEvent` inline and kept four of its inputs in locals for the layer pass; the port's first-person arm is a

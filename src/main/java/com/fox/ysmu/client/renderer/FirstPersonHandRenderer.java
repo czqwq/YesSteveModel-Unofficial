@@ -4,6 +4,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 
 import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.AnimatableCacheUtil;
@@ -525,20 +526,35 @@ public final class FirstPersonHandRenderer {
         if (eep == null) {
             return null;
         }
-        ResourceLocation modelId = eep.getModelId();
-        if (modelId == null) {
+        ResourceLocation requested = eep.getModelId();
+        if (requested == null) {
             return null;
         }
         // The arm model is built together with the rest of the model, on demand. Ask for it here so a player who is
         // holding nothing but looking at their own hand still gets the model built; the lookup below stays null-safe
         // for the few frames before that finishes.
-        com.fox.ysmu.client.ClientModelManager.ensureGeometry(modelId);
+        com.fox.ysmu.client.ClientModelManager.ensureGeometry(requested);
         // ...but the arm geometry outlives a connection in the engine's cache while this connection's textures do
         // not, and this path binds the model's texture directly (see renderCustomEmptyMainHand). A stale arm from the
         // previous server would therefore bind a texture that has not been uploaded, so the custom hand waits for
         // this connection to publish the model and the vanilla hand is used until then.
-        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(modelId)) {
-            return null;
+        //
+        // The arm follows the *body's applied model*, which is upstream's own wiring: its arm entity is told the body's
+        // model hash and reads the body's texture name and texture id back
+        // (client/entity/CustomFirstPersonArmEntity.java:22,59-66,74-76), so the two never show different models. While
+        // the requested model is Pending or Failed, the arm therefore uses what the body is showing
+        // (AppliedModelRegistry); with nothing applied yet it stays vanilla, which is this port's equivalent of
+        // upstream's arm target simply not being loaded.
+        ResourceLocation modelId = requested;
+        ResourceLocation textureId = eep.getSelectTexture();
+        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(requested)) {
+            AppliedModelRegistry.Applied applied = AppliedModelRegistry.applied(player);
+            if (!com.fox.ysmu.client.ClientModelManager.hasModelContent(requested) || applied == null
+                || !com.fox.ysmu.client.ClientModelManager.isModelPublished(applied.mainModelId())) {
+                return null;
+            }
+            modelId = applied.mainModelId();
+            textureId = applied.textureId();
         }
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
@@ -553,7 +569,7 @@ public final class FirstPersonHandRenderer {
         if (renderer == null) {
             return null;
         }
-        CustomPlayerEntity customPlayer = getCustomHandPlayer(modelId, eep, player);
+        CustomPlayerEntity customPlayer = getCustomHandPlayer(modelId, textureId, player);
         if (customPlayer == null) {
             return null;
         }
@@ -584,15 +600,18 @@ public final class FirstPersonHandRenderer {
      * <p>
      * The main model id is still set on it, because the things this arm asks of its animatable are about the model
      * (scale, layer order, roaming namespace), not about which file its animation comes from.
+     *
+     * @param textureId the texture this model is drawn with - the player's selection, or the applied model's own
+     *                  texture while a newer selection is still Pending or Failed; see the caller
      */
-    private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ExtendedModelInfo eep,
+    private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ResourceLocation textureId,
         EntityPlayer player) {
         ResourceLocation firstPersonKey = ModelIdUtil.getArmId(modelId);
         IAnimatable animatable;
         try {
             animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(firstPersonKey, () -> {
                 CustomPlayerEntity entity = new CustomFirstPersonArmEntity();
-                entity.setTexture(eep.getSelectTexture());
+                entity.setTexture(textureId);
                 return entity;
             });
         } catch (ExecutionException e) {
@@ -601,7 +620,7 @@ public final class FirstPersonHandRenderer {
         if (animatable instanceof CustomPlayerEntity customPlayer) {
             customPlayer.setPlayer(player);
             customPlayer.setMainModel(ModelIdUtil.getMainId(modelId));
-            customPlayer.setTexture(eep.getSelectTexture());
+            customPlayer.setTexture(textureId);
             return customPlayer;
         }
         return null;

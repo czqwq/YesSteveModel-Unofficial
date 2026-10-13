@@ -547,3 +547,10 @@ message.yes_steve_model.auth.reset=§6§l【§aYSM§6§l】§r §c你的模型 �
 commands.yes_steve_model.help.line.auth=  /ysm auth <玩家|@a|@p> <add|remove|all|clear> [模型] - 管理模型授权 (OP)
 commands.yes_steve_model.help.detail.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
 commands.yes_steve_model.help.detail.auth.desc=  在 EnableModelAuthorization 打开后管理玩家能选哪些模型. add/remove 授权或撤销单个模型, all 授权全部已注册模型, clear 全部撤销; 当前模型被撤销的玩家会重置为服务端默认模型. 模型参数写配置目录里的模型名(wine_fox/01_taisho_maid)或 ysmu:<id>. 示例: /ysm auth Notch add default, /ysm auth @a clear
+
+# 模型加载失败提示（上游 ModelFailureNotificationAggregator 的三种结果，加上本仓特有的"内置兜底不可用"）。
+# %s 是数量；1.7.10 的聊天键只接受 %s 一种占位符。
+message.yes_steve_model.model.failure.partial=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型有部分资源加载失败, 仍会继续渲染.
+message.yes_steve_model.model.failure.fallback=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型加载失败, 已改用默认模型.
+message.yes_steve_model.model.failure.stopped=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型加载失败, 无法渲染.
+message.yes_steve_model.model.failure.default_unavailable=§6§l【§aYSM§6§l】§r §c内置默认模型不可用, 玩家模型已交回原版渲染. 详情见日志.

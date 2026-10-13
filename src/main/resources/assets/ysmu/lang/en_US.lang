@@ -551,3 +551,10 @@ message.yes_steve_model.auth.reset=§6§l[§aYSM§6§l]§r §cYour model §e%s§
 commands.yes_steve_model.help.line.auth=  /ysm auth <player|@a|@p> <add|remove|all|clear> [model] - manage model authorizations (OP)
 commands.yes_steve_model.help.detail.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
 commands.yes_steve_model.help.detail.auth.desc=  Manage which models a player may select, once EnableModelAuthorization is on. add/remove grant or revoke one model, all grants every registered model, clear revokes all of them; a player whose current model is revoked is reset to the server's default model. The model argument is a model name as the config directory spells it (wine_fox/01_taisho_maid) or a ysmu:<id>. Examples: /ysm auth Notch add default, /ysm auth @a clear
+
+# Model failure notices (upstream ModelFailureNotificationAggregator's three outcomes, plus this port's
+# built-in-fallback-unavailable notice). %s is a count; 1.7.10 chat keys accept no other specifier.
+message.yes_steve_model.model.failure.partial=§6§l[§aYSM§6§l] §e%s§r active model(s) have partial resource failures; rendering continues.
+message.yes_steve_model.model.failure.fallback=§6§l[§aYSM§6§l] §e%s§r active model(s) failed and are using the default model.
+message.yes_steve_model.model.failure.stopped=§6§l[§aYSM§6§l] §e%s§r active model(s) failed and could not be rendered.
+message.yes_steve_model.model.failure.default_unavailable=§6§l[§aYSM§6§l] §cThe built-in default model is unavailable, so player models are drawn by the vanilla renderer. See the log.

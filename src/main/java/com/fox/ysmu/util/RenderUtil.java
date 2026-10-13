@@ -23,6 +23,7 @@ import org.joml.Quaternionf;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.util.vector.Quaternion;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.model.CustomPlayerModel;
@@ -41,6 +42,7 @@ import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.RenderContext;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
+import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.util.GeoStats;
 
 @SuppressWarnings("all")
@@ -580,6 +582,29 @@ public final class RenderUtil {
      *                        {@code null}
      * @return {@code true} when geometry was submitted
      */
+    /**
+     * Whether a preview draw has a geometry it may submit for {@code modelLocation}: either that model is really
+     * installed (published, with its geometry in the engine cache) or the built-in fallback is available to stand in
+     * for it.
+     * <p>
+     * The same question the world path answers in {@link CustomPlayerRenderer#canDrawFor}, and it has to be asked here
+     * because this path reaches {@code AnimatedGeoModel#getModel} from inside the GUI's draw pass: with an unusable
+     * fallback that call throws {@code GeoModelException}, and nothing between here and the client's main loop catches
+     * it - {@code GuiScreen} draws its buttons without a try, and {@code Minecraft}'s game loop only guards
+     * {@code OutOfMemoryError}. The catalog tiles already ask a narrower version of this question themselves
+     * ({@code ModelButton}, {@code TextureButton}); this is the same rule for every caller, including the settings
+     * panel's form preview, which has no gate of its own.
+     */
+    private static boolean canDrawPreview(ResourceLocation modelLocation) {
+        if (ClientModelManager.isFallbackAvailable()) {
+            return true;
+        }
+        return ClientModelManager.isModelPublished(modelLocation)
+            && GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(modelLocation) != null;
+    }
+
     private static boolean drawPreviewModel(ResourceLocation modelId, ResourceLocation textureId,
         GeoReplacedEntityRenderer renderer, CustomPlayerEntity entity, Runnable clearBeforeDraw, boolean allowPoseSkip,
         float partialTicks) {
@@ -587,6 +612,12 @@ public final class RenderUtil {
         withGuiEntityLighting(() -> {
             AnimatedGeoModel provider = renderer.getGeoModelProvider();
             ResourceLocation modelLocation = provider.getModelLocation(entity);
+            // See canDrawPreview: asking the provider for a model this client cannot draw would throw out of the GUI's
+            // draw pass, and the settings panel's form preview reaches this path without the publication gate the
+            // catalog tiles have.
+            if (!canDrawPreview(modelLocation)) {
+                return;
+            }
             GeoModel model = provider.getModel(modelLocation);
             // D-01: this path draws through IGeoRenderer#render instead of CustomPlayerRenderer#doRenderModel,
             // and the renderer's own preview brace (previewRenderDepth -> ModelPoseSnapshot) is read only

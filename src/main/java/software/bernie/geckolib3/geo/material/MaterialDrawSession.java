@@ -28,6 +28,8 @@ public final class MaterialDrawSession {
     private final List<Face> faces = new ArrayList<>();
     private final boolean forceCulling;
     private final YsmRenderType fallback;
+    /** Whether this segment's outer transform mirrors the model; see {@link MaterialFacing#mirrored(Matrix4f)}. */
+    private final boolean outerMirrored;
     private final int baseBinding;
     private ITextureObject source;
     private int texture;
@@ -38,7 +40,9 @@ public final class MaterialDrawSession {
         this.fallback = fallback;
         baseBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         Matrix4f projection = matrix(GL11.GL_PROJECTION_MATRIX);
-        outerClip.mul(projection, matrix(GL11.GL_MODELVIEW_MATRIX));
+        Matrix4f modelview = matrix(GL11.GL_MODELVIEW_MATRIX);
+        outerClip.mul(projection, modelview);
+        outerMirrored = MaterialFacing.mirrored(modelview);
         setTexture(fallback.getTexture());
         active = this;
     }
@@ -71,9 +75,16 @@ public final class MaterialDrawSession {
         if (!(source instanceof MaterialSource material) || !material.materialAvailable()) return false;
         Matrix4f clip = new Matrix4f(); clip.mul(outerClip, model);
         float[] coefficient = MaterialFacing.coefficient(clip);
+        // The native pose stack's orientation sign for this bone (pose_stack_impl.inc:53-60) combined with the
+        // handedness of the outer transform: the port mirrors in the outer one (the biped arm and the paper doll;
+        // see MaterialFacing#mirrored), a pack can mirror a bone with a negative scale.
+        boolean mirrored = outerMirrored != MaterialFacing.mirrored(model);
         for (BakedFace baked : material.materialFaces(cube, forceCulling)) {
-            boolean back = MaterialFacing.backFace(baked, coefficient);
-            if (baked.partition.culling && back) continue;
+            if (MaterialFacing.culled(baked, coefficient, mirrored)) continue;
+            // Which side of the face is being drawn, for its lighting: the same rule the culling uses, and it is
+            // meaningless for a mirrored chain, where the native rule cannot say (see MaterialFacing#culled), so the
+            // declared normal is kept there.
+            boolean back = !mirrored && MaterialFacing.backFace(baked, coefficient);
             Face face = new Face();
             face.baked = baked; face.texture = texture;
             face.depth = MaterialFacing.depth(baked, clip); face.index = faces.size();

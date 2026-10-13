@@ -1,5 +1,7 @@
 package com.fox.ysmu.client.renderer;
 
+import java.util.Objects;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.entity.player.EntityPlayer;
@@ -7,6 +9,7 @@ import net.minecraft.entity.player.EntityPlayer;
 import org.lwjgl.opengl.GL11;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.util.FboCache;
 import com.fox.ysmu.util.RenderUtil;
 
@@ -24,8 +27,8 @@ import com.fox.ysmu.util.RenderUtil;
  * Two triggers only:
  * <ul>
  *   <li><b>Discrete changes</b> — held item, armour, configured position/scale,
- *       resolution, or an explicit {@link #invalidate()}. Applied immediately; they
- *       are rare and a delayed one reads as a glitch.</li>
+ *       resolution, the model the player is drawn with, or an explicit {@link #invalidate()}.
+ *       Applied immediately; they are rare and a delayed one reads as a glitch.</li>
  *   <li><b>The rate policy</b> (see the constants below) — everything else,
  *       including angle tracking. It used to be that any body-yaw change over
  *       0.001 deg forced an immediate re-render, which meant the preview re-baked on
@@ -60,6 +63,8 @@ public class HudPreviewCache {
     private double prevYawOffset;
     private int prevItemHash;
     private int prevArmorHash;
+    /** The model this player was last baked with; see the discrete-dirty check in {@link #render}. */
+    private AppliedModelRegistry.Applied prevDrawnModel;
     // Screen dimensions (pixels) when the FBO was last rendered
     private int prevScreenW;
     private int prevScreenH;
@@ -378,9 +383,17 @@ public class HudPreviewCache {
 
         // Discrete changes: applied immediately. They happen rarely and a delayed
         // held-item / armour / scale update reads as a glitch rather than as lag.
+        // The model the player is drawn with belongs in that list as well, and this is the port-specific half: the
+        // reference has no applied-model record, because its binding lives per entity and a model swap is a single
+        // target switch there. Here a swap can be anything from a selection that just finished loading to a refusal
+        // that made the renderer keep the model already on screen (AppliedModelRegistry), and the paper doll is baked
+        // into an FBO - without this it would keep the previous model's bake until the next periodic refresh, while
+        // the world already shows the new one.
+        AppliedModelRegistry.Applied drawnModel = AppliedModelRegistry.applied(player);
         boolean discreteDirty = screenW != prevScreenW || screenH != prevScreenH
             || itemHash != prevItemHash || armorHash != prevArmorHash
-            || scale != prevScale || yawOffset != prevYawOffset;
+            || scale != prevScale || yawOffset != prevYawOffset
+            || !Objects.equals(drawnModel, prevDrawnModel);
 
         // ── Where the rate policy gets a second bound ──
         // In first person vanilla does not render the local player in the world at all
@@ -461,6 +474,7 @@ public class HudPreviewCache {
             prevYawOffset = yawOffset;
             prevItemHash = itemHash;
             prevArmorHash = armorHash;
+            prevDrawnModel = drawnModel;
             prevScreenW = screenW;
             prevScreenH = screenH;
         }

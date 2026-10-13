@@ -357,21 +357,34 @@ public class ClientModelManager {
         return System.currentTimeMillis() - GUI_CLOSE_TIME < graceMs;
     }
 
+    /** The built-in fallback model's path inside this mod's domain; see {@link #isDefaultModelId}. */
+    private static final String BUILT_IN_DEFAULT_MODEL = "default";
+
     /**
      * True when {@code id} — a base id, a mainId, or any sub-model id such as
-     * {@code ysmu:default/arm} — belongs to the configured default/fallback model.
+     * {@code ysmu:default/arm} — belongs to the <b>built-in fallback model</b>, the one this client materialises for
+     * itself ({@code loadDefaultModel}, read from {@code builtin/default} or a legacy {@code custom/default}) and
+     * draws whenever an entity's own model is not ready.
      * <p>
-     * Used to pin the fallback's geo entries against idle eviction: the local
-     * default model is read from {@code builtin/}/{@code custom/} and never gets a
-     * {@code CACHED_MODEL_MD5} entry, so once an entry is released it can never be
-     * reloaded through the lazy asset path.
+     * The pinned id is a fixed one, not the configurable default: upstream's own rule is the literal built-in
+     * default ({@code ClientModelRenderTargetManager#isDefault:620-624} -
+     * {@code rootKind == BUILTIN && path.equals("default")}) and it pins exactly those leases for the process
+     * ({@code RenderTargetLeaseOwnership.addRequired}). {@code Config.DEFAULT_MODEL_ID} is a different thing in
+     * upstream too - the <b>selection</b> default a fresh player starts with
+     * ({@code ModelSelectionService.selectDefault}) - and that model is an ordinary catalog entry which may be
+     * absent. Following the config here used to protect the wrong model whenever a player set
+     * {@code DefaultModelId} to something else, while the fallback the renderer actually draws
+     * ({@code CustomPlayerModel#DEFAULT_MAIN_MODEL}) stayed releasable.
      * <p>
-     * Reference {@code ClientModelManager.java:347} (whose body is
-     * {@code isDefaultModelBundle}, {@code :329-336}) strips the last path segment with
-     * {@code ModelIdUtil.getModelIdFromSubId}; this port has no such helper and uses
-     * {@link ModelIdUtil#getParentModelId} ({@code ModelIdUtil.java:45-52}), which is the same
-     * rule — "the model a sub-model id belongs to" — with the same behaviour for an id that has
-     * no segment to strip (it is returned unchanged).
+     * Used to pin the fallback's geo entries against idle eviction (it has no {@code CACHED_MODEL_MD5} entry, so a
+     * released entry can never be reloaded through the lazy asset path) and its textures against the connection-level
+     * release ({@code ModelTextureRegistry#clear}).
+     * <p>
+     * Reference {@code ClientModelManager.java:347} (whose body is {@code isDefaultModelBundle}, {@code :329-336})
+     * strips the last path segment with {@code ModelIdUtil.getModelIdFromSubId}; this port has no such helper and uses
+     * {@link ModelIdUtil#getParentModelId} ({@code ModelIdUtil.java:45-52}), which is the same rule — "the model a
+     * sub-model id belongs to" — with the same behaviour for an id that has no segment to strip (it is returned
+     * unchanged).
      */
     public static boolean isDefaultModelId(ResourceLocation id) {
         if (id == null) {
@@ -379,7 +392,16 @@ public class ClientModelManager {
         }
         ResourceLocation base = ModelIdUtil.getParentModelId(id);
         return ysmu.MODID.equals(base.getResourceDomain())
-            && com.fox.ysmu.Config.DEFAULT_MODEL_ID.equals(base.getResourcePath());
+            && BUILT_IN_DEFAULT_MODEL.equals(base.getResourcePath());
+    }
+
+    /**
+     * Whether the render paths may fall back on the built-in default model; see the field's own note. {@code false}
+     * means this client has no substitute to draw for a model that is not published yet, and the callers that would
+     * otherwise cancel the vanilla renderer must not do so ({@code CustomPlayerRenderer#canDrawFor}).
+     */
+    public static boolean isFallbackAvailable() {
+        return fallbackAvailable;
     }
 
     /**
@@ -489,6 +511,26 @@ public class ClientModelManager {
      * like one this client never received: it is drawn as the built-in default, with the default's texture.
      */
     private static final Set<ResourceLocation> GEOMETRY_FAILED = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Whether the built-in fallback's resources are usable on this client: its geometry was installed and its own
+     * textures uploaded at least once, and no later refusal has taken them away again.
+     *
+     * <p>This is the port's form of upstream's {@code defaultInitialization} future: upstream materialises the whole
+     * intrinsic default at startup and every path that would need it goes through
+     * {@code ClientModelRenderTargetManager#requireAvailable} ({@code :626-632}), which throws until that initialization
+     * succeeded - "a blocking error is a default-initialization failure; an incomplete fallback must not be published"
+     * ({@code docs/product-decisions/decisions/model-fallback.md:29-39}). The port cannot fail the client's startup, so
+     * it answers the same question with this predicate and the render paths degrade explicitly instead; see
+     * {@code CustomPlayerRenderer#canDrawFor}.
+     *
+     * <p>Deliberately <b>not</b> cleared by {@link #clearRuntimeModelCaches}: the fallback's assets are independent of
+     * the model list being dropped ("ordinary model hot-loading, catalog switches, network interruption and cache
+     * eviction must not replace, modify or withdraw the default model assets",
+     * {@code model-fallback.md:41-43}), and the geometry and textures themselves survive a sync - the same reason the
+     * texture registry pins them and the asset eviction pins that geometry.
+     */
+    private static volatile boolean fallbackAvailable;
 
     /** The one thread that parses geometry. Created on first use so a dedicated server never starts it. */
     private static volatile ExecutorService modelLoader;
@@ -748,6 +790,27 @@ public class ClientModelManager {
         return id != null && GEOMETRY_READY.contains(id);
     }
 
+    /**
+     * Whether this connection has a payload for this model at all: the server sent it and it was registered, whether
+     * or not its geometry was built - or could be built. Accepts either the model's own id or a sub-model id
+     * ({@code .../main}, {@code .../arm}).
+     * <p>
+     * This is the port's form of upstream's catalog lookup ({@code ClientCatalogSnapshot#find}, empty for a model the
+     * client never received) and it is the question that tells "wait, and keep what is on screen" apart from "there is
+     * nothing to wait for": a <em>Pending</em> or <em>Failed</em> model the client has keeps the model the entity is
+     * already shown with, while an id with no content at all goes to the built-in default
+     * ({@code EntityModelBinding:106-112} releases the primary and installs the fallback for that case,
+     * {@code :297-302} does the same when the catalog loses the applied model's content).
+     */
+    public static boolean hasModelContent(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return false;
+        }
+        // The texture list is keyed by the model's own id, so a sub-model id is answered by its parent - while an id
+        // that already is the model's own is answered directly (its path may itself contain segments).
+        return MODELS.containsKey(modelOrSubId) || MODELS.containsKey(ModelIdUtil.getParentModelId(modelOrSubId));
+    }
+
     /** Whether this model's build failed, so it is treated as one this client never received. */
     public static boolean isGeometryFailed(@Nullable ResourceLocation id) {
         return id != null && GEOMETRY_FAILED.contains(id);
@@ -877,6 +940,11 @@ public class ClientModelManager {
                         entry.getKey(),
                         modelId,
                         failure);
+                    // Upstream's PARTIAL outcome: the model still renders, one of its resources does not. Reported
+                    // from here (the loader thread) is fine - the notifier batches and flushes on the client tick.
+                    com.fox.ysmu.client.render.ModelFailureNotifier.report(
+                        modelId,
+                        com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.PARTIAL);
                 }
             }
             Map<String, Map<Integer, BufferedImage>> components = new LinkedHashMap<>();
@@ -890,6 +958,27 @@ public class ClientModelManager {
             }
             COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, components, data, generation));
         } catch (Throwable failure) {
+            if (isTransientBuildFailure(failure)) {
+                // Environmental, not content: an OOM or a linkage error says nothing about the bytes, and the same
+                // payload may well build on the next attempt. Upstream keeps this kind out of its deterministic
+                // negative cache ({@code ResourceFailure.Kind.TRANSIENT}, ModelRenderTargetLoader:118-131) and gives
+                // the expensive attempt no new eligibility until the content or the connection changes
+                // (failure-and-recovery.md:28). Leaving the payload parked with its request marker set is exactly
+                // that here: nothing re-submits the build per frame, the model is not reported as missing
+                // (isModelAvailable still answers true, so an entity keeps the renderer and its applied model), and a
+                // new payload or a reconnect - parkGeometry's GEOMETRY_REQUESTED.remove - makes it retryable.
+                ysmu.LOG.warn(
+                    "YSM client could not build model {} ({}); this is an environment failure, so the model stays "
+                        + "parked instead of being quarantined - a new payload or a reconnect may build it",
+                    modelId,
+                    failure.getClass()
+                        .getName(),
+                    failure);
+                com.fox.ysmu.client.render.ModelFailureNotifier.report(
+                    modelId,
+                    com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.FALLBACK);
+                return;
+            }
             ysmu.LOG.warn("Failed to build geometry for model {}", modelId, failure);
             // A build that threw is a deterministic failure - the same bytes will throw again - so the model is
             // quarantined rather than retried. Upstream makes the same distinction and quarantines deterministic
@@ -897,6 +986,26 @@ public class ClientModelManager {
             // is passed along because this task may already have been superseded.
             markGeometryFailed(modelId, data);
         }
+    }
+
+    /**
+     * Whether a failed build is an <b>environment</b> failure rather than a content failure.
+     *
+     * <p>Upstream makes exactly this split and carries it into the failure kind it records: a resource whose reason is
+     * {@code AssetLoadException.Reason.CONTENT} becomes {@code ResourceFailure.Kind.DETERMINISTIC} and everything else
+     * {@code TRANSIENT} ({@code model/resource/client/render/ModelRenderTargetLoader.java:107-131}); deterministic
+     * failures are frozen per content version in the negative cache, while a transient one only costs the current
+     * attempt. The port's payload is already in memory (no disk access to fail), so the environmental half is the JVM
+     * itself: {@link Error} - an {@code OutOfMemoryError} while baking a large model, a {@code LinkageError} from a
+     * half-loaded engine, a {@code StackOverflowError} from a pathological bone tree. Everything an
+     * {@code Exception} - a malformed payload, an unsupported geometry version, a build that cannot be represented -
+     * is content, and the same bytes will fail again.
+     *
+     * <p>Neither kind is retried per frame; the difference is that a transient one does not mark the model dead for
+     * the rest of the connection. Package private so the rule itself can be pinned without running a loader thread.
+     */
+    static boolean isTransientBuildFailure(Throwable failure) {
+        return failure instanceof Error;
     }
 
     /**
@@ -1154,8 +1263,21 @@ public class ClientModelManager {
         }
     }
 
-    /** The body of both refusal paths; callers hold {@link #GEOMETRY_STATE_LOCK}. */
+    /** Body of the refusal paths; callers hold {@link #GEOMETRY_STATE_LOCK}. */
     private static void refuseGeometryLocked(ResourceLocation modelId) {
+        if (isDefaultModelId(modelId)) {
+            // The fallback itself failed: whatever was installed is rolled back with the same refusal, so no render
+            // path may keep assuming it can fall back on it. See #isFallbackAvailable.
+            fallbackAvailable = false;
+        }
+        // Upstream's FALLBACK outcome: this model failed and the affected entities are drawn as the built-in default
+        // (its own wording, ModelFailureNotificationAggregator.Outcome.FALLBACK). The port reports it at the model
+        // level, because that is where a refusal happens; upstream reports it per entity binding, so the same failure
+        // reaches a projectile or vehicle as STOPPED instead - those renderers restore their host, which is what this
+        // port's arrow and vehicle paths report for their own content failures.
+        com.fox.ysmu.client.render.ModelFailureNotifier.report(
+            modelId,
+            com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.FALLBACK);
         for (ResourceLocation id : allIdsOf(modelId)) {
             GEOMETRY_FAILED.add(id);
             // A refusal supersedes a publish: leaving the ready marker set would make the id report itself published
@@ -1168,6 +1290,14 @@ public class ClientModelManager {
 
     private static void markGeometryReady(ResourceLocation modelId) {
         synchronized (GEOMETRY_STATE_LOCK) {
+            if (isDefaultModelId(modelId)) {
+                // Geometry published and this model's textures uploaded by the same publish step: the fallback is
+                // usable from here on, and stays so across a sync (see #isFallbackAvailable).
+                fallbackAvailable = true;
+            }
+            // Upstream forgets a model that is loaded again, so a failure of a later payload is announced again
+            // (ModelFailureNotificationAggregator#recovered:42-46).
+            com.fox.ysmu.client.render.ModelFailureNotifier.recovered(modelId);
             for (ResourceLocation id : allIdsOf(modelId)) {
                 GEOMETRY_READY.add(id);
                 PENDING_GEOMETRY.remove(id);
@@ -2717,6 +2847,12 @@ public class ClientModelManager {
         // the model list was cleared above, so no render site can still resolve one of these ids
         // (CustomPlayerModel.textureFor reads MODELS). See .agent/phase34-texture-release.md.
         ModelTextureRegistry.clear();
+        // What each entity is currently shown with belongs to the model list being dropped here: upstream releases the
+        // applied target with the catalog content it came from (EntityModelBinding:297-302), and this port's clear is
+        // the whole list, so every record goes with it and the next frames draw the built-in default exactly as
+        // upstream does during session negotiation. What the *entities* are then re-drawn from is decided by
+        // CustomPlayerRenderer#resolveDrawnModel.
+        com.fox.ysmu.client.render.AppliedModelRegistry.clear();
     }
 
     /**

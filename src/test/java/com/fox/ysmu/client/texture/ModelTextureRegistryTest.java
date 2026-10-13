@@ -1,8 +1,10 @@
 package com.fox.ysmu.client.texture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
 
@@ -42,12 +44,15 @@ class ModelTextureRegistryTest {
     @BeforeEach
     void resetRegistry() {
         this.savedBudget = Config.TEXTURE_VRAM_BUDGET_MB;
-        ModelTextureRegistry.clear();
+        // `false`: an empty registry, i.e. the pinned built-in fallback dropped as well. The pin is a production rule
+        // (see ModelTextureRegistry#clear(boolean)) and the tests that exercise it assert it themselves; every other
+        // test in this class needs the registry it found empty, whatever ran before it in this JVM.
+        ModelTextureRegistry.clear(false);
     }
 
     @AfterEach
     void restoreConfig() {
-        ModelTextureRegistry.clear();
+        ModelTextureRegistry.clear(false);
         Config.TEXTURE_VRAM_BUDGET_MB = this.savedBudget;
     }
 
@@ -230,6 +235,60 @@ class ModelTextureRegistryTest {
 
         ModelTextureRegistry.clear();
         assertEquals(0, ModelTextureRegistry.size(), "clear 之后一个 holder 都不留");
+    }
+
+    /**
+     * 内置兜底模型（default）自己的贴图不随模型列表一起释放。
+     *
+     * <p>它不是连接级模型列表的一部分：{@code CustomPlayerModel.textureFor} 在模型尚未发布时按常量把这张贴图
+     * 交出去（渲染器此时画的正是内置 default 的几何），而 1.7.10 的 {@code TextureManager.bindTexture} 对没有表项
+     * 的 id 会新建 {@code SimpleTexture} 去资源包里找——模型贴图永远找不到，于是打一条
+     * {@code Failed to load texture} + {@code FileNotFoundException}，并把该 id 永久指向全局缺失贴图。
+     * 上一次实测：{@code ysmu:default/default.png} 就是这么被绑定的。
+     *
+     * <p>同一模型的几何/动画早已被 {@code AssetManager} 用同一条理由钉住（「内置兜底模型必须常驻，释放后没有
+     * 加密缓存可恢复」），这里按同一个判定（{@code ClientModelManager.isDefaultModelId}）把贴图那半边补齐。
+     */
+    @Test
+    void clearKeepsTheBuiltInDefaultsTexturesAndReleasesTheModelsOfTheConnection() {
+        Config.TEXTURE_VRAM_BUDGET_MB = 0;
+        ResourceLocation fallback = textureId(Config.DEFAULT_MODEL_ID, "default.png");
+        ResourceLocation fallbackSecond = textureId(Config.DEFAULT_MODEL_ID, "blue.png");
+        ResourceLocation ordinary = textureId("model_a", "tex");
+        upload(fallback, MB);
+        upload(fallbackSecond, MB);
+        upload(ordinary, MB);
+        assertTrue(ModelTextureRegistry.isRegistered(ordinary), "普通模型贴图先注册上了");
+
+        ModelTextureRegistry.clear();
+
+        assertTrue(ModelTextureRegistry.isRegistered(fallback), "default 的默认贴图必须留在注册表里");
+        assertTrue(ModelTextureRegistry.isRegistered(fallbackSecond), "default 的每一张贴图都算，不只是默认那张");
+        assertFalse(ModelTextureRegistry.isRegistered(ordinary), "连接内的普通模型贴图照旧释放");
+    }
+
+    /**
+     * 常驻的兜底贴图仍然计入显存账：清理时把计数清零会让预算「看不见」它，
+     * 于是在真实超预算时一次回收都不触发（预算形同虚设）。
+     *
+     * <p>预算 2 MB、目标 1.5 MB：常驻的 1.5 MB + 新来的 1 MB = 2.5 MB 超预算，必须回收一张。常驻那张刚刚绑定过
+     * （{@code touch}），所以 LRU 先回收从没绑定过的 1 MB；回收后正好落到目标，循环停下。旧实现把计数清零时这里
+     * 只有 1 MB，预算不触发，{@code fresh.frees} 会是 0。
+     */
+    @Test
+    void thePinnedFallbackStillCountsAgainstTheBudget() {
+        Config.TEXTURE_VRAM_BUDGET_MB = 2;
+        ResourceLocation fallback = textureId(Config.DEFAULT_MODEL_ID, "default.png");
+        UploadedTexture pinned = upload(fallback, ONE_AND_A_HALF_MB);
+
+        ModelTextureRegistry.clear();
+        ModelTextureRegistry.touch(fallback);
+        UploadedTexture fresh = upload(textureId("model_fresh", "tex"), MB);
+
+        ModelTextureRegistry.enforceVramBudget(System.currentTimeMillis() + 60_000L);
+
+        assertEquals(1, fresh.frees, "常驻的 1.5 MB 仍在预算里，新贴图必须被回收");
+        assertEquals(0, pinned.frees, "按 LRU 只回收最新的那张，常驻贴图不动（它的 GPU 拷贝也留着）");
     }
 
     /**

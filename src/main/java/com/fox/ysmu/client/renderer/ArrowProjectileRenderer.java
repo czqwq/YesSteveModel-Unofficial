@@ -26,6 +26,7 @@ import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.Proj
 import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
+import com.fox.ysmu.client.render.ModelFailureNotifier;
 import com.fox.ysmu.util.IProjectileModelArrow;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.ProjectileGroundTracker;
@@ -127,6 +128,24 @@ public final class ArrowProjectileRenderer {
     }
 
     /**
+     * Tells the player that this projectile lost its YSM replacement, which is upstream's {@code STOPPED} outcome: the
+     * outcome for the entities that have no fallback target at all, since a projectile's
+     * {@code fallbackRenderTargetId()} is {@code null} ({@code CustomProjectileEntity:33-36}) and the replacement is
+     * therefore revoked rather than replaced by the built-in default
+     * ({@code ClientModelRenderTargetManager:246-250} picks STOPPED exactly then).
+     * <p>
+     * Only once the owner's model is really ready, or was refused: while its payload is still being built the arrow is
+     * drawn vanilla for a frame or two, and that is preparation, not a failure - upstream's outcome comes from a
+     * terminal {@code AcquireResult.Failed}, not from a pending one.
+     */
+    private static void reportReplacementRevoked(ResourceLocation modelId) {
+        ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+        if (ClientModelManager.isModelPublished(mainId) || ClientModelManager.isGeometryFailed(mainId)) {
+            ModelFailureNotifier.report(modelId, ModelFailureNotifier.Outcome.STOPPED);
+        }
+    }
+
+    /**
      * Tries to draw a custom projectile model for {@code entity}.
      *
      * @return {@code true} when a custom model was drawn, so the caller must skip vanilla rendering; {@code false}
@@ -184,6 +203,7 @@ public final class ArrowProjectileRenderer {
             .get(projectileGeoId);
         if (projectileModel == null) {
             warnOnce("geo-not-found", "projectile geometry {} is not registered for {}", projectileGeoId, modelId);
+            reportReplacementRevoked(modelId);
             return false;
         }
 
