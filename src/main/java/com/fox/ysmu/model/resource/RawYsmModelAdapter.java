@@ -334,9 +334,18 @@ public final class RawYsmModelAdapter {
         // OpenYSM channel calls this from OpenYsmModelSyncClient, and the legacy container is written from the
         // ModelData this returns (EncryptTools.LINKS_MODEL_VERSION carries the field on that channel).
         // Upstream draws the first two on its information screen (client/gui/ModelInfoScreen.java:111-124).
+        //
+        // The GUI preview declaration rides here for the same reason, and because this bridge is also the route the
+        // built-in default's payload takes: `loadDefaultModel` reads `builtin/default` with YSMFolderDeserializer and
+        // hands the parsed model straight to this method (ClientModelManager:2430), so without this the fallback -
+        // which declares `"preview_animation": "gui"` - would reach the GUI registration with nothing to register.
+        // Upstream has both values in the loaded model's settings and reads them off it where the card needs them
+        // (client/gui/button/CatalogModelCardState.java:228, :160).
         return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
             com.fox.ysmu.data.WheelDeclarations.from(raw.properties), components,
-            raw.metadata == null ? null : raw.metadata.links);
+            raw.metadata == null ? null : raw.metadata.links,
+            raw.properties == null ? null : raw.properties.previewAnimation,
+            raw.properties != null && raw.properties.disablePreviewRotation);
     }
 
     /**

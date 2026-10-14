@@ -609,6 +609,17 @@ public class ClientModelManager {
         // and the OpenYSM payload's metadata.links both end up in ModelData#getLinks), and the information screen is
         // the only reader. Before this line the field was parsed and synced but nothing on the client consumed it.
         com.fox.ysmu.client.gui.ModelConfigRegistry.acceptLinks(modelId, data.getLinks());
+        // The model's GUI preview declaration: which clip its selection tile plays and whether the tile keeps
+        // upstream's default framing. It used to be registered by the OpenYSM sync channel alone, so a payload that
+        // arrived any other way - the built-in default is read from builtin/ locally - reached the GUI with nothing
+        // declared and fell back to `idle`. Registering it here is the same funnel argument as the links above: this
+        // is the one place both sync channels (and the local built-in read) hand a payload to the client, and the
+        // selection screen is the only reader. Upstream resolves both off the loaded model where the card needs them
+        // (client/gui/button/CatalogModelPreviewAnimationState.java:21-24 takes the declared name, defaulting to
+        // `idle` exactly as ModelPreviewRegistry.previewFor does; CatalogModelCardState.java:228,
+        // CatalogModelButton.java:160 read them off the model's settings).
+        com.fox.ysmu.client.gui.ModelPreviewRegistry
+            .accept(modelId, data.getPreviewAnimation(), data.isDisablePreviewRotation());
         // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.
@@ -1347,6 +1358,10 @@ public class ClientModelManager {
      * change is its {@code gui_background} / {@code gui_foreground} must not be skipped as "identical content is
      * already registered", or the tile would keep drawing the previous payload's images.
      * <p>
+     * The GUI preview declaration ({@code preview_animation} / {@code disable_preview_rotation}) is part of it for the
+     * same reason: {@code registerAll} hands it to {@code ModelPreviewRegistry}, so a payload whose only change is the
+     * clip its tile plays must not be skipped either.
+     * <p>
      * Returns {@code null} when no digest is available, in which case the caller registers unconditionally rather
      * than assuming that two models are equal.
      */
@@ -1358,6 +1373,10 @@ public class ClientModelManager {
             updateDigest(digest, data.getTexture());
             updateDigest(digest, data.getAnimation());
             updateDigest(digest, data.getGuiImages());
+            // Separated like the file names above, so the declaration cannot run into whatever is hashed next.
+            digest.update(data.getPreviewAnimation().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update((byte) (data.isDisablePreviewRotation() ? 1 : 0));
             digest.update(data.getWheelDeclarations().encode().getBytes(StandardCharsets.UTF_8));
             for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
                 digest.update(base.getKey().getBytes(StandardCharsets.UTF_8));

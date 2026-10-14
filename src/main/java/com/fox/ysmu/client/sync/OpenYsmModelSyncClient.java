@@ -19,7 +19,6 @@ import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
-import com.fox.ysmu.client.gui.ModelPreviewRegistry;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
@@ -551,15 +550,11 @@ public final class OpenYsmModelSyncClient {
                         }
                     }
                     MolangScriptRegistry.register(mainModelId, scriptFunctions, scriptEvents, scriptControls);
-                    // The model's preview_animation (the animation the selection GUI plays) and its
-                    // disable_preview_rotation flag are in this payload too; without them the GUI could only show a
-                    // frozen pose framed with the wrong transform.
-                    ModelPreviewRegistry.accept(
-                        modelId,
-                        raw.properties == null ? null : raw.properties.previewAnimation,
-                        raw.properties != null && raw.properties.disablePreviewRotation);
-                    // Wheel/settings declarations and their roaming namespace are installed by registerAll above,
-                    // through the same ModelData carrier as the legacy channel; do not overwrite them a second time.
+                    // The model's preview_animation and its disable_preview_rotation are registered by the
+                    // registration funnel itself (ClientModelManager.registerAll above), because they now ride in the
+                    // ModelData this payload bridged to - the same carrier the wheel/settings declarations and their
+                    // roaming namespace already used. So the GUI gets all of them whichever channel delivered the
+                    // model, and none of them is registered a second time here.
                 });
             return true;
         } catch (Exception e) {

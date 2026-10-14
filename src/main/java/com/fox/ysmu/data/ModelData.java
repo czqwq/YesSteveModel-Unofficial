@@ -55,6 +55,26 @@ public final class ModelData {
     /** Explicit base key -> component role (1 normal, 2 specular) -> PNG. Never selectable skins. */
     private final Map<String, Map<Integer, byte[]>> pbrComponents;
 
+    /**
+     * The model's own {@code preview_animation}: the clip its selection tile plays. Empty means "this model declares
+     * none" - the same sentinel upstream's {@code ModelProperties.previewAnimation} uses when the pack omits the key
+     * ({@code format/parser/pojo/manifest/settings/ModelProperties.java:18,75}; the folder and binary parsers both
+     * default it to {@code ""}, {@code YSMFolderDeserializer.java:171} / {@code YSMBinaryDeserializer.java:604}).
+     * <p>
+     * It travels with the payload for the same reason {@link #guiImages} does: it is what the selection tile draws
+     * with, and it is not geometry, a texture or an animation clip. Before this field the client only learned it from
+     * one sync channel's own side call, so a model that arrived any other way - the built-in default is read from
+     * {@code builtin/} locally - lost its own declaration and fell back to {@code idle}.
+     */
+    private final String previewAnimation;
+
+    /**
+     * The model's {@code disable_preview_rotation} ({@code ModelProperties.java:30,99}): upstream frames such a model
+     * without the default -10 degree pitch and lifts it instead ({@code client/renderer/
+     * ModelPreviewRenderer.java:267,270}). Travels with {@link #previewAnimation}, which it is declared beside.
+     */
+    private final boolean disablePreviewRotation;
+
     public ModelData(String modelId, Type type, Map<String, byte[]> geo, Map<String, byte[]> texture,
         Map<String, byte[]> animation) {
         this(modelId, type, geo, texture, animation, null);
@@ -95,6 +115,25 @@ public final class ModelData {
     public ModelData(String modelId, Type type, Map<String, byte[]> geo, Map<String, byte[]> texture,
         Map<String, byte[]> animation, @Nullable Map<String, byte[]> guiImages, WheelDeclarations wheelDeclarations,
         Map<String, Map<Integer, byte[]>> components, @Nullable Map<String, String> links) {
+        this(modelId, type, geo, texture, animation, guiImages, wheelDeclarations, components, links, null, false);
+    }
+
+    /**
+     * The full payload plus the model's GUI preview declaration (see {@link #previewAnimation} and
+     * {@link #disablePreviewRotation}).
+     * <p>
+     * One more overload, for the same reason every other field got one: every existing caller - the legacy cache
+     * reader, the three format bakers, the client bridge and the tests - keeps compiling unchanged, and a payload
+     * built without the declaration simply has none, which is also what an older payload decodes to.
+     *
+     * @param previewAnimation the clip the selection tile plays; {@code null} and {@code ""} both mean "declares
+     *                         none", and the tile falls back to {@code idle} exactly as upstream does
+     * @param disablePreviewRotation the model's {@code disable_preview_rotation}
+     */
+    public ModelData(String modelId, Type type, Map<String, byte[]> geo, Map<String, byte[]> texture,
+        Map<String, byte[]> animation, @Nullable Map<String, byte[]> guiImages, WheelDeclarations wheelDeclarations,
+        Map<String, Map<Integer, byte[]>> components, @Nullable Map<String, String> links,
+        @Nullable String previewAnimation, boolean disablePreviewRotation) {
         Map<String, Map<Integer, byte[]>> copied = new LinkedHashMap<>();
         for (Map.Entry<String, Map<Integer, byte[]>> base : components.entrySet()) {
             if (!texture.containsKey(base.getKey())) throw new IllegalArgumentException("PBR base is not a texture");
@@ -110,6 +149,8 @@ public final class ModelData {
         this.links = links == null || links.isEmpty()
             ? Collections.emptyMap()
             : Collections.unmodifiableMap(new LinkedHashMap<>(links));
+        this.previewAnimation = previewAnimation == null ? "" : previewAnimation;
+        this.disablePreviewRotation = disablePreviewRotation;
         this.modelId = modelId;
         this.model = geo;
         this.texture = texture;
@@ -155,6 +196,19 @@ public final class ModelData {
      */
     public Map<String, String> getLinks() {
         return links;
+    }
+
+    /**
+     * The model's declared {@code preview_animation} (see the field); {@code ""} when it declares none, which is the
+     * sentinel upstream's {@code ModelProperties} uses too. Never {@code null}.
+     */
+    public String getPreviewAnimation() {
+        return previewAnimation;
+    }
+
+    /** The model's declared {@code disable_preview_rotation} (see the field); false when it declares none. */
+    public boolean isDisablePreviewRotation() {
+        return disablePreviewRotation;
     }
 
     public void setMd5(String md5) {
