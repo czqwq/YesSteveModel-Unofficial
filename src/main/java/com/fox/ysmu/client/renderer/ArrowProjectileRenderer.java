@@ -362,17 +362,20 @@ public final class ArrowProjectileRenderer {
             : null;
         setMolangVariable("ysm.shoot_item_id", MolangStringPool.intern(ProjectileShootItemIds.toModernId(shootItemId)));
 
-        // H: the shooter's model id is the same datawatcher value this arrow is drawn with, and MixinEntityArrow only
-        // writes it for a player-fired arrow (it checks `shooter instanceof EntityPlayer` at construction), so a
-        // non-empty value is exactly "this projectile has a player owner". Upstream's `projectile_owner` is a context
-        // read through `->` (client/animation/molang/YSMBinding.java:193); the legacy mclib parser has no `->`
-        // operator, so the port publishes the flat question it can answer from the wire instead. The owner's entity id
-        // is NOT available: 1.7.10 never syncs `EntityArrow.shootingEntity` to the client, and only the model id and
-        // the firing item travel in the two datawatcher slots MixinEntityArrow added.
-        String ownerModelId = arrow instanceof IProjectileModelArrow ownerArrow
-            ? ownerArrow.ysmu$getProjectileModelId()
-            : null;
-        setMolangVariable("ysm.projectile_owner", ownerModelId != null && !ownerModelId.isEmpty() ? 1.0 : 0.0);
+        // Upstream's `projectile_owner` is a **context** — `projectileVar("projectile_owner", ctx ->
+        // ctx.createChild(ctx.entity().getOwner()))` (client/animation/molang/YSMBinding.java:193) — and a pack reads it
+        // through the arrow operator (`ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand',
+        // 'minecraft:flame')`, tmp/wiki/molang_misc.md:148). 1.7.10 never syncs `EntityArrow.shootingEntity`, so
+        // MixinEntityArrow carries the shooter's **entity id** in a third datawatcher slot and this is where it becomes
+        // a context: `World#getEntityByID` back to the entity, then registered as a handle for the arrow operator's left
+        // side (see MolangStructContextAccess). A shooter the client has not loaded (a mob that is out of range, an
+        // arrow whose id slot was never written) resolves to null, and null publishes 0 — upstream's "no context",
+        // which reads as false and makes `??` take its right side. Fabricating a context there would hand a pack
+        // another entity's values, so the flat "0/1 = has a player owner" answer this used to publish is gone.
+        int ownerEntityId = arrow instanceof IProjectileModelArrow ownerArrow ? ownerArrow.ysmu$getProjectileOwnerId()
+            : 0;
+        net.minecraft.entity.Entity owner = ownerEntityId > 0 ? arrow.worldObj.getEntityByID(ownerEntityId) : null;
+        setMolangVariable("ysm.projectile_owner", com.fox.ysmu.client.animation.molang.MolangContextHandles.publish(owner));
 
         if (arrow.isDead) {
             GROUND_TRACKER.forget(arrow.getEntityId());

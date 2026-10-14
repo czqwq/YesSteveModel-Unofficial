@@ -1,5 +1,7 @@
 package com.eliotlash.mclib.math;
 
+import software.bernie.geckolib3.core.molang.MolangException;
+
 import java.util.HashSet;
 import java.util.Set;
 
@@ -123,6 +125,34 @@ public enum Operation {
         @Override
         public double calculate(double a, double b) {
             return b;
+        }
+    },
+    /**
+     * Bedrock/YSM 的结构体（箭头）访问 {@code a -> b}：在 {@code a} 指出的**上下文**里求值 {@code b}。
+     *
+     * <p>上游 Molang 是对对象值做 Pratt 解析：{@code BinaryExpression.Op.ARROW} 是它优先级最高的二元运算符
+     * （{@code tmp/YesSteveModel-dev-1.20 .../molang/parser/BinaryExpression.java:127}），求值器先算左边，再把右边
+     * 放进一个**以该值为 subject 的子求值器**里跑
+     * （{@code .../molang/runtime/ExpressionEvaluatorImpl.java:58-69}）。变量 wiki 记的用例正是这一支：
+     * {@code v.flame_level ?? (v.flame_level = ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand',
+     * 'minecraft:flame'))} —— 右边是**关于射击者**的查询（{@code tmp/wiki/molang_misc.md:148}、
+     * {@code molang_ref.md:229}：{@code ysm.projectile_owner} 返回发射该箭矢的玩家实体，可用箭头表达式查询其属性）。
+     *
+     * <p>本引擎的求值器没有对象值——{@code IValue} 就是 {@code double}——所以左边只能是宿主认得的**句柄**，
+     * 右边也只有在宿主能替换 subject 的地方才能跑。{@link MathBuilder.StructAccessHost} 就是那个宿主：由 mod 安装
+     * （反向控制，与 {@code MolangParser.ysmFunctionRegistrar} 同一形状），两半都归它管。没有宿主时这个运算符
+     * **无法求值**，因此解析阶段就带原因失败，而不是悄悄只answer 一侧。
+     *
+     * <p>优先级取全表最高：上游 ARROW 就是最紧的二元运算符，{@code a->b+1} 必须读成 {@code (a->b)+1}。
+     */
+    ARROW("->", 6) {
+        @Override
+        public double calculate(double a, double b) {
+            // calculate 的契约是"两个 double 进、一个 double 出"，而箭头的语义是副作用（换 subject），所以它永远
+            // 不该走到这里：MathBuilder#binary 会把 ARROW 交给宿主。会走到这里只有一种情形——没有安装宿主，那时
+            // 宁可响亮失败也不要悄悄只取一侧。用非受检异常：这张表的签名不允许受检异常。
+            throw new IllegalStateException(
+                "'->' cannot be evaluated by the numeric operator table; install MathBuilder.structAccessHost");
         }
     },
     /**

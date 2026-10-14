@@ -109,6 +109,33 @@ the part of it that is written against this snapshot.
   `.agent/phase45-mirrored-draw-face-culling.md` records the evidence and the one remaining gap (the paper doll's own
   `glFrontFace` half, left for the owner).
 
+- **`software/bernie/geckolib3/core/molang/MolangPhysicsRuntime.java` - the variable scope is per (entity, model), not
+  per animation.** `ScopeKey` carried the `animationId`, so a variable written by an animation file's timeline and read
+  by a controller lived in two different stores: `4_default_controllers/animations/arm.animation.json`'s `swing:sword`
+  timeline writes `v.jump=q.is_jumping&&(q.vertical_speed<0)` from the arm domain while the same model's
+  `player.post_swing` reads `v.swing_sword&&!v.jump&&…` from the body domain, so the controller read 0 and the sword
+  combo never left its first state. Upstream keeps one store per entity; dropping the animation component restores that
+  granularity. The port had already worked around the symptom once, for `swing_sword` alone, which is why only that
+  variable crossed domains. Verified in-game: with the key shared, the log shows `jump=1.0` (impossible before) and the
+  state machine walking `attack1 -> attack2 -> attack3 -> attack_jump -> default` with its clips active. See
+  `.agent/phase49-cross-domain-variables.md`.
+
+- **`software/bernie/geckolib3/core/molang/MolangParser.java` (+ `MolangException.java`) - ternary ordering and a
+  diagnosable parse failure.** Three narrow engine edits, each taken from upstream's parser shape rather than invented:
+  (1) `parseSymbols` resolves a ternary **before** delegating to `MathBuilder`, because upstream's Pratt parser binds
+  `?:` at `PRECEDENCE_QUES` - outside every other operator *and* outside unary minus - while `MathBuilder.parseSymbols`
+  starts with its leading-unary-minus repair, which slices the symbol list first and therefore threw
+  `There is no such operator ':'` for `a?(b):-(c)`. That was the live-client line, from LaPluma2.5.3's
+  `(query.vertical_speed>0)?(math.clamp(…)):-(math.clamp(…))`; with it fixed every expression that pack ships parses,
+  and the expression itself is pinned in the tracked
+  `MolangParserCompatibilityTest#ternaryBranchesWithSpacedStringArgumentsParse`. Non-ternary lists are untouched - they
+  still reach `MathBuilder` unchanged. (2) `reportParseFailure` now names the offending expression, tracked in
+  `parsingExpression`, while keeping the once-per-distinct-reason rule a real pack needed (Wine Fox & Friends produced
+  3985 stderr lines before it); without the text a log could say "There is no such operator ':'" and never say where.
+  (3) `MolangException` gained a cause-carrying constructor and the three catch sites chain it - before, the reason was
+  discarded and only `Couldn't parse '<whole expression>' expression!` surfaced, which is why this bug took three
+  measurement rounds to find. See `.agent/phase47-pack-timeline-never-dispatched.md`.
+
 - **`software/bernie/geckolib3/geo/GeoReplacedEntityRenderer.java` - the frame's animation event moved into a method,
   so a second animatable of the same entity can be ticked with it.** `doRender` built the `EntityModelData` and the
   `AnimationEvent` inline and kept four of its inputs in locals for the layer pass; the port's first-person arm is a
@@ -224,6 +251,24 @@ the part of it that is written against this snapshot.
   `isGlobalVarReadable` / `noteUnscopedGlobalVarWrite` are omitted because they need
   `ScopedMolangVariable.globalFallback` / `unscopedWriteSink`, which this tree never wires; adding them would be dead
   code. Recorded in `.agent/phase33-m4-debug-overlay-ported.md`.
+
+- **`->`（箭头表达式/结构体访问）在动画文件路径上可用。** 引擎侧两处改动：`com/eliotlash/mclib/math/Operation.java`
+  新增 `ARROW("->", 6)`（优先级取全表最高），`MathBuilder` 新增 `StructAccessHost` 接口 + `static volatile
+  structAccessHost` + `binary(Operation, IValue, IValue)`，并把 `parseSymbols` 里四处 `new Operator(...)` 改走
+  `binary(...)`。**原因**：包写 `ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand',
+  'minecraft:flame')`（`tmp/wiki/molang_misc.md:148`、`molang_ref.md:229`），而这张运算符表里没有 `->`，
+  `breakdownChars` 因此把它切成分开的 `-`/`>`，整条表达式解析失败、那条通道静默保持旧值（本仓审计
+  `.agent/wiki-parity-audit.md` 把这条列为第一号缺口）。**上游对应物**：`TokenKind.ARROW`
+  （`.../molang/lexer/TokenKind.java:144`，词法在 `MolangLexerImpl.java:245`）、优先级与解析
+  （`.../molang/parser/BinaryExpression.java:127` 的 `ARROW(3000, 10)`、`MolangParserImpl.java:313`）、求值
+  （左边为 null 则整体为 null，否则 `createChild(左边)` 造子求值器再跑右边：
+  `.../molang/runtime/ExpressionEvaluatorImpl.java:58-69`；`YSMBinding.java:193` 的 `projectile_owner` 就是一个
+  context）。**为什么引擎自己不能实现**：这张表的契约是"两个 double 进、一个 double 出"，而箭头的语义是副作用
+  （换掉 subject）；本树的值也只有 `double`。因此 `Operation.ARROW.calculate` 抛 `IllegalStateException`（非受检：
+  `calculate` 的签名不允许受检异常），`MathBuilder.binary` 把两侧交给 mod 安装的宿主，宿主未安装时**解析阶段就带
+  原因失败**（"requires a struct/context host"），而不是悄悄只取一侧。宿主钩子的形状与
+  `MolangParser.ysmFunctionRegistrar`/`explicitVariableLookup` 一致（静态、反向控制、本文件不引用 mod 类），
+  由 `AnimationRegister.registerMolangHooks()` 安装。记录见 `.agent/phase50-arrow-expressions.md`。
 
 ## Where it came from
 

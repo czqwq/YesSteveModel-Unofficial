@@ -87,6 +87,12 @@ public class MolangParser extends MathBuilder {
     /** 已经报告过的解析失败原因，同一个原因（例如同一个未注册函数）之后不再刷日志。 */
     private static final Set<String> REPORTED_PARSE_FAILURES = ConcurrentHashMap.newKeySet();
 
+    /**
+     * The statement {@link #parseExpression} is currently on, for {@link #reportParseFailure}. Not cleared: a failure
+     * can surface from a nested parse, and the innermost expression is the more useful one to name.
+     */
+    private String parsingExpression;
+
     public MolangParser() {
         super();
         // 将函数重新映射为 MoLang 标准名
@@ -318,6 +324,9 @@ public class MolangParser extends MathBuilder {
         for (String split : splitStatements(lowerCaseOutsideStrings(expression).trim())) {
             String trimmed = split.trim();
             if (!trimmed.isEmpty()) {
+                // Remembered for reportParseFailure: the warning used to name only the reason, so a log could say
+                // "There is no such operator ':'" without ever telling anyone which expression caused it.
+                this.parsingExpression = trimmed;
                 if (result == null) {
                     result = new MolangMultiStatement(this);
                 }
@@ -716,7 +725,7 @@ public class MolangParser extends MathBuilder {
             // 如果是其他表达式
             return new MolangValue(this, parseSymbolsMolang(symbols));
         } catch (Exception e) {
-            throw new MolangException("Couldn't parse '" + expression + "' expression!");
+            throw new MolangException("Couldn't parse '" + expression + "' expression!", e);
         }
     }
 
@@ -728,7 +737,7 @@ public class MolangParser extends MathBuilder {
             return this.parseSymbols(symbols);
         } catch (Exception e) {
             reportParseFailure(e);
-            throw new MolangException("Couldn't parse an expression!");
+            throw new MolangException("Couldn't parse an expression!", e);
         }
     }
 
@@ -749,6 +758,19 @@ public class MolangParser extends MathBuilder {
             LazyVariable variable = getVariable(name);
             IValue value = parseSymbols(symbols.subList(2, symbols.size()));
             return new MolangAssignment(this, variable, value);
+        }
+
+        // The ternary is resolved before anything else, which is upstream's precedence: in its Pratt parser `?:`
+        // sits at the lowest level (PRECEDENCE_QUES), so it is decided outside every other operator *and* outside
+        // unary minus ({@code molang/parser/MolangParserImpl.java}'s ternary branch runs after the compound
+        // expression's operators). MathBuilder#parseSymbols instead tries its leading-unary-minus repair first, and
+        // that repair slices the symbol list before a ternary is recognised: {@code a?(b):-(c)} recursed into a slice
+        // that still held ':' and threw {@code There is no such operator ':'} - the line the live log shows for
+        // {@code (query.vertical_speed>0)?(math.clamp(…)):-(math.clamp(…))}. Both branches of that expression parse
+        // on their own, so taking the ternary first fixes it and leaves every non-ternary list to MathBuilder.
+        IValue ternary = this.tryTernary(symbols);
+        if (ternary != null) {
+            return ternary;
         }
         return super.parseSymbols(symbols);
     }
@@ -785,13 +807,18 @@ public class MolangParser extends MathBuilder {
      * 每次 12 行栈，单次会话刷出 3985 行 STDERR。表达式仍然失败（语义不变），但原因只记一行；栈降级为 debug，
      * 并且同样只在该原因第一次出现时输出。
      */
-    private static void reportParseFailure(Exception failure) {
+    private void reportParseFailure(Exception failure) {
         String reason = failure.getMessage() == null ? failure.getClass()
             .getName() : failure.getMessage();
         if (!REPORTED_PARSE_FAILURES.add(reason)) {
             return;
         }
-        LOG.warn("Molang expression could not be parsed: {} (reported once per distinct reason)", reason);
+        // The expression itself rides along (first occurrence of this reason only, so the line count is unchanged):
+        // pack authors and this repository both need to know WHICH expression produced the reason.
+        LOG.warn(
+            "Molang expression could not be parsed: {} — first occurrence: {}",
+            reason,
+            this.parsingExpression);
         LOG.debug("Molang parse failure detail", failure);
     }
 

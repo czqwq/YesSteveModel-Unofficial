@@ -44,6 +44,16 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
     @Unique
     private static final int ysmu$DW_SHOOT_ITEM = 19;
 
+    /**
+     * 射击者的实体 id，供 {@code ysm.projectile_owner} 解析出那个实体（箭头表达式的左侧）。
+     * <p>
+     * 与上面两个槽的理由相同：1.7.10 的 {@code shootingEntity} 只在服务端赋值、从不发送，而
+     * {@code World#getEntityByID} 需要的就是实体 id。写成 {@code Integer} 而不是字符串：id 是整数，且
+     * {@code updateObject} 的类型必须与 {@code addObject} 一致。
+     */
+    @Unique
+    private static final int ysmu$DW_OWNER = 20;
+
     @Shadow
     public Entity shootingEntity;
 
@@ -56,6 +66,8 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
             .addObject(ysmu$DW_MODEL_ID, "");
         ((Entity) (Object) this).getDataWatcher()
             .addObject(ysmu$DW_SHOOT_ITEM, "");
+        ((Entity) (Object) this).getDataWatcher()
+            .addObject(ysmu$DW_OWNER, 0);
     }
 
     /**
@@ -79,6 +91,7 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
             }
         }
         ysmu$captureShootItem(shooter);
+        ysmu$captureOwner(shooter);
     }
 
     /**
@@ -92,6 +105,7 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
     private void ysmu$onConstructTargeted(World world, EntityLivingBase shooter, EntityLivingBase target, float velocity,
         float inaccuracy, CallbackInfo ci) {
         ysmu$captureShootItem(shooter);
+        ysmu$captureOwner(shooter);
     }
 
     /**
@@ -128,5 +142,31 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
     public String ysmu$getShootItemId() {
         return ((Entity) (Object) this).getDataWatcher()
             .getWatchableObjectString(ysmu$DW_SHOOT_ITEM);
+    }
+
+    /**
+     * 把射击者的实体 id 写进 datawatcher，在服务端。
+     * <p>
+     * 与开火物品不同，这里**不限于玩家**：上游的 {@code projectile_owner} 是 {@code ctx.entity().getOwner()}，
+     * 骷髅射出的箭同样有 owner。客户端换不回那个实体时（怪物不在已加载实体里）调用方会发布"没有上下文"，
+     * 所以多写一个 id 不会造成错误上下文。
+     */
+    @Unique
+    private void ysmu$captureOwner(EntityLivingBase shooter) {
+        if (shooter == null || ((Entity) (Object) this).worldObj.isRemote) {
+            return;
+        }
+        ((Entity) (Object) this).getDataWatcher()
+            .updateObject(ysmu$DW_OWNER, shooter.getEntityId());
+    }
+
+    /**
+     * 射击者的实体 id，没有则为 0。客户端用它 {@code World#getEntityByID} 换回实体，供箭头表达式
+     * {@code ysm.projectile_owner->…} 使用（只对已加载的实体有效）。
+     */
+    @Unique
+    public int ysmu$getProjectileOwnerId() {
+        return ((Entity) (Object) this).getDataWatcher()
+            .getWatchableObjectInt(ysmu$DW_OWNER);
     }
 }

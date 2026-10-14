@@ -39,21 +39,23 @@ import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.geo.IGeoRenderer;
 import software.bernie.geckolib3.geo.YsmRenderType;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
-import software.bernie.geckolib3.geo.render.built.GeoCube;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
-import software.bernie.geckolib3.geo.render.built.GeoQuad;
-import software.bernie.geckolib3.geo.render.built.GeoVertex;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class FirstPersonHandRenderer {
 
     private static final String RIGHT_ARM = "RightArm";
     private static final float HAND_SWING_SCALE = 0.8F;
-    private static final float GECKO_ARM_TO_BIPED_X = -0.5F;
+    /**
+     * Where the arm model's shoulder is placed in the vanilla biped arm's frame. Upstream's own constants
+     * ({@code CustomFirstPersonArmRenderer}: {@code poseStack.translate(±0.25, 1.8, 0)} then {@code scale(-1, -1, 1)}),
+     * with the y value expressed as the built-in models' shoulder pivot (29 px) - upstream's {@code 1.8} is that same
+     * anchor to two decimals. See {@link #alignGeckoArmToVanillaBipedArm}.
+     */
+    private static final float GECKO_ARM_TO_BIPED_X = -0.25F;
     private static final float GECKO_ARM_SHOULDER_TO_BIPED_ORIGIN_Y = 29.0F / 16.0F;
     private static final float GECKO_ARM_TO_BIPED_Z = 0.0F;
     private static final float GECKO_ARM_ROLL_DEGREES = 180.0F;
-    private static final ArmRollPivot DEFAULT_ARM_ROLL_PIVOT = new ArmRollPivot(2.0F / 16.0F, 0.0F);
 
     private FirstPersonHandRenderer() {}
 
@@ -313,7 +315,7 @@ public final class FirstPersonHandRenderer {
             YsmRenderType renderType = armRenderType(renderer, texture, customPlayer.hasTranslucentVertices());
             prepareCustomArmState(renderType);
             try {
-                alignGeckoArmToVanillaBipedArm(rightArm);
+                alignGeckoArmToVanillaBipedArm();
                 GeoModel armModel = GeckoLibCache.getInstance().getGeoModels().get(ModelIdUtil.getArmId(
                     ModelIdUtil.getModelIdFromMainId(customPlayer.getMainModel())));
                 renderer.renderMaterialRoot(customPlayer, armModel, rightArm, texture, renderType);
@@ -419,8 +421,20 @@ public final class FirstPersonHandRenderer {
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }
 
-    private static void alignGeckoArmToVanillaBipedArm(GeoBone rightArm) {
-        ArmRollPivot rollPivot = findArmRollPivot(rightArm);
+    /**
+     * Places the arm model where the vanilla biped arm sits, in the same shape upstream uses
+     * ({@code CustomFirstPersonArmRenderer}: translate to the shoulder, then {@code scale(-1, -1, 1)}).
+     * <p>
+     * One deliberate difference: 1.7.10's first-person camera looks down {@code -Z} where 1.20's looks down
+     * {@code +Z}, so the arm needs one more half-turn about Y - which is what {@link #GECKO_ARM_ROLL_DEGREES} is. It
+     * is applied <b>about the origin</b>, exactly like upstream's scale: a rotation about any other point also
+     * translates, and that translation is whatever the pivot happens to be. The arm used to be rolled about the
+     * centre of its own bounding box, which made the offset a property of each pack's geometry (0.23 blocks for the
+     * built-in default arm, more for an arm whose cubes sit off the bone axis, e.g. {@code LaPluma2.5.3} whose arm
+     * cubes live in child bones spanning x -2.6..+4.2 px) - the arm was drawn displaced from the hand and from where
+     * the pack authored it. See {@code .agent/phase46-first-person-arm-alignment.md}.
+     */
+    private static void alignGeckoArmToVanillaBipedArm() {
         GL11.glTranslatef(
             GECKO_ARM_TO_BIPED_X,
             GECKO_ARM_SHOULDER_TO_BIPED_ORIGIN_Y,
@@ -431,9 +445,7 @@ public final class FirstPersonHandRenderer {
         // 同一句中文注释），只在镜像生效期间改绕序；不剔除的分支（cutout/no-cull）不受影响，剔除的分支
         // （translucent）才不会把该看见的正面剔掉、只留远侧内壁。复位见 restoreCustomArmState。
         GL11.glFrontFace(GL11.GL_CW);
-        GL11.glTranslatef(rollPivot.x, 0.0F, rollPivot.z);
         GL11.glRotatef(GECKO_ARM_ROLL_DEGREES, 0.0F, 1.0F, 0.0F);
-        GL11.glTranslatef(-rollPivot.x, 0.0F, -rollPivot.z);
     }
 
     private static void renderRightArmBone(CustomPlayerRenderer renderer, GeoBone rightArm,
@@ -442,30 +454,6 @@ public final class FirstPersonHandRenderer {
         tessellator.startDrawing(GL11.GL_QUADS);
         renderer.renderRecursively(tessellator, customPlayer, rightArm, 1.0F, 1.0F, 1.0F, 1.0F);
         tessellator.draw();
-    }
-
-    private static ArmRollPivot findArmRollPivot(GeoBone rightArm) {
-        ArmRollBounds bounds = new ArmRollBounds();
-        collectArmRollBounds(rightArm, bounds);
-        return bounds.hasValues()
-            ? new ArmRollPivot((bounds.minX + bounds.maxX) * 0.5F, (bounds.minZ + bounds.maxZ) * 0.5F)
-            : DEFAULT_ARM_ROLL_PIVOT;
-    }
-
-    private static void collectArmRollBounds(GeoBone bone, ArmRollBounds bounds) {
-        for (GeoCube cube : bone.childCubes) {
-            for (GeoQuad quad : cube.quads) {
-                if (quad == null) {
-                    continue;
-                }
-                for (GeoVertex vertex : quad.vertices) {
-                    bounds.include(vertex.position.x, vertex.position.z);
-                }
-            }
-        }
-        for (GeoBone child : bone.childBones) {
-            collectArmRollBounds(child, bounds);
-        }
     }
 
     private static Optional<GeoBone> findRightArmBone(GeoModel geoModel) {
@@ -485,34 +473,6 @@ public final class FirstPersonHandRenderer {
 
         if (mc.gameSettings.viewBobbing) {
             entityRenderer.setupViewBobbing(partialTicks);
-        }
-    }
-
-    private static final class ArmRollPivot {
-        private final float x;
-        private final float z;
-
-        private ArmRollPivot(float x, float z) {
-            this.x = x;
-            this.z = z;
-        }
-    }
-
-    private static final class ArmRollBounds {
-        private float minX = Float.POSITIVE_INFINITY;
-        private float maxX = Float.NEGATIVE_INFINITY;
-        private float minZ = Float.POSITIVE_INFINITY;
-        private float maxZ = Float.NEGATIVE_INFINITY;
-
-        private void include(float x, float z) {
-            this.minX = Math.min(this.minX, x);
-            this.maxX = Math.max(this.maxX, x);
-            this.minZ = Math.min(this.minZ, z);
-            this.maxZ = Math.max(this.maxZ, z);
-        }
-
-        private boolean hasValues() {
-            return this.minX != Float.POSITIVE_INFINITY;
         }
     }
 

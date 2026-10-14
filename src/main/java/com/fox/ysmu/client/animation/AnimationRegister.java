@@ -394,6 +394,12 @@ public class AnimationRegister {
      */
     public static void registerMolangHooks() {
         MolangParser.ysmFunctionRegistrar = AnimationRegister::registerFunctions;
+        // 箭头表达式（`a -> b`）的宿主：上游的 `->` 是"把右边放进左边指出的上下文里求值"
+        // （ExpressionEvaluatorImpl.java:58-69；`projectile_owner` 就是一个 context），本引擎的值只有 double，
+        // 所以由宿主把左侧解释成上下文句柄、在右侧求值期间换掉 subject（见 MolangStructContextAccess）。
+        // 与上面的函数表同理，必须是静态钩子：引擎里任何一处 `new MolangParser()` 都要看到它。
+        com.eliotlash.mclib.math.MathBuilder.structAccessHost =
+            com.fox.ysmu.client.animation.molang.MolangStructContextAccess.INSTANCE;
     }
 
     /**

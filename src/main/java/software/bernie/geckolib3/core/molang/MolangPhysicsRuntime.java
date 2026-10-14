@@ -103,7 +103,7 @@ public final class MolangPhysicsRuntime {
             return;
         }
         EntityLivingBase entity = animatable.getMolangEntity();
-        ScopeKey key = ScopeKey.from(entity, animatable.getMolangModelId(), animatable.getMolangAnimationId());
+        ScopeKey key = ScopeKey.from(entity, animatable.getMolangModelId());
         ScopeState state = STATES.computeIfAbsent(key, ignored -> new ScopeState());
         state.physics.update(renderTicks);
         applyRemoteVariables(entity, state);
@@ -734,7 +734,7 @@ public final class MolangPhysicsRuntime {
     }
 
     /**
-     * What one scope belongs to: the owning entity, plus the model and animation being evaluated.
+     * What one scope belongs to: the owning entity and the model being evaluated.
      * <p>
      * Every component is compared <em>by value</em>. A detached preview has no entity and is handed freshly built id
      * objects, so any identity-based component would give it a different key - and therefore a different, empty scope -
@@ -742,21 +742,26 @@ public final class MolangPhysicsRuntime {
      * that: {@code RenderUtil.renderModel} calls {@code setMainModel(ModelIdUtil.getMainId(modelId))} on every frame
      * and {@code getMainId} returns a {@code new ResourceLocation}. A world entity never saw the problem because its
      * key is the player's UUID.
+     * <p>
+     * The animation is deliberately <em>not</em> part of the key. Upstream keeps one variable store per entity, and the
+     * built-in models depend on that: {@code 4_default_controllers/animations/arm.animation.json}'s {@code swing:sword}
+     * timeline writes {@code v.jump=q.is_jumping&&(q.vertical_speed<0)} from the arm domain, while the same model's
+     * {@code player.post_swing} controller reads {@code v.swing_sword&&!v.jump&&!(q.vertical_speed>0)} from the body
+     * domain. Keying by animation put those two writes in different scopes, so the controller read 0 and the sword combo
+     * never left its first state - the cross-domain gap recorded in {@code tmp/audit/animation.md:66-68}, of which the
+     * port's own {@code swing_sword} write was only a single-case patch.
      */
     private static final class ScopeKey {
         private final UUID entityId;
         private final ResourceLocation modelId;
-        private final ResourceLocation animationId;
 
-        private ScopeKey(UUID entityId, ResourceLocation modelId, ResourceLocation animationId) {
+        private ScopeKey(UUID entityId, ResourceLocation modelId) {
             this.entityId = entityId;
             this.modelId = modelId;
-            this.animationId = animationId;
         }
 
-        private static ScopeKey from(EntityLivingBase entity, ResourceLocation modelId,
-            ResourceLocation animationId) {
-            return new ScopeKey(entity == null ? null : entity.getUniqueID(), modelId, animationId);
+        private static ScopeKey from(EntityLivingBase entity, ResourceLocation modelId) {
+            return new ScopeKey(entity == null ? null : entity.getUniqueID(), modelId);
         }
 
         @Override
@@ -771,17 +776,13 @@ public final class MolangPhysicsRuntime {
             if (entityId == null ? other.entityId != null : !entityId.equals(other.entityId)) {
                 return false;
             }
-            if (modelId == null ? other.modelId != null : !modelId.equals(other.modelId)) {
-                return false;
-            }
-            return animationId == null ? other.animationId == null : animationId.equals(other.animationId);
+            return modelId == null ? other.modelId == null : modelId.equals(other.modelId);
         }
 
         @Override
         public int hashCode() {
             int result = entityId == null ? 0 : entityId.hashCode();
             result = 31 * result + (modelId == null ? 0 : modelId.hashCode());
-            result = 31 * result + (animationId == null ? 0 : animationId.hashCode());
             return result;
         }
     }

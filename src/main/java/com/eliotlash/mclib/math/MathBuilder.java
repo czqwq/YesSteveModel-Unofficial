@@ -327,17 +327,17 @@ public class MathBuilder {
                 if (right.value > left.value) {
                     IValue leftValue = this.parseSymbols(symbols.subList(0, leftOp));
                     IValue rightValue = this.parseSymbols(symbols.subList(leftOp + 1, size));
-                    return new Operator(left, leftValue, rightValue);
+                    return this.binary(left, leftValue, rightValue);
                 } else if (left.value > right.value) {
                     Operation initial = this.operationForOperator((String) symbols.get(lastOp));
                     if (initial.value < left.value) {
                         IValue leftValue = this.parseSymbols(symbols.subList(0, lastOp));
                         IValue rightValue = this.parseSymbols(symbols.subList(lastOp + 1, size));
-                        return new Operator(initial, leftValue, rightValue);
+                        return this.binary(initial, leftValue, rightValue);
                     }
                     IValue leftValue = this.parseSymbols(symbols.subList(0, op));
                     IValue rightValue = this.parseSymbols(symbols.subList(op + 1, size));
-                    return new Operator(right, leftValue, rightValue);
+                    return this.binary(right, leftValue, rightValue);
                 }
             }
             op = leftOp;
@@ -359,10 +359,54 @@ public class MathBuilder {
             throw new MolangException("no operator found in expression: " + symbols);
         }
         Operation operation = this.operationForOperator((String) symbols.get(lastOp));
-        return new Operator(
+        return this.binary(
             operation,
             this.parseSymbols(symbols.subList(0, lastOp)),
             this.parseSymbols(symbols.subList(lastOp + 1, size)));
+    }
+
+    /**
+     * 宿主 mod 对 {@code a -> b}（{@link Operation#ARROW}）的实现入口。由 mod 安装，反向控制：
+     * 本文件不引用 mod 类，与 {@code MolangParser.ysmFunctionRegistrar} 同一形状。
+     *
+     * <p>之所以需要宿主而不是在 {@link Operation} 里直接实现：本引擎的值只有 {@code double}，而箭头表达式要
+     * "把右边放进左边指出的上下文里求值"（上游 {@code ExpressionEvaluatorImpl.java:58-69} 是子求值器，
+     * {@code YSMBinding.java:193} 的 {@code projectile_owner} 就是一个 context）。宿主负责把左侧 double 解释成
+     * 上下文、在右侧求值期间换掉 subject、再还原。
+     */
+    public interface StructAccessHost {
+
+        /**
+         * @param builder 正在解析的构建器（宿主需要它才能发布 query 绑定；实现里应自行判断类型）
+         * @param left    箭头左侧已解析的值（宿主自己认得的句柄）
+         * @param right   箭头右侧已解析的值；实现必须返回一个在 {@code get()} 里换好 subject 再求值它的值
+         */
+        IValue access(MathBuilder builder, IValue left, IValue right) throws Exception;
+    }
+
+    /**
+     * 已安装的箭头宿主；{@code null} 表示没有宿主，此时用到 {@code ->} 的表达式在解析阶段就以
+     * "没有宿主" 失败——比整条表达式静默变成 0 或只取一侧诚实。与 {@code ysmFunctionRegistrar} 一样是静态的：
+     * 引擎里任何一处 {@code new MolangParser()} 都必须看到同一个宿主。
+     */
+    public static volatile StructAccessHost structAccessHost = null;
+
+    /**
+     * 构造一个二元值：普通的运算符走 {@link Operator}，箭头走宿主。
+     *
+     * <p>没有这一层时 {@code ->} 只能落到 {@link Operation#ARROW#calculate}（一个会抛的纯函数），因为这张表
+     * 的契约就是"两个 double 进、一个 double 出"，而箭头的语义是副作用（换 subject）而不是算术。
+     */
+    protected IValue binary(Operation operation, IValue left, IValue right) throws Exception {
+        if (operation == Operation.ARROW) {
+            StructAccessHost host = structAccessHost;
+            if (host == null) {
+                throw new MolangException(
+                    "'->' requires a struct/context host; none is installed (MathBuilder.structAccessHost)");
+            }
+            return host.access(this, left, right);
+        }
+        return new Operator(operation, left, right);
     }
 
     protected int seekLastOperator(List<Object> symbols) {

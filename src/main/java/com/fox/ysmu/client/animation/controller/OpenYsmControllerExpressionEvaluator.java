@@ -81,6 +81,17 @@ public final class OpenYsmControllerExpressionEvaluator {
     interface ConditionScope {
         double variableValue(String name);
         double functionValue(String name, List<Argument> arguments);
+
+        /**
+         * 条件里的赋值需要的写入口。
+         *
+         * <p>上游把 {@code =} 当**表达式**：求值时写入目标并返回赋入值
+         * （{@code .../molang/runtime/ExpressionEvaluatorImpl.java:78-103} 的 {@code var.assign(evaluator, val);
+         * return val;}），因此"求值一条条件"是**有副作用**的，而包的转移表正是靠这个副作用依次推进
+         * （LaPluma2.5.3 的 {@code (v.attack=0/1/2)}，见 {@code parseAssignmentCompiled}）。默认空实现：只有真的
+         * 连到变量表的 scope 才写得进去，测试桩不必被迫实现。
+         */
+        default void setVariable(String name, double value) {}
     }
 
     @FunctionalInterface
@@ -150,7 +161,7 @@ public final class OpenYsmControllerExpressionEvaluator {
      * parallel_4 首帧无条件进入"出来了"遁地状态且无法用 /ysm reset 停止。
      */
     private static CompiledExpr parseExpressionCompiled(String expr, int[] idx) {
-        CompiledExpr condition = parseOrCompiled(expr, idx);
+        CompiledExpr condition = parseAssignmentCompiled(expr, idx);
         if (condition == null) {
             return null;
         }
@@ -167,6 +178,77 @@ public final class OpenYsmControllerExpressionEvaluator {
             return condition;
         }
         return condition;
+    }
+
+    /**
+     * 赋值是**表达式**，不是语句专用：上游的 {@code =} 求值时写入目标并返回赋入值
+     * （{@code tmp/YesSteveModel-dev-1.20 .../molang/runtime/ExpressionEvaluatorImpl.java:78-103} 的
+     * {@code var.assign(evaluator, val); return val;}），优先级比三元低、比 {@code ||} 高，右结合。
+     *
+     * <p><b>包的转移表依赖这个副作用</b>：LaPluma2.5.3 的 {@code player.parallel_5} 在 {@code Default} 里依次写
+     * {@code v.Swing_Sword&&(v.attack=0)}、{@code …(v.attack=1)}、{@code …(v.attack=2)}，{@code BedrockAnimationController}
+     * 又是**从头逐条求值、命中即跳转**（{@code .../controller/BedrockAnimationController.java:244-257}）：第一条把
+     * {@code v.attack} 写成 0 并返回 0（假），第二条把它写成 1 并返回 1（真）→ 立刻跳转。每次左键重新求值一轮就
+     * 推进一格，于是"点一下出一刀、一直点一直出"，而 {@code on_exit} 里的 {@code math.mod(v.attack+1,3)} 只是把
+     * 轮换补齐。
+     *
+     * <p>缺少这一层时 {@code (v.attack=1)} 只会被读成变量 {@code v.attack} 的旧值（0），三条守卫全假、
+     * {@code swd1/2/3} 永不进入——这正是本仓此前的实机症状（"LaPluma 没有挥动"）。
+     */
+    private static CompiledExpr parseAssignmentCompiled(String expr, int[] idx) {
+        int[] probe = { idx[0] };
+        String target = probeAssignmentTarget(expr, probe);
+        if (target == null) {
+            return parseOrCompiled(expr, idx);
+        }
+        idx[0] = probe[0];
+        CompiledExpr value = parseAssignmentCompiled(expr, idx);
+        String name = target;
+        return ctx -> {
+            double assigned = value.eval(ctx);
+            ctx.setVariable(name, assigned);
+            return assigned;
+        };
+    }
+
+    /**
+     * 若 {@code probe} 处是"变量 = "（单个 {@code =}，不是 {@code ==}/{@code !=}/{@code <=}/{@code >=} 的一部分），
+     * 吃掉变量名与等号并返回变量名（带 {@code v.} 前缀）；否则 {@code probe} 原地不动并返回 null。
+     * <p>只认 {@code v.} 开头的目标，与语句路径（{@code executeStatements} 里 target 必须是 {@code v.*}）保持一致；
+     * 结构体路径的赋值（上游还允许 {@code struct->x = v}）本引擎没有对象值，不在这一层假装支持。
+     */
+    private static String probeAssignmentTarget(String expr, int[] probe) {
+        skipWhitespace(expr, probe);
+        int start = probe[0];
+        int i = start;
+        while (i < expr.length()) {
+            char c = expr.charAt(i);
+            if (Character.isLetterOrDigit(c) || c == '_' || c == '.') {
+                i++;
+            } else {
+                break;
+            }
+        }
+        if (i == start) {
+            return null;
+        }
+        String name = expr.substring(start, i);
+        if (!name.startsWith("v.")) {
+            return null;
+        }
+        int afterName = i;
+        while (afterName < expr.length() && Character.isWhitespace(expr.charAt(afterName))) {
+            afterName++;
+        }
+        if (afterName >= expr.length() || expr.charAt(afterName) != '=') {
+            return null;
+        }
+        char next = afterName + 1 < expr.length() ? expr.charAt(afterName + 1) : ' ';
+        if (next == '=') {
+            return null;
+        }
+        probe[0] = afterName + 1;
+        return name;
     }
 
     private static CompiledExpr parseOrCompiled(String expr, int[] idx) {
@@ -902,6 +984,27 @@ public final class OpenYsmControllerExpressionEvaluator {
             this.event = event;
             this.player = player;
             this.state = state;
+        }
+
+        /**
+         * 条件里赋值的落点：与 {@link #variableValue} 读取**同一张表**。
+         *
+         * <p>有状态机上下文时直接走 {@code RuntimeState#setVariable}（引擎逐帧作用域优先、本地表兜底，与
+         * timeline/on_entry/on_exit 的写入是同一个入口）。没有上下文时（{@code .molang} 脚本条件）写引擎的共享
+         * 作用域——脚本写的变量本来就在那里，与读取路径一致。名字先规范化，理由见 {@code RuntimeState#setVariable}。
+         */
+        @Override
+        public void setVariable(String name, double value) {
+            String normalized = normalizeVariableName(name);
+            if (!normalized.startsWith("v.")) {
+                return;
+            }
+            String canonical = MolangParser.canonicalVariableName(normalized.substring(2));
+            if (state != null) {
+                state.setVariable(canonical, value);
+                return;
+            }
+            software.bernie.geckolib3.core.molang.MolangPhysicsRuntime.setVariable("v." + canonical, value);
         }
 
         @Override

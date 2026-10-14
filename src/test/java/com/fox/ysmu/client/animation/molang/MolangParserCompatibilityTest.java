@@ -12,7 +12,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import com.eliotlash.mclib.math.IValue;
+import com.eliotlash.mclib.math.MathBuilder;
 import com.eliotlash.mclib.math.functions.Function;
+
+import com.fox.ysmu.client.animation.AnimationRegister;
 
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangException;
@@ -77,6 +80,51 @@ class MolangParserCompatibilityTest {
     private static MolangParser parserWithHostFunctions() {
         com.fox.ysmu.client.animation.AnimationRegister.registerMolangHooks();
         return new MolangParser();
+    }
+
+    /**
+     * A ternary whose branch calls a function with a space inside a string argument must parse.
+     *
+     * <p>LaPluma2.5.3 ships fourteen such expressions, e.g.
+     * {@code v.is_swordparticle_1>0?ysm.particle('minecraft:dust 0.75 0.51 1 1', ysm.bone_pivot_abs(...).x/21, …):0},
+     * and the live client log shows the legacy parser rejecting them with
+     * {@code There is no such operator ':'} - the space splits the argument list before the ternary is recognised, so
+     * the trailing {@code ':'} reaches the operator table. Upstream has a real lexer whose string tokens carry spaces
+     * ({@code molang/lexer/MolangLexerImpl.java:271} lexes {@code ':'} as {@code COLON} only outside a literal), so
+     * it never sees this; the port's character-level splitter must instead keep a quoted run together.
+     */
+    @Test
+    void ternaryBranchesWithSpacedStringArgumentsParse() throws Exception {
+        MolangParser parser = parserWithHostFunctions();
+        List<String> shapes = List.of("ysm.particle('minecraft:dust 0.75 0.51 1 1', 1, 2)",
+            "v.a?1:0",
+            "v.a?ysm.particle('minecraft:dust 0.75 0.51 1 1', 1, 2):0",
+            "(v.a||v.b)&&v.c?ysm.particle('minecraft:dust 0.75 0.51 1 1', 1, 2):0",
+            "v.is_swordparticle_1>0?ysm.particle('minecraft:dust 0.75 0.51 1 1', math.max(1, 2)/21, 3):0",
+            // A colon inside a quoted string argument is the shape the pack actually ships, and a splitter that
+            // looks for ':' without tracking quotes would cut the literal in half here.
+            "ctrl.hold('mainhand','#minecraft:swords')?1:0",
+            "(ctrl.hold('mainhand','#minecraft:swords')||ctrl.swing('mainhand','#minecraft:swords'))&&v.a"
+                + "?ysm.particle('minecraft:dust 0.0 0.6 0.7 1', 1, 2):0",
+            // The expression the live log finally named, plus its minimal shapes: the else branch begins with a unary
+            // minus in front of a parenthesised call, `:-(math.clamp(...))`. That is the one thing the shapes above do
+            // not cover - there the minus sits in front of a bare call inside a longer expression.
+            "(query.vertical_speed>0)?(math.clamp((5*query.vertical_speed),0,60)):-(math.clamp((5*query.vertical_speed),-60,0))",
+            "v.a?1:-(2)",
+            "v.a?1:-(math.clamp(1,0,2))",
+            "v.a?-(math.clamp(1,0,2)):0",
+            "-(math.clamp(1,0,2))",
+            "v.a?1:(-2)",
+            "v.a?1:-2");
+        for (String shape : shapes) {
+            try {
+                assertNotNull(parser.parseExpression(shape), "must parse: " + shape);
+            } catch (Throwable failure) {
+                // Re-throw with the reason attached: MolangException's message names only the whole expression, and
+                // the interesting part is what the parser disliked about it.
+                throw new AssertionError("rejected: " + shape + "\n  -> " + failure, failure);
+            }
+        }
     }
 
     @Test
@@ -737,5 +785,114 @@ class MolangParserCompatibilityTest {
         MolangParser parser = new MolangParser();
         assertThrows(MolangException.class, () -> parser.parseExpression("v.a=1}"));
         assertThrows(MolangException.class, () -> parser.parseExpression("v.a={v.b=1;"));
+    }
+
+    /**
+     * The arrow's host as these tests drive it: it records what it was handed and answers a value that makes the
+     * enclosing expression's parenthesisation observable ({@code 100 + right}), so a test can tell
+     * {@code (a->b)*2} from {@code a->(b*2)}.
+     */
+    public static final class RecordingStructHost implements MathBuilder.StructAccessHost {
+
+        double leftSeen = Double.NaN;
+        boolean rightEvaluated = false;
+
+        @Override
+        public IValue access(MathBuilder builder, IValue left, IValue right) {
+            return new IValue() {
+
+                @Override
+                public double get() {
+                    leftSeen = left.get();
+                    rightEvaluated = true;
+                    return 100.0D + right.get();
+                }
+            };
+        }
+    }
+
+    /**
+     * {@code ->} (the arrow expression / struct access) is upstream's highest-precedence binary operator, evaluated by
+     * running its right side in a child evaluator whose subject is the left side's value
+     * ({@code tmp/YesSteveModel-dev-1.20 .../molang/parser/MolangParserImpl.java:313},
+     * {@code runtime/ExpressionEvaluatorImpl.java:58-69}) - that is how {@code ysm.projectile_owner->query.health}
+     * reaches the shooter. This engine's values are plain doubles, so the two halves belong to the host
+     * ({@code MathBuilder.StructAccessHost}); these four tests pin the parse side, the precedence, the honest failure
+     * when no host is installed, and the expression the variables wiki actually documents.
+     */
+    @Test
+    void arrowExpressionIsOneTokenAndAsksTheHostForBothSides() throws Exception {
+        MolangParser parser = new MolangParser();
+        parser.register(new LazyVariable("ysm.owner", 7));
+        RecordingStructHost host = new RecordingStructHost();
+        MathBuilder.StructAccessHost previous = MathBuilder.structAccessHost;
+        MathBuilder.structAccessHost = host;
+        try {
+            IValue value = parser.parseExpression("ysm.owner->query.health");
+            assertEquals(100.0D, value.get(), 0.0D);
+            assertEquals(7.0D, host.leftSeen, 0.0D);
+            assertTrue(host.rightEvaluated, "the right side must be evaluated by the host");
+        } finally {
+            MathBuilder.structAccessHost = previous;
+        }
+    }
+
+    @Test
+    void arrowBindsTighterThanEveryOtherBinaryOperator() throws Exception {
+        MolangParser parser = new MolangParser();
+        parser.register(new LazyVariable("ysm.owner", 7));
+        MathBuilder.StructAccessHost previous = MathBuilder.structAccessHost;
+        MathBuilder.structAccessHost = new RecordingStructHost();
+        try {
+            // (ysm.owner->query.health) * 2 == (100 + 0) * 2. If the arrow bound looser than '*', the host would be
+            // handed `query.health*2` and answer 100 instead - which is what upstream's parser must not do either.
+            assertEquals(200.0D, parser.parseExpression("ysm.owner->query.health*2")
+                .get(), 0.0D);
+            // And tighter than '+': (100 + 0) + 1.
+            assertEquals(101.0D, parser.parseExpression("ysm.owner->query.health+1")
+                .get(), 0.0D);
+        } finally {
+            MathBuilder.structAccessHost = previous;
+        }
+    }
+
+    @Test
+    void arrowWithoutAHostFailsWithTheMissingHostAsTheReason() {
+        MolangParser parser = new MolangParser();
+        parser.register(new LazyVariable("ysm.owner", 7));
+        MathBuilder.StructAccessHost previous = MathBuilder.structAccessHost;
+        MathBuilder.structAccessHost = null;
+        try {
+            // Parse-time failure, and the message names what is missing. The alternative - quietly answering one of
+            // the two sides - is the shape this repository treats as a defect: a pack would see a plausible number
+            // instead of a broken expression.
+            Exception failure = assertThrows(Exception.class, () -> parser.parse("ysm.owner->query.health"));
+            assertTrue(
+                String.valueOf(failure.getMessage())
+                    .contains("host"),
+                "the reason must name the missing host, got: " + failure.getMessage());
+        } finally {
+            MathBuilder.structAccessHost = previous;
+        }
+    }
+
+    @Test
+    void theDocumentedProjectileOwnerArrowExpressionParsesAndEvaluates() throws Exception {
+        // 变量 wiki 的原句（tmp/wiki/molang_misc.md:148，同一句也出现在 log_120.md:225）：
+        //   v.flame_level ?? (v.flame_level = ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand',
+        //   'minecraft:flame'))
+        // 升级前 `->` 连分词都过不去，整条 timeline 指令被丢掉。这里用**真实的**宿主与函数表跑一遍：
+        // 句柄 0（没有登记过 owner）对应上游的"左侧为 null"，因此 ?? 取右侧、结果为 0——不抛异常是这条用例的重点。
+        MathBuilder.StructAccessHost previous = MathBuilder.structAccessHost;
+        try {
+            AnimationRegister.registerMolangHooks();
+            MolangParser parser = new MolangParser();
+            IValue value = parser.parseExpression(
+                "v.flame_level ?? (v.flame_level = ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand', 'minecraft:flame'))");
+            assertNotNull(value);
+            assertEquals(0.0D, value.get(), 0.0D);
+        } finally {
+            MathBuilder.structAccessHost = previous;
+        }
     }
 }

@@ -41,6 +41,9 @@ public final class EntityQueryFrameEvents {
         if (event.phase == TickEvent.Phase.START) {
             // The frame's baseline: what the registrations left in the table, before any draw publishes over it.
             EntityQueryScope.beginFrame();
+            // 箭头表达式的上下文句柄同样按帧计：句柄只在一个求值周期内有效，帧首清空让这张表不随会话增长
+            // （上游的 projectile_owner 是活对象，wiki 自记它"目前存在内存泄漏问题"——那一点不复制）。
+            com.fox.ysmu.client.animation.molang.MolangContextHandles.beginFrame();
         } else {
             // Every draw of this frame is done, so nothing can still be evaluating the names being put back.
             EntityQueryScope.endFrame();

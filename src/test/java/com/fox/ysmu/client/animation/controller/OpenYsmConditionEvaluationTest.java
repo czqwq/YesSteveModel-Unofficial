@@ -52,6 +52,90 @@ class OpenYsmConditionEvaluationTest {
         };
     }
 
+    /**
+     * 记录赋值的 scope：变量名统一小写（Molang 名字大小写不敏感），未定义读 0。
+     */
+    private static ConditionScope recordingScope(Map<String, Double> writes, String name, double value) {
+        Map<String, Double> variables = new HashMap<>();
+        variables.put(
+            name.toLowerCase(java.util.Locale.ROOT),
+            value);
+        return new ConditionScope() {
+
+            @Override
+            public double variableValue(String readName) {
+                Double read = variables.get(
+                    readName.toLowerCase(java.util.Locale.ROOT));
+                return read == null ? 0.0d : read;
+            }
+
+            @Override
+            public double functionValue(String functionName, List<Argument> arguments) {
+                return 0.0d;
+            }
+
+            @Override
+            public void setVariable(String target, double assigned) {
+                writes.put(
+                    target.toLowerCase(java.util.Locale.ROOT),
+                    assigned);
+            }
+        };
+    }
+
+    /**
+     * 条件里的赋值是**表达式**，不是语句专用：上游 {@code ExpressionEvaluatorImpl.java:78-103} 里
+     * {@code var.assign(evaluator, val); return val;} —— 写入目标、返回赋入值。
+     *
+     * <p>LaPluma2.5.3 的 {@code player.parallel_5} 正是靠这个副作用：{@code Default} 的三条转移
+     * ({@code v.Swing_Sword&&(v.attack=0/1/2)}) 由 {@code BedrockAnimationController.java:244-257} **从头逐条求值、
+     * 命中即跳转**——第一条把 {@code v.attack} 写成 0 并返回 0（假），第二条把它写成 1 并返回 1（真）→ 立刻跳转。
+     * 每次左键重新求值一轮就推进一格，所以"点一下出一刀、一直点一直出"；缺这一层时三条守卫全假、
+     * {@code swd1/2/3} 永不进入（本仓此前的实机症状）。
+     */
+    @Test
+    void assignmentInAConditionWritesTheTargetAndYieldsTheAssignedValue() {
+        Map<String, Double> writes = new HashMap<>();
+        ConditionScope scope = recordingScope(writes, "v.swing_sword", 1.0d);
+
+        assertFalse(
+            OpenYsmControllerExpressionEvaluator.evaluateCondition("v.swing_sword&&(v.attack=0)", scope),
+            "(v.attack=0) 求值为 0，条件为假");
+        assertEquals(0.0d, writes.get("v.attack"), 0.0d);
+
+        assertTrue(
+            OpenYsmControllerExpressionEvaluator.evaluateCondition("v.swing_sword&&(v.attack=1)", scope),
+            "(v.attack=1) 求值为 1，条件为真");
+        assertEquals(1.0d, writes.get("v.attack"), 0.0d);
+
+        // 左侧为假时短路，右侧的赋值**不**发生——上游 bool((a, b) -> a.eval() && b.eval()) 同样短路。
+        writes.clear();
+        assertFalse(OpenYsmControllerExpressionEvaluator.evaluateCondition("v.not_swinging&&(v.attack=2)", scope));
+        assertFalse(writes.containsKey("v.attack"), "左侧为假时不该发生赋值");
+    }
+
+    /**
+     * 包本体形态：{@code Default} 的三条守卫按**顺序**逐条求值、命中即停——命中的是第二条
+     * （第一条已把 {@code v.attack} 写成 0，第二条的 {@code (v.attack=1)} 返回 1）。
+     * 也就是说上游语义下从待命挥出的第一刀落在 {@code swd2}，之后每次点击推进一格。
+     */
+    @Test
+    void thePacksThreeGuardsSelectOneStatePerEvaluation() {
+        Map<String, Double> writes = new HashMap<>();
+        ConditionScope scope = recordingScope(writes, "v.swing_sword", 1.0d);
+        String[] guards = { "v.Swing_Sword&&(v.attack=0)", "v.Swing_Sword&&(v.attack=1)",
+            "v.Swing_Sword&&(v.attack=2)" };
+        int selected = -1;
+        for (int i = 0; i < guards.length; i++) {
+            if (OpenYsmControllerExpressionEvaluator.evaluateCondition(guards[i], scope)) {
+                selected = i;
+                break;
+            }
+        }
+        assertEquals(1, selected, "第二条守卫命中 → swd2");
+        assertEquals(1.0d, writes.get("v.attack"), 0.0d);
+    }
+
     /** 变量名/取值交替传入（取值给 int 或 double 都行）。 */
     private static Map<String, Double> vars(Object... namesAndValues) {
         Map<String, Double> map = new HashMap<>();

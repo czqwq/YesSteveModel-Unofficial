@@ -423,6 +423,9 @@ public final class AnimationManager {
     private static final java.util.Set<String> LOGGED_CONTROL_SCRIPT = java.util.concurrent.ConcurrentHashMap
         .newKeySet();
 
+    /** {@link #predicateSwing} 的解析诊断（每 玩家×手×解析结果 只打一条，见那里的说明）。 */
+    private static final Set<String> SWING_TRACE = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /**
      * GeckoLib 控制器名 → wiki 的槽位名（{@code @player_ctrl_<槽位>.molang} 里那个槽位）。
      *
@@ -986,18 +989,47 @@ public final class AnimationManager {
                 event.getController().markNeedsReload();
                 event.getController()
                     .adjustTick(0);
+                if (Config.DEBUG_CONTROLLER) {
+                    // One line per new swing, whatever the model: the swing clips carry their own tick-0 timeline
+                    // instructions that drive the per-swing variation (`v.qh` / `v.qh2` cycle 1-2-3, `v.random`), so
+                    // reading them at the edge says whether those instructions actually re-ran. A model whose
+                    // controller set has no `post_swing` prints nothing from the controller-side diagnostic, which is
+                    // exactly the models most likely to be missed.
+                    ysmu.LOG.info(
+                        "[YSMU-SWING-VARS] qh={} qh2={} random={} jump={} swing_sword={}",
+                        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime.getVariable("v.qh", Double.NaN),
+                        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime.getVariable("v.qh2", Double.NaN),
+                        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime
+                            .getVariable("v.random", Double.NaN),
+                        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime.getVariable("v.jump", Double.NaN),
+                        software.bernie.geckolib3.core.molang.MolangPhysicsRuntime
+                            .getVariable("v.swing_sword", Double.NaN));
+                }
             }
             boolean isMainHand = BackhandCompat.swingingArm(player);
             String conditionalAnimation = findSwingAnimation(event, player, isMainHand);
+            String fallbackAnimation = isMainHand ? "swing_hand" : "swing_offhand";
+            if (Config.DEBUG_CONTROLLER) {
+                // 一次挥动一行，回答"为什么没看见挥动动画"：是判定没到这一步、条件名解析不出来，还是名字不在模型里。
+                // 名称与存在性一起记，因为两者都会让控制器停在旧动画且不报错（unconditional 分支照上游不查存在性）。
+                String key = player.getEntityId() + "|" + isMainHand + "|" + conditionalAnimation;
+                if (SWING_TRACE.add(key) && SWING_TRACE.size() <= 64) {
+                    ysmu.LOG.info(
+                        "[YSMU-SWING] swinging={} mainHand={} conditional='{}' conditionalPresent={} fallback='{}' fallbackPresent={}",
+                        player.isSwingInProgress,
+                        isMainHand,
+                        conditionalAnimation,
+                        hasAnimation(event, conditionalAnimation),
+                        fallbackAnimation,
+                        hasAnimation(event, fallbackAnimation));
+                }
+            }
             if (StringUtils.isNoneBlank(conditionalAnimation)) {
                 return playAnimation(event, conditionalAnimation, ILoopType.EDefaultLoopTypes.PLAY_ONCE);
             }
             // A-02: the offhand fallback name is `swing_offhand` (1.20.1 ItemHoldAnimationPredicate), and both
             // fallbacks go through the exist-check so a model without them stops instead of spamming the log.
-            return playIfPresent(
-                event,
-                isMainHand ? "swing_hand" : "swing_offhand",
-                ILoopType.EDefaultLoopTypes.PLAY_ONCE);
+            return playIfPresent(event, fallbackAnimation, ILoopType.EDefaultLoopTypes.PLAY_ONCE);
         }
         return PlayState.STOP;
     }

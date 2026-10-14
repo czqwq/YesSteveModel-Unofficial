@@ -97,7 +97,27 @@ public final class OpenYsmPlayerControllerRuntime {
         }
 
         String geckoControllerName = event.getController().getName();
-        for (ControllerMatch match : resolveControllers(set, animationId, geckoControllerName)) {
+        java.util.List<ControllerMatch> matches = resolveControllers(set, animationId, geckoControllerName);
+        if (Config.DEBUG_CONTROLLER && allowDebugLog("CTRL-ROUTE-" + geckoControllerName)) {
+            // One line per controller per second, so a run says which definitions a controller resolved to and -
+            // when it resolved to none - which names the model actually declared. Without this the only symptom of a
+            // missing definition is that nothing animates, which is indistinguishable from a state machine that ran
+            // and chose a clip with no visible motion.
+            StringBuilder detail = new StringBuilder();
+            for (ControllerMatch match : matches) {
+                detail.append('[')
+                    .append(match.controller.name)
+                    .append(" preferred=")
+                    .append(match.preferredAnimationName)
+                    .append("] ");
+            }
+            ysmu.LOG.info(
+                "[YSMU-CTRL-ROUTE] {} -> {} match(es) {}",
+                geckoControllerName,
+                matches.size(),
+                detail.toString());
+        }
+        for (ControllerMatch match : matches) {
             PlayState result = tryApplyController(event, player, animationId, geckoControllerName, match);
             if (result != null) {
                 return result;
@@ -340,12 +360,32 @@ public final class OpenYsmPlayerControllerRuntime {
             return null;
         }
         List<software.bernie.geckolib3.core.controller.AnimationController.ConcurrentAnimation> entries = new ArrayList<>();
+        StringBuilder applied = Config.DEBUG_CONTROLLER ? new StringBuilder() : null;
         if (state.playerCount() != 0) {
             for (AnimationEntry entry : state.animations) {
                 // Every entry owns a player even when its condition is false.
+                boolean active = animationEntryActive(entry, context);
                 entries.add(new software.bernie.geckolib3.core.controller.AnimationController.ConcurrentAnimation(
-                    entry.animationName, animationEntryActive(entry, context)));
+                    entry.animationName, active));
+                if (applied != null) {
+                    applied.append('[')
+                        .append(entry.animationName)
+                        .append(active ? ":on" : ":off")
+                        .append("] ");
+                }
             }
+        }
+        if (applied != null && (geckoControllerName.contains("swing") || geckoControllerName.contains("parallel"))
+            && allowDebugLog("APPLY-" + geckoControllerName)) {
+            // Says what the state machine decided and what it handed to the engine. Without it the two failures -
+            // "the machine never left its initial state" and "the machine chose a clip the engine then dropped" -
+            // look identical from the outside: nothing moves.
+            ysmu.LOG.info(
+                "[YSMU-CTRL-APPLY] {} state={} entries={} tick={}",
+                geckoControllerName,
+                state.name,
+                applied.toString(),
+                event.getAnimationTick());
         }
         software.bernie.geckolib3.core.controller.BlendTransition blend = state.blendTransition != null
             ? state.blendTransition : software.bernie.geckolib3.core.controller.BlendTransition.linear(
