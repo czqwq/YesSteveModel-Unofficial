@@ -12,7 +12,9 @@ import java.util.Base64;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
@@ -260,10 +262,19 @@ public final class ServerModelManager {
         LAST_LOAD_TIME_MS = watch.getTime();
     }
 
-    private static void clearModelCaches() {
+    /**
+     * 把三张登记表与来源表恢复成"还没扫描"的状态。{@code reloadPacks()} 每次开局调用它；包内同样可见，因为
+     * 同包的回归用例需要一个能和 reload 起点一样的复位点（用例之间共享静态表，不复位就会互相污染）。
+     */
+    static void clearModelCaches() {
         CACHE_NAME_INFO.clear();
         OPEN_YSM_SYNC_INFO.clear();
         PACKS.clear();
+        // 第 6 项：来源表与冲突计数与登记表同生共死，每轮 reload 从零开始（上游每次选记录都重建一份 Selection）。
+        MODEL_SOURCES.clear();
+        PACK_SOURCES.clear();
+        MODEL_CONFLICTS.set(0);
+        PACK_CONFLICTS.set(0);
     }
 
     private static void createConfigDirectories() {
@@ -277,30 +288,274 @@ public final class ServerModelManager {
         createFolder(CACHE_CLIENT);
     }
 
+    // ---------------------------------------------------------------------------------------------------------------
+    // 来源优先级：同名模型/同名包的唯一裁决点（第 6 项）
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * 扫描根的显式优先级，数值越小越优先。
+     *
+     * <p>上游对应物是 {@code ReloadableModelCatalog.rootPriority}
+     * （{@code model/catalog/ReloadableModelCatalog.java:636-642}）：{@code BUILTIN 0 / AUTH 1 / CUSTOM 2}。
+     * 本仓没有 auth 目录（{@code grep AccessPolicy} 在 {@code src/main/java/com/fox/ysmu} 下 0 命中），所以 1
+     * 空缺；编号保持上游那张表，不重新编号。</p>
+     *
+     * <p>内置身份 = 扫描根是 {@link #BUILT} <b>且</b>该模型被随 jar 发布的契约
+     * {@code assets/ysmu/builtin-index.json} 声明过（{@link BuiltinModelIndex#declaredInternalIds()}）。契约不可读
+     * 时退回"只看扫描根"并 warn 一次：宁可把内置当内置，也不能因为契约缺失让内置输给用户域——那正是本项要固定
+     * 的结果。用户手放在 {@code config/ysmu/builtin} 里、契约没声明的目录因此<b>不是</b>内置模型（第 10 项的
+     * 要求），它们按 {@link #PRIORITY_CUSTOM} 参与裁决。</p>
+     */
+    private static final int PRIORITY_BUILTIN = 0;
+    private static final int PRIORITY_CUSTOM = 2;
+
+    /** 一个已登记来源：磁盘路径 + 优先级 + 扫描根内相对路径（上游 {@code CatalogRecord} 的 location 半边）。 */
+    private static final class RegisteredSource {
+
+        final Path source;
+        final int priority;
+        /** 排序键的一半：上游 {@code CatalogModelLocation.path()}，相对扫描根、{@code /} 分隔。 */
+        final String relativePath;
+
+        RegisteredSource(Path source, int priority, String relativePath) {
+            this.source = source;
+            this.priority = priority;
+            this.relativePath = relativePath;
+        }
+    }
+
+    /**
+     * 登记键 → 生效来源。诊断与冲突日志用它，{@link #isBuiltinModel(ResourceLocation)} 也用它（优先级
+     * {@link #PRIORITY_BUILTIN} 即"服务端正在按内置那份提供服务"）。与 {@link #CACHE_NAME_INFO} 一样在 reload
+     * 线程重建、被网络线程与命令线程读取，所以是并发容器。
+     */
+    private static final Map<String, RegisteredSource> MODEL_SOURCES = new ConcurrentHashMap<>();
+    private static final Map<String, RegisteredSource> PACK_SOURCES = new ConcurrentHashMap<>();
+    private static final AtomicInteger MODEL_CONFLICTS = new AtomicInteger();
+    private static final AtomicInteger PACK_CONFLICTS = new AtomicInteger();
+
+    /** 契约不可读只提示一次（契约本身在进程内不会变）。 */
+    private static volatile boolean builtinContractWarningLogged;
+
+    /**
+     * 登记一个模型。三个扫描器（{@code OpenYsmFormat} / {@code YsmFormat} / {@code FolderFormat}）与索引命中
+     * 路径（{@code ModelIndexCache.restoreIfHit}）都必须走这里，取代原先各自的裸 {@code CACHE_NAME_INFO.put}。
+     *
+     * <h2>裁决规则</h2>
+     * <ol>
+     * <li>同名冲突按来源优先级裁决：{@code BUILTIN(0)} 胜 {@code CUSTOM(2)}。最终结果与今天一致（内置排在扫描
+     * 顺序最后，本来是"后扫的赢"），但从"顺序碰巧"变成"与顺序无关的显式判定"。最典型的是 {@code default}：
+     * {@code config/ysmu/custom/default} 是旧安装残留的扁平模型，{@code config/ysmu/builtin/default} 才是新的
+     * {@code ysm.json} 包，内置必须赢。</li>
+     * <li>同优先级按<b>扫描根内相对路径升序取先者</b>：上游 {@code ReloadableModelCatalog.selectRecords:602-642}
+     * 的排序键就是 {@code comparingInt(rootPriority).thenComparing(location.path())}（{@code :607-610}），记录在
+     * 前先占位、后面的记冲突丢弃。于是 {@code custom/example/} 排 {@code custom/example.ysm} 之前、目录赢，
+     * 与登记顺序无关。</li>
+     * <li>同名但来源不同时一律 {@code ysmu.LOG.warn} 一条带两个来源路径与两个优先级的冲突日志（上游记
+     * {@code ModelScanError}，消息原文是 {@code "Catalog source conflicts with a selected model"}
+     * ，{@code :624-628}）；{@link #modelConflictCount()} 给诊断读本轮条数。</li>
+     * <li>同一磁盘来源的第二次登记是"补齐"，不是冲突：{@code OpenYsmFormat} 先登记 legacy 半边、拿到 17 载荷后
+     * 再登记一次。上游一个 location 只有一条记录，所以这里也不产生第二条冲突。</li>
+     * <li>赢家<b>同时</b>写 {@link #CACHE_NAME_INFO} 与 {@link #OPEN_YSM_SYNC_INFO}：赢了但没有 17 载荷时清掉旧
+     * 的，避免两张表指向两个不同的模型（AGENTS.md 记录过这个隐患）。</li>
+     * </ol>
+     *
+     * <p>排序键完全相等（同优先级 + 同相对路径）时保留先登记者：上游一个 rootKind 下不会有两条同路径记录，
+     * 本仓的 {@link #PRIORITY_CUSTOM} 同时覆盖 {@code custom} 与内置根里未被契约声明的目录，所以这种情况只在本仓
+     * 存在；按上游"先者胜、后者丢弃"的形态处理。</p>
+     *
+     * @param modelId 登记键（{@code ModelIdUtil.getInternalModelId} 的内部 id）
+     * @param info 传统缓存登记；{@code null} 表示这次没产出模型（写缓存失败），整条不登记——与改前一致
+     * @param syncInfo 17 通道载荷，可为 {@code null}
+     * @param source 磁盘来源（模型目录或 {@code .ysm} 文件）
+     * @param scanRoot 来源所属扫描根（{@link #CUSTOM} 或 {@link #BUILT}）
+     */
+    public static void registerModel(String modelId, ServerModelInfo info, OpenYsmSyncInfo syncInfo, Path source,
+        Path scanRoot) {
+        if (modelId == null || info == null || source == null) {
+            return;
+        }
+        int priority = isBuiltinOrigin(scanRoot, modelId) ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
+        if (!claim("model", modelId, priority, source, scanRoot, MODEL_SOURCES, MODEL_CONFLICTS)) {
+            return;
+        }
+        CACHE_NAME_INFO.put(modelId, info);
+        if (syncInfo != null) {
+            OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
+        } else {
+            OPEN_YSM_SYNC_INFO.remove(modelId);
+        }
+    }
+
+    /**
+     * 登记一个包根清单（{@code ysm-pack.json} 的名字/描述/封面）。规则与 {@link #registerModel} 同一套，只是包根
+     * 不参与内置契约：{@code builtin-index.json} 只列<b>模型</b>路径（上游 {@code BuiltinModelIndex} 的
+     * {@code models} 数组同理），所以包根只看扫描根。
+     */
+    public static void registerPack(String hierarchy, ServerPackData pack, Path source, Path scanRoot) {
+        if (hierarchy == null || pack == null || source == null) {
+            return;
+        }
+        int priority = isBuiltinRoot(scanRoot) ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
+        if (claim("model pack", hierarchy, priority, source, scanRoot, PACK_SOURCES, PACK_CONFLICTS)) {
+            PACKS.put(hierarchy, pack);
+        }
+    }
+
+    /** 本轮 reload 里被覆盖或丢弃的同名模型条数（上游把每一条记成一个 {@code ModelScanError}）。 */
+    public static int modelConflictCount() {
+        return MODEL_CONFLICTS.get();
+    }
+
+    /** 包清单那半边的计数，口径同 {@link #modelConflictCount()}。 */
+    public static int packConflictCount() {
+        return PACK_CONFLICTS.get();
+    }
+
+    /**
+     * 该 id 是否由内置那份提供服务：登记表里生效来源的优先级是 {@link #PRIORITY_BUILTIN}。拼写规范化与
+     * {@link #hasModel(ResourceLocation)} 同一套（裸磁盘名、{@code ysmu:} 全名、{@code _name_<hex>} 内部 id），
+     * 因为调用方（{@code api/ModelAuthorization}）拿到的可能是其中任一种。
+     */
+    public static boolean isBuiltinModel(ResourceLocation modelId) {
+        if (modelId == null) {
+            return false;
+        }
+        String path = modelId.getResourcePath();
+        if (isBuiltinRegistration(path) || isBuiltinRegistration(modelId.toString())) {
+            return true;
+        }
+        return isBuiltinRegistration(ModelIdUtil.getInternalModelId(path))
+            || isBuiltinRegistration(ModelIdUtil.getInternalModelId(modelId.toString()));
+    }
+
+    private static boolean isBuiltinRegistration(String modelId) {
+        RegisteredSource registered = MODEL_SOURCES.get(modelId);
+        return registered != null && registered.priority == PRIORITY_BUILTIN;
+    }
+
+    /** 该扫描根是不是内置运行时落点 {@link #BUILT}（两边都按绝对规范化路径比）。 */
+    public static boolean isBuiltinRoot(Path scanRoot) {
+        return scanRoot != null && BUILT.toAbsolutePath()
+            .normalize()
+            .equals(
+                scanRoot.toAbsolutePath()
+                    .normalize());
+    }
+
+    /**
+     * 该 (扫描根, 模型 id) 是否算内置。契约不可读（{@link BuiltinModelIndex#declaredInternalIds()} 为空）时只看
+     * 扫描根并 warn 一次；否则必须被契约声明过——这正是"用户手放在 {@code config/ysmu/builtin} 里的多余文件不算
+     * 内置"的判定。
+     */
+    static boolean isBuiltinOrigin(Path scanRoot, String modelId) {
+        if (!isBuiltinRoot(scanRoot)) {
+            return false;
+        }
+        Set<String> declared = BuiltinModelIndex.declaredInternalIds();
+        if (declared.isEmpty()) {
+            if (!builtinContractWarningLogged && BuiltinModelIndex.fingerprintHex() == null) {
+                builtinContractWarningLogged = true;
+                ysmu.LOG.warn(
+                    "Built-in model contract {} is unreadable, so every model under {} is treated as built-in by "
+                        + "scan root (the built-in copy keeps winning same-id conflicts)",
+                    BuiltinModelIndex.RESOURCE_PATH,
+                    BUILT);
+            }
+            return true;
+        }
+        return declared.contains(modelId);
+    }
+
+    /**
+     * 同名来源的裁决点，也是唯一写 {@link #MODEL_SOURCES}/{@link #PACK_SOURCES} 的地方。
+     *
+     * @return 这次登记是否生效（{@code false} = 保留已登记的那份）
+     */
+    private static boolean claim(String kind, String key, int priority, Path source, Path scanRoot,
+        Map<String, RegisteredSource> sources, AtomicInteger conflicts) {
+        Path normalized = source.toAbsolutePath()
+            .normalize();
+        String relativePath = relativePathOf(scanRoot, source);
+        RegisteredSource existing = sources.get(key);
+        if (existing == null || existing.source.equals(normalized)) {
+            // 首次登记，或同一磁盘来源的第二次登记（OpenYsmFormat 先 legacy 半边、再补 17 载荷）＝补齐。
+            sources.put(key, new RegisteredSource(normalized, priority, relativePath));
+            return true;
+        }
+        conflicts.incrementAndGet();
+        boolean wins = compareRank(priority, relativePath, existing) < 0;
+        // 上游同一句话："Catalog source conflicts with a selected model"（ReloadableModelCatalog:626-627）；
+        // 这里连两个来源路径与两个优先级一起打，才能不看代码就定位是哪一个目录赢了。
+        ysmu.LOG.warn(
+            "Catalog source conflicts with a selected {}: '{}' already comes from {} (priority {}); {} {} (priority {})",
+            kind,
+            key,
+            existing.source,
+            existing.priority,
+            wins ? "replacing it with" : "discarding",
+            normalized,
+            priority);
+        if (wins) {
+            sources.put(key, new RegisteredSource(normalized, priority, relativePath));
+        }
+        return wins;
+    }
+
+    /**
+     * 上游的排序键：先优先级，再相对路径升序（{@code ReloadableModelCatalog.selectRecords:607-610}）。返回负值表示
+     * 新来源排在已登记者前面、应当接替它；相等（同优先级 + 同相对路径）返回 0，由调用方保留先登记者——上游"先者
+     * 占位、后者记冲突丢弃"的同一形态。
+     */
+    private static int compareRank(int priority, String relativePath, RegisteredSource existing) {
+        int byPriority = Integer.compare(priority, existing.priority);
+        return byPriority != 0 ? byPriority : relativePath.compareTo(existing.relativePath);
+    }
+
+    /**
+     * 来源在扫描根内的相对路径（{@code /} 分隔）——上游 {@code CatalogModelLocation.path()} 的对应物，同名冲突的
+     * 次级排序键。来源不在根下时退回整条绝对路径，保证排序仍然确定（不返回 null）。
+     */
+    private static String relativePathOf(Path scanRoot, Path source) {
+        Path normalized = source.toAbsolutePath()
+            .normalize();
+        if (scanRoot != null) {
+            try {
+                return scanRoot.toAbsolutePath()
+                    .normalize()
+                    .relativize(normalized)
+                    .toString()
+                    .replace('\\', '/');
+            } catch (IllegalArgumentException notRelative) {
+                // 不同盘符等情形：落到下面的整条路径。
+            }
+        }
+        return normalized.toString();
+    }
+
     private static void rebuildModelCaches() {
         // M-18:单个模型/单个扫描器失败不得让整次 reload 中断；每一步单独兜底。
         // 包清单先扫：它只读 ysm-pack.json/png，既不影响下面的模型登记，也让 GUI 的文件夹格子在模型到达前
         // 就已有名字与封面。
         //
-        // M1/D9:扫描顺序就是重复 modelId 的胜负规则——三个扫描器登记同一个 id 时都是无条件 put，所以
-        // "后扫的赢"。builtin 排在 custom 之后，于是同名模型最终登记的一定是内置那份。最典型的是 default：
-        // config/ysmu/custom/default 是旧安装残留的扁平模型（它没有 ysm.json，M-21 那条"目录带 ysm.json
-        // 且 id 已在 CACHE_NAME_INFO 里就整棵跳过"的豁免对它不成立，FolderFormat 会照常登记它），
-        // config/ysmu/builtin/default 才是新的 ysm.json 包。顺序反过来会让残留的 legacy 版本覆盖内置版本，
-        // 使 CACHE_NAME_INFO["default"] 与 OPEN_YSM_SYNC_INFO["default"] 指向两个不同的模型。
+        // M1/D9:扫描顺序只是<b>执行顺序</b>，不再是重复 modelId 的胜负规则——三个扫描器都从
+        // {@link #registerModel} 走，胜负由 {@link #PRIORITY_BUILTIN}/{@link #PRIORITY_CUSTOM} 显式裁决（内置赢，
+        // 与顺序无关；同优先级保持"后扫的赢"，见 registerModel 的 javadoc 第 2 条）。builtin 仍排在 custom 之后，
+        // 因为 registerModel 的"同一磁盘来源补齐"与各扫描器的去重（FolderFormat 的 hasOpenYsmRegistration）都建立
+        // 在"OpenYSM 先于 legacy、custom 先于 builtin"这个既有顺序上。
         //
         // 索引侧车（ModelIndexCache）把六个 step 包起来：它为真时各扫描器会跳过已经烘过的源。它任何时候都
         // 只是加速 —— 未命中、索引文件缺失/损坏/版本不符、缓存文件不在，都照旧走下面的完整路径，
         // 所以没有索引时的行为与加它之前逐字节一致。
         ModelIndexCache.beginReload();
         try {
-            runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM, PACKS));
+            runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM));
             runCacheStep("OpenYSM (custom)", () -> {
                 OpenYsmFormat.cacheAllModels(CUSTOM);
                 ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, CUSTOM);
             });
             runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
-            runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT, PACKS));
+            runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT));
             runCacheStep("OpenYSM (builtin)", () -> {
                 OpenYsmFormat.cacheAllModels(BUILT);
                 ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, BUILT);

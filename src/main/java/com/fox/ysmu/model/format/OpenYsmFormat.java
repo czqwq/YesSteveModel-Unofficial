@@ -1,7 +1,5 @@
 package com.fox.ysmu.model.format;
 
-import static com.fox.ysmu.model.ServerModelManager.CACHE_NAME_INFO;
-import static com.fox.ysmu.model.ServerModelManager.OPEN_YSM_SYNC_INFO;
 import static com.fox.ysmu.model.ServerModelManager.removeExtension;
 
 import java.io.File;
@@ -53,7 +51,7 @@ public final class OpenYsmFormat {
                     }
 
                     String diskModelName = toModelName(rootPath, dir);
-                    cacheFolderModel(dir, ModelIdUtil.getInternalModelId(diskModelName),
+                    cacheFolderModel(rootPath, dir, ModelIdUtil.getInternalModelId(diskModelName),
                         ModelIndexCache.Source.of(ModelIndexCache.Scanner.OPEN_YSM, rootPath, dir));
                     return FileVisitResult.SKIP_SUBTREE;
                 }
@@ -75,8 +73,11 @@ public final class OpenYsmFormat {
     /**
      * {@code source} 是这个目录在 {@link ModelIndexCache} 里的身份（扫描器 + 扫描根 + 相对路径）。
      * 命中索引时整段跳过：不解密、不解析 {@code ysm.json} 树、不烘 {@code ModelData}、不加密。
+     * <p>
+     * {@code rootPath} 只用于第 6 项的来源判定（{@code ServerModelManager.registerModel} 需要扫描根来区分内置与
+     * 用户域）；它不参与模型 id 的计算，id 仍由 {@code source} 的相对路径决定。
      */
-    private static void cacheFolderModel(Path dir, String modelId, ModelIndexCache.Source source) {
+    private static void cacheFolderModel(Path rootPath, Path dir, String modelId, ModelIndexCache.Source source) {
         if (ModelIndexCache.restoreIfHit(source, modelId)) {
             return;
         }
@@ -94,7 +95,9 @@ public final class OpenYsmFormat {
             ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, modelId);
             ServerModelInfo info = ModelCacheWriter.write(data);
             if (info != null) {
-                CACHE_NAME_INFO.put(modelId, info);
+                // 第 6 项：唯一登记入口的第一次调用（legacy 半边）。拿到 17 载荷后同一来源会再登记一次＝补齐，
+                // 不产生冲突（见 ServerModelManager.registerModel 的 javadoc 第 4 条）。
+                ServerModelManager.registerModel(modelId, info, null, dir, rootPath);
             }
             // M-01:二进制同步缓存只序列化已烘焙的 bones/cubes/faces,不能用 isBridgeable 做门控
             // ——它对散件模型因 sourceJson != null 恒 true,会写出一个几何为空的缓存。
@@ -108,7 +111,7 @@ public final class OpenYsmFormat {
                 return;
             }
             OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
-            OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
+            ServerModelManager.registerModel(modelId, info, syncInfo, dir, rootPath);
             ModelIndexCache.remember(source, modelId, info, syncInfo);
         } catch (Exception | LinkageError e) {
             // S-02:类加载/链接期错误(缺类、版本不匹配)也应按"跳过并 warn"处理,而不是中断整次扫描。
@@ -167,7 +170,8 @@ public final class OpenYsmFormat {
                 ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, modelId);
                 ServerModelInfo info = ModelCacheWriter.write(data);
                 if (info != null) {
-                    CACHE_NAME_INFO.put(modelId, info);
+                    // 第 6 项：唯一登记入口（先 legacy 半边，拿到 17 载荷后同一来源补齐）。
+                    ServerModelManager.registerModel(modelId, info, null, file, rootPath);
                 }
                 if (!RawYsmModelAdapter.isBinaryPayloadBridgeable(raw)) {
                     ysmu.LOG.warn(
@@ -179,7 +183,7 @@ public final class OpenYsmFormat {
                     return;
                 }
                 OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
-                OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
+                ServerModelManager.registerModel(modelId, info, syncInfo, file, rootPath);
                 ModelIndexCache.remember(source, modelId, info, syncInfo);
             }
         } catch (UnsupportedOperationException e) {

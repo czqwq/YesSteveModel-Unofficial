@@ -1,12 +1,10 @@
 package com.fox.ysmu.model.format;
 
 import static com.fox.ysmu.model.ServerModelManager.ARM_ANIMATION_FILE_NAME;
-import static com.fox.ysmu.model.ServerModelManager.CACHE_NAME_INFO;
 import static com.fox.ysmu.model.ServerModelManager.CACHE_SERVER;
 import static com.fox.ysmu.model.ServerModelManager.EXTRA_ANIMATION_FILE_NAME;
 import static com.fox.ysmu.model.ServerModelManager.MAIN_ANIMATION_FILE_NAME;
 import static com.fox.ysmu.model.ServerModelManager.OPEN_YSM_SERVER_KEY;
-import static com.fox.ysmu.model.ServerModelManager.OPEN_YSM_SYNC_INFO;
 import static com.fox.ysmu.model.ServerModelManager.PASSWORD_FILE;
 
 import java.io.IOException;
@@ -185,6 +183,10 @@ public final class ModelIndexCache {
     /**
      * 命中则把当时登记的两份信息重新放进 {@code CACHE_NAME_INFO}/{@code OPEN_YSM_SYNC_INFO} 并返回 true，
      * 调用方直接跳过该模型的解密/解析/烘焙/加密。未命中或索引不可用返回 false，调用方走原路。
+     *
+     * <p>第 6 项：重放也走 {@code ServerModelManager#registerModel} 这个唯一入口，否则"索引命中"与"完整路径"
+     * 会有两套同名裁决规则。来源就是索引条目记下的 (扫描器, 扫描根, 相对路径)，与当初完整路径登记时同一份，
+     * 所以优先级一致（{@link Source#getRoot()} 就是为此保留的扫描根）。</p>
      */
     public static boolean restoreIfHit(Source source, String modelId) {
         ModelIndexCache cache = active;
@@ -196,11 +198,8 @@ public final class ModelIndexCache {
             return false;
         }
         Entry entry = hit.get();
-        CACHE_NAME_INFO.put(modelId, entry.toServerModelInfo());
-        OpenYsmSyncInfo syncInfo = entry.toOpenYsmSyncInfo();
-        if (syncInfo != null) {
-            OPEN_YSM_SYNC_INFO.put(modelId, syncInfo);
-        }
+        ServerModelManager.registerModel(modelId, entry.toServerModelInfo(), entry.toOpenYsmSyncInfo(),
+            source.getAbsolute(), source.getRoot());
         return true;
     }
 
@@ -650,12 +649,19 @@ public final class ModelIndexCache {
         private final String namespace;
         private final String relativePath;
         private final Path absolute;
+        /**
+         * 扫描根（绝对规范化）。{@link #key()} 只带命名空间，所以它不进索引键；但"命中重放"要按来源优先级登记
+         * （第 6 项：{@code ServerModelManager.registerModel} 只有同时拿到来源与扫描根才能判定内置），
+         * {@code config/ysmu/custom} 与 {@code config/ysmu/builtin} 的命名空间恰好不同名时也不能靠名字猜。
+         */
+        private final Path root;
 
-        private Source(Scanner scanner, String namespace, String relativePath, Path absolute) {
+        private Source(Scanner scanner, String namespace, String relativePath, Path absolute, Path root) {
             this.scanner = scanner;
             this.namespace = namespace;
             this.relativePath = relativePath;
             this.absolute = absolute;
+            this.root = root;
         }
 
         /**
@@ -683,6 +689,8 @@ public final class ModelIndexCache {
             }
             return new Source(scanner, namespace, relativePath,
                 source.toAbsolutePath()
+                    .normalize(),
+                root.toAbsolutePath()
                     .normalize());
         }
 
@@ -713,6 +721,11 @@ public final class ModelIndexCache {
 
         public Path getAbsolute() {
             return absolute;
+        }
+
+        /** 这个源所属扫描根的绝对规范化路径；判内置身份用（见 {@code root} 字段的注释）。 */
+        public Path getRoot() {
+            return root;
         }
 
         @Override

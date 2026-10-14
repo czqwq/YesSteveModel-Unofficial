@@ -75,7 +75,8 @@ public final class FolderFormat {
                     }
                     ServerModelInfo info = cacheModel(dir, modelId);
                     if (info != null) {
-                        CACHE_NAME_INFO.put(modelId, info);
+                        // 第 6 项：唯一登记入口（显式来源优先级 + 同名冲突日志），不再是裸 put。
+                        registerModel(modelId, info, null, dir, rootPath);
                         ModelIndexCache.remember(source, modelId, info, null);
                     }
                     return FileVisitResult.SKIP_SUBTREE;

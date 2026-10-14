@@ -46,10 +46,33 @@ public final class PackFormat {
     private PackFormat() {}
 
     /**
-     * Walks {@code rootPath} and registers every pack root it finds into {@code target}, keyed by the pack's hierarchy
-     * (folder path with a trailing slash). Failures are logged per pack so one broken manifest cannot stop the scan.
+     * 生产入口：把 {@code rootPath} 下发现的每个包根登记进 {@link ServerModelManager#PACKS}，登记走
+     * {@link ServerModelManager#registerPack} 的显式来源优先级（第 6 项）——同名包根因此与模型同名冲突一样：
+     * 内置赢、并打一条带两个来源路径的冲突日志，而不再依赖"后扫的赢"。
+     */
+    public static void cacheAllPacks(Path rootPath) {
+        walk(rootPath, (hierarchy, pack, dir) -> ServerModelManager.registerPack(hierarchy, pack, dir, rootPath));
+    }
+
+    /**
+     * 纯扫描：把结果收进调用方的表，<b>不</b>参与优先级裁决（测试与诊断用；生产走
+     * {@link #cacheAllPacks(Path)}）。两条路径共用同一个 {@link #walk}，认领规则不会分叉。
      */
     public static void cacheAllPacks(Path rootPath, Map<String, ServerPackData> target) {
+        walk(rootPath, (hierarchy, pack, ignored) -> target.put(hierarchy, pack));
+    }
+
+    /** 一个包根的落点：清单层级、清单内容、以及它在磁盘上的目录（冲突日志要它）。 */
+    @FunctionalInterface
+    private interface PackSink {
+
+        void accept(String hierarchy, ServerPackData pack, Path dir);
+    }
+
+    /**
+     * 走 {@code rootPath}，把找到的每个包根交给 {@code sink}。逐个包兜底：一个坏清单不会中断整次扫描。
+     */
+    private static void walk(Path rootPath, PackSink sink) {
         if (rootPath == null || !Files.isDirectory(rootPath)) {
             return;
         }
@@ -63,7 +86,7 @@ public final class PackFormat {
                     }
                     try {
                         ServerPackData pack = read(dir, OpenYsmFormat.toModelName(rootPath, dir) + "/");
-                        target.put(pack.hierarchy, pack);
+                        sink.accept(pack.hierarchy, pack, dir);
                     } catch (Exception | LinkageError e) {
                         ysmu.LOG.warn("Failed to read model pack manifest under {}", dir, e);
                     }
