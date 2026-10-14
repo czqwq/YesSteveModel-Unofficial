@@ -717,7 +717,8 @@ public class ClientEventHandler {
      * join 路径不调用。
      * <p>
      * 清 8 项：模型连接态、远端动画查询、远端动作状态、引擎侧远端 MoLang 变量、NPC 覆盖表、
-     * 宿主推送的动画剪辑表，以及 {@link AnimationManager#clearPlayerState()} 里的两张 per-player
+     * 宿主推送的动画剪辑表、服务端下发的授权事实（{@link ClientModelAccess#clear()}），
+     * 以及 {@link AnimationManager#clearPlayerState()} 里的两张 per-player
      * 进度表（{@code swingProgressByPlayer}/{@code useDurationByPlayer}，ExecPlan 的 A-11，由 t33 交付）、
      * 防滑步的每玩家平滑倍速（{@link MovementSpeedMatcher#clearAll()}）、
      * 客户端音效与音源，以及缩略图的姿态签名缓存（{@link RenderUtil#clearPreviewPoseCache()}：它按模型 id
@@ -736,6 +737,10 @@ public class ClientEventHandler {
         RemoteAnimationVariables.clear();
         // The roaming values belong to the server that just went away, and so do the pending reports for it.
         ClientRoamingStore.clear();
+        // The authorization facts belong to it as well: the next connection publishes its own restricted set and
+        // grants, and until that packet arrives the lock display must stay off (ClientModelAccess.isEmpty()), which
+        // clearing restores. Leaving them would lock tiles according to the previous server's rules.
+        ClientModelAccess.clear();
         NPCData.clear();
         EntityClips.clear();
         // What each entity was shown with dies with the entities of the world that just went away. Cleared here as

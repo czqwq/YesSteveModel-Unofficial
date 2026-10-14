@@ -60,9 +60,16 @@ public final class NetworkHandler {
      * <li>7: serverbound id 101/clientbound id 36 carry full roulette expressions plus the target model identity.
      * The server authorizes only the sender's current model; clients reject stale world/generation/model contexts.
      * This is distinct from numeric ysm.sync arguments. Unknown discriminators must fail the handshake before use.</li>
+     * <li>8: clientbound id 37 ({@code S2CModelGrants}), the authorization facts of upstream's session publication
+     * ({@code network/forge/SessionCollectionPublication.java:71-77} for the grants, {@code :749-759} for each entry's
+     * access): the restricted model ids and the player's granted ids. It is sent on login and after every
+     * {@code /ysm auth} mutation, so a peer that does not know the id meets it on an ordinary action rather than on a
+     * command - FML disconnects that peer on the unknown discriminator, so the handshake has to reject the pair first,
+     * exactly as versions 3, 4, 6 and 7 do. Nothing existing is renumbered or reused; 37 is the first free clientbound
+     * id above the highest in use (36, {@code S2CExecuteRouletteExpression}).</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 7;
+    public static final int NETWORK_PROTOCOL = 8;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -197,6 +204,15 @@ public final class NetworkHandler {
      * id rather than a reuse of the NPC channel.
      */
     private static final int CLIENTBOUND_VEHICLE_MODEL_STATE = 35;
+    /**
+     * The authorization facts (task batch 4): which models are restricted and which of them the receiving player may
+     * wear. Appended above the highest clientbound id in use (36, {@code S2CExecuteRouletteExpression}); see
+     * {@link #NETWORK_PROTOCOL} version 8 for why an older peer has to fail the handshake rather than receive it.
+     * <p>
+     * The sender is {@link com.fox.ysmu.network.ModelGrantSync} (login and every {@code /ysm auth} mutation); the
+     * client half is {@link com.fox.ysmu.client.ClientModelAccess}.
+     */
+    private static final int CLIENTBOUND_MODEL_GRANTS = 37;
 
     public static void init() {
         registerServerboundMessages();
@@ -384,6 +400,12 @@ public final class NetworkHandler {
             S2CVehicleModelState.Handler.class,
             S2CVehicleModelState.class,
             CLIENTBOUND_VEHICLE_MODEL_STATE,
+            Side.CLIENT);
+        // The authorization facts. See CLIENTBOUND_MODEL_GRANTS above for the id and the protocol bump.
+        CHANNEL.registerMessage(
+            S2CModelGrants.Handler.class,
+            S2CModelGrants.class,
+            CLIENTBOUND_MODEL_GRANTS,
             Side.CLIENT);
     }
 
