@@ -1424,14 +1424,21 @@ public class AnimationController<T extends IAnimatable> {
         if (soundListener != null) {
             for (EventKeyFrame<String> soundKeyFrame : currentAnimation.soundKeyFrames) {
                 if (!this.executedKeyFrames.contains(soundKeyFrame) && tick >= soundKeyFrame.getStartTick()) {
-                    SoundKeyframeEvent<T> event = new SoundKeyframeEvent<>(
-                        this.animatable,
-                        tick,
-                        soundKeyFrame.getEventData(),
-                        this);
-                    if (emitting) soundListener.playSound(event);
-
-                    this.executedKeyFrames.add(soundKeyFrame);
+                    // YSMU: only a keyframe that was really emitted may be marked as executed. The holder's
+                    // `emitting` is `applies && !beginning` (see setConcurrentAnimations), so on the frame a state
+                    // enters its clip `emitting` is false for the not-yet-applying holder - marking the frame there
+                    // consumed it silently and forever, which is why a sound authored at tick 0 (the swing's
+                    // `minecraft:item.trident.throw` in LaPluma2.5.3) never reached the listener while the one at
+                    // 2.625s, emitted many frames later, did.
+                    if (emitting) {
+                        SoundKeyframeEvent<T> event = new SoundKeyframeEvent<>(
+                            this.animatable,
+                            tick,
+                            soundKeyFrame.getEventData(),
+                            this);
+                        soundListener.playSound(event);
+                        this.executedKeyFrames.add(soundKeyFrame);
+                    }
                 }
             }
         }
