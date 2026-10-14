@@ -53,6 +53,7 @@ class AssetManagerTest {
         Config.ENABLE_IDLE_ASSET_EVICTION = true;
         // Drop anything another test class left registered, so this class's entry counts are absolute.
         AssetManager.clearAll();
+        releaseThePinnedBuiltInDefault();
         // The grace window is wall-clock driven and has no injectable clock (the reference has none
         // either), so it is disabled here and its semantics are pinned deterministically in
         // ClientModelManagerEvictionSupportTest.
@@ -65,9 +66,29 @@ class AssetManagerTest {
         // another test class in the same JVM.
         Config.ENABLE_IDLE_ASSET_EVICTION = true;
         AssetManager.clearAll();
+        releaseThePinnedBuiltInDefault();
         Config.ENABLE_IDLE_ASSET_EVICTION = false;
         Config.GUI_POST_CLOSE_GRACE_SECONDS = 120;
         ClientModelManager.setGuiOpen(false);
+    }
+
+    /**
+     * The reset the fixtures would otherwise get for free from {@link AssetManager#clearAll}: since that call keeps
+     * the built-in fallback's lease (which this class pins), a test that adopts the fallback's own key would leave
+     * its entry - and the engine's copy of its geometry - behind for the next class in this JVM. The facade's own
+     * {@code release} is the door that still hands a pinned id back, and it is deliberately not what production
+     * code calls for this id.
+     */
+    private static void releaseThePinnedBuiltInDefault() {
+        ResourceLocation defaultMain = ModelIdUtil
+            .getMainId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID));
+        AssetManager.release(defaultMain);
+        GeckoLibCache.getInstance()
+            .getGeoModels()
+            .remove(defaultMain);
+        GeckoLibCache.getInstance()
+            .getAnimations()
+            .remove(defaultMain);
     }
 
     /**
@@ -201,7 +222,66 @@ class AssetManagerTest {
             "and the scan must still collect an ordinary idle model in the same pass");
     }
 
-    /** An open preview GUI suppresses the whole scan, and closing it (grace disabled) lets the scan run. */
+    /**
+     * The session-level release keeps the lease the idle scan keeps. {@link AssetManager#clearAll} is what a model
+     * sync drops the runtime caches with, and the built-in fallback cannot be re-read afterwards: its geometry and
+     * animations are read from {@code builtin/} and never from the encrypted client cache, so a released entry stays
+     * released while every path that would draw a not-yet-published model still assumes it is there. Upstream holds
+     * that lease as a <em>required</em> one ({@code ClientModelRenderTargetManager.java:413-428},
+     * {@code leaseOwnership.addRequired}) and its {@code requireAvailable} (:626-632) demands it for the whole
+     * session; a catalog switch only swaps the catalog.
+     *
+     * <p>Defensive, not a reproduction: nothing adopts the fallback today - {@code registerGeo}/{@code registerAnim}
+     * are gated on {@code hasReloadableClientCache}, which is false for it, and the built-in models only travel the
+     * legacy channel - so what is pinned here is the release door itself, not a player-visible failure.
+     */
+    @Test
+    void clearAllKeepsTheBuiltInDefaultAndReleasesEverythingElse() {
+        ResourceLocation defaultMain = ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, Config.DEFAULT_MODEL_ID));
+        ResourceLocation otherMain = new ResourceLocation("ysmu", "clear_all_other/main");
+        GeoModel defaultGeo = new GeoModel();
+        GeoModel otherGeo = new GeoModel();
+        GeckoLibCache.getInstance()
+            .getGeoModels()
+            .put(defaultMain, defaultGeo);
+        GeckoLibCache.getInstance()
+            .getGeoModels()
+            .put(otherMain, otherGeo);
+        engineAnimations().put(defaultMain, new AnimationFile());
+        engineAnimations().put(otherMain, new AnimationFile());
+        AssetManager.registerGeo(defaultMain, defaultGeo);
+        AssetManager.registerGeo(otherMain, otherGeo);
+        AssetManager.registerAnim(defaultMain, animationMap("clear_all_default"));
+        AssetManager.registerAnim(otherMain, animationMap("clear_all_other"));
+        assertEquals(2, AssetManager.geoSize());
+        assertEquals(2, AssetManager.animSize());
+
+        AssetManager.clearAll();
+
+        assertSame(
+            defaultGeo,
+            GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(defaultMain),
+            "the built-in default's geometry must survive a session-level clear");
+        assertNotNull(engineAnimations().get(defaultMain), "and its animation payload with it");
+        assertNull(
+            GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(otherMain),
+            "an ordinary model's geometry leaves with the connection it came from");
+        assertNull(engineAnimations().get(otherMain), "and so do its animations");
+        assertEquals(1, AssetManager.geoSize(), "only the default's geometry entry stays registered");
+        assertEquals(1, AssetManager.animSize(), "and only its animation entry");
+        assertTrue(
+            AssetManager.managesAnimations(defaultMain),
+            "the adoption record stays beside the resource it describes, so the pin and the record agree");
+        assertFalse(AssetManager.managesAnimations(otherMain), "while an ordinary model is forgotten, exactly as before");
+    }
+
+    /**
+     * An open preview GUI suppresses the whole scan, and closing it (grace disabled) lets the scan run.
+     */
     @Test
     void anOpenPreviewGuiSuppressesTheEvictionScan() {
         ResourceLocation id = new ResourceLocation("ysmu", "gui/main");

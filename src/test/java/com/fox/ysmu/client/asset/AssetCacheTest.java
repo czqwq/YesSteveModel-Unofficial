@@ -149,6 +149,28 @@ class AssetCacheTest {
         assertEquals(Collections.singletonList("ysmu:a/main"), provider.released);
     }
 
+    /**
+     * The keep-predicate form: entries the predicate claims survive as registered, READY entries - a reader must not
+     * pay a reload for one - while everything else goes exactly where {@code clear()} sends it. The facade uses it so
+     * the built-in fallback's required lease outlives a session-level clear ({@code AssetManager.clearAll}), and the
+     * unrecoverable part of that contract is {@code provider.release}: the kept entry must not be handed to it.
+     */
+    @Test
+    void clearExceptKeepsTheMatchingEntriesResidentAndClearsTheRest() {
+        RecordingProvider provider = new RecordingProvider();
+        AssetCache<String, String> cache = new AssetCache<>(provider, 0L);
+        cache.register("ysmu:default/main", "geo", 0L);
+        cache.register("ysmu:other/main", "geo", 0L);
+
+        long before = cache.generation();
+        cache.clearExcept(key -> key.startsWith("ysmu:default/"));
+
+        assertEquals(Collections.singletonList("ysmu:other/main"), provider.released);
+        assertEquals(1, cache.size(), "the kept entry stays in the table");
+        assertEquals("geo", cache.get("ysmu:default/main"), "and stays READY, so reading it starts no background load");
+        assertTrue(cache.generation() > before, "a clear that keeps an entry still invalidates in-flight loads");
+    }
+
     /** release() drops the entry and releases the value; a second call is a no-op. */
     @Test
     void releaseRemovesTheEntryAndIsIdempotent() {

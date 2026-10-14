@@ -192,20 +192,50 @@ public final class AssetCache<K, V> {
     /** 释放所有 READY 资源并清空状态（断线 / /ysm reload 时调用）。
      *  <p>同时推进 {@link #generation}：此刻还在后台跑的加载结果回来时会被判为过期并丢弃，
      *  不会把刚被清掉的资源重新 {@code apply} 回 GeckoLib 缓存（旧实现会复活一个已经
-     *  不属于任何登记项的资源，既泄漏又可能让"应该消失的模型"继续渲染）。 */
+     *  不属于任何登记项的资源，既泄漏又可能让"应该消失的模型"继续渲染）。
+     *  <p>需要留下必需租约的调用方走 {@link #clearExcept}。 */
     public void clear() {
+        clearExcept(key -> false);
+    }
+
+    /**
+     * {@link #clear()} 的保留版：满足 {@code keep} 的 READY 条目<b>连同登记项与值一起留下</b>，其余照 {@link #clear()}
+     * 释放并丢弃。
+     * <p>
+     * 存在的理由与 {@link #touchIf} 相同，只是用在另一个门上：一个"必需租约"（内置兜底模型 default 的几何与
+     * 动画）不能在任何一次会话级清理里被释放 —— 上游把它交给
+     * {@code ClientModelRenderTargetManager#getOrStartRequired} 并由
+     * {@code leaseOwnership.addRequired(lease)} 持有（{@code ClientModelRenderTargetManager.java:413-428}），
+     * 再在 {@code requireAvailable}（同文件 :626-632）里要求它整会话可用；{@link #touchIf} 把同一批条目钉在
+     * 空闲回收之外，这里则是同一个判定用在 {@link #clear()} 上。
+     * <p>
+     * 其余语义与 {@link #clear()} 逐字一致，包括两点容易被漏掉的：
+     * <ul>
+     *   <li>{@link #generation} 照常推进：被丢弃条目的在途加载结果回来时会因代次不符或登记项已被移除而被丢弃，
+     *       不会把刚清掉的资源重新 {@code apply} 回 GeckoLib 缓存；</li>
+     *   <li>{@code keep} 只对 READY 条目生效。非 READY 的条目没有可保留的值，且本方法刚作废了在途加载 ——
+     *       留下一个 LOADING 条目只会让它永远等一个再也不会到来的结果，所以它们和 {@link #clear()} 一样被丢弃，
+     *       下次 {@link #get} 重新发起加载。同理被保留的条目不参与容量/空闲簿记之外的任何判断。</li>
+     * </ul>
+     *
+     * @param keep 判定"哪些 READY 条目属于必需租约、必须留下"；{@code clear()} 等价于 {@code clearExcept(key -> false)}
+     */
+    public void clearExcept(java.util.function.Predicate<K> keep) {
         generation.incrementAndGet();
         for (Map.Entry<K, Entry<V>> me : entries.entrySet()) {
             Entry<V> e = me.getValue();
             if (e.getState() == State.READY) {
+                if (keep.test(me.getKey())) {
+                    continue; // 必需租约：登记项与值都留下
+                }
                 try {
                     provider.release(me.getKey(), e.value, ReleaseMode.DROP_HEAP);
                 } catch (Throwable t) {
                     ysmu.LOG.warn("Failed to release {} during clear: {}", me.getKey(), t.getMessage());
                 }
             }
+            entries.remove(me.getKey(), e);
         }
-        entries.clear();
     }
 
     /** 当前登记的条目数（诊断用）。 */

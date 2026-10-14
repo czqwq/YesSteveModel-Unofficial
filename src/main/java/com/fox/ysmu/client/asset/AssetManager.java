@@ -217,16 +217,28 @@ public final class AssetManager {
     /**
      * 释放全部资源并清空状态（断线 / /ysm reload 时调用）。关闭时为 no-op。
      * <p>
-     * {@link #ADOPTED_ANIMATIONS} 一并清空：它记录的是「这一轮会话里本子系统接管了哪些模型」，
-     * 会话结束就跟着 {@code ClientModelManager.clearRuntimeModelCaches} 的其余状态一起作废。
+     * <b>内置兜底模型（default）的条目留下</b>，判定与 {@link #tick} 的钉住是同一个
+     * （{@code ClientModelManager::isDefaultModelId}）：它的租约是"必需的、不可撤销的"，上游用
+     * {@code getOrStartRequired} + {@code leaseOwnership.addRequired(lease)} 持有兜底租约
+     * （{@code ClientModelRenderTargetManager.java:413-428}），并在 {@code requireAvailable}
+     * （同文件 :626-632）里要求它整会话可用；会话级清理只换目录，从不交还它。在这里释放它不可恢复：
+     * 它的几何/动画从 {@code builtin/} 本地读盘、没有加密客户端缓存可重读
+     * （{@link ClientModelManager#hasReloadableClientCache} 对它是假），而
+     * {@code ClientModelManager.isFallbackAvailable()} 仍会答真 —— 渲染路径于是照常取消原版渲染却画不出
+     * 东西。这也是选"保留"而不是"置 {@code fallbackAvailable} 为假"的原因：后者在资源其实还在时是假降级。
+     * <p>
+     * {@link #ADOPTED_ANIMATIONS} 也一起作废 —— 只保留兜底模型自己的条目：它记录的是"本子系统接管了这个
+     * 模型的空闲回收与重加载"，留下的资源与留下的记录必须成对，否则下一轮 {@code tick} 会照常钉住一个登记表
+     * 已宣布不认识的条目。其余部分（这一轮会话里接管的普通模型）随
+     * {@code ClientModelManager.clearRuntimeModelCaches} 的其余状态一起作废。
      */
     public static void clearAll() {
         if (!isEnabled()) {
             return;
         }
-        GEO.clear();
-        ANIM.clear();
-        ADOPTED_ANIMATIONS.clear();
+        GEO.clearExcept(ClientModelManager::isDefaultModelId);
+        ANIM.clearExcept(ClientModelManager::isDefaultModelId);
+        ADOPTED_ANIMATIONS.removeIf(mainId -> !ClientModelManager.isDefaultModelId(mainId));
     }
 
     /**
