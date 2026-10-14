@@ -19,6 +19,7 @@ import com.fox.ysmu.model.format.ServerPackData;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.C2SCompleteFeedback17;
 import com.fox.ysmu.network.message.S2CModelSyncPayload17;
+import com.fox.ysmu.network.message.SyncModelFiles;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
@@ -82,7 +83,7 @@ public final class OpenYsmModelSyncServer {
         // the attempt that is currently running.
         int sessionId = 1 + RANDOM.nextInt(Integer.MAX_VALUE);
         PlayerSyncState state = new PlayerSyncState(player, sessionId, createClientCacheKey(serverKey));
-        state.allowedModels.addAll(snapshotAllowedModels());
+        state.allowedModels.addAll(snapshotAllowedModels(player));
         SYNC_STATES.put(playerId, state);
         ysmu.LOG.info(
             "Starting OpenYSM model sync for {}: models={}, session={}",
@@ -94,13 +95,30 @@ public final class OpenYsmModelSyncServer {
     }
 
     /**
-     * Snapshot of the model index. {@code OPEN_YSM_SYNC_INFO} is a plain HashMap that {@code /ysm reload} clears and
-     * rebuilds, and an exception thrown while iterating it would reach FML's packet handling and disconnect the
-     * player, so the copy is defensive: on a concurrent reload this round simply syncs nothing.
+     * Snapshot of the model index this player may be offered. {@code OPEN_YSM_SYNC_INFO} is a plain HashMap that
+     * {@code /ysm reload} clears and rebuilds, and an exception thrown while iterating it would reach FML's packet
+     * handling and disconnect the player, so the copy is defensive: on a concurrent reload this round simply syncs
+     * nothing.
+     *
+     * <p>The copy is filtered through the asset gate ({@code SyncModelFiles.mayTransferAssets}), the same decision the
+     * legacy channel applies to its md5 list. With {@code RestrictedAuth} on, advertising a
+     * restricted model to a player who may not receive it is not harmless: packet 03 is what makes the client hash its
+     * own cache and load a hit without asking the server for anything
+     * ({@code client/sync/OpenYsmModelSyncClient.handlePacket03}), so the index entry alone would hand that player the
+     * model while the payload is refused. Upstream keeps the catalog published - its presentation is a separate
+     * payload and {@code ServerAssetTransfers.java:299,447} still serves PREVIEW/ICON - but this port's presentation
+     * rides inside the model payload, so there is no smaller unit to allow (recorded in
+     * {@code .agent/phase53-model-authorization.md}). With the switch off (the default) nothing is filtered.</p>
      */
-    private static List<OpenYsmSyncInfo> snapshotAllowedModels() {
+    private static List<OpenYsmSyncInfo> snapshotAllowedModels(EntityPlayerMP player) {
         try {
-            return new ArrayList<>(ServerModelManager.OPEN_YSM_SYNC_INFO.values());
+            List<OpenYsmSyncInfo> allowed = new ArrayList<>();
+            for (OpenYsmSyncInfo info : ServerModelManager.OPEN_YSM_SYNC_INFO.values()) {
+                if (SyncModelFiles.mayTransferAssets(player, info.getModelId())) {
+                    allowed.add(info);
+                }
+            }
+            return allowed;
         } catch (RuntimeException e) {
             ysmu.LOG.warn("Skipping OpenYSM model sync because the server model index is being reloaded", e);
             return new ArrayList<>();
@@ -433,6 +451,21 @@ public final class OpenYsmModelSyncServer {
                 for (OpenYsmSyncInfo model : requested) {
                     if (!isActive(playerId, state)) {
                         return;
+                    }
+                    // The asset gate, at the moment a model's payload is queued. The index above was already filtered
+                    // for this player, so this can only refuse a model whose authorization changed while the round was
+                    // in flight - which is exactly upstream's admission shape: ServerAssetTransfers.java:234-243 asks
+                    // ServerModelSession.canRequest:205-221 when the chunk is requested, not when the catalog was
+                    // published. The N-11 skipped marker is this port's existing refusal - no payload bytes, and the
+                    // client's pending counter still moves so the round finishes instead of waiting out
+                    // Config.PLAYER_SYNC_TIMEOUT.
+                    if (!SyncModelFiles.mayTransferAssets(state.player, model.getModelId())) {
+                        ysmu.LOG.info(
+                            "Withholding restricted model {} from {} (RestrictedAuth)",
+                            model.getModelId(),
+                            state.playerName);
+                        sendPayload(playerId, state, createPacket05Skipped(state, model));
+                        continue;
                     }
                     File cacheFile = ServerModelManager.CACHE_SERVER.resolve(model.getCacheFileName())
                         .toFile();
