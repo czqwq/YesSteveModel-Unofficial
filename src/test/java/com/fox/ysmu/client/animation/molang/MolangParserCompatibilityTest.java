@@ -600,9 +600,9 @@ class MolangParserCompatibilityTest {
         // except `(`, and the `(` branch pushes the buffered `-` as its own symbol, so the symbol list is
         // `[-, [1], /, 25]`. `parseSymbols` then split at the `/`, recursed into `[-, [1]]`, found no operator
         // (lastOp == -1) and threw IndexOutOfBoundsException from `operationForOperator(symbols.get(-1))` - the whole
-        // expression died. `-(1)` alone only worked because it has no binary operator, and `-(1)+25` / `-(1)-(2)`
-        // only worked because `+`/`-` rank below `*`/`/` in the split rule. The logged form
-        // `-(ysm.bone_pivot_abs('RightHandPTC').z)/25` is exactly the failing shape.
+        // expression died. `-(1)` alone only worked because it has no binary operator; `-(1)+25` / `-(1)-(2)` parsed
+        // but with every following additive term pulled inside the negation, which the assertions below pin. The logged
+        // form `-(ysm.bone_pivot_abs('RightHandPTC').z)/25` is exactly the failing shape.
         MolangParser parser = parserWithHostFunctions();
 
         assertEquals(-0.04D, parser.parseExpression("-(1)/25")
@@ -620,6 +620,15 @@ class MolangParserCompatibilityTest {
             .get(), 0.0D);
         assertEquals(-1.5D, parser.parseExpression("2*-(3)/4")
             .get(), 0.0D);
+        // ... and "the rest of the expression" includes every following `+`/`-` term, which the negation used to
+        // swallow: `-(A)+B` was read as `-((A)+B)`. `*`/`/` hid it (associativity), and a `+ 0` term hid it too
+        // (the assertion above), so only a non-zero additive term shows the sign flip.
+        assertEquals(24.0D, parser.parseExpression("-(1)+25")
+            .get(), 0.0D);
+        assertEquals(-26.0D, parser.parseExpression("-(1)-25")
+            .get(), 0.0D);
+        assertEquals(-17.0D, parser.parseExpression("10*-(2)+3")
+            .get(), 0.0D);
         // Subtraction and negative literals keep their meanings - a bare `-` is unary only in operand position, so
         // the binary cases must not change.
         assertEquals(7.0D, parser.parseExpression("10-3")
@@ -633,6 +642,51 @@ class MolangParserCompatibilityTest {
         // The human-readable spacing still tokenises the same way.
         assertEquals(7.0D, parser.parseExpression("10 - 3")
             .get(), 0.0D);
+    }
+
+    /**
+     * Wine Fox's jump clip verbatim ({@code wine_fox/06_hanfu}'s {@code jump} animation; 04_magic and the rest of the
+     * pack are written the same way): a leading {@code -(…)} followed by a ternary term. That ternary is what made this
+     * look like a ternary bug - the negation used to pull the whole {@code +(has_offhand?-50:-80)} term inside itself,
+     * so the forearm evaluated to {@code +88°} where the pack asked for {@code -72°} and pointed backwards for the whole
+     * airborne phase. The renderer's X-axis flip turned that into the {@code -88°} / {@code -95.9°} the live client log
+     * records for {@code LeftForeArm} / {@code RightForeArm}. {@code default} and the packs that render fine were
+     * unaffected because their jump clips are numeric keyframes, which never reach this parser.
+     */
+    @Test
+    void wineFoxJumpClipNegationBindsToItsGroup() throws Exception {
+        MolangParser jump = parserWithHostFunctions();
+        jump.parseExpression("v.zz_jump_vs=-3.1")
+            .get();
+        jump.parseExpression("v.zz_jump_offhand=0")
+            .get();
+        // `(vs/|vs|*(1-e^(-0.1|vs|))*30)` is -8 at vs = -3.1, so the clip's `-(…)` makes it +8.
+        double negatedTerm = 30 * (1 - Math.exp(-0.1 * 3.1));
+        String jumpForeArm = "-(v.zz_jump_vs/math.abs(v.zz_jump_vs)*(1-math.exp(-0.1*math.abs(v.zz_jump_vs)))*30)"
+            + "+(v.zz_jump_offhand?-50:-80)";
+        assertEquals(
+            negatedTerm - 80,
+            jump.parseExpression(jumpForeArm)
+                .get(),
+            1.0E-9D,
+            "the leading minus must not swallow the ternary term");
+        jump.parseExpression("v.zz_jump_offhand=1")
+            .get();
+        assertEquals(
+            negatedTerm - 50,
+            jump.parseExpression(jumpForeArm)
+                .get(),
+            1.0E-9D,
+            "the offhand branch of the ternary stays selected");
+        // The upper arm's Z channel of the same clip has no leading `-(…)`, so it was never affected and the pack's own
+        // sign survives - which is why only the forearms pointed the wrong way.
+        assertEquals(
+            -20.0D - negatedTerm,
+            jump.parseExpression(
+                "-20+(v.zz_jump_vs/math.abs(v.zz_jump_vs)*(1-math.exp(-0.1*math.abs(v.zz_jump_vs)))*30)")
+                .get(),
+            1.0E-9D,
+            "a leading negative literal is a merged token and keeps its meaning");
     }
 
     @Test

@@ -236,12 +236,20 @@ public class MathBuilder {
      * Resolves a unary minus that {@code breakdownChars} left as its own symbol, or {@code null} when there is none.
      * <p>
      * A bare {@code "-"} is at a unary position exactly when it is the first symbol or follows an operator or a
-     * comma; every other place it is the binary subtraction and must reach {@link #seekLastOperator}. The operator
-     * immediately to the left is replaced along with the minus, so precedence is not reinterpreted: for
-     * {@code v.a = -(1)*25} this evaluates {@code (-1)*25}, not {@code -(1*25)}.
+     * comma; every other place it is the binary subtraction and must reach {@link #seekLastOperator}. A bare
+     * {@code "-"} can only appear before a parenthesised group, because the character loop folds a minus into the
+     * token buffer for every other follower; that is why this one shape covers what the logs show.
      * <p>
-     * A bare {@code "-"} can only appear before a parenthesised group, because the character loop folds a minus into
-     * the token buffer for every other follower; that is why this one shape covers what the logs show.
+     * The negation binds to that group alone and the surrounding operators are combined afterwards, which is upstream's
+     * shape: {@code MolangParserImpl.java:156-158} parses {@code -x} as
+     * {@code UnaryExpression(ARITHMETICAL_NEGATION, parseCompoundExpression(…, 2800))}, and that 2800 ranks above
+     * {@code MUL}/{@code DIV} (2600) and {@code ADD}/{@code SUB} (2400) in {@code BinaryExpression.Op}
+     * ({@code BinaryExpression.java:116-132}) — so {@code -(A)+(B)} is {@code (-A)+(B)}, never {@code -((A)+(B))}.
+     * <p>
+     * Negating the whole remainder instead — what this method used to do — flipped the sign of every following
+     * {@code +}/{@code -} term. Wine Fox's jump clips are written exactly that way
+     * ({@code -(vs/|vs|)*(1-exp(-0.1*|vs|))*30 + (ysm.has_offhand?-50:-80)}), so the parser produced
+     * {@code +88°} where the pack asked for {@code -72°} and both forearms pointed backwards.
      */
     private IValue parseLeadingUnaryMinus(List<Object> symbols) throws Exception {
         int size = symbols.size();
@@ -254,12 +262,15 @@ public class MathBuilder {
             if (!operandPosition || i + 1 >= size) {
                 return null;
             }
-            IValue value = new Negative(this.parseSymbols(symbols.subList(i + 1, size)));
-            if (i == 0) {
-                return value;
-            }
-            IValue left = this.parseSymbols(symbols.subList(0, i - 1));
-            return new Operator(this.operationForOperator((String) symbols.get(i - 1)), left, value);
+            // Negate the operand that follows the minus, splice the negated value back in its place and let the
+            // ordinary operator machinery combine the rest: `-(A)+(B?-50:-80)` reads `(-A)+(B?-50:-80)`, `10*-(2)+3`
+            // reads `10*(-2)+3`.
+            IValue operand = new Negative(this.valueFromObject(symbols.get(i + 1)));
+            List<Object> spliced = new ArrayList<>(size);
+            spliced.addAll(symbols.subList(0, i));
+            spliced.add(operand);
+            spliced.addAll(symbols.subList(i + 2, size));
+            return this.parseSymbols(spliced);
         }
         return null;
     }
@@ -574,6 +585,11 @@ public class MathBuilder {
                     }
                 }
             }
+        } else if (object instanceof IValue) {
+            // An already-parsed value spliced into the symbol list by {@link #parseLeadingUnaryMinus}: the negated
+            // operand has to take part in the surrounding operators as a single primary. Operators are only ever
+            // recognised on String tokens ({@link #isOperator(Object)}), so this token cannot be mistaken for one.
+            return (IValue) object;
         } else if (object instanceof List) {
             return new Group(this.parseSymbols((List<Object>) object));
         }
