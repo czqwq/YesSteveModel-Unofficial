@@ -65,7 +65,7 @@ public class SetModelAndTexture implements IMessage {
         /**
          * Applies the client's selection after the authorization check.
          * <p>
-         * <b>Authorization (E1).</b> Before this check the handler turned whatever string the client sent straight
+         * <b>Authorization.</b> Before this check the handler turned whatever string the client sent straight
          * into a {@code ResourceLocation} and stored it - any client could apply any model. Upstream decides this in
          * {@code ServerModelSession.select} ({@code
          * tmp/YesSteveModel-dev-1.20/.../model/session/server/ServerModelSession.java:147-180}): an unauthorized
@@ -74,7 +74,8 @@ public class SetModelAndTexture implements IMessage {
          * into the player's persistence ({@code network/forge/SessionProtocolHandler.java:563-573}). The port has no
          * separate session layer, so the same observable outcome is produced directly: an unauthorized selection is
          * replaced by the default selection and the player is told why. {@code api/ModelAuthorization} holds the
-         * decision and its default-allow rule.
+         * decision - "public, or granted" - and the model's access comes from the live registration table, i.e. a
+         * model is restricted exactly when its effective source is {@code config/ysmu/auth}.
          */
         private static void handleEEP(EntityPlayerMP sender, String model, String texture) {
             ResourceLocation modelLoc = model.isEmpty() ? null : new ResourceLocation(model);
@@ -90,6 +91,13 @@ public class SetModelAndTexture implements IMessage {
                         "message.yes_steve_model.auth.denied",
                         ModelIdUtil.getModelDisplayName(modelLoc)));
                 applySelection(sender, defaultModel, ExtendedModelInfo.defaultTextureId(defaultModel));
+                // Upstream's selectDefault/selectBuiltinDefault both drop the forced-selection exception
+                // (capability/ModelSelectionService.java:48,61,70). The EEP's own keep-rule already drops it when the
+                // model id changes (setModelAndTexture), but the reset must not depend on that coincidence.
+                ExtendedModelInfo reset = ExtendedModelInfo.get(sender);
+                if (reset != null) {
+                    reset.clearIgnoreGrants();
+                }
                 return;
             }
             applySelection(sender, modelLoc, textureLoc);

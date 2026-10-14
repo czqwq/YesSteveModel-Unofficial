@@ -34,6 +34,21 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
     /** The count this side has already acted on; not serialized, it belongs to whoever is rendering. */
     private int consumedReplayCount;
     private boolean dirty; // dirty 标志可以保留，用于客户端渲染逻辑判断是否需要更新
+    /**
+     * Whether the current selection may bypass the model-authorization grant check - upstream's
+     * {@code ModelInfoCapability.ignoreGrants} ({@code capability/ModelInfoCapability.java:18,43-58}). It is set only
+     * by {@link #setCommandSelection} (an operator's {@code /ysm model set ... true}) and read by
+     * {@link #ignoresGrantsFor(ResourceLocation)}, which the selection gate, the asset gate
+     * ({@code api/ModelAuthorization.canRequest}) and the two revoke paths of {@code /ysm auth} all consult.
+     * <p>
+     * It is stored per player rather than per session because upstream's reason for it is exactly that: an operator's
+     * forced selection must survive a logout, a restart and a catalog reload, which is also why upstream writes it to
+     * NBT ({@code ModelInfoCapability.java:179,197}). The port's counterpart of upstream's {@code mandatory} flag is
+     * deliberately absent: that flag exists to push a selection to a client without the mod channel
+     * ({@code event/CapabilityEvent.java:138,169,200}), and this port's sync has no such gate, so carrying it would be
+     * dead state (AGENTS.md).
+     */
+    private boolean ignoreGrants;
 
     public ExtendedModelInfo(EntityPlayer player) {
         this.player = player;
@@ -51,9 +66,49 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
                 selectTexture);
             return;
         }
+        // 上游 ModelInfoCapability.setModelAndTexture:26-35：普通选择只有在"选的还是同一个模型"时才保留
+        // ignoreGrants，换一个模型就作废——强制选择是绑定在具体模型上的，不是一张永久通行证。
+        boolean keepIgnoreGrants = this.ignoreGrants && modelId.equals(this.modelId);
         this.modelId = modelId;
         this.selectTexture = selectTexture;
+        this.ignoreGrants = keepIgnoreGrants;
         markDirty();
+    }
+
+    /**
+     * The command form of a selection: {@code /ysm model set <targets> <model> <texture> [ignore_auth]} - upstream's
+     * {@code ModelInfoCapability.setCommandSelection} ({@code capability/ModelInfoCapability.java:38-53}), minus its
+     * {@code mandatory} flag (see the field note).
+     *
+     * @param ignoreGrants whether this selection may bypass the grant check for as long as it is the current one
+     */
+    public void setCommandSelection(ResourceLocation modelId, ResourceLocation selectTexture, boolean ignoreGrants) {
+        setModelAndTexture(modelId, selectTexture);
+        if (this.modelId != null && this.modelId.equals(modelId)) {
+            this.ignoreGrants = ignoreGrants;
+            markDirty();
+        }
+    }
+
+    /**
+     * Whether the current selection may ignore the grant table for {@code modelId}; upstream's
+     * {@code ModelInfoCapability.ignoresGrantsFor:56-58} ({@code ignoreGrants && Objects.equals(this.modelId, modelId)}).
+     */
+    public boolean ignoresGrantsFor(ResourceLocation modelId) {
+        return this.ignoreGrants && modelId != null && modelId.equals(this.modelId);
+    }
+
+    /**
+     * Drops the forced-selection exception. Upstream's {@code clearIgnoreGrants} is package-private because its only
+     * callers live in the same package ({@code ModelSelectionService.java:48,61,70}, all three on a path that resolves
+     * the default selection); here it is public because the port's equivalent callers sit in {@code network.message}
+     * and {@code command}.
+     */
+    public void clearIgnoreGrants() {
+        if (this.ignoreGrants) {
+            this.ignoreGrants = false;
+            markDirty();
+        }
     }
 
     public void copyFrom(ExtendedModelInfo source) {
@@ -67,6 +122,7 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
         this.animation = source.animation;
         this.playAnimation = source.playAnimation;
         this.animationReplayCount = source.animationReplayCount;
+        this.ignoreGrants = source.ignoreGrants;
         markDirty();
     }
 
@@ -195,6 +251,9 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
         properties.setString("animation", this.animation);
         properties.setBoolean("play_animation", this.playAnimation);
         properties.setInteger("animation_replay_count", this.animationReplayCount);
+        // 上游写的是 "ignore_grants"（ModelInfoCapability.java:179），这里保持同一个键名与同一个读回语义
+        // （:197：没有模型 id 时为 false，所以一条没有选择的选择不算强制选择）。
+        properties.setBoolean("ignore_grants", this.ignoreGrants);
 
         compound.setTag(EXT_PROP_NAME, properties);
     }
@@ -212,6 +271,7 @@ public class ExtendedModelInfo implements IExtendedEntityProperties {
             this.playAnimation = properties.getBoolean("play_animation");
             // A missing key reads as 0, which is the right default for an older sender.
             this.animationReplayCount = properties.getInteger("animation_replay_count");
+            this.ignoreGrants = properties.getBoolean("ignore_grants");
         }
     }
 

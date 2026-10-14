@@ -8,59 +8,44 @@ import javax.annotation.Nullable;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
-import com.fox.ysmu.Config;
 import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.model.catalog.CatalogAccess;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 /**
- * The server-side authority for <em>which models a player may select</em> - the port of the access half of upstream's
- * model session: {@code model/session/server/ServerModelSession.java:317-322} ({@code canSelect}: a model is
- * selectable when it is public or granted) checked from {@code :147-180} ({@code select} answers
- * {@code NOT_FOUND}/{@code UNAUTHORIZED} and resets the selection to the intrinsic default).
+ * The server-side authority for <em>which models a player may select</em> - the port of upstream's selection
+ * predicate and of the two rules around it: {@code model/session/server/ServerModelSession.java:317-322}
+ * ({@code canSelect}: public, or granted) and {@code :205-221} ({@code canRequest}: what may still be transferred
+ * when {@code RestrictedAuth} is on). Upstream's {@code select} answers
+ * {@code NOT_FOUND}/{@code UNAUTHORIZED}/{@code INVALID_REQUEST} and resets the selection to the intrinsic
+ * default ({@code :147-180}); the port's single decision point is {@link com.fox.ysmu.network.message.SetModelAndTexture}'s
+ * handler, which produces the same observable outcome (reject + reset + tell the player).
  * <p>
  * <b>Not to be confused with {@link ModelGuiApi}.</b> That class hands out a five-minute (viewer, target) grant for
  * opening a selection screen on one entity. This one decides whether a model may be <em>applied</em> at all.
+ *
+ * <h2>What "restricted" means, and why nothing is restricted by default</h2>
+ * A model is restricted - {@link CatalogAccess#AUTHORIZED} - exactly when its effective (winning) source lives in the
+ * {@code auth} scan root, {@code config/ysmu/auth} ({@link ServerModelManager#accessOf(ResourceLocation)},
+ * upstream {@code model/catalog/snapshot/CatalogRecord.java:32-33}). Everything else is
+ * {@link CatalogAccess#PUBLIC} and never consults the grant table. Upstream reaches the same default behaviour from
+ * the other direction: its grant check is unconditional, but only its {@code auth} catalog root carries
+ * {@code AccessPolicy.SESSION_AUTHORIZED} ({@code model/catalog/source/CatalogRootKind.java:5-7}), so on a fresh
+ * install nothing is restricted and the feature is inert. The port has that same structure now, which is why it
+ * needs <b>no</b> enable switch: an empty {@code config/ysmu/auth} means "no model is restricted", and an upgraded
+ * server therefore behaves exactly as it did before this feature existed.
+ * <p>
+ * This replaced the port's own {@code Config.ENABLE_MODEL_AUTHORIZATION}: a global switch could only express
+ * "every model needs a grant or none does", which is not upstream's mechanism and made the grant table useless in
+ * its default position. Recorded in {@code .agent/phase53-model-authorization.md}.
  *
  * <h2>Where the grant table lives</h2>
  * Per player, in {@link ExtendedAuthModels} (the 1.7.10 EEP counterpart of upstream's {@code AuthModelsCapability}),
  * mutated by the {@code /ysm auth ...} family in {@code command/YsmCommand}. Read at the two places a model can be
  * applied on the server: the {@code SetModelAndTexture} packet handler and the revoke path of those commands.
- *
- * <h2>"Default allow": why a switch, and why this switch</h2>
- * Upstream never asks this question: its grant check is <em>unconditional</em> but only the {@code auth} catalog root
- * carries {@code AccessPolicy.SESSION_AUTHORIZED} ({@code model/catalog/source/CatalogRootKind.java:5-7}), so on a
- * fresh install - an empty {@code auth} root - nothing is restricted and the feature is inert. That structure does not
- * exist here: every model is discovered from {@code config/ysmu/custom} and {@code config/ysmu/builtin}
- * ({@code model/ServerModelManager.java:50-63}) and this port has no catalog root kind at all
- * ({@code grep AccessPolicy} over {@code src/main/java/com/fox/ysmu} = 0). Something therefore has to name the
- * restricted set, and the task's risk control requires that an upgraded 1.7.10 server does not suddenly lock every
- * player out of every model.
- * <p>
- * The chosen answer is a single server switch, {@link Config#ENABLE_MODEL_AUTHORIZATION}, <b>off by default</b>: when
- * it is off this class answers "yes" for every model and every player, so the packet path and the commands behave
- * exactly as before. Upstream keeps its authorization posture in exactly that place - a default-off server config
- * ({@code config/ServerConfig.java:13,56-57} {@code RestrictedAuth = false}) - although its switch relaxes the
- * <em>asset download</em> gate and never the selection gate; the port has no per-player sync gate to relax
- * (see the finding below), so the switch is used where the port does have a decision to make.
- * <p>
- * The rejected alternative was "an empty grant table means allow": it needs no config, but it inverts the meaning of
- * the commands - {@code clear} would <em>release</em> a player instead of restricting them, and removing the last
- * grant would silently restore full access. That is the opposite of upstream's {@code clear}
- * ({@code command/sub/AuthCommand.java:83-102}: after clearing, a session-authorized selection is reset because it is
- * no longer selectable) and it is a security inversion, so exactly one mechanism is used: the switch.
- *
- * <h2>The built-in half: PUBLIC by upstream's own rule</h2>
- * Upstream's answer is not only "the auth root is restricted": every record outside that root is
- * {@code CatalogAccess.PUBLIC} ({@code model/catalog/snapshot/CatalogRecord.java:32-33}: {@code access = rootKind ==
- * AUTH ? AUTHORIZED : PUBLIC}), and {@code canSelect} accepts a public record without consulting the grant table
- * ({@code ServerModelSession.java:317-322}). The port mirrors that half too: a model the server is serving from the
- * built-in root and that the shipped {@code assets/ysmu/builtin-index.json} contract declares is selectable with the
- * switch on and an empty grant table ({@code ServerModelManager.isBuiltinModel}). The restricted set the switch names is
- * therefore everything else - {@code config/ysmu/custom} and directories inside the built-in root the contract does not
- * declare.
  *
  * <h2>Deliberately not ported (recorded, not invented)</h2>
  * <ul>
@@ -70,63 +55,60 @@ import com.fox.ysmu.ysmu;
  * only to you" ({@code command/CommandYsmClient}, {@code ClientModelManager}'s local loader) and selecting one sends its
  * id to the server, which stores it as that player's choice. Rejecting unknown ids would regress that documented
  * client-local path (the same failure shape {@code AGENTS.md} records for a texture id set that rejected a player's own
- * skin). The grant half is what this port can enforce without that regression.</li>
+ * skin). An unknown id also has no source record, so {@link ServerModelManager#accessOf} answers PUBLIC for it and the
+ * grant half cannot be used to reject it either.</li>
  * <li><b>Texture validation.</b> Upstream also answers {@code INVALID_REQUEST} when the requested texture is not one of
  * the model's textures ({@code :168-171}, {@code hasTexture} {@code :324-330}). The port has no server-side texture list
  * for a model ({@code ServerModelInfo} carries only a texture-name set used for cache plumbing), and the client's own
  * texture ladder already falls back. Not ported.</li>
- * <li><b>Pushing grants to clients.</b> Upstream refreshes the player's grant set over its session protocol
- * ({@code SessionProtocolHandler.refreshGrants:339-388}) so its GUI can lock entries. This port sends nothing, because
- * its model <em>files</em> are not gated per player either: adding a cosmetic lock would need a new clientbound packet
- * that reaches old peers on login and would therefore force a {@code NETWORK_PROTOCOL} bump, while the server would
- * still hand every client every model. The server is the authority; a rejected selection simply does not take effect.
- * </li>
+ * <li><b>The presentation-only access level.</b> Upstream's {@code canRequest} lets an unauthorized player still fetch
+ * a model's {@code PREVIEW} and {@code ICON} assets under {@code RestrictedAuth}, so its tile exists and is drawn
+ * locked. This port's sync unit is the whole model (one encrypted cache file, or one OpenYSM 17 payload) and the
+ * presentation metadata travels inside it, so there is no smaller unit to allow. With {@code RestrictedAuth} on, an
+ * unauthorized model is therefore absent rather than locked, and the lock display (which the client computes from the
+ * grant packet) applies to the default configuration where assets are shareable. Recorded for the owner; see
+ * {@code .agent/phase53-model-authorization.md}.</li>
+ * <li><b>Forced-selection memory of the mandatory flag.</b> Upstream's {@code ModelInfoCapability} also carries
+ * {@code mandatory}, which makes its sync reach a client without the mod channel
+ * ({@code event/CapabilityEvent.java:138,169,200}; {@code client/compat/top/TopPlugin.java:46}). This port's sync has no
+ * such gate, so the flag would be dead state; only {@code ignoreGrants} is ported (see
+ * {@link ExtendedModelInfo#setCommandSelection}).</li>
  * </ul>
  */
 public final class ModelAuthorization {
 
     private ModelAuthorization() {}
 
-    /** Whether {@code /ysm auth}'s restrictions are in force. Off by default; see the class javadoc. */
-    public static boolean isEnabled() {
-        return Config.ENABLE_MODEL_AUTHORIZATION;
-    }
-
     /**
-     * The whole access decision, as a pure function so a unit JVM can pin it (no player, no server).
+     * The whole selection decision, as a pure function so a unit JVM can pin it (no player, no server).
      *
-     * @param enabled whether authorization is in force ({@link #isEnabled()})
+     * <p>Upstream's rule is
+     * {@code record != null && (record.entry().access() == CatalogAccess.PUBLIC || grants.contains(modelId))}
+     * ({@code ServerModelSession.java:317-322}). The two extra {@code true}s below are upstream's too, just handled at
+     * its call site instead of inside that method: {@code select} accepts {@code Selection.IntrinsicDefault}
+     * unconditionally ({@code :153-156}, resolved without a grant check by
+     * {@code capability/ModelSelectionService.java:15-31}), and a selection of "no model" is not a grant decision at
+     * all. Folding them in here keeps this class the single choke point no caller can forget.</p>
+     *
      * @param grants the player's granted model ids, or {@code null} when the table is <em>absent</em>. Absent is not
      *        the same as empty: an absent table means this build did not attach it (it is registered from
      *        {@code EntityEvent.EntityConstructing}, see {@link ExtendedAuthModels#register}), and answering "deny"
-     *        there would be the mass lock-out the switch exists to prevent. A correct build always has a table.
+     *        there would lock every player out of every restricted model because of a wiring fault. A correct build
+     *        always has a table.
      * @param modelId the model about to be applied; {@code null} means "no model", which is not a grant decision
-     * @param intrinsicDefault the id of the server's default model ({@link ExtendedModelInfo#defaultModelId()}), which
-     *        is always selectable: upstream accepts its {@code Selection.IntrinsicDefault} unconditionally
-     *        ({@code ServerModelSession.java:153-156}) and resolves it without a grant check
-     *        ({@code capability/ModelSelectionService.java:15-31}). It is the fallback this class resets players to, so
-     *        it must not itself be gated.
-     * @param builtin whether {@code modelId} is served from the built-in root and declared by the shipped contract
-     *        ({@code ServerModelManager.isBuiltinModel}). Upstream marks every non-{@code auth} record
-     *        {@code CatalogAccess.PUBLIC} and answers {@code canSelect} from {@code PUBLIC || granted}
-     *        ({@code CatalogRecord.java:32-33}, {@code ServerModelSession.java:317-322}), so a built-in model is
-     *        selectable with an empty grant table. See the class javadoc.
+     * @param access whether that model is public or needs a grant ({@link ServerModelManager#accessOf(ResourceLocation)})
      * @return whether the model may be applied
      */
-    public static boolean canSelect(boolean enabled, @Nullable Set<ResourceLocation> grants,
-        @Nullable ResourceLocation modelId, @Nullable ResourceLocation intrinsicDefault, boolean builtin) {
-        if (!enabled) {
-            // Default allow: with the switch off nothing changes for an existing server.
-            return true;
-        }
+    public static boolean canSelect(@Nullable Set<ResourceLocation> grants, @Nullable ResourceLocation modelId,
+        CatalogAccess access) {
         if (modelId == null) {
             return true;
         }
-        if (modelId.equals(intrinsicDefault)) {
+        if (modelId.equals(ExtendedModelInfo.defaultModelId())) {
+            // The intrinsic default is the fallback every refusal resets to, so gating it would deadlock the reset.
             return true;
         }
-        if (builtin) {
-            // Upstream's built-in root: CatalogAccess.PUBLIC, so no grant is ever required for it.
+        if (access == CatalogAccess.PUBLIC) {
             return true;
         }
         if (grants == null) {
@@ -136,14 +118,33 @@ public final class ModelAuthorization {
     }
 
     /**
-     * The server-registry entry point: the same decision with {@code builtin} resolved from the live registration table
-     * ({@link ServerModelManager#isBuiltinModel(ResourceLocation)}), so callers on the server - the
-     * {@code SetModelAndTexture} handler and the {@code /ysm auth} revoke path - do not have to know how "built-in" is
-     * decided. The pure overload above is what the unit tests pin.
+     * Whether the model's <em>assets</em> may be transferred to a player who is asking for them - upstream's
+     * {@code ServerModelSession.canRequest(modelId, kind, restrictedAuth)} ({@code :205-221}), reduced to this port's
+     * two asset kinds.
+     *
+     * <p>Upstream's shape is: everything is allowed while {@code RestrictedAuth} is off, and while it is on,
+     * {@code PUBLIC || granted} is allowed, and otherwise only {@code PREVIEW}/{@code ICON} - plus
+     * {@code CHUNK} for a model an operator force-set on this player ({@code ignoresGrantsFor}). The port has no
+     * separate preview/icon transfer (its previews ride inside the model payload - see the class javadoc), so the
+     * kinds collapse: the payload itself is the {@code CHUNK} case, and the forced-selection exception stays.</p>
+     *
+     * @param restrictedAuth the server's {@code RestrictedAuth} switch ({@link com.fox.ysmu.Config#RESTRICTED_AUTH})
+     * @param grants the player's granted ids, or {@code null} for "table not attached" (see {@link #canSelect})
+     * @param modelId the model whose bytes are about to be sent
+     * @param ignoresGrants whether this player's current selection was force-set by an operator
+     *        ({@link ExtendedModelInfo#ignoresGrantsFor(ResourceLocation)})
+     * @return whether the bytes may be sent
      */
-    public static boolean canSelect(boolean enabled, @Nullable Set<ResourceLocation> grants,
-        @Nullable ResourceLocation modelId, @Nullable ResourceLocation intrinsicDefault) {
-        return canSelect(enabled, grants, modelId, intrinsicDefault, ServerModelManager.isBuiltinModel(modelId));
+    public static boolean canRequest(boolean restrictedAuth, @Nullable Set<ResourceLocation> grants,
+        @Nullable ResourceLocation modelId, boolean ignoresGrants) {
+        if (!restrictedAuth) {
+            // Upstream's default: assets are shareable, which is what lets every client render other players' models.
+            return true;
+        }
+        if (canSelect(grants, modelId, ServerModelManager.accessOf(modelId))) {
+            return true;
+        }
+        return ignoresGrants;
     }
 
     /** The grant table of one player, or {@code null} when this build did not attach it. */
@@ -153,9 +154,18 @@ public final class ModelAuthorization {
         return auth == null ? null : auth.getAuthModels();
     }
 
-    /** Whether {@code modelId} may be applied to {@code player} right now; what the selection point calls. */
+    /** Whether {@code modelId} needs a grant at all ({@link ServerModelManager#accessOf}); what the lock display asks. */
+    public static boolean requiresAuth(@Nullable ResourceLocation modelId) {
+        return ServerModelManager.accessOf(modelId) == CatalogAccess.AUTHORIZED;
+    }
+
+    /**
+     * Whether {@code modelId} may be applied to {@code player} right now; what the selection point calls. The access
+     * half comes from the live registration table, so a {@code /ysm reload} that moves a model between roots is
+     * reflected on the next selection.
+     */
     public static boolean maySelect(EntityPlayer player, @Nullable ResourceLocation modelId) {
-        return canSelect(isEnabled(), grantsOf(player), modelId, ExtendedModelInfo.defaultModelId());
+        return canSelect(grantsOf(player), modelId, ServerModelManager.accessOf(modelId));
     }
 
     /**

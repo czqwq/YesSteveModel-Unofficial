@@ -4,6 +4,8 @@ gui.yes_steve_model.pre_page=前一页
 gui.yes_steve_model.next_page=后一页
 gui.yes_steve_model.all_models=所有模型
 gui.yes_steve_model.star_models=收藏模型
+# AUTH 分类按钮的悬浮提示(upstream zh_cn.json:7 "授权模型", 即它 PlayerModelScreen.java:187 按钮的文案).
+gui.yes_steve_model.auth_models=授权模型
 gui.yes_steve_model.config=打开配置界面
 gui.yes_steve_model.download=打开下载界面
 gui.yes_steve_model.search=搜索模型……
@@ -11,6 +13,9 @@ gui.yes_steve_model.model.authors=§2§l▌ §3作者：%s
 gui.yes_steve_model.model.license=§2§l▌ §3协议：%s
 gui.yes_steve_model.model.source.builtin=§2§l▌ §3来源：内置
 gui.yes_steve_model.model.source.server=§2§l▌ §3来源：服务器
+# 受限模型的来源行: upstream 的 Source.AUTH 词条(client/gui/button/CatalogModelTooltipFormatter.java:173-180),
+# 文案 "Authorized"(en_us.json:437 / zh_cn.json:438 的 "授权模型"), 按本仓 builtin/server 的同一格式绘制.
+gui.yes_steve_model.model.source.auth=§2§l▌ §3来源：授权模型
 gui.yes_steve_model.model.texture=选择材质贴图
 gui.yes_steve_model.model.info=打开详情界面
 gui.yes_steve_model.model.info.contact.click_hint=单击复制联系方式
@@ -534,7 +539,8 @@ gui.yes_steve_model.hud_cache.off=HUD FBO 缓存: 关 [C]
 gui.yes_steve_model.sync_model=加载中:
 gui.yes_steve_model.sync_waiting=等待服务器中...
 
-# /ysm auth(模型授权; api/ModelAuthorization, Config.ENABLE_MODEL_AUTHORIZATION). 回执是本次移植新增的
+# /ysm auth(模型授权; api/ModelAuthorization). 模型是否受限只看它的生效来源是不是 auth 根(config/ysmu/auth)——
+# 没有开关(上游也没有: auth 根本身就是开关, 空目录等于谁都不受限). 回执是本次移植新增的
 # (上游 AuthCommand 成功时不回话), 两条 message.* 是服务端拒绝/重置玩家选择时玩家看到的内容.
 # 这些键全部由 ChatComponentTranslation 渲染, 所以只许用 `%s`: 1.7.10 对其它转换字符会抛异常
 # (ChatComponentTranslation.java:121-124), 而且是在绘制聊天栏时才抛, 表现为"整行不显示"而不是报错.
@@ -549,7 +555,21 @@ message.yes_steve_model.auth.denied=§6§l【§aYSM§6§l】§r §c你没有使�
 message.yes_steve_model.auth.reset=§6§l【§aYSM§6§l】§r §c你的模型 §e%s§r§c 已被撤销授权, 已重置为服务端默认模型.
 commands.yes_steve_model.help.line.auth=  /ysm auth <玩家|@a|@p> <add|remove|all|clear> [模型] - 管理模型授权 (OP)
 commands.yes_steve_model.help.detail.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
-commands.yes_steve_model.help.detail.auth.desc=  在 EnableModelAuthorization 打开后管理玩家能选哪些模型. add/remove 授权或撤销单个模型, all 授权全部已注册模型, clear 全部撤销; 当前模型被撤销的玩家会重置为服务端默认模型. 模型参数写配置目录里的模型名(wine_fox/01_taisho_maid)或 ysmu:<id>. 示例: /ysm auth Notch add default, /ysm auth @a clear
+commands.yes_steve_model.help.detail.auth.desc=  管理玩家能选哪些模型. 只有生效来源是 auth 根(config/ysmu/auth)的模型受限, 内置与 custom 模型始终公开. add/remove 授权或撤销单个模型, all 授权全部已注册模型, clear 全部撤销. remove 会重置正在穿被撤销那个模型的玩家, clear 会重置正穿受限模型的玩家; 二者都不动被强制指定的选择. 模型参数写配置目录里的模型名(wine_fox/01_taisho_maid)或 ysmu:<id>. 示例: /ysm auth Notch add default, /ysm auth @a clear
+
+# /ysm model set(上游 command/sub/ModelCommand.set:41-98). 拒绝文案沿用上游(:61,72,86); 成功回执是本次移植新增的,
+# 因为上游成功时不回话. 只许用 `%s`(见 auth 组上方说明). 贴图参数写模型自己声明的贴图名(tab 补全会给出所选模型的
+# 名单; 上游的声明默认贴图写法 "-" 在这里不可用, 见 texture_dash_unavailable). 名字里带空格的模型在这个固定位置参数
+# 里写不出来(1.7.10 按空格切分), 请用它的 _name_<hex> id 写法.
+commands.yes_steve_model.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
+commands.yes_steve_model.model.set.unknown_model=未知或有歧义的模型路径: %s
+commands.yes_steve_model.model.set.unknown_texture=%s 没有名为 %s 的贴图
+commands.yes_steve_model.model.set.not_authorized=%s 没有使用 %s 的授权
+commands.yes_steve_model.model.set.texture_dash_unavailable=模型 %s 的贴图 "-" 需要它自己声明的默认贴图, 而服务端不保存该字段; 请显式写一个贴图名(tab 补全会列出).
+commands.yes_steve_model.model.set.done=已把模型 %s 设置给 %s 个玩家.
+commands.yes_steve_model.help.line.model=  /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false] - 强制指定玩家的模型 (OP)
+commands.yes_steve_model.help.detail.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
+commands.yes_steve_model.help.detail.model.desc=  强制把某个模型(及其某张贴图)指定给其他玩家; 第五个参数 true 表示同时忽略该模型的授权(等同上游的 ignore_auth). 受限且未授权的目标会被逐个报告并跳过, 选择器里其余玩家照常应用. 上游的 /ysm model reload/errors/disable 未移植(重建目录请用 /ysm reload). 示例: /ysm model set Notch default default.png true
 
 # 模型加载失败提示（上游 ModelFailureNotificationAggregator 的三种结果，加上本仓特有的"内置兜底不可用"）。
 # %s 是数量；1.7.10 的聊天键只接受 %s 一种占位符。

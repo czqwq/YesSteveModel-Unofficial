@@ -353,13 +353,13 @@ class YsmCommandTest {
     @Test
     void tabCompletionOffersEveryPortedSubcommandAtTheFirstArgument() {
         List<?> all = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "" });
-        // The reference's own list and order (reference YsmCommand:44-45), plus /ysm auth - the one subcommand that
-        // does not come from the reference tree but from upstream's RootCommand (RootCommand.java:16-24) and is
-        // therefore offered here too. Every name is asserted individually, not just counted, so a renamed or dropped
-        // subcommand cannot pass as "same size".
-        assertEquals(11, all.size());
+        // The reference's own list and order (reference YsmCommand:44-45), plus /ysm auth and /ysm model - the two
+        // subcommands that do not come from the reference tree but from upstream's RootCommand
+        // (RootCommand.java:16-24) and are therefore offered here too. Every name is asserted individually, not just
+        // counted, so a renamed or dropped subcommand cannot pass as "same size".
+        assertEquals(12, all.size());
         String[] expected = { "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset",
-            "sync", "auth", "help" };
+            "sync", "auth", "model", "help" };
         for (String name : expected) {
             assertTrue(all.contains(name), name + " must be offered at argument 1");
         }
@@ -367,6 +367,7 @@ class YsmCommandTest {
         assertTrue(all.contains("playsound"));
         assertTrue(all.contains("debug"));
         assertTrue(all.contains("reset"));
+        assertTrue(all.contains("model"));
 
         List<?> filtered = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "re" });
         assertEquals(2, filtered.size());
@@ -508,15 +509,15 @@ class YsmCommandTest {
         new YsmCommand().processCommand(sender, new String[] { "help" });
 
         // The title, the summaries in HELP_TOPICS' order (the reference's own order, reference YsmCommand:172-182,
-        // plus /ysm auth after reset), then the clickable welcome-off line (:183-188).
-        assertEquals(13, sender.count());
+        // plus /ysm auth and /ysm model after reset), then the clickable welcome-off line (:183-188).
+        assertEquals(14, sender.count());
         assertEquals("commands.yes_steve_model.help.title", sender.keyAt(0));
         String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset", "auth",
-            "debug", "ysmclient" };
+            "model", "debug", "ysmclient" };
         for (int i = 0; i < topics.length; i++) {
             assertEquals("commands.yes_steve_model.help.line." + topics[i], sender.keyAt(1 + i));
         }
-        assertEquals("commands.yes_steve_model.help.welcome_off", sender.keyAt(12));
+        assertEquals("commands.yes_steve_model.help.welcome_off", sender.keyAt(13));
     }
 
     @Test
@@ -548,7 +549,7 @@ class YsmCommandTest {
     @Test
     void everyAdvertisedTopicHasDetailKeysAndIsMatchedCaseInsensitively() {
         String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset", "auth",
-            "debug", "ysmclient" };
+            "model", "debug", "ysmclient" };
         for (String topic : topics) {
             assertTrue(YsmCommand.isKnownHelpTopic(topic), topic + " must be a known topic");
             RecordingSender sender = new RecordingSender();
@@ -568,7 +569,7 @@ class YsmCommandTest {
 
         new YsmCommand().processCommand(sender, new String[] { "help" });
 
-        // Looked up by key, not by index: the hint is the last line of an 11-topic list, so a hard index would keep
+        // Looked up by key, not by index: the hint is the last line of a 12-topic list, so a hard index would keep
         // "passing" against a different line after the next subcommand lands. The assertion is unchanged in strength -
         // the line must still exist, and it must still be clickable with the command it advertises.
         ChatComponentTranslation off = sender.translationWithKey("commands.yes_steve_model.help.welcome_off");
@@ -592,8 +593,8 @@ class YsmCommandTest {
         // branch: a denied permission would have been "commands.generic.permission" instead.
         RecordingSender helpSender = new DenyingSender();
         new YsmCommand().processCommand(helpSender, new String[] { "help" });
-        // One line per HELP_TOPICS entry - 11 since /ysm auth joined - plus the title and the welcome-off hint.
-        assertEquals(13, helpSender.count(), "help must run for a sender that denies every permission level");
+        // One line per HELP_TOPICS entry - 12 since /ysm model joined - plus the title and the welcome-off hint.
+        assertEquals(14, helpSender.count(), "help must run for a sender that denies every permission level");
 
         for (String sub : new String[] { "setgamepath", "welcome", "buffer", "sync" }) {
             CommandException exception = assertThrows(
@@ -609,11 +610,12 @@ class YsmCommandTest {
 
     @Test
     void theLevelTwoSubcommandsStillHitTheGateForASenderThatDeniesIt() {
-        // reload/play/playsound/debug/reset/auth keep the inherited level-2 rule, re-checked inside processCommand
+        // reload/play/playsound/debug/reset/auth/model keep the inherited level-2 rule, re-checked inside processCommand
         // because canCommandSenderUseCommand now lets players through to it (reference :109-113; /ysm auth's own gate
-        // is upstream's requires(hasPermission(source, 2)), AuthCommand.java:29). The refusal also proves that none of
-        // them ran: with a denied sender processReload never touches the model directory.
-        for (String sub : new String[] { "reload", "play", "playsound", "debug", "reset", "auth" }) {
+        // is upstream's requires(hasPermission(source, 2)), AuthCommand.java:29, and /ysm model's is the same at
+        // ModelCommand.java:35). The refusal also proves that none of them ran: with a denied sender processReload never
+        // touches the model directory.
+        for (String sub : new String[] { "reload", "play", "playsound", "debug", "reset", "auth", "model" }) {
             CommandException exception = assertThrows(
                 CommandException.class,
                 () -> new YsmCommand().processCommand(new DenyingSender(), new String[] { sub }));

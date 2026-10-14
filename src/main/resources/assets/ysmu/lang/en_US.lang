@@ -4,6 +4,9 @@ gui.yes_steve_model.pre_page=Pre Page
 gui.yes_steve_model.next_page=Next Page
 gui.yes_steve_model.all_models=All Models
 gui.yes_steve_model.star_models=Star Models
+# The AUTH category button's tooltip (upstream en_us.json:7 "Auth Models", the label of its
+# PlayerModelScreen.java:187 button).
+gui.yes_steve_model.auth_models=Auth Models
 gui.yes_steve_model.config=Open Config GUI
 gui.yes_steve_model.download=Open Download GUI
 gui.yes_steve_model.search=Search models...
@@ -11,6 +14,10 @@ gui.yes_steve_model.model.authors=§2§l▌ §3Authors: %s
 gui.yes_steve_model.model.license=§2§l▌ §3License: %s
 gui.yes_steve_model.model.source.builtin=§2§l▌ §3Source: Built-in
 gui.yes_steve_model.model.source.server=§2§l▌ §3Source: Server
+# The restricted model's source row: upstream's Source.AUTH vocabulary value
+# (client/gui/button/CatalogModelTooltipFormatter.java:173-180) whose text is "Authorized"
+# (en_us.json:437), drawn in this port's source-row style like builtin/server above.
+gui.yes_steve_model.model.source.auth=§2§l▌ §3Source: Authorized
 gui.yes_steve_model.model.texture=Select Texture
 gui.yes_steve_model.model.info=Open Info GUI
 gui.yes_steve_model.model.info.contact.click_hint=Click to copy the contact
@@ -537,12 +544,14 @@ gui.yes_steve_model.hud_cache.off=HUD FBO Cache: OFF [C]
 gui.yes_steve_model.sync_model=Loading: 
 gui.yes_steve_model.sync_waiting=Waiting for server...
 
-# /ysm auth (model authorization; api/ModelAuthorization, Config.ENABLE_MODEL_AUTHORIZATION). The feedback lines are a
-# port addition - upstream's AuthCommand answers nothing on success - and the two message.* keys are what a player
-# sees when the server refuses or resets their selection. Every one of these is drawn by ChatComponentTranslation, so
-# each may only use `%s`: 1.7.10 throws for any other conversion (ChatComponentTranslation.java:121-124), lazily, while
-# the chat is being rendered, which shows up as "the line never appears" rather than as an error. Argument order is
-# (model, count) for add/remove and (count) for all/clear, matching the send sites in command/YsmCommand.
+# /ysm auth (model authorization; api/ModelAuthorization). A model is restricted when its winning source is the auth
+# root, config/ysmu/auth - there is no enable switch (upstream has none either: the auth root is the switch, and an
+# empty one restricts nothing). The feedback lines are a port addition - upstream's AuthCommand answers nothing on
+# success - and the two message.* keys are what a player sees when the server refuses or resets their selection.
+# Every one of these is drawn by ChatComponentTranslation, so each may only use `%s`: 1.7.10 throws for any other
+# conversion (ChatComponentTranslation.java:121-124), lazily, while the chat is being rendered, which shows up as
+# "the line never appears" rather than as an error. Argument order is (model, count) for add/remove and (count) for
+# all/clear, matching the send sites in command/YsmCommand.
 commands.yes_steve_model.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
 commands.yes_steve_model.auth.add.done=Granted model %s to %s player(s).
 commands.yes_steve_model.auth.remove.done=Revoked model %s from %s player(s).
@@ -553,7 +562,23 @@ message.yes_steve_model.auth.denied=§6§l[§aYSM§6§l]§r §cYou are not autho
 message.yes_steve_model.auth.reset=§6§l[§aYSM§6§l]§r §cYour model §e%s§r§c is no longer authorized; reset to the server's default model.
 commands.yes_steve_model.help.line.auth=  /ysm auth <player|@a|@p> <add|remove|all|clear> [model] - manage model authorizations (OP)
 commands.yes_steve_model.help.detail.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
-commands.yes_steve_model.help.detail.auth.desc=  Manage which models a player may select, once EnableModelAuthorization is on. add/remove grant or revoke one model, all grants every registered model, clear revokes all of them; a player whose current model is revoked is reset to the server's default model. The model argument is a model name as the config directory spells it (wine_fox/01_taisho_maid) or a ysmu:<id>. Examples: /ysm auth Notch add default, /ysm auth @a clear
+commands.yes_steve_model.help.detail.auth.desc=  Manage which models a player may select. Only models whose winning source is the auth root (config/ysmu/auth) are restricted; built-in and custom models stay public. add/remove grant or revoke one model, all grants every registered model, clear revokes all of them. remove resets a player who is wearing exactly the revoked model, clear resets a player wearing a restricted model; both leave a forced selection alone. The model argument is a model name as the config directory spells it (wine_fox/01_taisho_maid) or a ysmu:<id>. Examples: /ysm auth Notch add default, /ysm auth @a clear
+
+# /ysm model set (upstream command/sub/ModelCommand.set:41-98). Refusal wording is upstream's (:61,72,86); the
+# receipts are a port addition, because upstream answers nothing on success. Only `%s` conversions - see the note
+# above the auth group. The texture argument is one of the model's own texture names (tab completion offers the
+# chosen model's list; the declared-default spelling "-" is not available here, see texture_dash_unavailable). A name
+# containing spaces cannot be spelled in this fixed-position argument - the 1.7.10 dispatcher splits on spaces - so
+# use the model's _name_<hex> id form there.
+commands.yes_steve_model.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
+commands.yes_steve_model.model.set.unknown_model=Unknown or ambiguous model path: %s
+commands.yes_steve_model.model.set.unknown_texture=Unknown texture for %s: %s
+commands.yes_steve_model.model.set.not_authorized=%s is not authorized for %s
+commands.yes_steve_model.model.set.texture_dash_unavailable=Texture "-" for %s needs the model's declared default texture, which this server does not keep; pass one of the model's texture names (tab completion lists them).
+commands.yes_steve_model.model.set.done=Set model %s for %s player(s).
+commands.yes_steve_model.help.line.model=  /ysm model set <player|@a|@p> <model> <texture> [true|false] - force a model on players (OP)
+commands.yes_steve_model.help.detail.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
+commands.yes_steve_model.help.detail.model.desc=  Force a model (and one of its textures) on other players; the fifth word true also ignores the model's authorization, as upstream's ignore_auth does. A restricted target that is not authorized is reported and skipped, the rest of the selector still gets the model. Upstream's /ysm model reload, errors and disable are not ported (use /ysm reload for the catalog rebuild). Example: /ysm model set Notch default default.png true
 
 # Model failure notices (upstream ModelFailureNotificationAggregator's three outcomes, plus this port's
 # built-in-fallback-unavailable notice). %s is a count; 1.7.10 chat keys accept no other specifier.

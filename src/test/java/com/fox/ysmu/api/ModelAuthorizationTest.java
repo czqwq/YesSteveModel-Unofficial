@@ -20,15 +20,19 @@ import net.minecraft.util.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.model.catalog.CatalogAccess;
 import com.fox.ysmu.network.message.SetModelAndTexture;
 
 /**
  * The access decision of {@link ModelAuthorization} - the port of upstream's {@code canSelect}
- * ({@code model/session/server/ServerModelSession.java:317-322}).
- * <p>
- * The two cases the task names are pinned here: an unauthorized selection is refused, and with the switch off
- * ("default allow") every selection is still accepted, i.e. an upgraded server behaves exactly as before.
- * <p>
+ * ({@code model/session/server/ServerModelSession.java:317-322}) - as a pure function, with no player and no server.
+ *
+ * <p>The cases pinned here are exactly upstream's rule plus the two concessions its call site makes: a public model is
+ * selectable with an empty grant table, a restricted one is not, an <em>absent</em> grant table (a build that never
+ * attached the EEP) does not lock anybody out, and the intrinsic default is never gated because every refusal resets
+ * to it. The registry-driven half - which models count as restricted, and the asset gate - lives in
+ * {@code model/ModelAccessPolicyTest}.</p>
+ *
  * <b>What a unit JVM cannot drive</b>, recorded rather than approximated: the call site itself
  * ({@code SetModelAndTexture.Handler.handleEEP}) takes an {@code EntityPlayerMP}, which cannot be fabricated here -
  * its constructor dereferences a live {@code WorldServer.provider} and {@code MinecraftServer.getConfigurationManager()}
@@ -47,80 +51,51 @@ class ModelAuthorizationTest {
     }
 
     // ---------------------------------------------------------------------------------------------------------------
-    // default allow
+    // the selection rule: public, or granted
     // ---------------------------------------------------------------------------------------------------------------
 
     @Test
-    void withTheSwitchOffEveryModelIsSelectableAgain() {
-        // The upgrade guard: an existing 1.7.10 server that never opts in must not lock anybody out, whether the
-        // player has no grants, some grants, or an absent table.
-        assertTrue(ModelAuthorization.canSelect(false, null, MODEL_A, INTRINSIC_DEFAULT));
-        assertTrue(ModelAuthorization.canSelect(false, grants(), MODEL_B, INTRINSIC_DEFAULT));
-        assertTrue(ModelAuthorization.canSelect(false, grants(MODEL_A), MODEL_B, INTRINSIC_DEFAULT));
+    void aPublicModelIsSelectableWithAnEmptyGrantTable() {
+        // Upstream CatalogRecord.java:32-33 marks everything outside the auth root PUBLIC, and canSelect accepts a
+        // public record without consulting the grant table (ServerModelSession.java:317-322). This is also the upgrade
+        // guard: a server whose config/ysmu/auth is empty restricts nothing, so nothing changes for it.
+        assertTrue(ModelAuthorization.canSelect(grants(), MODEL_A, CatalogAccess.PUBLIC));
+        assertTrue(ModelAuthorization.canSelect(grants(MODEL_B), MODEL_A, CatalogAccess.PUBLIC));
+        assertTrue(ModelAuthorization.canSelect(null, MODEL_A, CatalogAccess.PUBLIC));
     }
 
     @Test
-    void withTheSwitchOffARevokeCannotResetAnybodysSelection() {
-        // The revoke path asks the same predicate; while the switch is off the answer must stay "selectable", so
-        // /ysm auth clear cannot move a player off their model.
-        Set<ResourceLocation> cleared = grants();
-        ResourceLocation current = MODEL_B;
-        assertTrue(ModelAuthorization.canSelect(false, cleared, current, INTRINSIC_DEFAULT));
-    }
-
-    // ---------------------------------------------------------------------------------------------------------------
-    // enforced
-    // ---------------------------------------------------------------------------------------------------------------
-
-    @Test
-    void anUngrantedModelIsRefusedOnceTheSwitchIsOn() {
-        assertFalse(ModelAuthorization.canSelect(true, grants(), MODEL_A, INTRINSIC_DEFAULT));
-        assertFalse(ModelAuthorization.canSelect(true, grants(MODEL_A), MODEL_B, INTRINSIC_DEFAULT));
+    void aRestrictedModelNeedsAGrant() {
+        assertFalse(ModelAuthorization.canSelect(grants(), MODEL_A, CatalogAccess.AUTHORIZED));
+        assertFalse(ModelAuthorization.canSelect(grants(MODEL_A), MODEL_B, CatalogAccess.AUTHORIZED));
     }
 
     @Test
-    void aGrantedModelIsAccepted() {
-        assertTrue(ModelAuthorization.canSelect(true, grants(MODEL_A), MODEL_A, INTRINSIC_DEFAULT));
-        assertTrue(ModelAuthorization.canSelect(true, grants(MODEL_A, MODEL_B), MODEL_B, INTRINSIC_DEFAULT));
-    }
-
-    @Test
-    void theServersOwnDefaultModelIsNeverGated() {
-        // It is the fallback this class resets players to, and upstream accepts its selection kind unconditionally
-        // (ServerModelSession.java:153-156) and resolves it without a grant check (ModelSelectionService.java:15-31).
-        assertTrue(ModelAuthorization.canSelect(true, grants(), INTRINSIC_DEFAULT, INTRINSIC_DEFAULT));
-        assertTrue(ModelAuthorization.canSelect(true, null, INTRINSIC_DEFAULT, INTRINSIC_DEFAULT));
-    }
-
-    @Test
-    void aBuiltinModelIsPublicAndNeedsNoGrant() {
-        // Upstream marks every record outside the auth root CatalogAccess.PUBLIC (CatalogRecord.java:32-33) and answers
-        // canSelect from PUBLIC || granted (ServerModelSession.java:317-322): a built-in model stays selectable with the
-        // switch on and an empty grant table.
-        assertTrue(ModelAuthorization.canSelect(true, grants(), MODEL_A, INTRINSIC_DEFAULT, true));
-        assertTrue(ModelAuthorization.canSelect(true, null, MODEL_A, INTRINSIC_DEFAULT, true));
-    }
-
-    @Test
-    void aNonBuiltinModelStillNeedsAGrant() {
-        assertFalse(ModelAuthorization.canSelect(true, grants(), MODEL_A, INTRINSIC_DEFAULT, false));
-        assertTrue(ModelAuthorization.canSelect(true, grants(MODEL_A), MODEL_A, INTRINSIC_DEFAULT, false));
-        // With the switch off the builtin flag is irrelevant: nothing is gated (the upgrade guard).
-        assertTrue(ModelAuthorization.canSelect(false, grants(), MODEL_A, INTRINSIC_DEFAULT, false));
+    void aGrantedRestrictedModelIsAccepted() {
+        assertTrue(ModelAuthorization.canSelect(grants(MODEL_A), MODEL_A, CatalogAccess.AUTHORIZED));
+        assertTrue(ModelAuthorization.canSelect(grants(MODEL_A, MODEL_B), MODEL_B, CatalogAccess.AUTHORIZED));
     }
 
     @Test
     void anAbsentGrantTableMeansTheBuildDidNotAttachItNotAnEmptyGrantList() {
         // Attached from EntityEvent.EntityConstructing (ExtendedAuthModels.register); an absent table is a wiring
-        // fault, and answering "deny" for it would be the mass lock-out the switch exists to prevent.
-        assertTrue(ModelAuthorization.canSelect(true, null, MODEL_A, INTRINSIC_DEFAULT));
+        // fault, and answering "deny" for it would lock every player out of every restricted model.
+        assertTrue(ModelAuthorization.canSelect(null, MODEL_A, CatalogAccess.AUTHORIZED));
+    }
+
+    @Test
+    void theServersOwnDefaultModelIsNeverGated() {
+        // It is the fallback this class resets players to; upstream accepts its selection kind unconditionally
+        // (ServerModelSession.java:153-156) and resolves it without a grant check (ModelSelectionService.java:15-31).
+        assertTrue(ModelAuthorization.canSelect(grants(), INTRINSIC_DEFAULT, CatalogAccess.AUTHORIZED));
+        assertTrue(ModelAuthorization.canSelect(null, INTRINSIC_DEFAULT, CatalogAccess.AUTHORIZED));
     }
 
     @Test
     void anEmptySelectionIsNotAGrantDecision() {
         // The packet maps an empty model string to null; that path already keeps the previous selection (the EEP's own
         // guard) and must not be turned into a refusal here.
-        assertTrue(ModelAuthorization.canSelect(true, grants(), null, INTRINSIC_DEFAULT));
+        assertTrue(ModelAuthorization.canSelect(grants(), null, CatalogAccess.AUTHORIZED));
     }
 
     @Test

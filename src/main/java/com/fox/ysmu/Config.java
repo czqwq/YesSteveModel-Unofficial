@@ -48,20 +48,21 @@ public class Config {
      */
     public static boolean DISABLE_VEHICLE_MODEL = false;
     /**
-     * Whether {@code /ysm auth}'s per-player model grants are enforced. <b>Off by default</b>: with it off every
-     * player may select every model, exactly as before this feature existed.
+     * Whether the server withholds a restricted model's assets from players who are not authorized for it - the port
+     * of upstream's {@code ServerConfig.RESTRICTED_AUTH} ({@code config/ServerConfig.java:13,56-57}, config key
+     * {@code RestrictedAuth}, default {@code false}), consumed by
+     * {@code model/session/server/ServerModelSession.canRequest:205-221} through
+     * {@code network/dispatch/ServerAssetTransfers:234,299}.
      *
-     * <p>Upstream has no such switch on the selection path - its grant check is unconditional
-     * ({@code model/session/server/ServerModelSession.java:317-322}) because only the {@code auth} catalog root is
-     * restricted ({@code model/catalog/source/CatalogRootKind.java:5-7}), so a fresh install restricts nothing. This
-     * port has no catalog root kinds (all models come from {@code config/ysmu/custom} and {@code config/ysmu/builtin},
-     * {@code model/ServerModelManager.java:50-63}), so the restricted set has to be named somewhere - and a default-off
-     * server switch is both upstream's own posture for its authorization config
-     * ({@code config/ServerConfig.java:13,56-57} {@code RestrictedAuth = false}) and the task's required guard against
-     * locking every player out of every model after an upgrade. The decision, the rejected alternative and the user
-     * commands live in {@link com.fox.ysmu.api.ModelAuthorization}.</p>
+     * <p><b>This is the asset gate, not the selection gate.</b> Selection is always restricted for a model that lives
+     * in {@code config/ysmu/auth} ({@code api/ModelAuthorization.canSelect}); whether an unauthorized player may
+     * still <em>receive</em> that model's bytes is a separate product decision, and the default is "yes", because the
+     * normal way to see another player wearing a model is to have its assets (upstream's product decision
+     * {@code docs/product-decisions/decisions/model-authorization.md}, "无权 | 关闭（默认）| ... | 按需允许，可用于呈现
+     * RemotePlayer"). With it on, an unauthorized player cannot render that model at all and falls back to the
+     * intrinsic default (or to vanilla rendering for arrows and vehicles).</p>
      */
-    public static boolean ENABLE_MODEL_AUTHORIZATION = false;
+    public static boolean RESTRICTED_AUTH = false;
     public static String DEFAULT_MODEL_ID = "default";
     public static String DEFAULT_MODEL_TEXTURE = "default.png";
 
@@ -410,9 +411,9 @@ public class Config {
         // declarations for the bypass points they are read at.
         DISABLE_PROJECTILE_MODEL = syncBoolean("DisableProjectileModel", Configuration.CATEGORY_GENERAL, DISABLE_PROJECTILE_MODEL, "Prevents rendering of projectile model", load);
         DISABLE_VEHICLE_MODEL = syncBoolean("DisableVehicleModel", Configuration.CATEGORY_GENERAL, DISABLE_VEHICLE_MODEL, "Prevents rendering of vehicle model", load);
-        // /ysm auth: off by default, so an upgraded server keeps letting every player select every model. See the
-        // field declaration and api/ModelAuthorization.
-        ENABLE_MODEL_AUTHORIZATION = syncBoolean("EnableModelAuthorization", Configuration.CATEGORY_GENERAL, ENABLE_MODEL_AUTHORIZATION, "Enforce /ysm auth model grants: when on, a player may only select the models an operator granted them (or the server's default model). Off by default, so nothing changes until an operator opts in.", load);
+        // Model authorization: the restricted set is named by the config/ysmu/auth scan root, not by a switch (see
+        // api/ModelAuthorization). RestrictedAuth is upstream's asset gate and defaults to off.
+        RESTRICTED_AUTH = syncBoolean("RestrictedAuth", "ysm_sync", RESTRICTED_AUTH, "Withhold a restrictive (config/ysmu/auth) model's assets from players who are not authorized for it. Off by default: unauthorized players can still render other players wearing it, as upstream's default does. Selection of a restricted model always needs a grant regardless of this switch.", load);
         DEFAULT_MODEL_ID = syncString("DefaultModelId", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_ID, "The default model ID when a player first enters the game", load);
         DEFAULT_MODEL_TEXTURE = syncString("DefaultModelTexture", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_TEXTURE, "The default model texture when a player first enters the game", load);
 

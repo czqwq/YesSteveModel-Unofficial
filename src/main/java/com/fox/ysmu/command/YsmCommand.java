@@ -9,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 
+import javax.annotation.Nullable;
+
 import net.minecraft.command.*;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
@@ -28,6 +30,8 @@ import com.fox.ysmu.api.ModelAuthorization;
 import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.network.ModelGrantSync;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.PacketEvalMolang;
 import com.fox.ysmu.network.message.PacketQueryMolangVar;
@@ -54,15 +58,30 @@ public class YsmCommand extends CommandBase {
      * The subcommands {@code /ysm help} documents, in the order the reference branch prints them
      * ({@code YsmCommand:173-182}). One list, so the summary lines, the subcommand lookup and the detail keys cannot
      * drift apart; the reference repeats the same names in three separate {@code equals} chains.
+     * <p>
+     * {@code auth} and {@code model} are not in that reference list: they are upstream's two authorization
+     * subcommands ({@code command/sub/AuthCommand.java} and {@code command/sub/ModelCommand.java}, siblings under
+     * {@code command/RootCommand.java:16-24}), appended after {@code reset}. Both need a summary line here because
+     * {@link #processHelp} walks this array.
      */
     private static final String[] HELP_TOPICS = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome",
-        "sync", "reset", "auth", "debug", "ysmclient" };
+        "sync", "reset", "auth", "model", "debug", "ysmclient" };
 
     /**
      * The action words of {@code /ysm auth <targets> <action> [model]} - upstream's four literals
      * ({@code command/sub/AuthCommand.java:32-39}: {@code add}, {@code remove}, {@code all}, {@code clear}).
      */
     private static final String[] AUTH_ACTIONS = { "add", "remove", "all", "clear" };
+
+    /**
+     * The action words of {@code /ysm model <action>} that this port dispatches - upstream's literal {@code set}
+     * ({@code command/sub/ModelCommand.java:41}). Upstream's other three model literals are deliberately not ported:
+     * {@code reload} ({@code :36}, the same rebuild as this port's {@code /ysm reload}), {@code errors} ({@code :37},
+     * a scan-error list this port keeps as log lines) and {@code disable} ({@code :38-40}, which sets a
+     * {@code ModelInfoCapability.disabled} flag this port does not carry - nothing would read it, so dispatching it
+     * would be dead state).
+     */
+    private static final String[] MODEL_ACTIONS = { "set" };
 
     /**
      * The subcommands exempt from the level-2 re-check inside {@link #processCommand}: every one of them either runs
@@ -79,7 +98,9 @@ public class YsmCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        // The reference's own usage line (YsmCommand:38), now that every subcommand it lists exists here.
+        // The reference's own usage line (YsmCommand:38), now that every subcommand it lists exists here. The list is
+        // the reference's, not an inventory: /ysm auth and /ysm model are upstream's two authorization subcommands and
+        // are documented by /ysm help (HELP_TOPICS) rather than by rewriting this string.
         return "/ysm <reload|play|playsound|setgamepath|buffer|welcome|debug|reset|sync|help> [args] (type /ysm help for details)";
     }
 
@@ -134,7 +155,7 @@ public class YsmCommand extends CommandBase {
             return getListOfStringsMatchingLastWord(
                 args,
                 "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset", "sync", "auth",
-                "help");
+                "model", "help");
         }
         if (args.length == 2) {
             if ("welcome".equalsIgnoreCase(args[0])) {
@@ -143,15 +164,11 @@ public class YsmCommand extends CommandBase {
             if ("debug".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, "query", "overlay", "eval");
             }
+            if ("model".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, MODEL_ACTIONS);
+            }
             if ("reset".equalsIgnoreCase(args[0]) || "auth".equalsIgnoreCase(args[0])) {
-                MinecraftServer server = MinecraftServer.getServer();
-                if (server == null || server.getConfigurationManager() == null) {
-                    return null;
-                }
-                return getListOfStringsMatchingLastWord(
-                    args,
-                    server.getConfigurationManager()
-                        .getAllUsernames());
+                return playerNameSuggestions(args);
             }
         }
         if (args.length == 2 && "setgamepath".equalsIgnoreCase(args[0])) {
@@ -167,14 +184,55 @@ public class YsmCommand extends CommandBase {
             if ("auth".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, AUTH_ACTIONS);
             }
+            // /ysm model set <targets> ...: upstream's targets argument is EntityArgument.players()
+            // (command/sub/ModelCommand.java:42), the same selector-or-name slot /ysm auth completes.
+            if ("model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+                return playerNameSuggestions(args);
+            }
         }
         // /ysm auth <targets> add|remove <model>: the same model names the command accepts (upstream suggests its
-        // catalog's model paths here, command/sub/AuthCommand.java:31,34).
-        if (args.length == 4 && "auth".equalsIgnoreCase(args[0])
-            && ("add".equalsIgnoreCase(args[2]) || "remove".equalsIgnoreCase(args[2]))) {
+        // catalog's model paths here, command/sub/AuthCommand.java:31,34). /ysm model set's model slot is the same
+        // slot (upstream :44, CommandRegistry.ALL_MODELS).
+        if (args.length == 4 && ("auth".equalsIgnoreCase(args[0])
+            && ("add".equalsIgnoreCase(args[2]) || "remove".equalsIgnoreCase(args[2]))
+            || "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1]))) {
             return getListOfStringsFromIterableMatchingLastWord(args, authModelSuggestions());
         }
+        // /ysm model set <targets> <model> <texture>: the chosen model's own texture names (upstream suggests its
+        // whole texture registry here, ModelCommand.java:46, CommandRegistry.ALL_TEXTURES; this server keeps textures
+        // per model, see textureNamesOf).
+        if (args.length == 5 && "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+            ResourceLocation modelId = ModelAuthorization.resolveModelArgument(stripOneQuotePair(args[3]));
+            Set<String> names = modelId == null ? null : textureNamesOf(modelId);
+            return names == null ? null : getListOfStringsFromIterableMatchingLastWord(args, textureSuggestions(names));
+        }
+        // /ysm model set <targets> <model> <texture> [ignore_auth]: upstream's BoolArgumentType.bool() slot
+        // (ModelCommand.java:48).
+        if (args.length == 6 && "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+            return getListOfStringsMatchingLastWord(args, "true", "false");
+        }
         return null;
+    }
+
+    /**
+     * The player-name suggestions for a selector-or-name slot ({@code /ysm auth <targets>}, {@code /ysm reset <...>},
+     * {@code /ysm model set <targets>}).
+     * <p>
+     * {@code MinecraftServer.getServer()} is only safe while a server exists: a dedicated server always has one, but an
+     * integrated server that is still starting - and a unit JVM, which is how {@code YsmCommandTest} drives this method
+     * - does not, and 1.7.10 command completion runs on the server thread. Degrading to "no suggestions" is a null
+     * check, not a behaviour change; the reference's list is returned verbatim whenever a server is present.
+     */
+    @Nullable
+    private static List playerNameSuggestions(String[] args) {
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            return null;
+        }
+        return getListOfStringsMatchingLastWord(
+            args,
+            server.getConfigurationManager()
+                .getAllUsernames());
     }
 
     /**
@@ -186,11 +244,13 @@ public class YsmCommand extends CommandBase {
      * <b>Permission, and why the gate is here as well as in the framework.</b> {@code help} is handled before the
      * check (reference {@code :101-105}), and the subcommands in {@link #LEVEL_ZERO_SUBCOMMANDS} - setgamepath,
      * welcome, buffer and sync - are exempt from it (reference {@code :109-113}), because each of them only forwards
-     * a request to the issuing player's own client. Everything else - reload, play, playsound, debug, reset - must
-     * pass the inherited level-2 gate, re-checked here because {@link #canCommandSenderUseCommand(ICommandSender)}
-     * now lets players through to this point. That re-check is the reference's mechanism, not an addition: it is what
-     * keeps a non-OP player out of {@code /ysm reload} while {@code /ysm help} still works. {@code /ysm debug} then
-     * re-checks level 4 on top of it ({@link #processDebug}).
+     * a request to the issuing player's own client. Everything else - reload, play, playsound, debug, reset, auth and
+     * model - must pass the inherited level-2 gate, re-checked here because
+     * {@link #canCommandSenderUseCommand(ICommandSender)} now lets players through to this point. That re-check is the
+     * reference's mechanism, not an addition: it is what keeps a non-OP player out of {@code /ysm reload} while
+     * {@code /ysm help} still works. {@code /ysm debug} then re-checks level 4 on top of it ({@link #processDebug}),
+     * and {@code auth}/{@code model} are upstream's own {@code requires(hasPermission(source, 2))}
+     * ({@code command/sub/AuthCommand.java:29}, {@code command/sub/ModelCommand.java:35}).
      */
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
@@ -228,6 +288,8 @@ public class YsmCommand extends CommandBase {
             processReset(sender, args);
         } else if ("auth".equalsIgnoreCase(args[0])) {
             processAuth(sender, args);
+        } else if ("model".equalsIgnoreCase(args[0])) {
+            processModel(sender, args);
         } else {
             throw new WrongUsageException(getCommandUsage(sender));
         }
@@ -702,9 +764,12 @@ public class YsmCommand extends CommandBase {
      * <p>
      * Upstream's four actions map one-to-one: {@code add}/{@code remove} mutate one model in each resolved player's
      * capability ({@code :53-68}), {@code all} grants every model the catalog knows ({@code :72-81}), {@code clear}
-     * empties the table ({@code :83-102}). {@code remove} and {@code clear} additionally reset a player whose current
-     * selection is no longer selectable ({@code :59-64} and {@code :88-97}), which is what
-     * {@link #resetSelectionIfUnauthorized} does; {@code all} never resets anything.
+     * empties the table ({@code :83-102}). {@code remove} and {@code clear} additionally reset a wearer of the
+     * affected model, but by two <em>different</em> tests ({@code :59-64} resets on id equality, {@code :88-97} only
+     * for a {@code SESSION_AUTHORIZED} selection), which {@link #removeAuthModel} and {@link #clearAuthModels}
+     * reproduce separately; {@code all} never resets anything. Both mutations and the resets end in upstream's
+     * {@code SessionProtocolHandler.refreshGrants(player)} ({@code :66}, {@code :78}, {@code :98}), the port's
+     * {@link ModelGrantSync#send(EntityPlayer)}.
      * <p>
      * <b>Permission</b> is the command's own level-2 gate, re-checked by {@link #processCommand} for every subcommand
      * outside {@link #LEVEL_ZERO_SUBCOMMANDS} - exactly upstream's {@code requires(hasPermission(source, 2))}
@@ -795,12 +860,9 @@ public class YsmCommand extends CommandBase {
      * dispatcher hands quotes through instead of consuming them.
      */
     static String parseAuthModelArgument(String[] args) {
-        String argument = joinCommandArguments(args, 3)
-            .trim();
-        if (argument.length() >= 2 && argument.startsWith("\"") && argument.endsWith("\"")) {
-            argument = argument.substring(1, argument.length() - 1);
-        }
-        return argument;
+        return stripOneQuotePair(
+            joinCommandArguments(args, 3)
+                .trim());
     }
 
     /**
@@ -865,7 +927,11 @@ public class YsmCommand extends CommandBase {
         return new EntityPlayerMP[] { getPlayer(sender, selector) };
     }
 
-    /** Grants one model to one player; upstream {@code AuthCommand.java:56}. */
+    /**
+     * Grants one model to one player ({@code AuthCommand.java:56}) and re-publishes that player's grant set
+     * ({@code :66} {@code SessionProtocolHandler.refreshGrants(player)} - every mutation, including a pure grant,
+     * tells the client).
+     */
     private static void addAuthModel(EntityPlayerMP target, ResourceLocation modelId) {
         ExtendedAuthModels auth = ExtendedAuthModels.get(target);
         if (auth == null) {
@@ -873,9 +939,19 @@ public class YsmCommand extends CommandBase {
             return;
         }
         auth.addModel(modelId);
+        ModelGrantSync.send(target);
     }
 
-    /** Revokes one model, then resets the player if they were using it; upstream {@code AuthCommand.java:57-65}. */
+    /**
+     * Revokes one model, then resets the target when the removed id <em>is</em> their current selection
+     * ({@code AuthCommand.java:58} removes, {@code :60-64} is the test {@code hash.equals(selection.getModelId())
+     * && !selection.ignoresGrantsFor(hash)}, {@code :66} refreshes).
+     * <p>
+     * Note what that test does <b>not</b> consult: the removed model's access policy. Revoking a model that needed no
+     * grant still moves a player who is wearing exactly it back to the default - upstream's observable behaviour, not
+     * a typo, so it is copied ({@link #removeResetsSelection}). The old port collapsed it onto the {@code clear} test,
+     * which silently made revoking a public model a no-op.
+     */
     private static void removeAuthModel(EntityPlayerMP target, ResourceLocation modelId) {
         ExtendedAuthModels auth = ExtendedAuthModels.get(target);
         if (auth == null) {
@@ -883,10 +959,17 @@ public class YsmCommand extends CommandBase {
             return;
         }
         auth.removeModel(modelId);
-        resetSelectionIfUnauthorized(target, auth);
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null && removeResetsSelection(info.getModelId(), modelId, info.ignoresGrantsFor(modelId))) {
+            resetToIntrinsicDefault(target, info.getModelId());
+        }
+        ModelGrantSync.send(target);
     }
 
-    /** Grants every registered model; upstream {@code AuthCommand.java:73-78} over {@code catalog.models().keySet()}. */
+    /**
+     * Grants every registered model ({@code AuthCommand.java:73-78} over {@code catalog.models().keySet()}) and
+     * publishes the new set ({@code :78}).
+     */
     private static void grantAllModels(EntityPlayerMP target) {
         ExtendedAuthModels auth = ExtendedAuthModels.get(target);
         if (auth == null) {
@@ -894,9 +977,15 @@ public class YsmCommand extends CommandBase {
             return;
         }
         auth.setAuthModels(ModelAuthorization.allRegisteredModelIds());
+        ModelGrantSync.send(target);
     }
 
-    /** Empties the table, then resets the player if their model is no longer selectable; upstream {@code :86-98}. */
+    /**
+     * Empties the table ({@code AuthCommand.java:87}), then resets the target only when their current model's root
+     * kind is {@code SESSION_AUTHORIZED} and the selection does not ignore grants ({@code :88-97}, the
+     * {@code accessPolicy() == SESSION_AUTHORIZED} test at {@code :90-93}), and publishes the (now empty) set
+     * ({@code :98}). Clearing a table therefore never resets a player who wears a public model.
+     */
     private static void clearAuthModels(EntityPlayerMP target) {
         ExtendedAuthModels auth = ExtendedAuthModels.get(target);
         if (auth == null) {
@@ -904,41 +993,104 @@ public class YsmCommand extends CommandBase {
             return;
         }
         auth.clear();
-        resetSelectionIfUnauthorized(target, auth);
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null) {
+            ResourceLocation current = info.getModelId();
+            if (clearResetsSelection(
+                current,
+                ModelAuthorization.requiresAuth(current),
+                info.ignoresGrantsFor(current))) {
+                resetToIntrinsicDefault(target, current);
+            }
+        }
+        ModelGrantSync.send(target);
     }
 
     /**
-     * Upstream's revoke semantics: after {@code remove}/{@code clear}, a player whose current model is no longer
-     * selectable is moved to the default selection ({@code AuthCommand.java:59-64} for a removed model,
-     * {@code :88-97} for a cleared table), and the change is published to everyone tracking them
-     * ({@code SessionProtocolHandler.refreshGrants} does that on upstream's side, {@code :366-388}).
-     * <p>
-     * The decision is the same predicate the selection point uses
-     * ({@code ModelAuthorization.canSelect}), so with the authorization switch off nothing here can reset anybody -
-     * which is the point of the switch. Note the one place this is deliberately <em>not</em> upstream's shape:
-     * upstream's {@code remove} resets whenever the removed id equals the current selection, even for a model that
-     * needed no grant, while its {@code clear} first checks the model's catalog root kind
-     * ({@code :91-93}). With no root kinds here, both collapse onto "the current model is not selectable", i.e. the
-     * {@code clear} shape; the {@code remove} asymmetry would reset a player for revoking a grant they never needed.
+     * Upstream's {@code auth remove} reset test ({@code command/sub/AuthCommand.java:60-64}):
+     * {@code hash.equals(selection.getModelId()) && !selection.ignoresGrantsFor(hash)}. There is deliberately no
+     * access test in it - see {@link #removeAuthModel} - and no texture test.
      */
-    private static void resetSelectionIfUnauthorized(EntityPlayerMP target, ExtendedAuthModels auth) {
+    static boolean removeResetsSelection(@Nullable ResourceLocation current, @Nullable ResourceLocation removed,
+        boolean ignoresGrants) {
+        return removed != null && removed.equals(current) && !ignoresGrants;
+    }
+
+    /**
+     * Upstream's {@code auth clear} reset test ({@code AuthCommand.java:90-94}): the current selection's catalog root
+     * kind must be {@code SESSION_AUTHORIZED} ({@code :91-93}) and the selection must not ignore grants
+     * ({@code :94}). The port's root kind half is {@link ModelAuthorization#requiresAuth(ResourceLocation)} - the
+     * effective source is {@code config/ysmu/auth}.
+     */
+    static boolean clearResetsSelection(@Nullable ResourceLocation current, boolean restricted,
+        boolean ignoresGrants) {
+        return current != null && restricted && !ignoresGrants;
+    }
+
+    /**
+     * The third revoke shape: {@code ServerModelSession.setGrants} ({@code
+     * tmp/YesSteveModel-dev-1.20/.../model/session/server/ServerModelSession.java:137-142}) drops the current
+     * selection to the intrinsic default when a re-published grant set no longer allows it and the selection does not
+     * ignore grants. It is reached from {@code SessionProtocolHandler.refreshGrants:374-386} - i.e. from <em>any</em>
+     * grant re-evaluation, not only the two {@code /ysm auth} actions - and {@code commitCatalog} ->
+     * {@code buildAuthority:305-311} applies the same rule when the catalog is committed. This port's counterpart is
+     * {@link #resetSelectionIfUnauthorized}, called for every online player by {@link #processReload}.
+     */
+    static boolean grantReevaluationResetsSelection(@Nullable ResourceLocation current, boolean selectable,
+        boolean ignoresGrants) {
+        return current != null && !selectable && !ignoresGrants;
+    }
+
+    /**
+     * Re-evaluates one player's selection against the live authorization state and resets it when it is no longer
+     * eligible ({@link #grantReevaluationResetsSelection}). Wired from {@link #processReload}: a reload is what
+     * commits the catalog here ({@code ServerModelManager.reloadPacks()}), so it is the moment a model can become
+     * restricted - an operator moved it into {@code config/ysmu/auth} - or lose its winning source.
+     * <p>
+     * Two clauses of upstream's commit-time rule are recorded rather than ported. {@code buildAuthority:305-309}
+     * also resets when the committed catalog no longer <em>has</em> the model ({@code record == null}), which this
+     * port cannot ask: an unknown id answers {@code CatalogAccess.PUBLIC} on purpose so a client-local model
+     * registered by {@code /ysmclient load} stays selectable ({@code api/ModelAuthorization:52-59}), so a model
+     * deleted from disk leaves its wearer on it until they choose another one. The texture clause
+     * ({@code :308} {@code !hasTexture}) <em>is</em> checkable here ({@link #textureNamesOf}), but it is not ported
+     * for the reason batch 2 already recorded for the packet path: the client's own texture ladder falls back when a
+     * selection names a texture the model no longer has ({@code api/ModelAuthorization:60-63}), so a stale texture is
+     * not an authorization failure and resetting a player for it would be a new rule. A model that becomes restricted
+     * does reset, which is what this path exists for.
+     */
+    private static void resetSelectionIfUnauthorized(EntityPlayerMP target) {
         ExtendedModelInfo info = ExtendedModelInfo.get(target);
         if (info == null) {
             return;
         }
         ResourceLocation current = info.getModelId();
-        if (current == null) {
-            return;
-        }
-        if (ModelAuthorization.canSelect(
-            ModelAuthorization.isEnabled(),
-            auth.getAuthModels(),
+        if (!grantReevaluationResetsSelection(
             current,
-            ExtendedModelInfo.defaultModelId())) {
+            ModelAuthorization.maySelect(target, current),
+            info.ignoresGrantsFor(current))) {
             return;
         }
+        resetToIntrinsicDefault(target, current);
+    }
+
+    /**
+     * Moves {@code current}'s wearer back to the intrinsic default and tells them. The callers' <em>tests</em> are
+     * upstream's three shapes ({@link #removeResetsSelection}, {@link #clearResetsSelection},
+     * {@link #grantReevaluationResetsSelection}); the reset itself is upstream's single
+     * {@code ModelSelectionService.selectDefault} ({@code capability/ModelSelectionService.java:15-31}), which the two
+     * {@code AuthCommand} branches ({@code :62}, {@code :95}) and {@code setGrants} all funnel into.
+     */
+    private static void resetToIntrinsicDefault(EntityPlayerMP target, ResourceLocation current) {
         ResourceLocation defaultModel = ExtendedModelInfo.defaultModelId();
         SetModelAndTexture.applySelection(target, defaultModel, ExtendedModelInfo.defaultTextureId(defaultModel));
+        // Upstream clears the forced-selection exception whenever it resets to the intrinsic default: the session's
+        // selectIntrinsicDefault writes ignoreGrants false (ServerModelSession.java:338-341) and its authority refuses
+        // to hold an intrinsic default that ignores grants (:388-391). The EEP's own keep-rule would drop it here
+        // anyway because the model id changes, but the reset must not depend on that coincidence.
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null) {
+            info.clearIgnoreGrants();
+        }
         // Port addition, like the command receipts above: upstream's player learns about the reset only from the
         // changed model. The message is what makes "my model changed by itself" explainable.
         target.addChatMessage(
@@ -958,11 +1110,308 @@ public class YsmCommand extends CommandBase {
             target.getCommandSenderName());
     }
 
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm model set
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * {@code /ysm model set <targets> <model> <texture> [ignore_auth]} - the port of upstream's
+     * {@code command/sub/ModelCommand.set}: the grammar is {@code command/sub/ModelCommand.java:41-50} (permission 2
+     * at {@code :35}), the body is {@code :55-98}.
+     * <p>
+     * <b>Scope.</b> Upstream's {@code /ysm model} command has four literals; only {@code set} is ported, and the other
+     * three are recorded rather than stubbed (see {@link #MODEL_ACTIONS}).
+     * <p>
+     * <b>A restricted target is skipped, not fatal</b> - upstream's check at {@code :82-88} ends in {@code return}
+     * inside the {@code ifPresent} lambda, so it reports the ungranted player and continues with the rest of the
+     * selector; only a bad model path aborts the command ({@code :60-63}). {@code ignore_auth} is what skips that
+     * refusal, and it is also the value {@link ExtendedModelInfo#setCommandSelection} stores as the forced-selection
+     * exception.
+     * <p>
+     * <b>Feedback is a port addition</b> (upstream {@code sendFailure}s literal English text at {@code :61,72,86} and
+     * answers nothing on success), like the {@code /ysm auth} receipts, and it is only sent when
+     * {@link #reportsModelSetReceipt} is true - i.e. when at least one target actually got the model; the refusal
+     * <em>wording</em> is upstream's. Every key here is {@code %s}-only, because {@code ChatComponentTranslation}
+     * refuses other conversions on 1.7.10.
+     * <p>
+     * <b>One argument the port cannot honour.</b> Upstream's {@code texture} accepts {@code "-"} for the model's own
+     * declared {@code settings.default_texture} ({@code :66-70}). That value is parsed on the client in this port
+     * ({@code ClientModelManager.DECLARED_DEFAULT_TEXTURES}, filled from the payload's {@code ysm_default_texture});
+     * the server keeps only the texture-<em>name</em> set ({@link ServerModelInfo#getTextures()}), so {@code "-"} is
+     * refused with an explanation instead of being guessed at.
+     */
+    private void processModel(ICommandSender sender, String[] args) {
+        if (args.length < 2 || !isKnownModelAction(args[1])) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.model.usage"));
+            return;
+        }
+        // /ysm model set <targets> <model> <texture> [ignore_auth]: upstream's command graph has exactly these nodes,
+        // so a shorter or longer argument list - or a fifth word that is not a boolean - cannot be parsed there either
+        // (brigadier fails to build the tree; BoolArgumentType at :48 only reads true/false). The usage line is this
+        // port's equivalent of "the tree did not match".
+        if (args.length < 5 || args.length > 6 || args.length == 6 && !isBooleanWord(args[5])) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.model.usage"));
+            return;
+        }
+        boolean ignoreAuth = args.length == 6 && Boolean.parseBoolean(args[5]);
+        String modelArgument = stripOneQuotePair(args[3]);
+        String textureArgument = stripOneQuotePair(args[4]);
+
+        ResourceLocation modelId = ModelAuthorization.resolveModelArgument(modelArgument);
+        Set<String> textureNames = modelId == null ? null : textureNamesOf(modelId);
+        if (modelId == null || textureNames == null) {
+            // Upstream's own wording for a path the catalog cannot resolve (ModelCommand.java:61), which is the same
+            // sentence AuthCommand.java:49 uses for the same failure. The registry half is a reload race: the id was
+            // just resolved against CACHE_NAME_INFO's key set.
+            sender.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.model.set.unknown_model", modelArgument));
+            return;
+        }
+        if (isDeclaredDefaultTextureArgument(textureArgument)) {
+            // Upstream ModelCommand.java:66-70; see the method note for why this port cannot resolve it.
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.texture_dash_unavailable",
+                    modelArgument));
+            return;
+        }
+        if (!isKnownTexture(textureArgument, textureNames)) {
+            // Upstream ModelCommand.java:71-74. The names are the model's own texture list, i.e. the same set the
+            // client registers its texture ids from, so a name accepted here is one the client can bind.
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.unknown_texture",
+                    modelArgument,
+                    textureArgument));
+            return;
+        }
+        ResourceLocation textureId = ModelIdUtil.getSubModelId(modelId, textureArgument);
+
+        // Resolve the targets before touching anything, so a bad selector cannot apply the model to a partial round
+        // (the same order /ysm auth uses; the argument checks above run first on purpose, because a usage error must
+        // not need a player to be resolvable).
+        EntityPlayerMP[] targets = resolveAuthTargets(sender, args[2]);
+        // The access half is per model (upstream :82-83: rootKind().accessPolicy() == SESSION_AUTHORIZED), the grant
+        // half is per target (upstream :84: !auth.containModel(hash)).
+        boolean restricted = ModelAuthorization.requiresAuth(modelId);
+        int applied = 0;
+        for (EntityPlayerMP target : targets) {
+            if (targetRefusesModelSet(ignoreAuth, restricted, ModelAuthorization.maySelect(target, modelId))) {
+                // Upstream :85-87: reported to the command source, and the loop continues with the next target.
+                sender.addChatMessage(
+                    new ChatComponentTranslation(
+                        "commands.yes_steve_model.model.set.not_authorized",
+                        target.getCommandSenderName(),
+                        modelArgument));
+                continue;
+            }
+            if (applyCommandSelection(target, modelId, textureId, ignoreAuth)) {
+                applied++;
+            }
+        }
+        if (reportsModelSetReceipt(applied)) {
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.done",
+                    modelArgument,
+                    String.valueOf(applied)));
+        }
+    }
+
+    /**
+     * Whether {@code /ysm model set} answers with its success receipt: only when at least one target actually got the
+     * model.
+     * <p>
+     * The receipt itself is a port addition (upstream's {@code ModelCommand} answers nothing at all on success - its
+     * only output is the per-target {@code sendFailure} at {@code :85-87} and the argument refusals at
+     * {@code :61,72}), so its rule is the port's own. A run in which every target was refused therefore prints
+     * nothing beyond those refusal lines: an extra "0 player(s)" line would only restate feedback the operator
+     * already has, and printing nothing extra is upstream's own silent shape.
+     */
+    static boolean reportsModelSetReceipt(int appliedTargets) {
+        return appliedTargets > 0;
+    }
+
+    /**
+     * Writes one operator-forced selection and publishes it - the port of upstream's
+     * {@code SessionProtocolHandler.applyCommandSelection} ({@code
+     * tmp/YesSteveModel-dev-1.20/.../network/forge/SessionProtocolHandler.java:343-366}), which stores the selection
+     * with {@code persistence.setCommandSelection(modelId, textureId, ignoreGrants && !intrinsicDefault)}
+     * ({@code :362-363}) and then stops any pending animation request ({@code :364}).
+     * <p>
+     * The port's write/publish funnel for a selection is {@link SetModelAndTexture#applySelection} - it also drops a
+     * stale NPC override and rewrites the vehicle this player owns, which upstream does from its own model-update path
+     * ({@code event/CapabilityEvent.java:198-211}); the forced flag is then the one
+     * {@link ExtendedModelInfo#setCommandSelection} call, so {@code ignoresGrantsFor} reads exactly what the operator
+     * asked for. The trailing grant publication is this port's split channel (upstream publishes the accepted
+     * selection over its session, {@code ControlHandler.applyAcceptedModelSelection}); the packet is the only way the
+     * target's client learns its restricted/granted sets here.
+     *
+     * @return whether the target had a model table to write to; a target without one is skipped, not fatal, the same
+     *         way upstream's {@code ifPresent} chain ({@code ModelCommand.java:80-95}) does nothing at all for it
+     */
+    private static boolean applyCommandSelection(EntityPlayerMP target, ResourceLocation modelId,
+        ResourceLocation textureId, boolean ignoreGrants) {
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info == null) {
+            warnMissingModelInfo(target);
+            return false;
+        }
+        SetModelAndTexture.applySelection(target, modelId, textureId);
+        // Upstream :362-363: {@code ignoreGrants && !intrinsicDefault}. The intrinsic default can never ignore grants
+        // (ServerModelSession.java:388-391 refuses to hold such an authority), and every reset path writes the flag
+        // false for it, so a forced selection of the default model must not leave the exception behind either.
+        info.setCommandSelection(
+            modelId,
+            textureId,
+            ignoreGrants && !modelId.equals(ExtendedModelInfo.defaultModelId()));
+        info.stopAnimation();
+        ModelGrantSync.send(target);
+        return true;
+    }
+
+    /**
+     * Whether one target of {@code /ysm model set} is refused before anything is written - upstream's
+     * {@code ModelCommand.java:82-85}: {@code !ignoreAuth && rootKind().accessPolicy() == SESSION_AUTHORIZED
+     * && !auth.containModel(hash)}. The refusal is reported at {@code :85-87} and only that target is skipped
+     * ({@code return} inside the {@code ifPresent} lambda), so a selector with one ungranted player still applies the
+     * model to the others.
+     *
+     * @param restricted whether the model's access policy is {@code SESSION_AUTHORIZED}
+     *        ({@link ModelAuthorization#requiresAuth(ResourceLocation)})
+     * @param selectable whether this target may select it ({@link ModelAuthorization#maySelect(EntityPlayer,
+     *        ResourceLocation)}: public, or granted). An <em>absent</em> grant table answers {@code true} - the
+     *        documented "this build did not attach the EEP" rule of {@code api/ModelAuthorization.canSelect}, which
+     *        upstream does not have a counterpart for: its {@code ifPresent} chain would do nothing at all for such a
+     *        target instead of applying the model.
+     */
+    static boolean targetRefusesModelSet(boolean ignoreAuth, boolean restricted, boolean selectable) {
+        return !ignoreAuth && restricted && !selectable;
+    }
+
+    /**
+     * Whether an action word is one of {@link #MODEL_ACTIONS}. Upstream's literal set is a four-way command tree
+     * ({@code ModelCommand.java:36-51}); the port dispatches only {@code set} and answers the usage line for the rest.
+     */
+    static boolean isKnownModelAction(String action) {
+        for (String known : MODEL_ACTIONS) {
+            if (known.equalsIgnoreCase(action)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Upstream's {@code "-"} texture spelling ({@code ModelCommand.java:66}: "the model's declared default"), which
+     * this port refuses because the declared default is client-side state; see {@link #processModel}.
+     */
+    static boolean isDeclaredDefaultTextureArgument(String textureArgument) {
+        return "-".equals(textureArgument);
+    }
+
+    /**
+     * Upstream's texture validation ({@code ModelCommand.java:71-74}): the requested texture must be one of the
+     * model's own names.
+     */
+    static boolean isKnownTexture(String textureArgument, Set<String> textureNames) {
+        return textureArgument != null && textureNames != null && textureNames.contains(textureArgument);
+    }
+
+    /** Upstream's {@code BoolArgumentType.bool()} ({@code ModelCommand.java:48}) spells a boolean as true/false only. */
+    static boolean isBooleanWord(String word) {
+        return "true".equalsIgnoreCase(word) || "false".equalsIgnoreCase(word);
+    }
+
+    /**
+     * The texture names one registered model declares, or {@code null} when the registry has no such model.
+     * <p>
+     * The server-side source is {@link ServerModelInfo#getTextures()} - the {@code ModelData.texture} key set of the
+     * baked payload ({@code data/ModelData.java:210}), i.e. the same names the client builds its texture ids from
+     * ({@code client/ClientModelManager.java:1158}). Upstream reads the same list off the loaded model
+     * ({@code ModelCommand.java:68,71}); what this port does <em>not</em> have server-side is the model's declared
+     * <em>default</em> texture, hence the {@code "-"} refusal.
+     */
+    @Nullable
+    private static Set<String> textureNamesOf(ResourceLocation modelId) {
+        ServerModelInfo info = CACHE_NAME_INFO.get(modelId.getResourcePath());
+        return info == null ? null : info.getTextures();
+    }
+
+    /**
+     * The texture slot's completion: the chosen model's own texture names, sorted so the list is stable.
+     * <p>
+     * Upstream suggests its whole texture registry there ({@code ModelCommand.java:46} with
+     * {@code CommandRegistry.ALL_TEXTURES}); this port's server keeps textures per model, so the same slot offers the
+     * names that will actually pass {@link #isKnownTexture}.
+     */
+    static List<String> textureSuggestions(Set<String> textureNames) {
+        List<String> names = new ArrayList<>(textureNames);
+        Collections.sort(names);
+        return names;
+    }
+
+    /**
+     * One argument with one surrounding pair of double quotes removed. 1.7.10's dispatcher splits the command line on
+     * spaces and hands quotes through ({@code CommandHandler.java:38}), so this is how a quoted single argument is
+     * unwrapped; a longer quoted string cannot be spelled in a fixed-position slot at all (use the {@code _name_<hex>}
+     * id for a name containing spaces).
+     */
+    static String stripOneQuotePair(String argument) {
+        if (argument != null && argument.length() >= 2 && argument.startsWith("\"") && argument.endsWith("\"")) {
+            return argument.substring(1, argument.length() - 1);
+        }
+        return argument;
+    }
+
+    /**
+     * The model-info table is attached at {@code EntityEvent.EntityConstructing} like the auth table; a missing one
+     * means this build did not attach it. Upstream's command body would silently do nothing for such a target
+     * ({@code ModelCommand.java:80-95} guards both capabilities); the port logs, like {@link #warnMissingAuthTable}.
+     */
+    private static void warnMissingModelInfo(EntityPlayerMP target) {
+        ysmu.LOG.warn(
+            "No model-info table on {}; is ExtendedModelInfo registered from EntityEvent.EntityConstructing?",
+            target.getCommandSenderName());
+    }
+
+    /**
+     * Re-evaluates every online player's selection after a catalog reload and republishes the authorization state.
+     * <p>
+     * Upstream re-evaluates at commit time: {@code ServerModelSession.commitCatalog} builds the next authority
+     * ({@code :250-268} -> {@code buildAuthority:286-315}), which resets an ineligible selection, and
+     * {@code SessionProtocolHandler.publishCatalog} ({@code :443-469}) applies that per player and sends the new
+     * authority. The port's commit is {@code ServerModelManager.reloadPacks()}, so this runs immediately after it.
+     * <p>
+     * The reset is upstream's third shape ({@link #resetSelectionIfUnauthorized}); the publication is one
+     * {@link ModelGrantSync#sendAll()} because the reload can change the restricted set as well as every player's
+     * eligibility, and it runs after the resets so it carries the settled state. (The per-player
+     * {@code refreshGrants} upstream calls from a grant mutation is {@link ModelGrantSync#send(EntityPlayer)}, used by
+     * the {@code /ysm auth} actions.)
+     */
+    private static void republishAuthorizationAfterReload() {
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            // A unit JVM, or a server that is still starting; nothing to re-evaluate and nobody to tell.
+            return;
+        }
+        for (EntityPlayerMP target : server.getConfigurationManager().playerEntityList) {
+            resetSelectionIfUnauthorized(target);
+        }
+        ModelGrantSync.sendAll();
+    }
+
     private void processReload(ICommandSender sender) {
         StopWatch watch = new StopWatch();
         watch.start();
         checkModelFiles(sender, CUSTOM);
         ServerModelManager.reloadPacks();
+
+        // 模型授权随目录一起重算：把模型移进/移出 config/ysmu/auth 或撤销授权后，在线玩家的当前选择可能不再可用，
+        // 且受限集合本身变了。上游在提交目录时做同一件事（ServerModelSession.commitCatalog -> buildAuthority
+        // :286-315 重置不合格的选择，SessionProtocolHandler.publishCatalog :443-469 逐个玩家应用并发新权威），
+        // 本仓的"提交"就是上面的 reloadPacks()。
+        republishAuthorizationAfterReload();
 
         // CUI-02: 广播给全服所有玩家，而不是只广播命令执行者所在维度的玩家。
         // N-02（取舍：保留）：这是 /ysm reload 之后唯一的服务端权威重同步入口 —— 每个玩家恰好调用一次，
