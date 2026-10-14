@@ -25,6 +25,7 @@ import net.minecraft.util.ResourceLocation;
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.Tags;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.model.format.BuiltinModelIndex;
 import com.fox.ysmu.model.format.FolderFormat;
@@ -231,16 +232,15 @@ public final class ServerModelManager {
         }
         clearModelCaches();
         createConfigDirectories();
-        // 先补齐 blacklist.txt(首次运行时创建)。
-        initBlacklistFile();
-        // M1：内置模型只有 assets/ysmu/builtin/ 一个来源根，每次 reload 先清空 config/ysmu/builtin 再整树解压（决策 D7/D8）。
+        // M1：内置模型只有 assets/ysmu/builtin/ 一个来源根；契约指纹未变且契约路径齐全时跳过"清空 + 整树解压"
+        // （决策 D7/D8，见 extractBuiltinModels 的 javadoc）。
         extractBuiltinModels();
         // 契约校验刻意放在解压**之后**、且不塞进 extractBuiltinModels 内部：将来"内容未变则跳过整树解压"的优化
         // 落进那个方法时，被跳过的那一轮照样有人报多余/缺失文件（见 verifyBuiltinModelIndex 的 javadoc）。
         verifyBuiltinModelIndex();
         initPassword();
         initOpenYsmServerIndex();
-        initBuiltNoticeFile();
+        initBuiltNoticeFile(BUILT);
         rebuildModelCaches();
         // M-09:reloadPacks 末尾按本次登记清理 cache/server（保留 PASSWORD 与所有非缓存命名文件）。
         try {
@@ -578,33 +578,52 @@ public final class ServerModelManager {
     }
 
     /**
-     * 清空运行时目录 {@link #BUILT}（{@code config/ysmu/builtin}）后，把 jar 内 {@code assets/ysmu/builtin/} 的
-     * 整棵树解压进去，与 SOURCE 的 {@code ServerModelManager.extractBuiltinModels} 同一形状：解压整棵树，而不是
-     * 逐个模型、逐个文件列举（决策 D7）。
+     * 把 jar 内 {@code assets/ysmu/builtin/} 的整棵树**按需**镜像到运行时目录 {@link #BUILT}
+     * （{@code config/ysmu/builtin}）：随包契约 {@code builtin-index.json} 的指纹
+     * （{@link BuiltinModelIndex#fingerprintHex()}）加模组版本与落点里的 stamp 一致、且契约声明的每个模型路径都还在
+     * 时，跳过清空与解压；否则保持 SOURCE 的形状——{@code FileUtils.cleanDirectory(target)} 后整树解压（决策 D7）
+     * ——再写 stamp。
      *
-     * <p>树里两类顶层条目都在这里落地：{@code builtin/misc} 是包根（{@code ysm-pack.json} 加六个旧扁平模型
-     * 目录 {@code 1_alex} … {@code 6_wine_fox}），{@code builtin/default} 是现代 {@code ysm.json} 包。
-     * 它们随后由 {@link #rebuildModelCaches} 的三个扫描器分别认领。目标目录不区分"包根"与"模型目录"，
-     * 也没有"用户替换过的目录"这种例外：{@code config/ysmu/builtin} 的内容每轮都由模组自己重写。</p>
+     * <p><b>为什么是"按需"（移植特有能力，上游没有对应物）。</b>上游的内置模型在 jar 内、由原生层在内存里
+     * materialize（{@code model/catalog/builtin/BuiltinModelMaterializer}，没有落盘副本），所以不存在"要不要重写"
+     * 这个问题；本仓必须把 {@code ysm.json} 与现代包两种格式摊到磁盘上给扫描器读，每轮 reload 把那 585 个文件、
+     * 约 57 MB 重抄一遍纯属浪费。判定与 {@link ModelIndexCache} 同族——用内容指纹决定要不要重建：</p>
+     * <ul>
+     * <li>指纹 = 契约文件字节的 sha256 + {@link Tags#VERSION}：内置集合或任一模型内容变了、模组换版本了就重写；</li>
+     * <li>契约不可读（{@link BuiltinModelIndex#fingerprintHex()} 为 {@code null}）时<b>不跳过</b>：这时连"该有哪些
+     * 文件"都不知道，保持整树重写最稳；</li>
+     * <li>契约路径有缺失（用户删了/改坏了某个内置模型目录）时<b>不跳过</b>：整树重写顺带修好它。</li>
+     * </ul>
      *
-     * <p>与 SOURCE 同一形状：SOURCE 先 {@code FileUtils.cleanDirectory(BUILT)} 再解压（{@code :440-446}），这里也
-     * 先清空目标目录，避免 jar 里被删除的内置文件以残留形式留在 {@code config/ysmu/builtin} 下、下次 reload 仍被
-     * 扫到并登记一个已经不再随 jar 发布的模型。</p>
+     * <p><b>这是一处有意的语义变化。</b>指纹一致时运行时副本不再被每轮覆盖：用户对 {@code config/ysmu/builtin/**}
+     * 的改动与添加的文件会保留到下一次契约变化。{@link #BUILT} 仍然不是用户数据（它是模组的落点，
+     * {@code notice.txt} 也这么写），但这确实不同于本仓旧行为（每轮清空重写），所以 AGENTS.md 与 notice 文案一起
+     * 记着它。契约路径集合同时是"内置身份"（{@link #isBuiltinOrigin}）：契约没声明的目录既不算内置、也不会被清掉。</p>
      *
-     * <p>清空是安全的，因为 {@link #BUILT} 不是用户数据：它是模组自己的解压落点（迁到这里的目录，早前版本不
-     * 存在），它的 {@code notice.txt} 也明确写着内容每轮都会被 {@code assets/ysmu/builtin} 覆盖、玩家自己的模型
-     * 应放 {@link #CUSTOM}。{@link #CUSTOM} 是用户目录，绝不清理。</p>
+     * <p>清空（只有真的重写时）仍然安全：{@link #BUILT} 是模组的解压落点，{@link #CUSTOM} 是用户目录、绝不清理。</p>
+     *
+     * @param target 解压落点（生产是 {@link #BUILT}；参数化是为了用 {@code @TempDir} 验证"跳过 / 用户文件保留 /
+     *        缺件自愈"）
+     * @param stamp 契约指纹 + 模组版本；{@code null}（契约不可读）时永不跳过
      */
-    private static void extractBuiltinModels() {
-        // 只清 BUILT：custom 是用户数据，另一个 built（旧的孤儿 notice 目录）也刻意不动。
-        if (Files.isDirectory(BUILT)) {
+    static void extractBuiltinModels(Path target, String stamp) {
+        if (builtinTreeMatches(target, stamp)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
+                ysmu.LOG.info(
+                    "[YSMU-MODEL] Built-in model tree under {} matches the shipped contract; skipping extraction",
+                    target);
+            }
+            return;
+        }
+        // 只清 target：custom 是用户数据，另一个 built（旧的孤儿 notice 目录）也刻意不动。
+        if (Files.isDirectory(target)) {
             try {
-                FileUtils.cleanDirectory(BUILT.toFile());
+                FileUtils.cleanDirectory(target.toFile());
             } catch (IOException e) {
-                ysmu.LOG.warn("Failed to clean built-in model directory {}", BUILT, e);
+                ysmu.LOG.warn("Failed to clean built-in model directory {}", target, e);
             }
         }
-        createFolder(BUILT);
+        createFolder(target);
         // 尾斜杠与 SOURCE 一致：jar 里以目录条目（"assets/ysmu/builtin/"）存在，带斜杠才能解析成目录 URL。
         String prefix = getCustomFiles(BUILTIN_PACK_RESOURCE_ROOT) + "/";
         URL url = ysmu.class.getResource(prefix);
@@ -627,7 +646,7 @@ public final class ServerModelManager {
                         if (entry.isDirectory() || !name.startsWith(entryPrefix)) {
                             continue;
                         }
-                        copyBuiltinPackResource(name.substring(entryPrefix.length()));
+                        copyBuiltinPackResource(target, name.substring(entryPrefix.length()));
                     }
                 }
             } else if ("file".equals(url.getProtocol())) {
@@ -638,15 +657,71 @@ public final class ServerModelManager {
                         stream.filter(Files::isRegularFile)
                             .forEach(
                                 source -> copyBuiltinPackResource(
+                                    target,
                                     sourceRoot.relativize(source)
                                         .toString()
                                         .replace('\\', '/')));
                     }
                 }
             }
-            ysmu.LOG.info("Extracted built-in model resources from {} into {}", prefix, BUILT);
+            ysmu.LOG.info("Extracted built-in model resources from {} into {}", prefix, target);
+            // stamp 只在整棵树真的落地之后写：中途失败就没有 stamp，下次 reload 照旧重写一遍。
+            writeBuiltinStamp(target, stamp);
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to extract built-in model resources from {}", prefix, e);
+        }
+    }
+
+    /** 生产入口：落点是 {@link #BUILT}，stamp 由契约指纹与模组版本算出来（见 {@link #builtinStampValue()}）。 */
+    private static void extractBuiltinModels() {
+        extractBuiltinModels(BUILT, builtinStampValue());
+    }
+
+    /** 运行时副本的状态标记文件名；内容 = 契约指纹 + {@link Tags#VERSION}。 */
+    static final String BUILTIN_STAMP_FILE_NAME = ".ysmu-builtin-stamp";
+
+    /**
+     * stamp 的内容：契约文件字节的 sha256 + 模组版本。契约不可读时返回 {@code null}，调用方据此<b>不</b>跳过解压。
+     */
+    static String builtinStampValue() {
+        String fingerprint = BuiltinModelIndex.fingerprintHex();
+        if (fingerprint == null) {
+            return null;
+        }
+        return fingerprint + '\n' + Tags.VERSION + '\n';
+    }
+
+    /**
+     * {@code target} 是否就是这份 stamp 对应的解压结果：stamp 文件内容一致，<b>且</b>契约声明的每个模型路径都还在。
+     * 少了任何一个路径就回答"不匹配"，让整树重写顺带修好它；读不到 stamp 也回答不匹配（重写一次没有代价）。
+     */
+    static boolean builtinTreeMatches(Path target, String stamp) {
+        if (stamp == null || target == null || !Files.isDirectory(target)) {
+            return false;
+        }
+        for (String modelPath : BuiltinModelIndex.declaredModelPaths()) {
+            if (!Files.exists(target.resolve(modelPath))) {
+                return false;
+            }
+        }
+        Path stampFile = target.resolve(BUILTIN_STAMP_FILE_NAME);
+        try {
+            return Files.isRegularFile(stampFile)
+                && stamp.equals(new String(Files.readAllBytes(stampFile), StandardCharsets.UTF_8));
+        } catch (Exception | LinkageError unreadable) {
+            return false;
+        }
+    }
+
+    private static void writeBuiltinStamp(Path target, String stamp) {
+        if (stamp == null) {
+            return;
+        }
+        try {
+            FileUtils.writeStringToFile(target.resolve(BUILTIN_STAMP_FILE_NAME)
+                .toFile(), stamp, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to write the built-in extraction stamp under {}", target, e);
         }
     }
 
@@ -755,15 +830,15 @@ public final class ServerModelManager {
 
     /**
      * 复制 {@code assets/ysmu/builtin/} 下的一个文件，{@code relativePath} 相对该目录；落点是
-     * {@code config/ysmu/builtin/<relativePath>}，即整棵树的镜像。
+     * {@code <target>/<relativePath>}，即整棵树的镜像。
      */
-    private static void copyBuiltinPackResource(String relativePath) {
-        Path target = BUILT.resolve(relativePath);
-        createFolder(target.getParent());
+    private static void copyBuiltinPackResource(Path target, String relativePath) {
+        Path destination = target.resolve(relativePath);
+        createFolder(destination.getParent());
         GetJarResources.copyYesSteveModelFile(
             getCustomFiles(BUILTIN_PACK_RESOURCE_ROOT + "/" + relativePath),
-            target.getParent(),
-            target.getFileName()
+            destination.getParent(),
+            destination.getFileName()
                 .toString());
     }
 
@@ -831,31 +906,25 @@ public final class ServerModelManager {
         }
     }
 
-    private static void initBlacklistFile() {
-        Path blacklistFile = FOLDER.resolve("blacklist.txt");
-        if (Files.isRegularFile(blacklistFile)) {
-            return;
-        }
-        try {
-            String content = "# Yes Steve Model built-in model blacklist\n"
-                + "# One Java regular expression per line. Lines starting with # are comments.\n"
-                + "# NOT CONSULTED YET: built-in models now come from assets/ysmu/builtin and are extracted\n"
-                + "# into config/ysmu/builtin on every reload, so there is no per-name copy left to skip.\n"
-                + "# Your own models live in config/ysmu/custom and are never touched.\n"
-                + "# The default model cannot be disabled: the mod's fallback paths load their animations\n"
-                + "# and geometry from it.\n";
-            FileUtils.writeStringToFile(blacklistFile.toFile(), content, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            ysmu.LOG.warn("Failed to create OpenYSM blacklist file", e);
-        }
-    }
-
-    private static void initBuiltNoticeFile() {
-        Path noticeFile = BUILT.resolve("notice.txt");
+    /**
+     * 在 {@code builtDir} 里放一份 {@code notice.txt}，说明该目录是模组的落点、用户模型该放 {@link #CUSTOM}。
+     *
+     * <p>第 ⑩ 项：只在**内容变化**时才写盘。旧版每轮 reload 都重写一遍，而 {@code extractBuiltinModels} 现在在契约
+     * 未变时会跳过整树解压，所以这个文件通常已经在那里、内容也一样——重写只会改一次 mtime 并让"运行时副本没被
+     * 动过"这件事变得不可观察。文案同步改成实际规则：指纹未变时副本保留（不再声称"每轮被覆盖"）。</p>
+     *
+     * <p>参数化是为了用 {@code @TempDir} 验证"同内容不写盘"。</p>
+     */
+    static void initBuiltNoticeFile(Path builtDir) {
+        Path noticeFile = builtDir.resolve("notice.txt");
         try {
             String content = "OpenYSM built-in model directory.\n"
-                + "Its contents are overwritten from assets/ysmu/builtin on every reload;\n"
+                + "It is materialized from assets/ysmu/builtin when the shipped builtin-index.json contract changes;\n"
                 + "put your own models in config/ysmu/custom instead.\n";
+            if (Files.isRegularFile(noticeFile)
+                && content.equals(new String(Files.readAllBytes(noticeFile), StandardCharsets.UTF_8))) {
+                return;
+            }
             FileUtils.writeStringToFile(noticeFile.toFile(), content, StandardCharsets.UTF_8);
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to write OpenYSM builtin directory notice", e);
