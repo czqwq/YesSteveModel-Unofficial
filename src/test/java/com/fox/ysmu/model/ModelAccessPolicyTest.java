@@ -37,9 +37,6 @@ import com.fox.ysmu.util.ModelIdUtil;
  */
 class ModelAccessPolicyTest {
 
-    /** 故意不等于内置 default：命中的只可能是"访问级别"分支，而不是 intrinsic default 分支。 */
-    private static final ResourceLocation OTHER_DEFAULT = new ResourceLocation("ysmu", "some_other_default");
-
     @AfterEach
     void resetRegistry() {
         ServerModelManager.clearModelCaches();

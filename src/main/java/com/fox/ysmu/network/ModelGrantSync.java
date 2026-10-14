@@ -84,7 +84,8 @@ public final class ModelGrantSync {
         }
         List<String> ids = new ArrayList<>(grants.size());
         for (ResourceLocation modelId : grants) {
-            if (modelId != null && ServerModelManager.hasModel(modelId)) {
+            // hasModel() null-checks its argument itself (ServerModelManager.hasModel), so no guard is needed here.
+            if (ServerModelManager.hasModel(modelId)) {
                 ids.add(modelId.getResourcePath());
             }
         }
