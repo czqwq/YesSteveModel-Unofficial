@@ -28,7 +28,9 @@ import com.fox.ysmu.util.ModelPathUtil;
  * synthetic packs.</li>
  * <li>With an empty query, the "all models" category shows only the folders and models that are <b>direct children</b>
  * of the current folder. The star category shows every starred model flat, because it is a "show me my collection" view
- * rather than a place in the tree.</li>
+ * rather than a place in the tree. The auth category is flat for the same reason and hides the models that are
+ * restricted and not granted to this client - every other model, folders included, is treated exactly like the all
+ * category treats it up to that one rule.</li>
  * <li>With a non-empty query, models from every folder are matched by their display path and folders are hidden, except
  * for a query starting with {@code #}, which matches folder names only.</li>
  * <li>The page number is remembered per folder, so going back into a folder returns to the page the user left.</li>
@@ -108,15 +110,17 @@ public final class ModelBrowserState {
     /**
      * Applies the search query, the category and the current folder, producing the two lists the grid draws.
      *
-     * @param query  raw text of the search box; may be {@code null}
-     * @param starred decides whether a model belongs to the star category; may be {@code null}
+     * @param query    raw text of the search box; may be {@code null}
+     * @param needAuth decides whether a model is restricted and this client holds no grant for it, which is the one
+     *                 thing the auth category hides ({@code CatalogBrowserState.java:108-109}); may be {@code null}
+     * @param starred  decides whether a model belongs to the star category; may be {@code null}
      */
-    public void filter(String query, Predicate<String> starred) {
+    public void filter(String query, Predicate<String> needAuth, Predicate<String> starred) {
         String search = query == null ? "" : query.trim().toLowerCase(Locale.ENGLISH);
 
         List<String> visibleModels = new ArrayList<>();
         for (String path : allModels) {
-            if (isVisible(path, search, starred)) {
+            if (isVisible(path, search, needAuth, starred)) {
                 visibleModels.add(path);
             }
         }
@@ -144,12 +148,21 @@ public final class ModelBrowserState {
         }
     }
 
-    private boolean isVisible(String path, String search, Predicate<String> starred) {
+    private boolean isVisible(String path, String search, Predicate<String> needAuth, Predicate<String> starred) {
+        // Upstream checks the auth rule first and the star rule second (CatalogBrowserState.java:108-113). Upstream
+        // asks the entry itself whether it is restricted and the passed-in predicate whether it is granted; this class
+        // holds display paths and knows nothing about access, so the caller folds both facts into one predicate - the
+        // same division of labour as the star rule below. A null predicate means "nothing is locked", like a null star
+        // predicate means "nothing is starred".
+        if (category == Category.AUTH && needAuth != null && needAuth.test(path)) {
+            return false;
+        }
         if (category == Category.STAR && (starred == null || !starred.test(path))) {
             return false;
         }
         if (search.isEmpty()) {
-            // Inside a folder the grid shows that folder's content; the star view is flat by design.
+            // Inside a folder the grid shows that folder's content; the star and auth views are flat by design,
+            // because upstream drops the folder list in every category but "all" (CatalogBrowserState.java:125).
             return category != Category.ALL || ModelPathUtil.parentHierarchy(path).equals(currentPack);
         }
         return matchesPath(path, search);
@@ -261,9 +274,13 @@ public final class ModelBrowserState {
         return maxPage;
     }
 
-    /** Which slice of the models the grid shows; only {@link #ALL} has folders. */
+    /**
+     * Which slice of the models the grid shows; only {@link #ALL} has folders. The constants keep upstream's names and
+     * order ({@code CatalogBrowserState.java:257-261}).
+     */
     public enum Category {
         ALL,
+        AUTH,
         STAR
     }
 }

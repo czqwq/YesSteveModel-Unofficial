@@ -3,6 +3,7 @@ package com.fox.ysmu.client.gui;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.ysmu;
+import com.fox.ysmu.client.ClientModelAccess;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
@@ -46,6 +47,12 @@ public class PlayerModelScreen extends GuiScreen {
      */
     private static final int MODEL_SETTINGS_BUTTON_ID = 50;
     private static final int SHOW_MODEL_ID_FIRST_BUTTON_ID = 51;
+    /**
+     * Id of the auth-category button. Upstream's category buttons carry no ids; this port's {@code actionPerformed}
+     * switches on them, so it needs one that is free: 0-10 are the header and page buttons, 11-20 the grid tiles
+     * (ten slots), 50/51 the two settings widgets.
+     */
+    private static final int AUTH_CATEGORY_BUTTON_ID = 52;
 
     private final ModelSelectionTarget target;
     /** Which folder is open and which page each folder is on; static state inside, like upstream. */
@@ -102,7 +109,24 @@ public class PlayerModelScreen extends GuiScreen {
         // The server's pack manifests give folders their real name/description and cover; folders without one are
         // derived from the model paths alone.
         this.browser.rebuild(this.modelIdByPath.keySet(), ClientPackRegistry.names(), ClientPackRegistry.descriptions());
-        this.browser.filter(this.textField == null ? "" : this.textField.getText(), this::isStarred);
+        this.browser.filter(this.textField == null ? "" : this.textField.getText(), this::needsAuth, this::isStarred);
+    }
+
+    /**
+     * Whether the tile for this display path is locked, which is the one thing the auth category hides and the tile
+     * darkens for. {@link ClientModelAccess#needsAuth(net.minecraft.util.ResourceLocation)} folds upstream's two
+     * facts - {@code entry.authorizationRequired()} and {@code !authorized.test(hash)}
+     * ({@code client/gui/CatalogBrowserState.java:108-109}) - into the single predicate {@link ModelBrowserState}
+     * accepts, because that class holds display paths and must stay free of Minecraft-side lookups.
+     * <p>
+     * Like {@link #isStarred(String)} beside it, this predicate is evaluated when the screen rebuilds its list
+     * ({@code initGui} / {@code calculateModelList}), so the auth <em>listing</em> follows the same refresh cadence as
+     * the star listing. The tile's own lock state is read live instead ({@code ModelButton#needAuth}), so a grant
+     * revoked while the screen is open turns the tile dark at once even though it stays listed until the next rebuild.
+     */
+    private boolean needsAuth(String displayPath) {
+        ResourceLocation modelId = this.modelIdByPath.get(displayPath);
+        return modelId != null && ClientModelAccess.needsAuth(modelId);
     }
 
     private boolean isStarred(String displayPath) {
@@ -152,7 +176,11 @@ public class PlayerModelScreen extends GuiScreen {
             perText = textField.getText();
             focus = textField.isFocused();
         }
-        textField = new GuiTextField(this.fontRendererObj, x + 144, y + 6, 158, 16);
+        // Upstream's search box is 140 wide (PlayerModelScreen.java:131), which is what leaves room for the category
+        // row at x+288/x+308/x+328 (:186-188). This port had widened it to 158, ending at x+302 and therefore under the
+        // star button once the auth button took its upstream slot; the width is back to upstream's so the three
+        // category buttons keep upstream's positions without overlapping the box.
+        textField = new GuiTextField(this.fontRendererObj, x + 144, y + 6, 140, 16);
         textField.setText(perText);
         textField.setTextColor(0xF3EFE0);
         textField.setFocused(focus);
@@ -175,8 +203,13 @@ public class PlayerModelScreen extends GuiScreen {
             this.buttonList.add(new FlatIconButton(4, x + 110, y + 27, 20, 20, 0, 32).setTooltips("gui.back"));
         }
         this.buttonList.add(new FlatIconButton(3, x + 328, y + 5, 18, 18, 32, 0).setTooltips("gui.yes_steve_model.all_models"));
+        // The category row is upstream's order and atlas cells: all (u=32), auth (u=48), star (u=0)
+        // (PlayerModelScreen.java:186-188 adds them at x+328/x+308/x+288). Authorization exists for every target, so
+        // this button is not gated on supportsStars() the way the star button is.
+        this.buttonList.add(
+            new FlatIconButton(AUTH_CATEGORY_BUTTON_ID, x + 308, y + 5, 18, 18, 48, 0).setTooltips("gui.yes_steve_model.auth_models"));
         if (this.target.supportsStars()) {
-            this.buttonList.add(new FlatIconButton(5, x + 308, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
+            this.buttonList.add(new FlatIconButton(5, x + 288, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
         }
         this.buttonList.add(new FlatIconButton(6, x + 397, y + 5, 18, 18, 16, 16).setTooltips("gui.yes_steve_model.config"));
         // The selected model's own settings panel (the pack's 模型设置), offered only when the model declares one.
@@ -276,6 +309,13 @@ public class PlayerModelScreen extends GuiScreen {
             case 5:
                 if (this.browser.category() != ModelBrowserState.Category.STAR) {
                     this.browser.category(ModelBrowserState.Category.STAR);
+                    this.initGui();
+                }
+                break;
+            case AUTH_CATEGORY_BUTTON_ID:
+                // Upstream's addCategoryButton (:200-208) ignores a press on the category that is already selected.
+                if (this.browser.category() != ModelBrowserState.Category.AUTH) {
+                    this.browser.category(ModelBrowserState.Category.AUTH);
                     this.initGui();
                 }
                 break;

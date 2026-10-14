@@ -1,6 +1,7 @@
 package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelAccess;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
@@ -31,7 +32,6 @@ import com.fox.ysmu.model.format.BuiltinModelIndex;
 public class ModelButton extends GuiButton {
     private final static ResourceLocation ICON = new ResourceLocation(ysmu.MODID, "texture/icon.png");
     private final Pair<ResourceLocation, List<ResourceLocation>> modelInfo;
-    private final int color;
     private final ModelSelectionTarget target;
     /** CU-16: 缩放因子在构造时缓存（按钮每次 initGui 重建），避免每帧重建 ScaledResolution。FBO 的物理像素
      *  尺寸也用它(width × scaleFactor),替换掉原来给 scissor 用的显示高度(离屏路径不需要 scissor)。 */
@@ -76,12 +76,35 @@ public class ModelButton extends GuiButton {
                        ModelSelectionTarget target) {
         super(id, pX, pY, 52, 90, "");
         this.modelInfo = modelInfo;
-        this.color = 0xFF_434242;
         this.target = target;
         this.displayString = ModelIdUtil.getModelFileName(modelInfo.getLeft());
 
         Minecraft mc = Minecraft.getMinecraft();
         this.guiScale = mc == null ? 1 : new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+    }
+
+    /**
+     * Whether this tile is locked: the model is restricted on the server and this client holds no grant for it.
+     * <p>
+     * Upstream computes that fact when it builds the card
+     * ({@code client/gui/PlayerModelScreen.java:255-257} -> {@code client/gui/button/CatalogModelButton.java:42,48-56}),
+     * which uses it in four places: the fill colour ({@code CatalogModelButton.java:100}), refusing the press
+     * ({@code :80-85}), refusing the hit test ({@code :141-144}) and, in {@code renderState}, dropping the hover frame
+     * and adding the dark overlay ({@code :194-206}).
+     * <p>
+     * Upstream re-evaluates it while the screen is open: {@code tick()} notices that the session published a new
+     * catalog ({@code PlayerModelScreen.java:377-390}) and calls {@code init()}, which rebuilds the cards from the live
+     * {@code authoritativeGrants()} ({@code :235,280}). This port has no catalog snapshot to compare against and
+     * rebuilds its tiles only when the model count or the pack manifests change
+     * ({@code PlayerModelScreen#updateScreen}), so a value snapshotted at build time would keep a locked tile unlocked
+     * after {@code /ysm auth <player> clear} until the user left the page. Asking the holder at the moment the fact is
+     * used is that same refresh with nothing to compare and nothing to invalidate.
+     * <p>
+     * {@code needsAuth} is false while the client has received no authorization information at all, which is what
+     * keeps a not-yet-synced or vanilla server from locking every tile.
+     */
+    private boolean needAuth() {
+        return ClientModelAccess.needsAuth(this.modelInfo.getLeft());
     }
 
     /**
@@ -128,12 +151,22 @@ public class ModelButton extends GuiButton {
     /**
      * Which translation key names where this model comes from.
      * <p>
+     * A model the server published as restricted answers the auth row first: upstream's tooltip has one source row per
+     * entry and an entry whose origin is {@code AUTH} maps to {@code Source.AUTH}
+     * ({@code client/gui/button/CatalogModelTooltipFormatter.java:173-180}), whose row is
+     * {@code gui.yes_steve_model.catalog.tooltip.source.auth} ("Authorized") and whose key here is
+     * {@code gui.yes_steve_model.model.source.auth}. {@code requiresAuth} is false when no authorization information
+     * has arrived, so a vanilla server keeps answering built-in/server exactly as before.
+     * <p>
      * A model the shipped contract declares is built-in ({@code BuiltinModelIndex.declaredInternalIds()}, the same
      * identity the server uses for its source priority). Every other model on a client arrived from the server: this
      * port keeps no per-model local/server registry, and the only thing the client ever reads off its own disk is the
      * built-in tree, which is exactly the built-in case. There is deliberately no third value.
      */
     static String sourceKeyFor(@Nullable ResourceLocation modelId) {
+        if (ClientModelAccess.requiresAuth(modelId)) {
+            return "gui.yes_steve_model.model.source.auth";
+        }
         boolean builtin = modelId != null && BuiltinModelIndex.declaredInternalIds()
             .contains(modelId.getResourcePath());
         return builtin ? "gui.yes_steve_model.model.source.builtin" : "gui.yes_steve_model.model.source.server";
@@ -153,12 +186,29 @@ public class ModelButton extends GuiButton {
     }
 
     public void doPress() {
+        // Upstream CatalogModelButton.onPress (:80-85) ignores the press outright while the tile is locked.
+        if (needAuth()) {
+            return;
+        }
         ResourceLocation texture = this.defaultTexture();
         if (texture == null) {
             // CU-08: 没有任何贴图的模型无法应用，直接忽略点击（不再越界崩溃）。
             return;
         }
         target.apply(modelInfo.getLeft(), texture);
+    }
+
+    /**
+     * Upstream refuses a locked selection twice, and both halves are shaped after it: the hit test
+     * ({@code CatalogModelButton.java:141-144}, {@code clicked} returns {@code !needAuth && super.clicked(...)}) and
+     * the press handler ({@code :80-85}, {@link #doPress()}). 1.7.10's {@code GuiScreen.mouseClicked} only calls
+     * {@code actionPerformed} for a button whose {@code mousePressed} returned true
+     * ({@code build/rfg/minecraft-src/java/net/minecraft/client/gui/GuiScreen.java:245-249}), so the first refusal is
+     * this override.
+     */
+    @Override
+    public boolean mousePressed(Minecraft mc, int mouseX, int mouseY) {
+        return !needAuth() && super.mousePressed(mc, mouseX, mouseY);
     }
 
     /**
@@ -198,7 +248,10 @@ public class ModelButton extends GuiButton {
         // Hover状态
         this.field_146123_n = mouseX >= this.xPosition && mouseY >= this.yPosition && mouseX < this.xPosition + this.width && mouseY < this.yPosition + this.height;
         // 绘制背景（原graphics.fillGradient）
-        this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, this.color, this.color);
+        // Upstream CatalogModelButton.java:100: a locked card fills with translucent black instead of the flat opaque
+        // grey, so the preview behind it reads as darkened rather than replaced.
+        int backgroundColor = needAuth() ? 0x7F000000 : 0xFF434242;
+        this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, backgroundColor, backgroundColor);
         ResourceLocation texture = this.defaultTexture();
         // CU-08: 没有贴图时跳过实体预览（原来会在 get(0) 处越界崩溃）。
         // The tile is drawn only once this model has been published on this connection. Asking is separate from
@@ -257,11 +310,20 @@ public class ModelButton extends GuiButton {
             this.drawCenteredString(font, title, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
         }
         // 悬停时的高亮边框
-        if (this.field_146123_n) {
+        // Upstream CatalogModelButton.java:194 draws the frame only on a card that is not locked
+        // (`!needAuth && isHoveredOrFocused()`), while its tooltip still shows (:119-121), which is how the player
+        // reads that the model is "Authorized".
+        if (!needAuth() && this.field_146123_n) {
             this.drawGradientRect(this.xPosition, this.yPosition + 1, this.xPosition + 1, this.yPosition + this.height - 1, 0xff_F3EFE0, 0xff_F3EFE0);
             this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + 1, 0xff_F3EFE0, 0xff_F3EFE0);
             this.drawGradientRect(this.xPosition + this.width - 1, this.yPosition + 1, this.xPosition + this.width, this.yPosition + this.height - 1, 0xff_F3EFE0, 0xff_F3EFE0);
             this.drawGradientRect(this.xPosition, this.yPosition + this.height - 1, this.xPosition + this.width, this.yPosition + this.height, 0xff_F3EFE0, 0xff_F3EFE0);
+        }
+        // Upstream CatalogModelButton.renderState (:203-206) then darkens a locked card over everything drawn so far -
+        // its title included - and before the star badge. The 1.7.10 equivalent layers by call order (drawGradientRect
+        // has no z argument; Gui.java:87-114), so this goes after the text and the border, before the star below.
+        if (needAuth()) {
+            this.drawGradientRect(this.xPosition, this.yPosition, this.xPosition + this.width, this.yPosition + this.height, 0x9F222222, 0x9F222222);
         }
         // 收藏图标
         if (target.isStarred(modelInfo.getLeft())) {
