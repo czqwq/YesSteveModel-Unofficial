@@ -24,6 +24,7 @@ import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.data.EncryptTools;
+import com.fox.ysmu.model.format.BuiltinModelIndex;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ModelCacheWriter;
 import com.fox.ysmu.model.format.ModelIndexCache;
@@ -232,6 +233,9 @@ public final class ServerModelManager {
         initBlacklistFile();
         // M1：内置模型只有 assets/ysmu/builtin/ 一个来源根，每次 reload 先清空 config/ysmu/builtin 再整树解压（决策 D7/D8）。
         extractBuiltinModels();
+        // 契约校验刻意放在解压**之后**、且不塞进 extractBuiltinModels 内部：将来"内容未变则跳过整树解压"的优化
+        // 落进那个方法时，被跳过的那一轮照样有人报多余/缺失文件（见 verifyBuiltinModelIndex 的 javadoc）。
+        verifyBuiltinModelIndex();
         initPassword();
         initOpenYsmServerIndex();
         initBuiltNoticeFile();
@@ -388,6 +392,109 @@ public final class ServerModelManager {
             ysmu.LOG.info("Extracted built-in model resources from {} into {}", prefix, BUILT);
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to extract built-in model resources from {}", prefix, e);
+        }
+    }
+
+    /**
+     * 把随 jar 发布的内置契约 {@code assets/ysmu/builtin-index.json} 与 {@link #BUILT} 里**实际**解压出来的内容对照：
+     * 路径集合双向覆盖 + 每个模型目录的内容摘要比对，有问题就明确报出来。
+     *
+     * <h2>上游依据</h2>
+     * <ul>
+     * <li>{@code model/catalog/source/ModelCatalogSources.builtinIndex():24-27}：上游从模组文件里取同名契约
+     * （{@code assets/ysm/builtin-index.json}）。</li>
+     * <li>{@code model/catalog/builtin/BuiltinModelIndex.java:283-291} 的 {@code validateCoverage}：双向覆盖
+     * ——契约有而实际没有（missing）、实际有而契约没有（unexpected）都算不符。</li>
+     * <li>{@code model/catalog/CatalogReconciler.java:101-110}：运行时对内置根照做。</li>
+     * </ul>
+     *
+     * <h2>与上游刻意不同的地方</h2>
+     * <p><b>不符时只报，绝不丢根。</b>上游 {@code validateCoverage} 抛错后 {@code CatalogReconciler:105-109}
+     * 直接 {@code continue}，整个内置根被跳过——对上游是可接受的（它的内置集合只是"目录的一部分"），对本仓不是：
+     * 内置 {@code default} 是客户端启动与兜底渲染的硬依赖，丢根等于所有内置模型消失。所以这里只打
+     * {@code LOG.error}/{@code LOG.warn}，**一个模型都不从扫描链里摘掉**。</p>
+     * <p>字段用 {@code path}+{@code sha256}（JDK 的 SHA-256，模型目录整棵树的摘要），不是上游那个由
+     * {@code ModelHashing.blake3} 算的 {@code modelHash}，也不算上游的 {@code dedupProfileHash}、不含 protobuf。
+     * 详见 {@link BuiltinModelIndex} 的类注释。</p>
+     * <p>多一个 {@code intentionallyAbsent} 段：上游有、本仓**有意不收录**的模型（当前是三个
+     * {@code metadata.license = All Rights Reserved} 的 wine_fox 模型，见 {@code NOTICE.md}）。它们不算缺失；
+     * 反过来出现在树里就报 {@code LOG.error}——这条同时是"不要把 ARR 资产拷进来"的守卫。</p>
+     */
+    private static void verifyBuiltinModelIndex() {
+        try {
+            BuiltinModelIndex.Report report = BuiltinModelIndex.verifyActual(BUILT);
+            if (!report.contractAvailable()) {
+                if (report.actualPaths()
+                    .isEmpty()) {
+                    // 裁剪过的资源包：连内置树都没有，缺契约不是问题（与 extractBuiltinModels 的提前 return 同一情形）。
+                    return;
+                }
+                ysmu.LOG.error(
+                    "Built-in model contract {} is unavailable ({}), so the {} built-in models under {} cannot be "
+                        + "verified against it",
+                    BuiltinModelIndex.RESOURCE_PATH,
+                    report.failure(),
+                    report.actualPaths()
+                        .size(),
+                    BUILT);
+                return;
+            }
+            if (report.ok()) {
+                ysmu.LOG.info(
+                    "Built-in model contract OK: {} models verified against {} (contract fingerprint {})",
+                    report.actualPaths()
+                        .size(),
+                    BuiltinModelIndex.RESOURCE_PATH,
+                    BuiltinModelIndex.fingerprintHex());
+                return;
+            }
+            // 以下四项只报不改：扫描链不受影响，模型照常登记。
+            if (!report.missing()
+                .isEmpty()) {
+                ysmu.LOG.error(
+                    "Built-in model contract declares {} model(s) that are missing from {}: {} — the jar was built from "
+                        + "different built-in assets than the contract; regenerate the contract from the tree",
+                    report.missing()
+                        .size(),
+                    BUILT,
+                    report.missing());
+            }
+            if (!report.hashMismatch()
+                .isEmpty()) {
+                ysmu.LOG.error(
+                    "Built-in model contract hash mismatch for {} model(s) under {}: {} — the model content changed "
+                        + "without regenerating the contract",
+                    report.hashMismatch()
+                        .size(),
+                    BUILT,
+                    report.hashMismatch());
+            }
+            if (!report.unexpected()
+                .isEmpty()) {
+                ysmu.LOG.warn(
+                    "{} model(s) under {} are not declared in the built-in contract: {} — either the built-in set grew "
+                        + "without regenerating the contract, or a user dropped files into the built-in directory "
+                        + "(it is rewritten from the jar every reload)",
+                    report.unexpected()
+                        .size(),
+                    BUILT,
+                    report.unexpected());
+            }
+            if (!report.forbiddenPresent()
+                .isEmpty()) {
+                Map<String, String> absent = BuiltinModelIndex.intentionallyAbsent();
+                for (String path : report.forbiddenPresent()) {
+                    ysmu.LOG.error(
+                        "Built-in model {} is declared intentionally absent from this repository ({}) but is present "
+                            + "under {}; do not ship it",
+                        path,
+                        absent.get(path),
+                        BUILT);
+                }
+            }
+        } catch (Exception | LinkageError e) {
+            // 校验本身失败绝不能影响 reload：模型发现与缓存重建都已经在它之前完成了。
+            ysmu.LOG.warn("Failed to verify the built-in model contract {}", BuiltinModelIndex.RESOURCE_PATH, e);
         }
     }
 
