@@ -109,6 +109,11 @@ public final class ModelBrowserState {
 
     /**
      * Applies the search query, the category and the current folder, producing the two lists the grid draws.
+     * <p>
+     * Upstream has a second overload of this rule for its <em>failed</em> entries
+     * ({@code client/gui/CatalogBrowserState.java:88-91}: the auth category keeps only {@code CatalogAccess.AUTHORIZED}
+     * failures). This port's browser has no failed-entry list - a model either registered or was never seen - so that
+     * overload has no counterpart here rather than a second, differently-shaped filter.
      *
      * @param query    raw text of the search box; may be {@code null}
      * @param needAuth decides whether a model is restricted and this client holds no grant for it, which is the one
