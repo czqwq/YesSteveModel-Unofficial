@@ -52,6 +52,16 @@ import com.fox.ysmu.ysmu;
  * ({@code command/sub/AuthCommand.java:83-102}: after clearing, a session-authorized selection is reset because it is
  * no longer selectable) and it is a security inversion, so exactly one mechanism is used: the switch.
  *
+ * <h2>The built-in half: PUBLIC by upstream's own rule</h2>
+ * Upstream's answer is not only "the auth root is restricted": every record outside that root is
+ * {@code CatalogAccess.PUBLIC} ({@code model/catalog/snapshot/CatalogRecord.java:32-33}: {@code access = rootKind ==
+ * AUTH ? AUTHORIZED : PUBLIC}), and {@code canSelect} accepts a public record without consulting the grant table
+ * ({@code ServerModelSession.java:317-322}). The port mirrors that half too: a model the server is serving from the
+ * built-in root and that the shipped {@code assets/ysmu/builtin-index.json} contract declares is selectable with the
+ * switch on and an empty grant table ({@code ServerModelManager.isBuiltinModel}). The restricted set the switch names is
+ * therefore everything else - {@code config/ysmu/custom} and directories inside the built-in root the contract does not
+ * declare.
+ *
  * <h2>Deliberately not ported (recorded, not invented)</h2>
  * <ul>
  * <li><b>Catalog membership.</b> Upstream rejects a selection of an unknown model ({@code NOT_FOUND},
@@ -96,10 +106,15 @@ public final class ModelAuthorization {
      *        ({@code ServerModelSession.java:153-156}) and resolves it without a grant check
      *        ({@code capability/ModelSelectionService.java:15-31}). It is the fallback this class resets players to, so
      *        it must not itself be gated.
+     * @param builtin whether {@code modelId} is served from the built-in root and declared by the shipped contract
+     *        ({@code ServerModelManager.isBuiltinModel}). Upstream marks every non-{@code auth} record
+     *        {@code CatalogAccess.PUBLIC} and answers {@code canSelect} from {@code PUBLIC || granted}
+     *        ({@code CatalogRecord.java:32-33}, {@code ServerModelSession.java:317-322}), so a built-in model is
+     *        selectable with an empty grant table. See the class javadoc.
      * @return whether the model may be applied
      */
     public static boolean canSelect(boolean enabled, @Nullable Set<ResourceLocation> grants,
-        @Nullable ResourceLocation modelId, @Nullable ResourceLocation intrinsicDefault) {
+        @Nullable ResourceLocation modelId, @Nullable ResourceLocation intrinsicDefault, boolean builtin) {
         if (!enabled) {
             // Default allow: with the switch off nothing changes for an existing server.
             return true;
@@ -110,10 +125,25 @@ public final class ModelAuthorization {
         if (modelId.equals(intrinsicDefault)) {
             return true;
         }
+        if (builtin) {
+            // Upstream's built-in root: CatalogAccess.PUBLIC, so no grant is ever required for it.
+            return true;
+        }
         if (grants == null) {
             return true;
         }
         return grants.contains(modelId);
+    }
+
+    /**
+     * The server-registry entry point: the same decision with {@code builtin} resolved from the live registration table
+     * ({@link ServerModelManager#isBuiltinModel(ResourceLocation)}), so callers on the server - the
+     * {@code SetModelAndTexture} handler and the {@code /ysm auth} revoke path - do not have to know how "built-in" is
+     * decided. The pure overload above is what the unit tests pin.
+     */
+    public static boolean canSelect(boolean enabled, @Nullable Set<ResourceLocation> grants,
+        @Nullable ResourceLocation modelId, @Nullable ResourceLocation intrinsicDefault) {
+        return canSelect(enabled, grants, modelId, intrinsicDefault, ServerModelManager.isBuiltinModel(modelId));
     }
 
     /** The grant table of one player, or {@code null} when this build did not attach it. */

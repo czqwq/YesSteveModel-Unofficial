@@ -93,6 +93,23 @@ class ModelAuthorizationTest {
     }
 
     @Test
+    void aBuiltinModelIsPublicAndNeedsNoGrant() {
+        // Upstream marks every record outside the auth root CatalogAccess.PUBLIC (CatalogRecord.java:32-33) and answers
+        // canSelect from PUBLIC || granted (ServerModelSession.java:317-322): a built-in model stays selectable with the
+        // switch on and an empty grant table.
+        assertTrue(ModelAuthorization.canSelect(true, grants(), MODEL_A, INTRINSIC_DEFAULT, true));
+        assertTrue(ModelAuthorization.canSelect(true, null, MODEL_A, INTRINSIC_DEFAULT, true));
+    }
+
+    @Test
+    void aNonBuiltinModelStillNeedsAGrant() {
+        assertFalse(ModelAuthorization.canSelect(true, grants(), MODEL_A, INTRINSIC_DEFAULT, false));
+        assertTrue(ModelAuthorization.canSelect(true, grants(MODEL_A), MODEL_A, INTRINSIC_DEFAULT, false));
+        // With the switch off the builtin flag is irrelevant: nothing is gated (the upgrade guard).
+        assertTrue(ModelAuthorization.canSelect(false, grants(), MODEL_A, INTRINSIC_DEFAULT, false));
+    }
+
+    @Test
     void anAbsentGrantTableMeansTheBuildDidNotAttachItNotAnEmptyGrantList() {
         // Attached from EntityEvent.EntityConstructing (ExtendedAuthModels.register); an absent table is a wiring
         // fault, and answering "deny" for it would be the mass lock-out the switch exists to prevent.
