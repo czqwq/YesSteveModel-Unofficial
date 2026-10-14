@@ -16,13 +16,17 @@ import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.Tessellator;
+import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.IChatComponent;
 import net.minecraft.util.ResourceLocation;
 import org.apache.commons.lang3.tuple.Pair;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.opengl.GL11;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import com.fox.ysmu.model.format.BuiltinModelIndex;
 
 public class ModelButton extends GuiButton {
     private final static ResourceLocation ICON = new ResourceLocation(ysmu.MODID, "texture/icon.png");
@@ -99,16 +103,40 @@ public class ModelButton extends GuiButton {
     }
 
     /**
-     * The hover tooltip for this tile.
+     * The hover tooltip for this tile: where the model comes from, then the lines its geometry declares.
+     * <p>
+     * Upstream renders a source row for every card
+     * ({@code client/gui/button/CatalogModelTooltipFormatter.java:26-88}, whose source enum includes
+     * {@code BUILTIN("builtin")}), so this list is never empty any more - only its source row is always present.
      * <p>
      * Resolved on demand rather than captured when the button is constructed, because the extra info it shows comes
      * from the model's geometry and geometry is parsed on demand: when this screen builds its buttons nothing has
      * been drawn yet, so the value would otherwise be {@code null} for the whole life of the screen. Null is a
      * normal answer and means "this model has no extra info".
      */
-    @Nullable
     public List<IChatComponent> tooltips() {
-        return ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(this.modelInfo.getLeft()));
+        List<IChatComponent> lines = new ArrayList<>();
+        lines.add(new ChatComponentTranslation(sourceKeyFor(this.modelInfo.getLeft())));
+        List<IChatComponent> declared = ClientModelManager.EXTRA_INFO
+            .get(ModelIdUtil.getMainId(this.modelInfo.getLeft()));
+        if (declared != null) {
+            lines.addAll(declared);
+        }
+        return lines;
+    }
+
+    /**
+     * Which translation key names where this model comes from.
+     * <p>
+     * A model the shipped contract declares is built-in ({@code BuiltinModelIndex.declaredInternalIds()}, the same
+     * identity the server uses for its source priority). Every other model on a client arrived from the server: this
+     * port keeps no per-model local/server registry, and the only thing the client ever reads off its own disk is the
+     * built-in tree, which is exactly the built-in case. There is deliberately no third value.
+     */
+    static String sourceKeyFor(@Nullable ResourceLocation modelId) {
+        boolean builtin = modelId != null && BuiltinModelIndex.declaredInternalIds()
+            .contains(modelId.getResourcePath());
+        return builtin ? "gui.yes_steve_model.model.source.builtin" : "gui.yes_steve_model.model.source.server";
     }
 
     /**
