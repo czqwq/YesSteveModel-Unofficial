@@ -8,13 +8,7 @@
 				"texture_height": 128,
 				"visible_bounds_width": 4,
 				"visible_bounds_height": 4.5,
-				"visible_bounds_offset": [0, 1.75, 0],
-				"ysm_extra_info": {
-					"name": "Default Boy",
-					"tips": "默认男版模型（Default Boy Model）",
-					"authors": ["哥斯拉", "端木"],
-					"license": "CC 0"
-				}
+				"visible_bounds_offset": [0, 1.75, 0]
 			},
 			"bones": [
 				{
@@ -336,6 +330,16 @@
 					]
 				},
 				{
+					"name": "LeftShoulderLocator",
+					"parent": "Head",
+					"pivot": [3, 41.5, 0]
+				},
+				{
+					"name": "RightShoulderLocator",
+					"parent": "Head",
+					"pivot": [-3, 41.5, 0]
+				},
+				{
 					"name": "Arm",
 					"parent": "UpBody",
 					"pivot": [0, 31.2, 0]
@@ -371,6 +375,16 @@
 					"cubes": [
 						{"origin": [4.075, 18.225, -0.475], "size": [1, 1, 1], "uv": [36, 47], "mirror": true}
 					]
+				},
+				{
+					"name": "SheathLocator",
+					"parent": "LeftHand",
+					"pivot": [4.575, 18.725, 0.025]
+				},
+				{
+					"name": "LeftWaistLocator",
+					"parent": "LeftHand",
+					"pivot": [4.575, 18.725, 0.025]
 				},
 				{
 					"name": "RightArm",
@@ -409,6 +423,11 @@
 					]
 				},
 				{
+					"name": "BladeLocator",
+					"parent": "RightHand",
+					"pivot": [-4.575, 18.825, 0.025]
+				},
+				{
 					"name": "RifleLocator",
 					"parent": "UpBody",
 					"pivot": [0, 25.15, 2.3],
@@ -424,6 +443,17 @@
 					"name": "ElytraLocator",
 					"parent": "UpBody",
 					"pivot": [0, 31.65, 2]
+				},
+				{
+					"name": "RightWaistLocator",
+					"parent": "UpBody",
+					"pivot": [-4, 21, 0],
+					"rotation": [-5, 0, 0]
+				},
+				{
+					"name": "BackpackLocator",
+					"parent": "UpBody",
+					"pivot": [0, 29, 0]
 				},
 				{
 					"name": "DownBody",
