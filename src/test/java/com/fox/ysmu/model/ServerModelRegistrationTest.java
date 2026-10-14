@@ -24,6 +24,7 @@ import net.minecraft.util.ResourceLocation;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import com.fox.ysmu.model.catalog.CatalogAccess;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.OpenYsmFormat;
 import com.fox.ysmu.model.format.OpenYsmSyncInfo;
@@ -93,8 +94,69 @@ class ServerModelRegistrationTest {
     }
 
     // -----------------------------------------------------------------------------------------------------------
-    // 同优先级：保持既有扫描顺序
+    // 受权限保护的第 3 个根：auth（优先级 BUILTIN 0 / AUTH 1 / CUSTOM 2）
     // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    void theAuthRootBeatsCustomAtTheSameRelativePathButStillLosesToBuiltin() {
+        // 上游 ReloadableModelCatalog.rootPriority:636-642 的 AUTH 档，以及
+        // docs/architecture/model-management/catalog-and-sources.md:25 的"同一路径的 auth 候选优先于 custom"。
+        registerFromCustom(BUILTIN_MODEL, "custom-md5");
+        registerFromAuth(BUILTIN_MODEL, "auth-md5");
+        assertEquals("auth-md5", winnerMd5(BUILTIN_MODEL), "auth 的优先级 1 胜过 custom 的 2");
+        assertEquals(1, ServerModelManager.modelConflictCount());
+
+        ServerModelManager.clearModelCaches();
+
+        registerFromAuth(BUILTIN_MODEL, "auth-md5");
+        registerFromCustom(BUILTIN_MODEL, "custom-md5");
+        assertEquals("auth-md5", winnerMd5(BUILTIN_MODEL), "胜负与登记顺序无关");
+        assertEquals(1, ServerModelManager.modelConflictCount());
+
+        ServerModelManager.clearModelCaches();
+
+        registerFromAuth(BUILTIN_MODEL, "auth-md5");
+        registerFromBuiltin(BUILTIN_MODEL, "builtin-md5");
+        assertEquals("builtin-md5", winnerMd5(BUILTIN_MODEL), "内置的优先级 0 仍然压过 auth 的 1");
+        assertEquals(1, ServerModelManager.modelConflictCount());
+    }
+
+    @Test
+    void aModelIsRestrictedExactlyWhenItsEffectiveSourceIsTheAuthRoot() {
+        // 上游 CatalogRecord.localEntry:32-33：access = rootKind == AUTH ? AUTHORIZED : PUBLIC。
+        ResourceLocation id = new ResourceLocation("ysmu", "guarded");
+
+        assertFalse(ServerModelManager.isAuthModel(id), "还没登记：未知 id 一律按 PUBLIC（不能凭未知就拦人）");
+        assertEquals(CatalogAccess.PUBLIC, ServerModelManager.accessOf(null));
+
+        registerFromAuth("guarded", "auth-md5");
+        assertTrue(ServerModelManager.isAuthModel(id));
+        assertEquals(Collections.singleton("guarded"), ServerModelManager.authModelIds());
+
+        // 生效来源换人（内置压过 auth），访问级别跟着换：同一个 id 回到 PUBLIC。用契约声明的内置 id，因为内置根里
+        // 未被声明的目录按 CUSTOM 优先级参与裁决（第 10 项），那种情况下 auth 的 1 档仍然赢，测不到本命题。
+        registerFromAuth("default", "auth-md5");
+        assertTrue(ServerModelManager.isAuthModel(new ResourceLocation("ysmu", "default")));
+
+        registerFromBuiltin("default", "builtin-md5");
+        assertEquals("builtin-md5", winnerMd5("default"), "内置的 0 档压过 auth 的 1 档");
+        assertFalse(
+            ServerModelManager.isAuthModel(new ResourceLocation("ysmu", "default")),
+            "生效来源换人，权限判定跟着换");
+        assertEquals(Collections.singleton("guarded"), ServerModelManager.authModelIds(), "guarded 仍然来自 auth 根");
+    }
+
+    @Test
+    void theAuthRootIsRecognizedWithTheSameNormalizationAsTheBuiltinRoot() {
+        assertTrue(ServerModelManager.isAuthRoot(ServerModelManager.AUTH));
+        assertFalse(ServerModelManager.isAuthRoot(ServerModelManager.CUSTOM));
+        assertFalse(ServerModelManager.isAuthRoot(ServerModelManager.BUILT));
+        assertFalse(ServerModelManager.isAuthRoot(null));
+        // 权限判定与 isBuiltinModel 共用一套拼写规范化：裸磁盘名、ysmu: 全名、_name_<hex> 内部 id。
+        String internalId = ModelIdUtil.getInternalModelId("misc/2_steve");
+        registerFromAuth(internalId, "auth-md5");
+        assertTrue(ServerModelManager.isAuthModel(new ResourceLocation("ysmu", internalId)));
+    }
 
     @Test
     void samePriorityFollowsTheUpstreamRelativePathOrder() {
@@ -263,6 +325,11 @@ class ServerModelRegistrationTest {
     private static void registerFromBuiltin(String modelId, String md5) {
         ServerModelManager.registerModel(modelId, info(md5), null,
             ServerModelManager.BUILT.resolve(modelId), ServerModelManager.BUILT);
+    }
+
+    private static void registerFromAuth(String modelId, String md5) {
+        ServerModelManager.registerModel(modelId, info(md5), null,
+            ServerModelManager.AUTH.resolve(modelId), ServerModelManager.AUTH);
     }
 
     private static String winnerMd5(String modelId) {

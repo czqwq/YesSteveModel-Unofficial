@@ -60,8 +60,8 @@ import com.fox.ysmu.ysmu;
  * "完整路径在同一份源上也会复用这个缓存文件"，而不是另一套推理。
  *
  * <p>线程模型：{@link #beginReload()}/{@link #commitReload()} 由
- * {@code ServerModelManager.rebuildModelCaches} 在 reload 线程上成对调用，六个 cache step 都是同一线程上的
- * 顺序调用（模型缓存这条路径上没有任何 {@code ThreadTools.THREAD_POOL} 用法），所以这里的容器都是普通
+ * {@code ServerModelManager.rebuildModelCaches} 在 reload 线程上成对调用，各扫描根 × 各扫描器的 cache step 都是同一
+ * 线程上的顺序调用（模型缓存这条路径上没有任何 {@code ThreadTools.THREAD_POOL} 用法），所以这里的容器都是普通
  * {@code LinkedHashMap}/{@code TreeSet}，不引入新的锁。网络线程读的是
  * {@code CACHE_NAME_INFO}/{@code OPEN_YSM_SYNC_INFO}（本来就是并发容器），本类不改变它们的并发语义。
  */

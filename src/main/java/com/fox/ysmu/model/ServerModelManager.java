@@ -13,6 +13,7 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
@@ -27,6 +28,8 @@ import org.apache.commons.io.FileUtils;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.data.EncryptTools;
+import com.fox.ysmu.model.catalog.CatalogAccess;
+import com.fox.ysmu.model.catalog.CatalogRootKind;
 import com.fox.ysmu.model.format.BuiltinModelIndex;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ModelCacheWriter;
@@ -65,6 +68,22 @@ public final class ServerModelManager {
      * {@code ServerModelManager.BUILT}（{@code config/ysmu/builtin}）一致。
      */
     public static final Path BUILT = FOLDER.resolve("builtin");
+
+    /**
+     * 受授权保护的模型扫描根：{@code config/ysmu/auth}。它的 {@link CatalogRootKind#accessPolicy()} 是
+     * {@link com.fox.ysmu.model.catalog.AccessPolicy#SESSION_AUTHORIZED}，所以这里发现的每个模型都是
+     * {@link CatalogAccess#AUTHORIZED}——只有被 {@code /ysm auth} 授权过的玩家才能选用它。
+     *
+     * <p><b>上游依据。</b>{@code model/catalog/source/CatalogRootKind.java:7} 的
+     * {@code AUTH("auth", AccessPolicy.SESSION_AUTHORIZED)} 与
+     * {@code model/catalog/source/ModelCatalogSources.reloadableSources():29-33} 把它作为与 {@code custom} 并列的
+     * 可重扫来源；{@code AssetPaths.authModelsRoot():100-107} 的落点是 {@code <game-dir>/ysm/auth}。本仓所有模型根
+     * 都在 {@code config/ysmu} 下（{@link #CUSTOM} 与 {@link #BUILT} 已经如此），所以这里用同一套前缀。</p>
+     *
+     * <p><b>默认是空的，因此升级后的服务器什么都不受限。</b>这正是上游的形态：它没有"启用授权"的开关，受限集合
+     * 就是 auth 根里的内容；空根 = 无限制。</p>
+     */
+    public static final Path AUTH = FOLDER.resolve("auth");
     public static final Path EXPORT = FOLDER.resolve("export");
 
     /**
@@ -281,6 +300,7 @@ public final class ServerModelManager {
         createFolder(FOLDER);
         createFolder(BUILT);
         createFolder(CUSTOM);
+        createFolder(AUTH);
         createFolder(EXPORT);
 
         createFolder(CACHE);
@@ -297,8 +317,9 @@ public final class ServerModelManager {
      *
      * <p>上游对应物是 {@code ReloadableModelCatalog.rootPriority}
      * （{@code model/catalog/ReloadableModelCatalog.java:636-642}）：{@code BUILTIN 0 / AUTH 1 / CUSTOM 2}。
-     * 本仓没有 auth 目录（{@code grep AccessPolicy} 在 {@code src/main/java/com/fox/ysmu} 下 0 命中），所以 1
-     * 空缺；编号保持上游那张表，不重新编号。</p>
+     * 全部三档现在都有扫描根了：{@link CatalogRootKind#BUILTIN} 是 {@link #BUILT}、
+     * {@link CatalogRootKind#AUTH} 是 {@link #AUTH}、{@link CatalogRootKind#CUSTOM} 是 {@link #CUSTOM} 加内置根里
+     * 未被契约声明的目录。编号保持上游那张表，不重新编号。</p>
      *
      * <p>内置身份 = 扫描根是 {@link #BUILT} <b>且</b>该模型被随 jar 发布的契约
      * {@code assets/ysmu/builtin-index.json} 声明过（{@link BuiltinModelIndex#declaredInternalIds()}）。契约不可读
@@ -307,6 +328,12 @@ public final class ServerModelManager {
      * 要求），它们按 {@link #PRIORITY_CUSTOM} 参与裁决。</p>
      */
     private static final int PRIORITY_BUILTIN = 0;
+    /**
+     * auth 根排在 custom 之前，于是同相对路径的 auth 候选胜过 custom（上游"同一路径的 auth 候选优先于 custom"，
+     * {@code docs/architecture/model-management/catalog-and-sources.md:25}）。权限只影响能否选用，不影响谁能赢这个
+     * id：把模型从 custom 移进 auth 不会因为"多了一层限制"而输给留在 custom 里的同名模型。
+     */
+    private static final int PRIORITY_AUTH = 1;
     private static final int PRIORITY_CUSTOM = 2;
 
     /** 一个已登记来源：磁盘路径 + 优先级 + 扫描根内相对路径（上游 {@code CatalogRecord} 的 location 半边）。 */
@@ -316,11 +343,14 @@ public final class ServerModelManager {
         final int priority;
         /** 排序键的一半：上游 {@code CatalogModelLocation.path()}，相对扫描根、{@code /} 分隔。 */
         final String relativePath;
+        /** 这个来源属于哪个扫描根；决定模型是 {@link CatalogAccess#PUBLIC} 还是 {@code AUTHORIZED}。 */
+        final CatalogRootKind rootKind;
 
-        RegisteredSource(Path source, int priority, String relativePath) {
+        RegisteredSource(Path source, int priority, String relativePath, CatalogRootKind rootKind) {
             this.source = source;
             this.priority = priority;
             this.relativePath = relativePath;
+            this.rootKind = rootKind;
         }
     }
 
@@ -368,15 +398,16 @@ public final class ServerModelManager {
      * @param info 传统缓存登记；{@code null} 表示这次没产出模型（写缓存失败），整条不登记——与改前一致
      * @param syncInfo 17 通道载荷，可为 {@code null}
      * @param source 磁盘来源（模型目录或 {@code .ysm} 文件）
-     * @param scanRoot 来源所属扫描根（{@link #CUSTOM} 或 {@link #BUILT}）
+     * @param scanRoot 来源所属扫描根（{@link #CUSTOM}、{@link #AUTH} 或 {@link #BUILT}）
      */
     public static void registerModel(String modelId, ServerModelInfo info, OpenYsmSyncInfo syncInfo, Path source,
         Path scanRoot) {
         if (modelId == null || info == null || source == null) {
             return;
         }
-        int priority = isBuiltinOrigin(scanRoot, modelId) ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
-        if (!claim("model", modelId, priority, source, scanRoot, MODEL_SOURCES, MODEL_CONFLICTS)) {
+        CatalogRootKind rootKind = rootKindOf(scanRoot);
+        int priority = priorityOf(rootKind, scanRoot, modelId);
+        if (!claim("model", modelId, priority, rootKind, source, scanRoot, MODEL_SOURCES, MODEL_CONFLICTS)) {
             return;
         }
         CACHE_NAME_INFO.put(modelId, info);
@@ -396,8 +427,10 @@ public final class ServerModelManager {
         if (hierarchy == null || pack == null || source == null) {
             return;
         }
-        int priority = isBuiltinRoot(scanRoot) ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
-        if (claim("model pack", hierarchy, priority, source, scanRoot, PACK_SOURCES, PACK_CONFLICTS)) {
+        CatalogRootKind rootKind = rootKindOf(scanRoot);
+        int priority = rootKind == CatalogRootKind.AUTH ? PRIORITY_AUTH
+            : rootKind == CatalogRootKind.BUILTIN ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
+        if (claim("model pack", hierarchy, priority, rootKind, source, scanRoot, PACK_SOURCES, PACK_CONFLICTS)) {
             PACKS.put(hierarchy, pack);
         }
     }
@@ -472,15 +505,15 @@ public final class ServerModelManager {
      *
      * @return 这次登记是否生效（{@code false} = 保留已登记的那份）
      */
-    private static boolean claim(String kind, String key, int priority, Path source, Path scanRoot,
-        Map<String, RegisteredSource> sources, AtomicInteger conflicts) {
+    private static boolean claim(String kind, String key, int priority, CatalogRootKind rootKind, Path source,
+        Path scanRoot, Map<String, RegisteredSource> sources, AtomicInteger conflicts) {
         Path normalized = source.toAbsolutePath()
             .normalize();
         String relativePath = relativePathOf(scanRoot, source);
         RegisteredSource existing = sources.get(key);
         if (existing == null || existing.source.equals(normalized)) {
             // 首次登记，或同一磁盘来源的第二次登记（OpenYsmFormat 先 legacy 半边、再补 17 载荷）＝补齐。
-            sources.put(key, new RegisteredSource(normalized, priority, relativePath));
+            sources.put(key, new RegisteredSource(normalized, priority, relativePath, rootKind));
             return true;
         }
         conflicts.incrementAndGet();
@@ -497,9 +530,102 @@ public final class ServerModelManager {
             normalized,
             priority);
         if (wins) {
-            sources.put(key, new RegisteredSource(normalized, priority, relativePath));
+            sources.put(key, new RegisteredSource(normalized, priority, relativePath, rootKind));
         }
         return wins;
+    }
+
+    /**
+     * 来源所属的扫描根，即上游 {@code ModelSourceResolver} 从目录名得出的 {@code CatalogRootKind}：三个已知根按
+     * 绝对规范化路径比较，其余（不认识的根、{@code null}）一律当 {@link CatalogRootKind#CUSTOM}——那是最宽松的
+     * 一档（PUBLIC），不会因为一个路径没被认出来就意外把模型变成受限。
+     */
+    static CatalogRootKind rootKindOf(Path scanRoot) {
+        if (isBuiltinRoot(scanRoot)) {
+            return CatalogRootKind.BUILTIN;
+        }
+        if (isAuthRoot(scanRoot)) {
+            return CatalogRootKind.AUTH;
+        }
+        return CatalogRootKind.CUSTOM;
+    }
+
+    /**
+     * 该扫描根的优先级。{@link CatalogRootKind#BUILTIN} 里那些契约没声明的目录退回 {@link #PRIORITY_CUSTOM}
+     * （第 10 项："用户手放进内置目录的目录不算内置"），那与权限无关——{@code BUILTIN} 与 {@code CUSTOM} 的
+     * {@code accessPolicy} 都是 PUBLIC。
+     */
+    private static int priorityOf(CatalogRootKind rootKind, Path scanRoot, String modelId) {
+        if (rootKind == CatalogRootKind.AUTH) {
+            return PRIORITY_AUTH;
+        }
+        if (rootKind == CatalogRootKind.BUILTIN) {
+            return isBuiltinOrigin(scanRoot, modelId) ? PRIORITY_BUILTIN : PRIORITY_CUSTOM;
+        }
+        return PRIORITY_CUSTOM;
+    }
+
+    /** 该扫描根是不是受限根 {@link #AUTH}（两边都按绝对规范化路径比）。 */
+    public static boolean isAuthRoot(Path scanRoot) {
+        return scanRoot != null && AUTH.toAbsolutePath()
+            .normalize()
+            .equals(
+                scanRoot.toAbsolutePath()
+                    .normalize());
+    }
+
+    /**
+     * 该模型对玩家是公开的还是需要授权——上游
+     * {@code model/catalog/snapshot/CatalogRecord.localEntry:32-33}
+     * （{@code access = rootKind == AUTH ? AUTHORIZED : PUBLIC}）的对应物，只不过这里的"记录"是
+     * {@link #MODEL_SOURCES} 里生效的那条来源。
+     *
+     * <p>拼写规范化与 {@link #isBuiltinModel(ResourceLocation)} 同一套（裸磁盘名、{@code ysmu:} 全名、
+     * {@code _name_<hex>} 内部 id），因为调用方拿到的可能是其中任一种。未知模型返回
+     * {@link CatalogAccess#PUBLIC}：服务端没有它的来源，也就无从说它受限；这一条同时保证客户端本地
+     * {@code /ysmclient load} 注册的模型不会被授权判定挡住（见 {@code api/ModelAuthorization} 的说明）。</p>
+     */
+    public static CatalogAccess accessOf(ResourceLocation modelId) {
+        if (modelId == null) {
+            return CatalogAccess.PUBLIC;
+        }
+        String path = modelId.getResourcePath();
+        CatalogRootKind kind = registeredRootKind(path);
+        if (kind == null) {
+            kind = registeredRootKind(modelId.toString());
+        }
+        if (kind == null) {
+            kind = registeredRootKind(ModelIdUtil.getInternalModelId(path));
+        }
+        if (kind == null) {
+            kind = registeredRootKind(ModelIdUtil.getInternalModelId(modelId.toString()));
+        }
+        return kind == CatalogRootKind.AUTH ? CatalogAccess.AUTHORIZED : CatalogAccess.PUBLIC;
+    }
+
+    /** 该模型是否由 auth 根提供；{@link #accessOf(ResourceLocation)} 的布尔半边。 */
+    public static boolean isAuthModel(ResourceLocation modelId) {
+        return accessOf(modelId) == CatalogAccess.AUTHORIZED;
+    }
+
+    private static CatalogRootKind registeredRootKind(String modelId) {
+        RegisteredSource registered = MODEL_SOURCES.get(modelId);
+        return registered == null ? null : registered.rootKind;
+    }
+
+    /**
+     * 生效来源属于 {@link CatalogRootKind#AUTH} 的每个登记键，即服务端当前受限的模型集合（上游
+     * {@code CatalogSnapshot.byModelId} 里 {@code access == AUTHORIZED} 那些条目）。菜单与诊断用；
+     * 集合按登记表实时算，所以 reload 之后立刻正确。
+     */
+    public static Set<String> authModelIds() {
+        Set<String> ids = new TreeSet<>();
+        for (Map.Entry<String, RegisteredSource> entry : MODEL_SOURCES.entrySet()) {
+            if (entry.getValue().rootKind == CatalogRootKind.AUTH) {
+                ids.add(entry.getKey());
+            }
+        }
+        return ids;
     }
 
     /**
@@ -539,32 +665,40 @@ public final class ServerModelManager {
         // 就已有名字与封面。
         //
         // M1/D9:扫描顺序只是<b>执行顺序</b>，不再是重复 modelId 的胜负规则——三个扫描器都从
-        // {@link #registerModel} 走，胜负由 {@link #PRIORITY_BUILTIN}/{@link #PRIORITY_CUSTOM} 显式裁决（内置赢，
-        // 与顺序无关；同优先级保持"后扫的赢"，见 registerModel 的 javadoc 第 2 条）。builtin 仍排在 custom 之后，
-        // 因为 registerModel 的"同一磁盘来源补齐"与各扫描器的去重（FolderFormat 的 hasOpenYsmRegistration）都建立
-        // 在"OpenYSM 先于 legacy、custom 先于 builtin"这个既有顺序上。
+        // {@link #registerModel} 走，胜负由 {@link #PRIORITY_BUILTIN}/{@link #PRIORITY_AUTH}/{@link #PRIORITY_CUSTOM}
+        // 显式裁决（内置赢，auth 胜过同路径的 custom，与顺序无关；同优先级保持"后扫的赢"，见 registerModel 的
+        // javadoc 第 2 条）。builtin 仍排在 custom 之后，因为 registerModel 的"同一磁盘来源补齐"与各扫描器的去重
+        // （FolderFormat 的 hasOpenYsmRegistration）都建立在"OpenYSM 先于 legacy、custom 先于 builtin"这个既有顺序上。
+        // auth 插在 custom 与 builtin 之间，与上游 reloadableSources() 的 [CUSTOM, AUTH] 顺序一致（ReloadableModelCatalog
+        // 的优先级表与扫描顺序无关，所以这个位置只影响日志与执行耗时）。
         //
-        // 索引侧车（ModelIndexCache）把六个 step 包起来：它为真时各扫描器会跳过已经烘过的源。它任何时候都
+        // 索引侧车（ModelIndexCache）把 cache step 包起来：它为真时各扫描器会跳过已经烘过的源。它任何时候都
         // 只是加速 —— 未命中、索引文件缺失/损坏/版本不符、缓存文件不在，都照旧走下面的完整路径，
-        // 所以没有索引时的行为与加它之前逐字节一致。
+        // 所以没有索引时的行为与加它之前逐字节一致。侧车按 (扫描器, 根目录名) 记条目，所以多出来的 auth 根
+        // 自动拥有自己的一格，不需要提升 INDEX_VERSION。
         ModelIndexCache.beginReload();
         try {
-            runCacheStep("packs (custom)", () -> PackFormat.cacheAllPacks(CUSTOM));
-            runCacheStep("OpenYSM (custom)", () -> {
-                OpenYsmFormat.cacheAllModels(CUSTOM);
-                ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, CUSTOM);
-            });
-            runCacheStep("legacy (custom)", () -> cacheAllModels(CUSTOM));
-            runCacheStep("packs (builtin)", () -> PackFormat.cacheAllPacks(BUILT));
-            runCacheStep("OpenYSM (builtin)", () -> {
-                OpenYsmFormat.cacheAllModels(BUILT);
-                ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, BUILT);
-            });
-            runCacheStep("legacy (builtin)", () -> cacheAllModels(BUILT));
+            cacheRoot("custom", CUSTOM);
+            // 第 3 个根：上游的 AUTH（`config/ysmu/auth`），与前两个根走同一套扫描器，只多一层权限分类。
+            cacheRoot("auth", AUTH);
+            cacheRoot("builtin", BUILT);
         } finally {
             // 与 beginReload 成对：合并本轮记录并原子落盘，失败只 warn。
             ModelIndexCache.commitReload();
         }
+    }
+
+    /**
+     * 一个扫描根的三个扫描器步骤。顺序仍是"OpenYSM 先于 legacy"——这是同一磁盘来源去重与"补齐"登记的前提
+     * （{@code FolderFormat} 的 {@code hasOpenYsmRegistration}），与根的权限分类无关。
+     */
+    private static void cacheRoot(String label, Path root) {
+        runCacheStep("packs (" + label + ")", () -> PackFormat.cacheAllPacks(root));
+        runCacheStep("OpenYSM (" + label + ")", () -> {
+            OpenYsmFormat.cacheAllModels(root);
+            ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, root);
+        });
+        runCacheStep("legacy (" + label + ")", () -> cacheAllModels(root));
     }
 
     private static void runCacheStep(String name, Runnable step) {
