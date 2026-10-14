@@ -112,13 +112,16 @@ public class ModelButton extends GuiButton {
     }
 
     /**
-     * The name the model author declared, falling back to the leaf name when the model declares none - the same
-     * rule as upstream CatalogModelTooltipFormatter.java:61-70.
+     * The name this tile draws: the pack's own {@code metadata.name} for the running locale, else the name the
+     * geometry declares, else the leaf name - the same fallback chain as upstream
+     * {@code CatalogModelTooltipFormatter.java:61-70} with the pack's language table consulted first
+     * ({@code ModelInfoView.translateOr:91-93}).
      */
     private String declaredName() {
-        ClientModelMetadataRegistry.Metadata metadata = ClientModelMetadataRegistry.get(this.modelInfo.getLeft());
-        String declared = metadata == null ? null : metadata.name;
-        return declared == null || declared.trim().isEmpty() ? this.displayString : declared;
+        return ClientModelMetadataRegistry.displayName(
+            this.modelInfo.getLeft(),
+            ClientModelMetadataRegistry.currentLocale(),
+            this.displayString);
     }
 
     public void doPress() {

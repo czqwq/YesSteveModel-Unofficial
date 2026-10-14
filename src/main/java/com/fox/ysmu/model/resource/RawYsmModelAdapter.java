@@ -341,11 +341,30 @@ public final class RawYsmModelAdapter {
         // which declares `"preview_animation": "gui"` - would reach the GUI registration with nothing to register.
         // Upstream has both values in the loaded model's settings and reads them off it where the card needs them
         // (client/gui/button/CatalogModelCardState.java:228, :160).
+        //
+        // The language tables ride here too, and for the same reason: this is the only place a parsed RawYsmModel
+        // becomes a client payload, so both sync channels get them - the OpenYSM channel calls this from
+        // OpenYsmModelSyncClient, and the legacy container is written from the ModelData this returns. Upstream
+        // resolves a name at display time against the tables it collected from the pack
+        // (format/schema/model/views/ModelInfoView.java:45-58 collects them, :95-111 translate() = requested locale
+        // else en_us). Only the table is carried: RawLanguageFile.hash is never read upstream, and the client display
+        // layer stores the plain nested map.
+        Map<String, Map<String, String>> languageFiles = new LinkedHashMap<>();
+        if (raw.languageFiles != null) {
+            for (Map.Entry<String, RawYsmModel.RawLanguageFile> entry : raw.languageFiles.entrySet()) {
+                RawYsmModel.RawLanguageFile file = entry.getValue();
+                if (entry.getKey() == null || file == null || file.data == null || file.data.isEmpty()) {
+                    continue;
+                }
+                languageFiles.put(entry.getKey(), new LinkedHashMap<>(file.data));
+            }
+        }
         return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
             com.fox.ysmu.data.WheelDeclarations.from(raw.properties), components,
             raw.metadata == null ? null : raw.metadata.links,
             raw.properties == null ? null : raw.properties.previewAnimation,
-            raw.properties != null && raw.properties.disablePreviewRotation);
+            raw.properties != null && raw.properties.disablePreviewRotation,
+            languageFiles);
     }
 
     /**

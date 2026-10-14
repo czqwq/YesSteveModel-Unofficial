@@ -370,12 +370,13 @@ public class PlayerModelScreen extends GuiScreen {
         ResourceLocation selectedModel = this.target.getModelId();
         if (selectedModel != null) {
             // Upstream PlayerModelScreen.java:363-374: the preview name is the author-declared name with the leaf
-            // name as the fallback, and it does not follow the Show Model ID First switch.
-            ClientModelMetadataRegistry.Metadata metadata = ClientModelMetadataRegistry.get(selectedModel);
-            String declaredName = metadata == null ? null : metadata.name;
-            String modelName = declaredName == null || declaredName.trim().isEmpty()
-                ? ModelIdUtil.getModelFileName(selectedModel)
-                : declaredName;
+            // name as the fallback, and it does not follow the Show Model ID First switch. The pack's own language
+            // table for the running locale is consulted before that declared name, exactly as upstream translates at
+            // display time (ModelInfoView.translateOr:91-93).
+            String modelName = ClientModelMetadataRegistry.displayName(
+                selectedModel,
+                ClientModelMetadataRegistry.currentLocale(),
+                ModelIdUtil.getModelFileName(selectedModel));
             // font -> fontRendererObj
             List<String> modelNameSplit = fontRendererObj.listFormattedStringToWidth(modelName, 125);
             int lineY = y + 205;

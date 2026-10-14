@@ -620,6 +620,13 @@ public class ClientModelManager {
         // CatalogModelButton.java:160 read them off the model's settings).
         com.fox.ysmu.client.gui.ModelPreviewRegistry
             .accept(modelId, data.getPreviewAnimation(), data.isDisablePreviewRotation());
+        // The model's own language tables reach the client through this same funnel and for the same reason as the
+        // links and the preview declaration above: both sync channels - and the local read of the built-in default -
+        // end here, and the model information screen plus the two selection screens' name lines are the only readers.
+        // The lookup itself happens where the name is drawn (ClientModelMetadataRegistry.displayName), mirroring
+        // upstream, which translates against the tables it collected from the pack at the point the card is rendered
+        // (format/schema/model/views/ModelInfoView.java:91-111).
+        ClientModelMetadataRegistry.acceptLanguageFiles(modelId, data.getLanguageFiles());
         // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.

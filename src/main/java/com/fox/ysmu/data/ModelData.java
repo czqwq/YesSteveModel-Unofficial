@@ -75,6 +75,22 @@ public final class ModelData {
      */
     private final boolean disablePreviewRotation;
 
+    /**
+     * The model's own language tables, locale to key/value, straight from the pack's {@code lang/*.json}
+     * ({@code YSMFolderDeserializer.parseGlobalResources:1004-1008} collects them; the OpenYSM binary payload already
+     * carries them both ways: {@code YSMBinarySerializer:64,437-449} / {@code YSMBinaryDeserializer:980-989}).
+     * <p>
+     * Only the <b>table</b> travels, not the per-file {@code hash} the parsed form keeps
+     * ({@code RawYsmModel.RawLanguageFile.hash}): upstream copies just the entry maps
+     * ({@code format/schema/model/views/ModelInfoView.java:45-58}) and resolves a key against the requested locale
+     * and then {@code en_us} ({@code :95-111}), never reading the hash. Carrying the plain nested map also keeps one
+     * shape for the client display layer instead of two.
+     * <p>
+     * Locale keys are the pack's own file names ({@code zh_cn}, {@code en_us}). 1.7.10 reports the running locale as
+     * {@code zh_CN}/{@code en_US}, so the caller normalizes before looking a key up.
+     */
+    private final Map<String, Map<String, String>> languageFiles;
+
     public ModelData(String modelId, Type type, Map<String, byte[]> geo, Map<String, byte[]> texture,
         Map<String, byte[]> animation) {
         this(modelId, type, geo, texture, animation, null);
@@ -134,6 +150,26 @@ public final class ModelData {
         Map<String, byte[]> animation, @Nullable Map<String, byte[]> guiImages, WheelDeclarations wheelDeclarations,
         Map<String, Map<Integer, byte[]>> components, @Nullable Map<String, String> links,
         @Nullable String previewAnimation, boolean disablePreviewRotation) {
+        this(modelId, type, geo, texture, animation, guiImages, wheelDeclarations, components, links,
+            previewAnimation, disablePreviewRotation, null);
+    }
+
+    /**
+     * The full payload plus the model's own language tables (see {@link #languageFiles}).
+     * <p>
+     * One more overload, for the same reason every other field got one: every existing caller - the legacy cache
+     * reader, the three format bakers, the client bridge and the tests - keeps compiling unchanged, and a payload
+     * built without language tables simply has none, which is also what an older payload decodes to.
+     *
+     * @param languageFiles locale to key/value, as the pack's {@code lang/*.json} files declare it; {@code null} and
+     *                      an empty map both mean "this model declares none", and an empty per-locale table is
+     *                      dropped rather than kept as an empty entry
+     */
+    public ModelData(String modelId, Type type, Map<String, byte[]> geo, Map<String, byte[]> texture,
+        Map<String, byte[]> animation, @Nullable Map<String, byte[]> guiImages, WheelDeclarations wheelDeclarations,
+        Map<String, Map<Integer, byte[]>> components, @Nullable Map<String, String> links,
+        @Nullable String previewAnimation, boolean disablePreviewRotation,
+        @Nullable Map<String, Map<String, String>> languageFiles) {
         Map<String, Map<Integer, byte[]>> copied = new LinkedHashMap<>();
         for (Map.Entry<String, Map<Integer, byte[]>> base : components.entrySet()) {
             if (!texture.containsKey(base.getKey())) throw new IllegalArgumentException("PBR base is not a texture");
@@ -151,6 +187,19 @@ public final class ModelData {
             : Collections.unmodifiableMap(new LinkedHashMap<>(links));
         this.previewAnimation = previewAnimation == null ? "" : previewAnimation;
         this.disablePreviewRotation = disablePreviewRotation;
+        Map<String, Map<String, String>> copiedLanguages = new LinkedHashMap<>();
+        if (languageFiles != null) {
+            for (Map.Entry<String, Map<String, String>> entry : languageFiles.entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null || entry.getValue()
+                    .isEmpty()) {
+                    continue;
+                }
+                copiedLanguages.put(
+                    entry.getKey(),
+                    Collections.unmodifiableMap(new LinkedHashMap<>(entry.getValue())));
+            }
+        }
+        this.languageFiles = Collections.unmodifiableMap(copiedLanguages);
         this.modelId = modelId;
         this.model = geo;
         this.texture = texture;
@@ -209,6 +258,14 @@ public final class ModelData {
     /** The model's declared {@code disable_preview_rotation} (see the field); false when it declares none. */
     public boolean isDisablePreviewRotation() {
         return disablePreviewRotation;
+    }
+
+    /**
+     * The model's own language tables, locale to key/value (see the field); empty when it declares none or arrived
+     * over a channel that predates the field. Never {@code null}.
+     */
+    public Map<String, Map<String, String>> getLanguageFiles() {
+        return languageFiles;
     }
 
     public void setMd5(String md5) {

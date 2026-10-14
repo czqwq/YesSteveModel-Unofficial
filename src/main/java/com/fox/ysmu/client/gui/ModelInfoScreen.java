@@ -240,8 +240,13 @@ public class ModelInfoScreen extends GuiScreen {
         this.drawGradientRect(x, y, x + 420, y + 235, 0xff_222222, 0xff_222222);
 
         ClientModelMetadataRegistry.Metadata metadata = ClientModelMetadataRegistry.get(this.modelId);
-        String title = metadata == null || metadata.name.trim()
-            .isEmpty() ? ModelIdUtil.getModelFileName(this.modelId) : metadata.name;
+        // The pack's own language table for the running locale comes first, then the name the geometry declares, then
+        // the leaf name: upstream ModelInfoView.translateOr:91-93 returns the caller's default when neither the
+        // requested locale nor en_us declares the key.
+        String title = ClientModelMetadataRegistry.displayName(
+            this.modelId,
+            ClientModelMetadataRegistry.currentLocale(),
+            ModelIdUtil.getModelFileName(this.modelId));
         this.drawCenteredString(fontRendererObj, title, x + 210, y + 6, 0xFF_AA00);
 
         if (metadata != null && !metadata.tips.trim()
