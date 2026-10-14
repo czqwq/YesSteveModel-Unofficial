@@ -80,7 +80,7 @@ src/main/java/com/fox/ysmu/mixin：仅 Mixins。gradle.properties 将 Mixins 限
 
 src/main/java/software、src/main/java/com/eliotlash、src/main/java/net/geckominecraft：内置 GeckoLib 3 引擎（327 文件：275/48/4）。本仓库拥有的第三方兼容代码——保持引擎编辑窄小并记录每次偏离。除 software/bernie/geckolib3/GeckoLib.java（@Mod 和 preInit 已移除）外，树与快照字节相同。见 PROVENANCE.md。
 
-src/main/resources/assets/ysmu/builtin：内置模型资产（`default` 与 `misc/*`），重载时整树解压到 `config/ysmu/builtin`。改这些资产要小心，因为重载路径故意覆盖运行时副本。唯一例外是用户替换为 OpenYSM 模型包的目录：当 `config/ysmu/custom/<name>/ysm-pack.json` 存在时，该名称的内置副本被跳过并记录（ServerModelManager.builtInModelTarget），目录计为包根而非模型（ServerModelManager.isPackRoot）。包根持有模型目录，其 ysm-pack.png 是封面从不是模型纹理，其 ysm-pack.json（名称/描述/语言）随 OpenYSM 同步索引到达客户端，使模型选择 GUI 能用包自身名称和封面标记文件夹。
+src/main/resources/assets/ysmu/builtin：内置模型资产（`default` 与 `misc/*`），重载时整树解压到 `config/ysmu/builtin`。改这些资产要小心，因为重载路径故意覆盖运行时副本。内置目录 `config/ysmu/builtin` 每轮 reload 由模组自己清空重写（`ServerModelManager.extractBuiltinModels`），用户把同名模型放进 `config/ysmu/custom/<同名>` **不会**替换它：内置后扫、同名时内置赢。包根机制（`ysm-pack.json`）本身来自上游，但同名包根同样是内置赢。**注意：旧文档所述的"用户可用 OpenYSM 包替换同名内置目录"（`ServerModelManager.builtInModelTarget`）在当前代码里已不存在**——该函数 grep 0 命中，`blacklist.txt` 的文本自己写着 "NOT CONSULTED YET … there is no per-name copy left to skip"。包根持有模型目录，其 ysm-pack.png 是封面从不是模型纹理，其 ysm-pack.json（名称/描述/语言）随 OpenYSM 同步索引到达客户端，使模型选择 GUI 能用包自身名称和封面标记文件夹。
 
 src/main/resources/assets/ysmu/lang：en_US.lang 和 zh_CN.lang。保持新翻译键同步。
 
@@ -129,7 +129,7 @@ config/ysmu/custom 中的 .ysm 文件也会被扫描。仅包含 main.json、arm
 
 ModelIdUtil 为 ResourceLocation 规范化模型名。安全 id 匹配 [a-z0-9._-]+；不安全名编码为 _name_ 加 UTF-8 十六进制。使用 ModelIdUtil 助手而非手工构建模型、主、手臂或纹理 id。
 
-jar 内 `src/main/resources/assets/ysmu/builtin` 的整棵树在每次 reload 时先清空 `config/ysmu/builtin` 再解压到这里，所以改内置资产时运行时副本会被覆盖（用户自己的模型在 `config/ysmu/custom`，不受影响）。唯一例外是用户替换为 OpenYSM 模型包的目录：当 `config/ysmu/custom/<name>/ysm-pack.json` 存在时，该名称的内置副本被跳过并记录（ServerModelManager.builtInModelTarget），目录计为包根而非模型（ServerModelManager.isPackRoot）。包根持有模型目录，其 ysm-pack.png 是封面从不是模型纹理，其 ysm-pack.json（名称/描述/语言）随 OpenYSM 同步索引到达客户端，使模型选择 GUI 能用包自身名称和封面标记文件夹。
+jar 内 `src/main/resources/assets/ysmu/builtin` 的整棵树在每次 reload 时先清空 `config/ysmu/builtin` 再解压到这里，所以改内置资产时运行时副本会被覆盖（用户自己的模型在 `config/ysmu/custom`，不受影响）。内置目录 `config/ysmu/builtin` 每轮 reload 由模组自己清空重写（`ServerModelManager.extractBuiltinModels`），用户把同名模型放进 `config/ysmu/custom/<同名>` **不会**替换它：内置后扫、同名时内置赢。包根机制（`ysm-pack.json`）本身来自上游，但同名包根同样是内置赢。**注意：旧文档所述的"用户可用 OpenYSM 包替换同名内置目录"（`ServerModelManager.builtInModelTarget`）在当前代码里已不存在**——该函数 grep 0 命中，`blacklist.txt` 的文本自己写着 "NOT CONSULTED YET … there is no per-name copy left to skip"。包根持有模型目录，其 ysm-pack.png 是封面从不是模型纹理，其 ysm-pack.json（名称/描述/语言）随 OpenYSM 同步索引到达客户端，使模型选择 GUI 能用包自身名称和封面标记文件夹。
 
 网络和线程规则
 NetworkHandler 中的数据包 id 是线协议的一部分。需要时添加新 id；不要重编号现有 id。保持数据包侧注册显式并与处理器行为一致。
