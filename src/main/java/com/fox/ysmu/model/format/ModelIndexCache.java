@@ -392,10 +392,12 @@ public final class ModelIndexCache {
      * 传统容器没有自己的烘焙版本常量，这一项是它的兜底。</li>
      * <li>{@code ModelCacheWriter.hashSourceFor}：里面已经带了 {@code OPEN_YSM_BAKE_VERSION} 与
      * {@code OPEN_YSM_SYNC_FORMAT}，直接复用而不是在这里再抄一份常量。</li>
-     * <li>{@link EncryptTools#LINKS_MODEL_VERSION}：传统缓存容器<b>当前</b>写出的载荷版本（头部第二个字，
-     * {@code EncryptTools.assembleEncryptModels} 写它；v6 加了 {@code metadata.links} 段，v5 及更早仍可读）。
+     * <li>{@link EncryptTools#PREVIEW_MODEL_VERSION}：传统缓存容器<b>当前</b>写出的载荷版本（头部第二个字，
+     * {@code EncryptTools.assembleEncryptModels} 写它；v7 加了 GUI 预览声明与 {@code lang/*.json} 语言表段，
+     * v6 加了 {@code metadata.links} 段，v5 及更早仍可读）。
      * 布局一改，同一份源烘出来的 MD5 也会变。取"当前那一版"而不是某一个历史常量，是为了让这个围栏跟着
-     * 容器版本走；将来再加 v7 时这一行必须一起改（{@code Tags.VERSION} 是兜底的那张网）。</li>
+     * 容器版本走；v6 加链接段时是 {@code LINKS_MODEL_VERSION}，v7 加预览/语言段时换成
+     * {@code PREVIEW_MODEL_VERSION}（{@code Tags.VERSION} 是兜底的那张网）。</li>
      * <li>{@link Config#ACCEPT_SOUND_FX}：会让 {@code ModelCacheWriter} 剥掉音效（{@code :186-194}），
      * 载荷内容随之改变。</li>
      * <li>三份内置缺省动画（模型自己没带时 {@code RawYsmModelAdapter}/{@code FolderFormat}/{@code YsmFormat}
@@ -420,7 +422,7 @@ public final class ModelIndexCache {
             updateText(digest, serverKeyFingerprint);
             updateText(digest, passwordFingerprint);
             updateText(digest, ModelCacheWriter.hashSourceFor(null, modelId));
-            updateInt(digest, EncryptTools.LINKS_MODEL_VERSION);
+            updateInt(digest, EncryptTools.PREVIEW_MODEL_VERSION);
             updateText(digest, Boolean.toString(Config.ACCEPT_SOUND_FX));
             updateText(digest, defaultAnimationsFingerprint());
             updateText(digest, source.key());

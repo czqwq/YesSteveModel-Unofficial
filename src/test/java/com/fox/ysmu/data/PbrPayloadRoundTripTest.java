@@ -15,9 +15,13 @@ class PbrPayloadRoundTripTest {
         javax.crypto.spec.IvParameterSpec iv = new javax.crypto.spec.IvParameterSpec(java.util.Arrays.copyOfRange(password, 24, 40));
         byte[] clear = com.fox.ysmu.util.DeflateUtil.decompressBytes(com.fox.ysmu.util.AESUtil.decrypt(key, iv,
             java.util.Arrays.copyOfRange(current, 24, current.length)).toByteArray());
-        // v4 has neither trailing section the current writer emits: the PBR base count (v5) nor the links count (v6).
-        // Chopping only the PBR count would leave 4 bytes the v4 reader never consumes, and it rejects those.
-        clear = java.util.Arrays.copyOf(clear, clear.length - 8);
+        // v4 has none of the trailing sections the current writer emits: the PBR base count (v5, 4 bytes), the links
+        // count (v6, 4 bytes) and - since v7 - the preview_animation string (4), its disable_preview_rotation flag (4)
+        // and the language-file count (4). Every one of them must be trimmed: leaving any behind leaves bytes the v4
+        // reader never consumes, and it rejects trailing bytes. Keep this in sync with EncryptTools.encryptModel when
+        // another trailing section is added.
+        int trailingSections = 4 + 4 + 12;
+        clear = java.util.Arrays.copyOf(clear, clear.length - trailingSections);
         byte[] encrypted = com.fox.ysmu.util.AESUtil.encrypt(key, iv, com.fox.ysmu.util.DeflateUtil.compressBytes(clear)).toByteArray();
         java.io.ByteArrayOutputStream old = new java.io.ByteArrayOutputStream();
         old.write(com.fox.ysmu.util.ByteInteger.int2Bytes(EncryptTools.HEAD));

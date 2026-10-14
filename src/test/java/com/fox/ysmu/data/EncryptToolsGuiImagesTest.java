@@ -55,9 +55,10 @@ class EncryptToolsGuiImagesTest {
         ModelData after = decode(password, container);
 
         assertNotNull(after);
-        // The writer stamps the *current* container version; that is LINKS_MODEL_VERSION since v6 appended the links
-        // section (EncryptTools.java:63, written at :136). An older version is accepted on read instead (see :120).
-        assertEquals(EncryptTools.LINKS_MODEL_VERSION, ByteInteger.bytes2Int(container, 4));
+        // The writer stamps the *current* container version; that is PREVIEW_MODEL_VERSION since v7 appended the GUI
+        // preview declaration and the language tables (EncryptTools.java:63-85, written at :158). An older version is
+        // accepted on read instead (see :120).
+        assertEquals(EncryptTools.PREVIEW_MODEL_VERSION, ByteInteger.bytes2Int(container, 4));
         assertEquals(before.getModel().keySet(), after.getModel().keySet());
         assertEquals(before.getTexture().keySet(), after.getTexture().keySet());
         assertEquals(Collections.singleton("skin.png"), after.getInfo().getTextures());
