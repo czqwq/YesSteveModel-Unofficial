@@ -18,6 +18,7 @@ import java.util.Arrays;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 final class Histogram
 {
     private Histogram()

@@ -17,6 +17,11 @@ public class Config {
     public static boolean DISABLE_OTHER_MODEL = false;
     public static boolean DISABLE_SELF_HANDS = false;
     /**
+     * Show Model ID First: model selection cards title with the model ID (the folder/file leaf) instead of the name
+     * the model author declared in ysm.json. Port of upstream ClientConfig.SHOW_MODEL_ID_FIRST (config/ClientConfig.java:63-64).
+     */
+    public static boolean SHOW_MODEL_ID_FIRST = false;
+    /**
      * Stops this client from drawing a pack's projectile sub-entity, so an arrow keeps its vanilla renderer.
      *
      * <p>Upstream's switch is {@code ClientConfig.DISABLE_PROJECTILE_MODEL}
@@ -422,6 +427,7 @@ public class Config {
 
         // GUI config values
         GUI_ENHANCEMENTS = syncBoolean("GuiEnhancements", "gui", GUI_ENHANCEMENTS, "Enable model selection GUI enhancements (foreground/background textures and GUI animations)", load);
+        SHOW_MODEL_ID_FIRST = syncBoolean("ShowModelIdFirst", "gui", SHOW_MODEL_ID_FIRST, "Whether to display model ID first in the model selection screen, instead of the model name filled in by the model author.", load);
         SHOW_LOADING_PROGRESS = syncBoolean("ShowLoadingProgress", "gui", SHOW_LOADING_PROGRESS, "Show model sync progress bar overlay", load);
         GUI_MODEL_PREVIEW_REFRESH = syncInt("GuiModelPreviewRefresh", "gui", GUI_MODEL_PREVIEW_REFRESH, "Preview grid FBO refresh. -1 = auto (whole-page shared budget), 0 = static (only on interaction), 1-4 = refresh every N frames. Higher = smoother animation but more GPU load.", -1, 4, load);
         GUI_HUD_PREVIEW_CACHE = syncBoolean("GuiHudPreviewCache", "gui", GUI_HUD_PREVIEW_CACHE, "HUD selfie model FBO cache. Disable for every-frame rendering (no performance gain).", load);

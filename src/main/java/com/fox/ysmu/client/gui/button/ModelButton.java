@@ -2,6 +2,7 @@ package com.fox.ysmu.client.gui.button;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.ysmu;
@@ -110,6 +111,16 @@ public class ModelButton extends GuiButton {
         return ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(this.modelInfo.getLeft()));
     }
 
+    /**
+     * The name the model author declared, falling back to the leaf name when the model declares none - the same
+     * rule as upstream CatalogModelTooltipFormatter.java:61-70.
+     */
+    private String declaredName() {
+        ClientModelMetadataRegistry.Metadata metadata = ClientModelMetadataRegistry.get(this.modelInfo.getLeft());
+        String declared = metadata == null ? null : metadata.name;
+        return declared == null || declared.trim().isEmpty() ? this.displayString : declared;
+    }
+
     public void doPress() {
         ResourceLocation texture = this.defaultTexture();
         if (texture == null) {
@@ -198,7 +209,11 @@ public class ModelButton extends GuiButton {
         }
         // 渲染文本
         // font.split->listFormattedStringToWidth
-        List<String> split = font.listFormattedStringToWidth(this.displayString, 45);
+        // Upstream CatalogModelButton.java:75-78: the card title follows the Show Model ID First switch, so the
+        // declared name is read here instead of being snapshotted in the constructor (it can arrive later, the same
+        // reason tooltips() queries on demand).
+        String title = Config.SHOW_MODEL_ID_FIRST ? this.displayString : declaredName();
+        List<String> split = font.listFormattedStringToWidth(title, 45);
         if (split.size() > 1) {
             this.drawCenteredString(font, split.get(0), this.xPosition + this.width / 2, this.yPosition + this.height - 19, 0xF3EFE0);
             // CU-17: 模型名超过两行时在第二行末尾补省略号，提示被截断（按 45px 宽裁剪后再追加）。
@@ -208,7 +223,7 @@ public class ModelButton extends GuiButton {
             }
             this.drawCenteredString(font, secondLine, this.xPosition + this.width / 2, this.yPosition + this.height - 10, 0xF3EFE0);
         } else {
-            this.drawCenteredString(font, this.displayString, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
+            this.drawCenteredString(font, title, this.xPosition + this.width / 2, this.yPosition + this.height - 15, 0xF3EFE0);
         }
         // 悬停时的高亮边框
         if (this.field_146123_n) {

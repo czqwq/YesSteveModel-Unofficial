@@ -1,8 +1,10 @@
 package com.fox.ysmu.client.gui;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
 import com.fox.ysmu.client.ClientPackRegistry;
 import com.fox.ysmu.client.gui.button.*;
@@ -43,6 +45,7 @@ public class PlayerModelScreen extends GuiScreen {
      * page, so it can never collide with a tile.
      */
     private static final int MODEL_SETTINGS_BUTTON_ID = 50;
+    private static final int SHOW_MODEL_ID_FIRST_BUTTON_ID = 51;
 
     private final ModelSelectionTarget target;
     /** Which folder is open and which page each folder is on; static state inside, like upstream. */
@@ -184,6 +187,16 @@ public class PlayerModelScreen extends GuiScreen {
                     .setTooltips("gui.yes_steve_model.model.config.title"));
         }
         this.buttonList.add(new FlatIconButton(8, x + 377, y + 5, 18, 18, 80, 0).setTooltips("gui.yes_steve_model.open_model_folder.open"));
+        // Upstream PlayerModelScreen.java:175-184 puts the switch at (x + 5, y - 22); it only changes the card
+        // title, so the widget reads the config value and writes it back on press.
+        this.buttonList.add(
+            ConfigCheckBox.forLabel(
+                SHOW_MODEL_ID_FIRST_BUTTON_ID,
+                x + 5,
+                y - 22,
+                110,
+                I18n.format("gui.yes_steve_model.show_model_id_first"),
+                Config.SHOW_MODEL_ID_FIRST));
         this.buttonList.add(new FlatColorButton(9, x + 198, y + 215, 52, 14, I18n.format("gui.yes_steve_model.pre_page")));
         this.buttonList.add(new FlatColorButton(10, x + 308, y + 215, 52, 14, I18n.format("gui.yes_steve_model.next_page")));
 
@@ -294,6 +307,14 @@ public class PlayerModelScreen extends GuiScreen {
                     this.initGui();
                 }
                 break;
+            case SHOW_MODEL_ID_FIRST_BUTTON_ID:
+                Config.SHOW_MODEL_ID_FIRST = !Config.SHOW_MODEL_ID_FIRST;
+                if (button instanceof ConfigCheckBox checkbox) {
+                    checkbox.setChecked(Config.SHOW_MODEL_ID_FIRST);
+                }
+                Config.save();
+                this.initGui();
+                break;
             case MODEL_SETTINGS_BUTTON_ID:
                 if (this.target.getModelId() != null) {
                     this.mc.displayGuiScreen(new ModelConfigScreen(this, this.target.getModelId()));
@@ -348,8 +369,13 @@ public class PlayerModelScreen extends GuiScreen {
 
         ResourceLocation selectedModel = this.target.getModelId();
         if (selectedModel != null) {
-            // The tile labels are leaf names, so the preview name uses the leaf too instead of the whole path.
-            String modelName = ModelIdUtil.getModelFileName(selectedModel);
+            // Upstream PlayerModelScreen.java:363-374: the preview name is the author-declared name with the leaf
+            // name as the fallback, and it does not follow the Show Model ID First switch.
+            ClientModelMetadataRegistry.Metadata metadata = ClientModelMetadataRegistry.get(selectedModel);
+            String declaredName = metadata == null ? null : metadata.name;
+            String modelName = declaredName == null || declaredName.trim().isEmpty()
+                ? ModelIdUtil.getModelFileName(selectedModel)
+                : declaredName;
             // font -> fontRendererObj
             List<String> modelNameSplit = fontRendererObj.listFormattedStringToWidth(modelName, 125);
             int lineY = y + 205;

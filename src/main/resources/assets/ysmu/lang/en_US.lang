@@ -25,6 +25,7 @@ gui.yes_steve_model.model.config.bad_range=invalid range
 gui.yes_steve_model.model.ground=Show/Hide Ground
 gui.yes_steve_model.model.reset=Reset View
 gui.yes_steve_model.model.stop=Stop Animation
+gui.yes_steve_model.show_model_id_first=Show Model ID First
 gui.yes_steve_model.config.disable_self_model=Prevents rendering of self player's model
 gui.yes_steve_model.config.disable_other_model=Prevents rendering of other player's model
 gui.yes_steve_model.config.print_animation_roulette_msg=Whether to print animation roulette play message

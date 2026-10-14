@@ -25,6 +25,7 @@ gui.yes_steve_model.model.config.bad_range=范围无效
 gui.yes_steve_model.model.ground=显示/隐藏地面
 gui.yes_steve_model.model.reset=重置视角
 gui.yes_steve_model.model.stop=停止播放动画
+gui.yes_steve_model.show_model_id_first=优先显示模型 ID
 gui.yes_steve_model.config.disable_self_model=阻止渲染自身玩家模型
 gui.yes_steve_model.config.disable_other_model=阻止渲染其他玩家模型
 gui.yes_steve_model.config.print_animation_roulette_msg=是否显示轮盘动画播放信息
