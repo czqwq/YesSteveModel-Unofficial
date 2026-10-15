@@ -41,19 +41,27 @@ public class C2SVersionCheck17 implements IMessage {
 
         @Override
         public IMessage onMessage(C2SVersionCheck17 message, MessageContext ctx) {
-            EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender == null || !Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
-                return null;
+            // N-10: guard the handler body (startSync iterates the server model index, which /ysm reload rebuilds).
+            try {
+                EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
+                if (sender == null || !Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL) {
+                    return null;
+                }
+                if (!NetworkHandler.PROTOCOL_VERSION.equals(message.version)) {
+                    ysmu.LOG.warn(
+                        "Skipping OpenYSM model sync for {} because protocol versions differ: client={}, server={}",
+                        sender.getCommandSenderName(),
+                        message.version,
+                        NetworkHandler.PROTOCOL_VERSION);
+                    return null;
+                }
+                // 17 是附加的快速路径:legacy 请求已由 ServerModelManager.sendRequestSyncModelMessage 无条件发出,
+                // 所以这里不接任何 gate,也不关心 startSync 的返回值 —— 17 起不来时 legacy 那一路照样送达。
+                OpenYsmModelSyncServer.startSync(sender);
+            } catch (Exception e) {
+                // legacy 的送达与 17 是否成功无关(见上),异常只记录,不做通道交接。
+                ysmu.LOG.warn("Failed to start OpenYSM model sync", e);
             }
-            if (!NetworkHandler.PROTOCOL_VERSION.equals(message.version)) {
-                ysmu.LOG.warn(
-                    "Skipping OpenYSM model sync for {} because protocol versions differ: client={}, server={}",
-                    sender.getCommandSenderName(),
-                    message.version,
-                    NetworkHandler.PROTOCOL_VERSION);
-                return null;
-            }
-            OpenYsmModelSyncServer.startSync(sender);
             return null;
         }
     }

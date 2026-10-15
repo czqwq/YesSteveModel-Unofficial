@@ -11,7 +11,8 @@ public class Negative implements IValue {
     @Override
 
     public double get() {
-        return -this.value.get();
+        // 上游一元负号是 `-asFloat(value)`（ExpressionEvaluatorImpl.java:361-362），NaN 先归 0。
+        return -Operation.asDouble(this.value.get());
     }
 
     @Override

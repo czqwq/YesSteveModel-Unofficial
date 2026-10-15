@@ -8,11 +8,16 @@
 .classpath
 .project
 /bin/
+/tmp/
+/tools/
+/.agent-teams/
+/.agent/
 /config/
 /crash-reports/
 /logs/
 options.txt
 /saves/
+/.dsh-vision-router/
 usernamecache.json
 banned-ips.json
 banned-players.json
@@ -36,3 +41,18 @@ addon.late.local.gradle
 addon.late.local.gradle.kts
 layout.json
 __pycache__/
+
+# 本地专用测试：它们直接读本机才有的文件（run/ 的运行目录、tmp/ 下的模型包），
+# 在克隆和 CI 上只会 assumeTrue 跳过，所以保持不入库、只在本机跑。
+# 新增同类测试时把路径加进这份清单；如果测试真正需要的是"能构建的字节"而不是那份真包，
+# 请改用 com.fox.ysmu.client.GeometryFixtures（有真包用真包，没有就用内联几何，永远会跑）。
+src/test/java/com/fox/ysmu/client/animation/controller/LaPlumaSwordSwingReproTest.java
+src/test/java/com/fox/ysmu/client/animation/molang/RunPoseDiagnosticTest.java
+src/test/java/com/fox/ysmu/client/ChargeCircleDecalRendersTranslucentTest.java
+src/test/java/com/fox/ysmu/client/ClientModelManagerOnDemandBuildTest.java
+src/test/java/com/fox/ysmu/client/ClientModelManagerRegistrationCostTest.java
+src/test/java/com/fox/ysmu/client/TranslucentTexelSamplingTest.java
+src/test/java/com/fox/ysmu/client/YsmSyncChannelParityTest.java
+src/test/java/com/fox/ysmu/model/resource/ModelImageConverterTest.java
+src/test/java/com/fox/ysmu/model/resource/OpenYsmBakeRoundTripTest.java
+src/test/java/software/bernie/geckolib3/core/controller/LaPlumaToggleTimelineReproTest.java

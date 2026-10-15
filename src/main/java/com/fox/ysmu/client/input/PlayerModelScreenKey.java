@@ -18,13 +18,26 @@ public class PlayerModelScreenKey {
 
     @SubscribeEvent
     public static void onKeyboardInput(InputEvent.KeyInputEvent event) {
+        // CU-04: 先消费 isPressed()（KeyBinding.pressTime 是一次性信号），再判断界面与玩家状态：
+        // 1.7.10 的按键状态与 KeyInputEvent 都不受 GUI 影响（Minecraft.java:1839/1964）。
+        boolean pressed = PLAYER_MODEL_KEY.isPressed();
+        if (!pressed) {
+            return;
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        // CU-03: thePlayer == null（主菜单/已断开）时打开模型界面会在渲染时 NPE，
+        // 因此这里必须先判空，并把玩家显式传给界面（不再走无参构造器 / 不把 null 交给 ModelSelectionTarget.of）。
+        if (mc.currentScreen != null || mc.thePlayer == null) {
+            return;
+        }
         boolean isAltKeyDown = Keyboard.isKeyDown(Keyboard.KEY_LMENU) || Keyboard.isKeyDown(Keyboard.KEY_RMENU);
-        if (PLAYER_MODEL_KEY.isPressed() && isAltKeyDown) {
-            if (Config.DISCLAIMER_SHOW) {
-                Minecraft.getMinecraft().displayGuiScreen(new DisclaimerScreen());
-            } else {
-                Minecraft.getMinecraft().displayGuiScreen(new PlayerModelScreen());
-            }
+        if (!isAltKeyDown) {
+            return;
+        }
+        if (Config.DISCLAIMER_SHOW) {
+            mc.displayGuiScreen(new DisclaimerScreen());
+        } else {
+            mc.displayGuiScreen(new PlayerModelScreen(mc.thePlayer));
         }
     }
 }

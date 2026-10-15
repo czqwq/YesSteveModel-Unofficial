@@ -2,14 +2,15 @@ package com.fox.ysmu.client.gui;
 
 import com.fox.ysmu.client.gui.button.FlatColorButton;
 import com.fox.ysmu.client.gui.button.TextureButton;
+import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
 import net.minecraft.client.audio.PositionedSoundRecord;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
-import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 import org.lwjgl.input.Mouse;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
@@ -22,7 +23,7 @@ public class PlayerTextureScreen extends GuiScreen {
     private final PlayerModelScreen parent;
     private final ResourceLocation modelId;
     private final List<ResourceLocation> textures;
-    private final EntityPlayer player;
+    private final ModelSelectionTarget target;
     private int maxTexturePage;
     private int texturePage;
     private int x;
@@ -31,14 +32,23 @@ public class PlayerTextureScreen extends GuiScreen {
     public PlayerTextureScreen(PlayerModelScreen parent, ResourceLocation modelId, List<ResourceLocation> textures) {
         this.parent = parent;
         this.modelId = modelId;
-        this.textures = textures;
+        // CU-15: 必须拷贝。原来的 sort 直接改的是 ClientModelManager.MODELS 里共享的 List 实例，
+        // 于是"打开过一次贴图页"会永久改变该模型的贴图顺序，进而改变 ModelButton 应用的默认贴图。
+        this.textures = textures == null ? new ArrayList<>() : new ArrayList<>(textures);
         this.textures.sort(Comparator.comparing(ResourceLocation::toString));
-        this.player = parent.player;
+        this.target = parent.getTarget();
     }
 
     @Override
     public void initGui() {
+        // 翻页 / 重新 initGui 会丢掉旧 tile,每个 tile 的离屏 FBO(行 43)只能在这里释放 —— 否则每翻一页
+        // 泄漏一张 GL 贴图(参考 PlayerTextureScreen.java:583-585 的同一处理)。
+        this.disposePreviewButtons();
         this.buttonList.clear();
+        // Same as the model screen: a fresh visit starts the preview animations over, and each tile owns (and
+        // disposes) its own animatable, so ANIMATABLE_CACHE is not cleared here - see PlayerModelScreen#initGui.
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;
         this.maxTexturePage = textures.isEmpty() ? 0 : (textures.size() - 1) / TEXTURES_PER_PAGE;
@@ -58,7 +68,7 @@ public class PlayerTextureScreen extends GuiScreen {
             }
             int xStart = x + 5 + TEXTURE_X_STEP * (i % TEXTURE_COLUMNS);
             int yStart = y + 28 + TEXTURE_Y_STEP * (i / TEXTURE_COLUMNS);
-            this.buttonList.add(new TextureButton(b++, xStart, yStart, modelId, textures.get(modelIndex), player));
+            this.buttonList.add(new TextureButton(b++, xStart, yStart, modelId, textures.get(modelIndex), target));
         }
     }
 
@@ -90,10 +100,12 @@ public class PlayerTextureScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTick) {
+        // 行 43:预览刷新预算每个渲染帧推进一次(见 PlayerModelScreen#drawScreen 的说明)。
+        PreviewRefreshPolicy.beginFrame();
         this.drawDefaultBackground();
         this.drawGradientRect(x, y, x + 420, y + 235, 0xff_222222, 0xff_222222);
 
-        String texturePageInfo = String.format("%d/%d", texturePage + 1, this.maxTexturePage + 1);
+        String texturePageInfo = "%d/%d".formatted(texturePage + 1, this.maxTexturePage + 1);
         this.drawString(fontRendererObj, texturePageInfo, x + 251 + (56 - fontRendererObj.getStringWidth(texturePageInfo)) / 2, y + 10, 0xF3EFE0);
 
         super.drawScreen(mouseX, mouseY, partialTick);
@@ -134,5 +146,20 @@ public class PlayerTextureScreen extends GuiScreen {
     @Override
     public boolean doesGuiPauseGame() {
         return false;
+    }
+
+    @Override
+    public void onGuiClosed() {
+        // 关闭贴图页时同样要释放每个 tile 的离屏 FBO(参考 PlayerTextureScreen.java:583-585)。
+        this.disposePreviewButtons();
+    }
+
+    /** Releases the off-screen FBO of every texture tile on this screen; see {@link TextureButton#dispose()}. */
+    private void disposePreviewButtons() {
+        for (Object button : this.buttonList) {
+            if (button instanceof TextureButton textureButton) {
+                textureButton.dispose();
+            }
+        }
     }
 }

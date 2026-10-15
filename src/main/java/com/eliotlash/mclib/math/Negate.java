@@ -11,7 +11,8 @@ public class Negate implements IValue {
     @Override
 
     public double get() {
-        return this.value.get() == 0 ? 1 : 0;
+        // 上游取非是 `!asBoolean(value)`（ExpressionEvaluatorImpl.java:359-360）：NaN 判假，取非为真。
+        return Operation.asBoolean(this.value.get()) ? 0 : 1;
     }
 
     @Override

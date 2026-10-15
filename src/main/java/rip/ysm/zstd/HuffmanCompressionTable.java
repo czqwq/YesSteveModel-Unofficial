@@ -24,6 +24,7 @@ import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static rip.ysm.zstd.Util.checkArgument;
 import static rip.ysm.zstd.Util.minTableLog;
 
+@SuppressWarnings("removal")
 final class HuffmanCompressionTable
 {
     private final short[] values;

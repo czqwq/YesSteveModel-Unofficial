@@ -17,6 +17,7 @@ package rip.ysm.zstd;
 import static rip.ysm.zstd.Constants.SIZE_OF_SHORT;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 
+@SuppressWarnings("removal")
 final class Util
 {
     private Util()

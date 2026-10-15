@@ -26,6 +26,7 @@ public class GeoCube implements Serializable {
     public double inflate;
     public Boolean mirror;
     public boolean mesh;
+    public boolean hasNegSize;
 
     private GeoCube(double[] size) {
         if (size.length >= 3) {
@@ -98,11 +99,20 @@ public class GeoCube implements Serializable {
 
     public static GeoCube createFromPojoCube(Cube cubeIn, ModelProperties properties, Double boneInflate,
         Boolean mirror) {
+        // Detect negative-size cubes (inside-out shell effect used by some models).
+        // Must check raw size before any transformation.
+        double[] rawSize = cubeIn.getSize();
+        boolean hasNegSize = rawSize != null && rawSize.length >= 3
+            && (rawSize[0] < 0 || rawSize[1] < 0 || rawSize[2] < 0);
+
         GeoCube cube = new GeoCube(cubeIn.getSize());
 
+        // Model packs are third-party data and a cube may omit "uv" entirely (or carry "uv": null). Everything
+        // below treats missing face data as "no quad" and IGeoRenderer already skips null quads, so degrade
+        // instead of throwing an NPE that would make the whole model silently disappear.
         UvUnion uvUnion = cubeIn.getUv();
-        UvFaces faces = uvUnion.faceUV;
-        boolean isBoxUV = uvUnion.isBoxUV;
+        UvFaces faces = uvUnion == null ? null : uvUnion.faceUV;
+        boolean isBoxUV = uvUnion == null || uvUnion.isBoxUV;
         cube.mirror = cubeIn.getMirror();
         cube.inflate = cubeIn.getInflate() == null ? (boneInflate == null ? 0 : boneInflate) : cubeIn.getInflate() / 16;
 
@@ -110,14 +120,32 @@ public class GeoCube implements Serializable {
             cube.inflate = 0.001;
         }
 
-        float textureHeight = properties.getTextureHeight()
-            .floatValue();
-        float textureWidth = properties.getTextureWidth()
-            .floatValue();
+        // A missing description means no declared texture size. The poly-mesh path in this same class already
+        // defaults to 64F for exactly this case; match that instead of dereferencing null.
+        float textureHeight = properties == null || properties.getTextureHeight() == null ? 64F
+            : properties.getTextureHeight()
+                .floatValue();
+        float textureWidth = properties == null || properties.getTextureWidth() == null ? 64F
+            : properties.getTextureWidth()
+                .floatValue();
 
-        Vector3d size = VectorUtils.fromArray(cubeIn.getSize());
-        Vector3d origin = VectorUtils.fromArray(cubeIn.getOrigin());
-        origin = new Vector3d(-(origin.x + size.x) / 16, origin.y / 16, origin.z / 16);
+        // Use absolute size so vertex math works correctly for negative-size cubes.
+        // Also adjust origin to the true minimum corner.
+        double[] rawOrigin = cubeIn.getOrigin();
+        double ox = rawOrigin != null && rawOrigin.length >= 1 ? rawOrigin[0] : 0;
+        double oy = rawOrigin != null && rawOrigin.length >= 2 ? rawOrigin[1] : 0;
+        double oz = rawOrigin != null && rawOrigin.length >= 3 ? rawOrigin[2] : 0;
+        double sx = rawSize != null && rawSize.length >= 1 ? Math.abs(rawSize[0]) : 1;
+        double sy = rawSize != null && rawSize.length >= 2 ? Math.abs(rawSize[1]) : 1;
+        double sz = rawSize != null && rawSize.length >= 3 ? Math.abs(rawSize[2]) : 1;
+        // If original size was negative in a dimension, shift origin to the true
+        // minimum corner (the normalization that sanitizeGeometryJson would do).
+        if (rawSize != null && rawSize.length >= 1 && rawSize[0] < 0) ox += rawSize[0]; // rawSize[0] is negative
+        if (rawSize != null && rawSize.length >= 2 && rawSize[1] < 0) oy += rawSize[1];
+        if (rawSize != null && rawSize.length >= 3 && rawSize[2] < 0) oz += rawSize[2];
+
+        Vector3d size = new Vector3d(sx, sy, sz);
+        Vector3d origin = new Vector3d(-(ox + sx) / 16, oy / 16, oz / 16);
 
         size.x *= 0.0625f;
         size.y *= 0.0625f;
@@ -206,12 +234,12 @@ public class GeoCube implements Serializable {
         GeoQuad quadDown;
 
         if (!isBoxUV) {
-            FaceUv west = faces.getWest();
-            FaceUv east = faces.getEast();
-            FaceUv north = faces.getNorth();
-            FaceUv south = faces.getSouth();
-            FaceUv up = faces.getUp();
-            FaceUv down = faces.getDown();
+            FaceUv west = faces == null ? null : faces.getWest();
+            FaceUv east = faces == null ? null : faces.getEast();
+            FaceUv north = faces == null ? null : faces.getNorth();
+            FaceUv south = faces == null ? null : faces.getSouth();
+            FaceUv up = faces == null ? null : faces.getUp();
+            FaceUv down = faces == null ? null : faces.getDown();
             // Pass in vertices starting from the top right corner, then going
             // counter-clockwise
             quadWest = west == null ? null
@@ -349,8 +377,17 @@ public class GeoCube implements Serializable {
                         cubeIn.getMirror(),
                         EnumFacing.DOWN);
             }
+        } else if (uvUnion == null || uvUnion.boxUVCoords == null) {
+            // Box UV was requested but the cube carries no box UV coordinates at all. Leave the six quads null;
+            // IGeoRenderer skips null quads, so the cube is drawn without textures rather than crashing.
+            quadWest = null;
+            quadEast = null;
+            quadNorth = null;
+            quadSouth = null;
+            quadUp = null;
+            quadDown = null;
         } else {
-            double[] UV = cubeIn.getUv().boxUVCoords;
+            double[] UV = uvUnion.boxUVCoords;
             Vector3d UVSize = VectorUtils.fromArray(cubeIn.getSize());
             UVSize = new Vector3d(Math.floor(UVSize.x), Math.floor(UVSize.y), Math.floor(UVSize.z));
 
@@ -473,6 +510,13 @@ public class GeoCube implements Serializable {
         cube.quads[3] = quadSouth;
         cube.quads[4] = quadUp;
         cube.quads[5] = quadDown;
+
+        storeCubeHasNegSize(cube, hasNegSize);
+
         return cube;
+    }
+
+    private static void storeCubeHasNegSize(GeoCube cube, boolean hasNegSize) {
+        cube.hasNegSize = hasNegSize;
     }
 }

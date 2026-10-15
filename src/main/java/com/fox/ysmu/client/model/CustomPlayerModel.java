@@ -11,17 +11,21 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.animation.AnimationRegister;
-import com.fox.ysmu.client.animation.molang.MolangPhysicsRuntime;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.Config;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.IAnimatable;
+import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
+import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.model.AnimatedGeoModel;
 import software.bernie.geckolib3.model.provider.data.EntityModelData;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -34,6 +38,10 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     public static final ResourceLocation DEFAULT_MAIN_ANIMATION = ModelIdUtil
         .getMainId(new ResourceLocation(ysmu.MODID, "default"));
     public static final ResourceLocation DEFAULT_TEXTURE = new ResourceLocation(ysmu.MODID, "default/default.png");
+    /**
+     * 首人称相机高度/头部偏移的移植锚点(R-10):**目前只写不读**,保留字段是为了将来接线;
+     * 不要在没有消费方时依赖它的值。相机高度接线本身属非目标。
+     */
     public static float FIRST_PERSON_HEAD_POS;
     private final Map<IBone, HeadPoseOffset> headPoseOffsets = new IdentityHashMap<>();
 
@@ -49,10 +57,70 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     @Override
 
     public ResourceLocation getTextureLocation(Object object) {
-        if (object instanceof CustomPlayerEntity customPlayer) {
-            return customPlayer.getTexture();
+        return object instanceof CustomPlayerEntity customPlayer ? textureFor(customPlayer) : DEFAULT_TEXTURE;
+    }
+
+    /**
+     * The texture to bind for an entity, resolved the way upstream resolves it: through the model's own texture list.
+     * <p>
+     * Upstream's render target owns its texture id, so the selection is looked up inside the model that was loaded and
+     * can never name a texture that model does not have. YSMU receives the selection as an id from the server instead,
+     * so the same guarantee has to be re-established here: an id that is not one of this model's textures is not
+     * bindable, and the model's own default stands in for it - upstream's {@code playerResources()
+     * .defaultTextureName()}. That covers a selection left over from a pack that renamed its files, and a mismatched
+     * pair, without inventing a rule upstream does not have.
+     * <p>
+     * While the model is not published the renderer is drawing the built-in default (see {@link #getModel}), so the
+     * default's texture is the one that belongs with it.
+     * <p>
+     * A texture deliberately outside the model - the player's own Minecraft skin for the built-in {@code steve} /
+     * {@code alex} models, or one a companion mod supplies - never travels through here: it is carried by
+     * {@code SpecialPlayerRenderEvent#getTextureLocationOverride} and preferred by the renderer and the arm, which is
+     * the seam upstream uses for exactly that case.
+     */
+    public static ResourceLocation textureFor(CustomPlayerEntity customPlayer) {
+        ResourceLocation requested = customPlayer.getRequestedMainModel();
+        if (!ClientModelManager.isModelPublished(requested)) {
+            return DEFAULT_TEXTURE;
         }
-        return DEFAULT_TEXTURE;
+        ResourceLocation modelId = ModelIdUtil.getModelIdFromMainId(requested);
+        return resolveTexture(
+            modelId,
+            ClientModelManager.MODELS.get(modelId),
+            customPlayer.getTexture(),
+            ClientModelManager.DECLARED_DEFAULT_TEXTURES.get(modelId));
+    }
+
+    /**
+     * The texture to bind, resolved the way upstream resolves it: inside the model that was loaded, so it can never
+     * name a texture that model does not have.
+     * <p>
+     * Upstream's ladder ({@code format/schema/model/ModelManifestLookup.java:10-29}) is the requested name, then the
+     * model's own declared {@code settings.defaultTexture} - which {@code RawModelAssembler:189-196} fills with the
+     * first declared texture when the pack declares none - and only then the first entry. Every rung is checked
+     * against this model's texture list, which is what upstream's {@code containsTexture} does, so a stale or
+     * misspelled declaration falls through rather than binding a texture the model does not have.
+     * <p>
+     * {@code Config.DEFAULT_MODEL_TEXTURE} stays as one more rung between the declared default and the first entry:
+     * it is also the initial per-player selection ({@code ExtendedModelInfo:31}), and a selection made for a model
+     * that has since been replaced has to land somewhere defined.
+     */
+    public static ResourceLocation resolveTexture(ResourceLocation modelId, @Nullable List<ResourceLocation> textures,
+        @Nullable ResourceLocation selected, @Nullable ResourceLocation declaredDefault) {
+        if (textures == null || textures.isEmpty()) {
+            return DEFAULT_TEXTURE;
+        }
+        if (selected != null && textures.contains(selected)) {
+            return selected;
+        }
+        if (declaredDefault != null && textures.contains(declaredDefault)) {
+            return declaredDefault;
+        }
+        ResourceLocation configured = ModelIdUtil.getSubModelId(modelId, Config.DEFAULT_MODEL_TEXTURE);
+        if (textures.contains(configured)) {
+            return configured;
+        }
+        return textures.get(0);
     }
 
     @Override
@@ -64,20 +132,86 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         return DEFAULT_MAIN_ANIMATION;
     }
 
+    /**
+     * Installs a model's animations the first time anything asks for one of them.
+     * <p>
+     * Animations are the largest part of a synced payload and nothing needs them in order to list the models, so the
+     * client parks them at registration and this is the single choke point every play path already goes through -
+     * the engine looks an animation up by name both when one is requested and again on every frame for the one
+     * already playing. After the first call this is one lookup in a map that only holds the models not yet drawn.
+     */
+    @Override
+    public Animation getAnimation(String name, IAnimatable animatable) {
+        if (animatable instanceof CustomPlayerEntity customPlayer) {
+            // Keyed on the model, not on getAnimation(): that one answers with the built-in default until this
+            // model's own animations exist, so asking it first would install the wrong model's payload.
+            ClientModelManager.ensureAnimations(customPlayer.getMainModel());
+        }
+        return super.getAnimation(name, animatable);
+    }
+
+    /**
+     * Draws the model that has been asked for, or the built-in default until it has been built.
+     * <p>
+     * Geometry is built on demand rather than at registration, so the first frame a model is wanted it is usually
+     * still being parsed. Returning the default for those frames is what makes the change invisible to the player -
+     * something is drawn immediately and the real model replaces it on the frame the build is published - and it is
+     * the same thing the engine would do if the model were genuinely absent, minus the warning.
+     * <p>
+     * This is also where the build is requested, which is deliberate: every path that draws a model comes through
+     * here, including the GUI tiles, so no caller can forget to ask for it.
+     */
+    @Override
+    public GeoModel getModel(ResourceLocation location) {
+        // The cache test is not redundant with ensureGeometry: a model can be "not pending" without being drawable -
+        // quarantined after a failed build, or registered through a low-level entry point that does not mark it -
+        // and AnimatedGeoModel.getModel throws when the location is absent, on a path the GUI does not guard. The
+        // quarantine is tested explicitly because the engine's cache can still hold geometry for such a model from an
+        // earlier connection, and that geometry is not what this connection asked for.
+        if (ClientModelManager.isGeometryFailed(location)
+            || !ClientModelManager.ensureGeometry(location)
+            || GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(location) == null) {
+            return super.getModel(DEFAULT_MAIN_MODEL);
+        }
+        return super.getModel(location);
+    }
+
     @Override
     public void setLivingAnimations(IAnimatable animatable, Integer instanceId, AnimationEvent animationEvent) {
         clearHeadPoseOffsets();
         List extraData = animationEvent.getExtraData();
         MolangParser parser = GeckoLibCache.getInstance().parser;
-        if (!Minecraft.getMinecraft()
+        if (animatable instanceof com.fox.ysmu.client.entity.CustomGuiPlayerEntity preview
+            && preview.getQueryPlayer() != null) {
+            // Upstream CustomGuiPlayerEntity owns its query entity, physics and processor. The approved off-model
+            // forms use the same shape, not the world owner temporarily posed by an inventory renderer.
+            EntityModelData previewData = new EntityModelData();
+            previewData.isSitting = preview.getQueryPlayer().isRiding();
+            previewData.isChild = preview.getQueryPlayer().isChild();
+            previewData.netHeadYaw = preview.getQueryPlayer().rotationYawHead - preview.getQueryPlayer().renderYawOffset;
+            previewData.headPitch = preview.getQueryPlayer().rotationPitch;
+            AnimationRegister.setParserValue(animationEvent, parser, previewData, preview.getQueryPlayer(), false);
+            try {
+                super.setLivingAnimations(animatable, instanceId, animationEvent);
+                com.fox.ysmu.client.roaming.ModelFormExecution.drain(preview);
+            } finally {
+                MolangPhysicsRuntime.end();
+            }
+        } else if (!Minecraft.getMinecraft()
             .isGamePaused() && extraData.size() == 1
             && extraData.get(0) instanceof EntityModelData data
             && animatable instanceof CustomPlayerEntity customPlayer
             && customPlayer.getPlayer() != null) {
             EntityPlayer player = customPlayer.getPlayer();
-            AnimationRegister.setParserValue(animationEvent, parser, data, player);
+            AnimationRegister.setParserValue(animationEvent, parser, data, player, customPlayer.firesHumanoidHooks());
             try {
                 super.setLivingAnimations(animatable, instanceId, animationEvent);
+                // Upstream AnimationProcessor.java:259-265 executes form tasks in postProcess, after animation.
+                if (customPlayer.firesHumanoidHooks()) {
+                    com.fox.ysmu.client.roaming.ModelFormExecution.drain(customPlayer);
+                }
                 this.codeAnimation(animationEvent, data, player);
             } finally {
                 MolangPhysicsRuntime.end();
@@ -106,9 +240,12 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             FIRST_PERSON_HEAD_POS = head.getPivotY()
                 * ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
         }
-        if (getCurrentModel().firstPersonViewLocator != null) {
+        // R-10: getCurrentModel() is a plain field read and can be null when super.setLivingAnimations never
+        // ran (no model resolved yet), so it is resolved once and guarded here.
+        GeoModel currentModel = getCurrentModel();
+        GeoBone locator = currentModel == null ? null : currentModel.firstPersonViewLocator;
+        if (locator != null) {
             float heightScale = ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
-            GeoBone locator = getCurrentModel().firstPersonViewLocator;
             FIRST_PERSON_HEAD_POS = locator.getPivotY() * heightScale;
         }
     }
@@ -133,6 +270,36 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         private HeadPoseOffset(float rotationX, float rotationY) {
             this.rotationX = rotationX;
             this.rotationY = rotationY;
+        }
+    }
+
+    /**
+     * 资源框架释放一份几何（{@code ReleaseMode.DROP_HEAP}）时调用，把 {@code model}
+     * 转达给渲染器持有的那一个模型实例，让它松手（丢骨骼登记 + 清 {@code currentModel}）。
+     *
+     * <p>见 {@link AnimatedGeoModel#onModelReleased(GeoModel)}：不这么做的话，"最后渲染过的
+     * 那份几何"会一直被强引用，{@code DROP_HEAP} 只搬走了 GeckoLibCache 里的登记项，
+     * 堆内存并没有真的释放。渲染器实例在客户端初始化后才存在，所以这里全程容错：
+     * 拿不到实例（关服/早期）就没有东西需要松手。
+     *
+     * <p>Reference {@code CustomPlayerModel.java:421-438}。
+     */
+    public static void onGeoModelReleased(GeoModel model) {
+        if (model == null) {
+            return;
+        }
+        try {
+            com.fox.ysmu.client.renderer.CustomPlayerRenderer renderer =
+                com.fox.ysmu.client.ClientProxy.getInstance();
+            if (renderer == null) {
+                return;
+            }
+            AnimatedGeoModel provider = renderer.getGeoModelProvider();
+            if (provider != null) {
+                provider.onModelReleased(model);
+            }
+        } catch (Throwable ignored) {
+            // 未初始化 / 正在关闭：没有需要松手的登记项。
         }
     }
 

@@ -22,15 +22,15 @@ public final class GetJarResources {
     public static void copyYesSteveModelFile(String filePath, Path destPath, String fileName) {
         URL url = ysmu.class.getResource(filePath);
         if (url == null) {
+            // 旧实现静默 return：打包布局变化或资源缺失时内置模型会缺件，而 latest.log 里查不到任何线索。
+            ysmu.LOG.warn("Missing built-in model resource {} (cannot copy it to {})", filePath, destPath);
             return;
         }
+        Path target = destPath.resolve(fileName);
         try {
-            FileUtils.copyURLToFile(
-                url,
-                destPath.resolve(fileName)
-                    .toFile());
+            FileUtils.copyURLToFile(url, target.toFile());
         } catch (IOException e) {
-            e.printStackTrace();
+            ysmu.LOG.warn("Failed to copy built-in model resource {} to {}", filePath, target, e);
         }
     }
 }

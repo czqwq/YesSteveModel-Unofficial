@@ -27,6 +27,57 @@ public class ModelProperties implements Serializable {
     private Double heightScale = 0.7D;
     private Double widthScale = 0.7D;
     private ExtraInfo extraInfo = null;
+    /** YSM 的 {@code properties.render_layers_first}：渲染层（手持物品层）在本体之前提交，
+     *  让本体把物品盖住。由 {@code RawYsmModelAdapter.applyOpenYsmModelInfo} 注入 geometry
+     *  的 description。 */
+    private Boolean renderLayersFirst;
+    /**
+     * The texture the model declares as its own default, carried the same way as the other host-specific properties,
+     * under a {@code ysm_} name.
+     * <p>
+     * Upstream's ladder is the requested name, then the model's own {@code settings.defaultTexture}, then the first
+     * entry ({@code format/schema/model/ModelManifestLookup.java:10-29}), and it validates the declared name against
+     * that model's texture list before using it ({@code containsTexture}, {@code :41-49}). The declared name is
+     * filled with the first texture during assembly when the pack declares none
+     * ({@code RawModelAssembler:189-196}).
+     */
+    private String defaultTexture;
+    /**
+     * Upstream's {@code forceCulling}, which it parses from the pack's {@code all_cutout}
+     * ({@code com/elfmcys/ysm/format/parser/pojo/manifest/settings/ModelProperties.java:35-36} names the field
+     * {@code forceCulling} and gives it {@code @SerializedName("all_cutout")}) and feeds to its bake alongside
+     * {@code forceTranslucent}. The port parses and syncs that field already and now carries it here too, under a
+     * {@code ysm_} name like the other host-specific properties.
+     * <p>
+     * The texture-specific MaterialBake/MaterialDrawSession consumer follows the native reference:
+     * {@code tmp/YesSteveModel-Native-dev/modules/gfx/src/bake/baked_model.cc:685-734} partitions faces by
+     * texture alpha, then applies this flag only to six-face cubes. Mixed/partial-alpha faces remain translucent;
+     * the flag selects their culling partition, not a global cutout render type. Its renderer filters back faces
+     * using transformed face planes and winding ({@code renderer/cube/transform_common.h:31-48}).
+     * The CPU port leaves shared geometry unchanged and applies culling from transformed clip planes/winding.
+     * External textures without CPU pixels retain the legacy fallback. See {@code .agent/task32-material-execplan.md}.
+     */
+    private Boolean forceCulling;
+
+    @JsonProperty("ysm_all_cutout")
+    public Boolean getForceCulling() {
+        return forceCulling;
+    }
+
+    @JsonProperty("ysm_all_cutout")
+    public void setForceCulling(Boolean forceCulling) {
+        this.forceCulling = forceCulling;
+    }
+
+    @JsonProperty("ysm_default_texture")
+    public String getDefaultTexture() {
+        return defaultTexture;
+    }
+
+    @JsonProperty("ysm_default_texture")
+    public void setDefaultTexture(String defaultTexture) {
+        this.defaultTexture = defaultTexture;
+    }
 
     @JsonProperty("animationArmsDown")
     public Boolean getAnimationArmsDown() {
@@ -242,5 +293,26 @@ public class ModelProperties implements Serializable {
     @JsonProperty("ysm_extra_info")
     public void setExtraInfo(ExtraInfo extraInfo) {
         this.extraInfo = extraInfo;
+    }
+
+    /**
+     * Whether the host should draw this model's layers (held item, armor, back attachments) before the model instead
+     * of after it. Carried the same way as the other host-specific properties, under a {@code ysm_} name, and read by
+     * the renderer through {@code IGeoRenderer#shouldRenderLayersFirst}.
+     */
+    @JsonProperty("ysm_render_layers_first")
+    public Boolean getRenderLayersFirst() {
+        return renderLayersFirst;
+    }
+
+    @JsonProperty("ysm_render_layers_first")
+    public void setRenderLayersFirst(Boolean renderLayersFirst) {
+        this.renderLayersFirst = renderLayersFirst;
+    }
+
+    /** 便捷读取：字段缺失（旧模型/未注入）按 false 处理。 */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    public boolean isRenderLayersFirst() {
+        return Boolean.TRUE.equals(renderLayersFirst);
     }
 }

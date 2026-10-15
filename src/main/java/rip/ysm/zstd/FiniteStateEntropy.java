@@ -22,6 +22,7 @@ import static rip.ysm.zstd.Util.checkArgument;
 import static rip.ysm.zstd.Util.verify;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 final class FiniteStateEntropy
 {
     public static final int MAX_SYMBOL = 255;

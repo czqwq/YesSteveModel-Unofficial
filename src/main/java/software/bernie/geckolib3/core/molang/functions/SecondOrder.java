@@ -2,7 +2,7 @@ package software.bernie.geckolib3.core.molang.functions;
 
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
-import com.fox.ysmu.client.animation.molang.MolangPhysicsRuntime;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 
 public class SecondOrder extends Function {
 
@@ -22,6 +22,13 @@ public class SecondOrder extends Function {
         double frequency = this.args.length >= 3 ? this.getArg(2) : 1.0D;
         double coefficient = this.args.length >= 4 ? this.getArg(3) : 1.0D;
         double response = this.args.length >= 5 ? this.getArg(4) : 1.0D;
-        return MolangPhysicsRuntime.secondOrder(nameId, input, frequency, coefficient, response);
+        // 本拓扑下引擎直接调用才是活路径：MolangPhysicsRuntime 在引擎里，桥只服务于
+        // SOURCE 把引擎内嵌进 mod 时的布局（源侧由 AnimationRegister:249 接线）。
+        // 桥未接线时回落到直接调用，绝不短路成 0。
+        // 桥前置判断取自 SOURCE software/bernie/geckolib3/core/molang/functions/SecondOrder.java:24-25。
+        MolangPhysicsBridge.Physics physics = MolangPhysicsBridge.physics;
+        return physics == null
+            ? MolangPhysicsRuntime.secondOrder(nameId, input, frequency, coefficient, response)
+            : physics.secondOrder(nameId, input, frequency, coefficient, response);
     }
 }

@@ -5,6 +5,8 @@ import java.io.File;
 import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.common.config.Property;
 
+import com.fox.ysmu.util.ControllerUtils;
+
 public class Config {
     private static Configuration configuration;
 
@@ -14,6 +16,53 @@ public class Config {
     public static boolean DISABLE_SELF_MODEL = false;
     public static boolean DISABLE_OTHER_MODEL = false;
     public static boolean DISABLE_SELF_HANDS = false;
+    /**
+     * Show Model ID First: model selection cards title with the model ID (the folder/file leaf) instead of the name
+     * the model author declared in ysm.json. Port of upstream ClientConfig.SHOW_MODEL_ID_FIRST (config/ClientConfig.java:63-64).
+     */
+    public static boolean SHOW_MODEL_ID_FIRST = false;
+    /**
+     * Stops this client from drawing a pack's projectile sub-entity, so an arrow keeps its vanilla renderer.
+     *
+     * <p>Upstream's switch is {@code ClientConfig.DISABLE_PROJECTILE_MODEL}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../config/ClientConfig.java:12,48-49}, config key {@code DisableProjectileModel}),
+     * and its <b>only</b> consumer is the render-dispatcher wrap that decides whether to replace the vanilla renderer:
+     * {@code mixin/client/EntityRenderDispatcherMixin.java:37} - {@code entity instanceof Projectile &&
+     * !DISABLE_PROJECTILE_MODEL.get()} - which otherwise hands the entity to {@code ProjectileRendererReplace}. This
+     * port has no dispatcher mixin for it: its arrow replacement is entered directly from {@code MixinRenderArrow}, so
+     * the equivalent bypass point is that renderer's own entry, {@link
+     * com.fox.ysmu.client.renderer.ArrowProjectileRenderer#render}. Upstream's second consumer, the animation ticker
+     * ({@code client/animation/AnimationParallelTicker.java:60-63}), has no separate counterpart here because this
+     * port samples a projectile's keyframes inside that same render entry.</p>
+     */
+    public static boolean DISABLE_PROJECTILE_MODEL = false;
+    /**
+     * Stops this client from drawing a pack's vehicle sub-entity, so a boat/minecart/horse keeps its vanilla renderer.
+     *
+     * <p>Upstream's switch is {@code ClientConfig.DISABLE_VEHICLE_MODEL}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../config/ClientConfig.java:13,51-52}, config key {@code DisableVehicleModel}),
+     * consumed at the same dispatcher wrap ({@code mixin/client/EntityRenderDispatcherMixin.java:46}) and by the same
+     * ticker ({@code client/animation/AnimationParallelTicker.java:64-66}). This port's vehicle replacement is entered
+     * from {@code MixinRenderManager}, so its bypass point is {@link
+     * com.fox.ysmu.client.renderer.VehicleRenderer#render}.</p>
+     */
+    public static boolean DISABLE_VEHICLE_MODEL = false;
+    /**
+     * Whether the server withholds a restricted model's assets from players who are not authorized for it - the port
+     * of upstream's {@code ServerConfig.RESTRICTED_AUTH} ({@code config/ServerConfig.java:13,56-57}, config key
+     * {@code RestrictedAuth}, default {@code false}), consumed by
+     * {@code model/session/server/ServerModelSession.canRequest:205-221} through
+     * {@code network/dispatch/ServerAssetTransfers:234,299}.
+     *
+     * <p><b>This is the asset gate, not the selection gate.</b> Selection is always restricted for a model that lives
+     * in {@code config/ysmu/auth} ({@code api/ModelAuthorization.canSelect}); whether an unauthorized player may
+     * still <em>receive</em> that model's bytes is a separate product decision, and the default is "yes", because the
+     * normal way to see another player wearing a model is to have its assets (upstream's product decision
+     * {@code docs/product-decisions/decisions/model-authorization.md}, "无权 | 关闭（默认）| ... | 按需允许，可用于呈现
+     * RemotePlayer"). With it on, an unauthorized player cannot render that model at all and falls back to the
+     * intrinsic default (or to vanilla rendering for arrows and vehicles).</p>
+     */
+    public static boolean RESTRICTED_AUTH = false;
     public static String DEFAULT_MODEL_ID = "default";
     public static String DEFAULT_MODEL_TEXTURE = "default.png";
 
@@ -23,14 +72,307 @@ public class Config {
     public static int PLAYER_POS_Y = 10;
     public static double PLAYER_SCALE = 40.0;
     public static double PLAYER_YAW_OFFSET = 5.0;
+    /**
+     * Swap the roulette's config panel and preview sides.
+     * <p>
+     * Declared here and exposed as the "swap_config_sides" checkbox on the options screen
+     * ({@code ConfigScreen}), but this port has <b>no consumer</b>: its {@code AnimationRouletteScreen} is a
+     * ~240-line radial fan with neither a config panel nor a 3D preview - a model's own settings live in
+     * {@code ModelConfigScreen}, a separate screen. The reference's ~914-line wheel is what has both halves
+     * (its {@code AnimationRouletteScreen.java:178}, {@code :196}, {@code :270}, {@code :487}, {@code :719}).
+     * Carried and recorded rather than given an invented second meaning; see the task-9 report for the owner.
+     */
+    public static boolean SWAP_CONFIG_SIDES = false;
 
-    // OpenYSM model sync config
+    /** HUD paperdoll follow mode: 0 = vanilla (current), 1 = vanilla smooth, 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock). */
+    public static final int HUD_FOLLOW_VANILLA = 0;
+    public static final int HUD_FOLLOW_VANILLA_SMOOTH = 1;
+    public static final int HUD_FOLLOW_YSM = 2;
+    public static final int HUD_FOLLOW_YSM_SMOOTH = 3;
+    public static int HUD_FOLLOW_MODE = HUD_FOLLOW_YSM_SMOOTH;
+
+    // GUI Config
+    /**
+     * 模型选择 GUI 增强:前景/背景贴图与 GUI 动画。
+     * <p>
+     * 本仓的消费者是 {@code ModelButton} 的三处:关闭时把该 tile 的刷新模式降级为静态
+     * (参考 {@code ModelButton.java:264-266})、停掉该 tile 的 hover/focus 预览通道、以及**不画**模型自带的
+     * GUI 前景/背景图。
+     * <p>
+     * 这两张图的链路现在是完整的:模型格式侧解析与同步在
+     * ({@code YSMFolderDeserializer:178-179,202-203,240-250}、{@code YSMBinarySerializer:556-557,586-587}、
+     * {@code YSMBinaryDeserializer:677-678,701-710},落在 {@code RawYsmModel:237-239} 的 {@code backgroundImages}),
+     * {@code RawYsmModelAdapter} 把它们转发进 {@code ModelData#getGuiImages},客户端注册进
+     * {@code ClientModelManager} 并画在 tile 上(实心底 → 背景 → 模型预览 → 前景 → 文字/边框/星,顺序照
+     * upstream {@code CatalogModelButton:101-106})。参考的贴图页不受这个开关影响(其 {@code TextureButton.java:75}
+     * 直接读刷新模式),本仓照做。
+     * <p>
+     * <b>这个门控是参考分支自己的选择,不是 upstream 的语义。</b>upstream 对这两张图**没有开关**:模型声明了就画
+     * (它的 hover/focus 动画是另一条通道,在 {@code CatalogModelButton:99} 单独驱动)。本仓沿用参考的门控,因为
+     * 这个开关自己的说明就是"前景/背景贴图与 GUI 动画" —— 一处 port-specific 的取舍,写在这里以免被当成 upstream
+     * 行为。
+     */
+    public static boolean GUI_ENHANCEMENTS = true;
+    public static boolean SHOW_LOADING_PROGRESS = true;
+    /** Preview grid FBO refresh mode. -1 = auto (whole-page shared budget, see
+     *  {@link com.fox.ysmu.client.renderer.PreviewRefreshPolicy}); 0 = static (only on interaction);
+     *  1-4 = refresh every N frames. default: -1
+     *  <p>Consumed by {@code ModelButton} / {@code TextureButton}, which bake their tile into a
+     *  {@code FboCache} and blit it on the frames in between. {@code GUI_ENHANCEMENTS=false} forces the
+     *  model-selection tiles to 0 (static). */
+    public static int GUI_MODEL_PREVIEW_REFRESH = -1;
+    /** HUD selfie model FBO cache. When true (default), renders to an off-screen
+     *  framebuffer at an adaptive rate and blits the cached texture between refreshes.
+     *  Set to false to force every-frame rendering (no performance gain). */
+    public static boolean GUI_HUD_PREVIEW_CACHE = true;
+
+    // OpenYSM model sync config (port-specific: the port's own sync channel switch)
+    /**
+     * Whether a model the OpenYSM index carries is offered on the OpenYSM sync channel; off means every model is
+     * synced by the legacy MD5/AES channel.
+     *
+     * <p>The reference branch spells the same decision {@code ENABLE_SYNC_PROTOCOL} ("EnableSyncProtocol" in the
+     * {@code ysm_sync} section, its {@code Config.java:133}, 6 consumers). That field was carried into this port's
+     * {@code Config} too, but nothing here ever read it - the port has two channels and this is the switch for the
+     * OpenYSM one - so a user could set a switch that did nothing. It was deleted rather than wired: two names for
+     * one decision is the defect {@code AGENTS.md} calls out, and "wire the legacy field" would have given the
+     * second name its own meaning, which is how a rename lands in only one half and the other half stays silent.
+     * An old {@code ysm_sync.cfg} keeps its orphan {@code EnableSyncProtocol} line; the loader ignores unknown keys.
+     */
     public static boolean ENABLE_OPEN_YSM_SYNC_PROTOCOL = true;
+
+    // Local asset config
+    /** Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft) */
+    public static String HIGH_VERSION_GAME_PATH = "";
+    /** Asset version to use (e.g. "32"). Should match the game directory's assets/indexes/ */
+    public static String HIGH_VERSION_ASSET_VERSION = "32";
+    /**
+     * Version directory name under {@code <gamePath>/versions/} whose client jar holds
+     * textures/particles (e.g. "26.2"). Newer Minecraft versions keep textures inside the
+     * version jar instead of assets/objects; leave empty if not needed (older versions).
+     */
+    public static String HIGH_VERSION_JAR_VERSION = "26.2";
+
+    // Debug Config
+    public static boolean DEBUG_CONTROLLER = false;
+    public static boolean DEBUG_WHEEL = false;
+    /**
+     * The debug switches the model and animation paths gate their diagnostics on. All off by default, and every
+     * site that uses one also rate-limits or deduplicates its output: without that, a single stuck projectile
+     * prints a line per frame and the log becomes unreadable at exactly the moment it is needed.
+     * <ul>
+     * <li>{@link #DEBUG_MODEL_LOAD} - which model files were read and which sub-models they declared;</li>
+     * <li>{@link #DEBUG_MODEL_RENDER} - geometry/texture lookup results on the render path;</li>
+     * <li>{@link #DEBUG_ANIMATION} - which animations a frame selected and which timeline instructions ran;</li>
+     * <li>{@link #DEBUG_CONTROLLER} - controller state-machine transitions and expression results.</li>
+     * </ul>
+     */
+    public static boolean DEBUG_MODEL_LOAD = false;
+    /** 子开关：细分 DEBUG_MODEL_LOAD 的日志域，避免大型模型库初始化时刷爆日志。
+     *  每个子开关只有在 DEBUG_MODEL_LOAD 为 true 时才生效。 */
+    public static boolean DEBUG_MODEL_SCAN = false;
+    public static boolean DEBUG_MODEL_SYNC = false;
+    public static boolean DEBUG_MODEL_PARSE = false;
+    /** 二进制 .ysm 解析细节（偏移地址/HEXDUMP/逐动画逐骨骼日志），默认关，避免刷屏。
+     *  仅在 DEBUG_MODEL_LOAD 为 true 时生效，独立于 DEBUG_MODEL_PARSE。 */
+    public static boolean DEBUG_MODEL_BINARY = false;
+    public static boolean DEBUG_MODEL_RENDER = false;
+    public static boolean DEBUG_ANIMATION = false;
+    /**
+     * Per-frame diagnostics for model sound effects: which model registered which sound, which controller fired
+     * which keyframe, and which source name a sound became. Off by default - the lines are per-keyframe.
+     */
+    public static boolean DEBUG_SOUND = false;
+    public static boolean DEBUG_PARTICLE = false;
+    /** 调试/测试用：粒子生成时从 Y 偏移额外减去的值（格）。默认 0。
+     *  用于临时校正模型粒子高度偏差（有的模型粒子偏高约 2 格）。 */
+    public static double PARTICLE_Y_ADJUST = 0.0;
+    /** 调试/测试用：粒子 xyz 偏移全部置 0（直接生成在实体位置）。 */
+    public static boolean PARTICLE_ZERO_OFFSET = false;
+    // `DEBUG_MERGED_ANIMATIONS` (the reference branch's "Show __ysm_merged__ animations in the preview GUI for
+    // debugging") was deleted with the mechanism it debugs: the reference *flattens* an overlay controller's
+    // contributor animations into one synthesised `Animation` cached under `"__ysm_merged__" + primaryName`
+    // (`OpenYsmPlayerControllerRuntime.java:846-864`), and that synthesised entry then shows up in the preview
+    // screen's animation-name list (`client/gui/PlayerTextureScreen.java:122,169`), which is why it needs a filter.
+    // This port has no such copy - `grep` for `merged`/`contributor`/`excludeRoot` over
+    // `client/animation/controller/OpenYsmPlayerControllerRuntime.java` is 0 - because each contributor is handed to
+    // its own controller instead of being flattened into one. So there is no name to filter, and a switch that
+    // filters nothing is the dead-switch defect, not a feature. `grep` for `__ysm_merged__` over this tree is now 0.
+    /**
+     * Master switch for the Molang debug overlay and the {@code /ysmclient} Molang commands: the full-screen
+     * {@code v.*}/{@code query.*}/{@code ctrl.*} table (Ctrl+P, or {@code S2CSetDebugOverlay}), the
+     * {@code PacketQueryMolangVar} / {@code PacketEvalMolang} / {@code PacketResetMolang} consumers, and the engine's
+     * per-frame variable snapshot. <b>Off by default</b>, even though the reference branch has no such switch and
+     * always captures: with it off no snapshot is taken, no overlay renders, no client command is registered, and the
+     * four packets' client-side handlers do nothing (see {@code MolangDebugCaptureTest}).
+     * <p>
+     * It is a <b>client opt-out, not a wire switch</b>: the server-side senders ({@code /ysm debug query|eval|overlay}
+     * and {@code /ysm reset}, {@code command/YsmCommand}) do <em>not</em> read it - neither do the reference's - so a
+     * switched-off client receives the packets and quietly ignores them.
+     * <p>
+     * <b>Divergence from the reference branch.</b> Its {@code MolangPhysicsRuntime.end()}
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/animation/molang/MolangPhysicsRuntime.java:244-250})
+     * copies the whole {@code v.*} scope into a new {@code HashMap} on every model pass - a per-frame allocation on
+     * the render hot path, paid in normal play, purely so that this debug overlay and {@code /ysm query} can read the
+     * values afterwards. The port instead captures only while something needs it: the overlay is open, or a
+     * query/reset has asked for a capture ({@code MolangDebugSnapshot.refreshCaptureDemand}). The feature is off by
+     * default, so a default install pays neither the copy nor the overlay.
+     */
+    public static boolean DEBUG_MOLANG_OVERLAY = false;
+
+    // Chat message config
+    /** 进世界时显示欢迎/提示消息。 */
+    public static boolean SHOW_WELCOME_MESSAGE = true;
+    /** 在 chat 中显示服务端/客户端模型加载时间与模型加载数量。
+     *  默认关：正常时不显示；仅当有模型加载失败时才显示加载数量。 */
+    public static boolean SHOW_MODEL_LOAD_CHAT = false;
+
+    // External wearable rendering (AdventureBackpack2 backpacks/copter/jetpack etc.)
+    public static boolean RENDER_WEARABLE = true;
+    public static double WEARABLE_RENDER_SCALE = 0.8;
+
+    // Direct Buffer watchdog
+    /** Safety-net: periodically check Direct Buffer usage and GC if over threshold */
+    public static boolean ENABLE_DIRECT_BUFFER_WATCHDOG = true;
+    /** Direct Buffer GC trigger threshold in MB */
+    public static int DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = 1024;
+
+    // Texture VRAM config
+    /** Target texture dimension (px) uploaded to VRAM; 0 = disabled (full resolution).
+     *  Textures larger than the target are uniformly downscaled by a power of two
+     *  so the result lands in [target, 2*target) — e.g. target 1024 keeps 2048->1024,
+     *  and anything under 2048 passes through. Bound VRAM on large model libraries;
+     *  GeckoLib samples with normalized UVs, so an aspect-preserving resize never
+     *  shifts the mapped content. Default 0 (off): downscaling still has visual
+     *  artifacts on some models, so it is opt-in until a better
+     *  downscale strategy lands. */
+    public static int TEXTURE_TARGET_SIZE = 0;
+
+    /** GPU VRAM budget for YSM model textures in MB; 0 = disabled.
+     *  When the total VRAM footprint of uploaded YSM textures exceeds this budget,
+     *  least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so
+     *  re-upload is a cheap GPU upload — never a white model). Bounds the VRAM peak
+     *  on large model libraries instead of per-texture downscaling, which still has
+     *  visual artifacts. Roughly 24-36 typical models fit in
+     *  128-256 MB; raise it if on-screen demand regularly exceeds the budget. */
+    public static int TEXTURE_VRAM_BUDGET_MB = 256;
+
+    // `TEXTURE_RELEASE_BYTES_ON_IDLE` (the reference branch's heap half of its 30 s idle texture policy) is
+    // deliberately **not** carried, and this note replaces the field so the promise is not left standing while
+    // nothing implements it. Two reasons, both checked:
+    //
+    //  1. The trigger does not exist here. The reference drives it from the last line of its `AssetManager.tick()`
+    //     (reference `client/asset/AssetManager.java:93` -> its `ClientModelManager.unloadIdleTextures`, reference
+    //     `:1845-1896`); this port's `client/asset/AssetManager` deliberately omits that line (`.agent/phase32`
+    //     member 3, `.agent/phase40` member 4) and the whole subsystem is off by default
+    //     (`ENABLE_IDLE_ASSET_EVICTION = false`). Adding a 30 s idle clock inside `client/texture` would be a
+    //     *second* eviction policy that neither upstream nor the reference has.
+    //  2. The restore half does not exist either. Releasing the heap bytes without it is a white model, and the
+    //     reference's restore seam is `ensureTexturesLoaded` -> `restoreTextureData` (reference `:1671-1695`,
+    //     `:1706-1741`) plus `YSM_TEXTURE_OBJECTS` and `MODELS` - `grep` for all three over this tree is 0.
+    //
+    // What *is* ported is the GPU half of the same reference feature, `TEXTURE_VRAM_BUDGET_MB` above: freeing a
+    // model's GPU copy while its registration, platform map entry and heap bytes stay put needs no restore seam
+    // because the next bind re-uploads from the bytes already in memory.
+    //
+    // A future port of the heap half needs `client/ClientModelManager` (the restore seam) and the `AssetManager`
+    // trigger line, and it must come with a default-off switch until it is validated in a client - the heap growth
+    // it removes is real, but so is the white-model failure mode if the restore path is wrong.
+
+
+    /** GUI 关闭后的保护宽限期（秒）。在此期间，所有模型资源（几何/动画/纹理）
+     *  不会被空闲超时回收。默认 120 秒（2 分钟），覆盖最常见的「关闭预览再打开」场景。
+     *  设为 0 则禁用宽限期（恢复旧行为）。 */
+    public static int GUI_POST_CLOSE_GRACE_SECONDS = 120;
+
+    /**
+     * 是否启用「空闲资源回收 → 后台重加载」子系统（{@code client/asset/}）。
+     *
+     * <p><b>默认 false，与参考分支不同</b>：参考分支根本没有这个开关，它无条件运行
+     * （参考 {@code AssetManager.java:73-94} 的 {@code tick()} 直接回收，没有前置判断）。
+     * 本移植分支把它默认关闭，因为这条路径在本仓**从未运行过**，而且它依赖的状态本仓与参考
+     * 分支并不一致 —— 一次错误的空闲判定会把正在显示的几何从 GeckoLibCache 里移走。
+     * 开启它是一次需要真机对比参考分支的刻意实验，不是默认行为；见
+     * {@code .agent/phase32-asset-eviction-subsystem.md}。
+     *
+     * <p>关闭时 {@link com.fox.ysmu.client.asset.AssetManager} 不登记任何条目、不回收、
+     * 不清空，也因此不会调用引擎的释放钩子（{@code AnimatedGeoModel#onModelReleased} /
+     * {@code AnimationProcessor#forgetModel}）。调用点统一判
+     * {@link com.fox.ysmu.client.asset.AssetManager#isEnabled()}。
+     */
+    public static boolean ENABLE_IDLE_ASSET_EVICTION = false;
+
+    // Model sync config
+    /**
+     * 动画控制脚本（{@code @player_ctrl_<槽位>.molang}）是否每帧真正执行。
+     * <p>
+     * 关闭时只有解析期静态提取的状态→动画映射生效（旧行为）；开启后每帧求值脚本，
+     * 于是 {@code set_animation} 的动画名可以是算出来的、{@code ctrl.state_bypass}
+     * 会精确地交回内置逻辑。脚本报错或返回 bypass 时仍然回落到内置逻辑，所以开启
+     * 本身不会让"本来能动的模型"不动。用于 A/B 对比模型表现。
+     */
+    public static boolean MOLANG_CONTROL_SCRIPTS = true;
+    /**
+     * 具名并行槽位（{@code player.pre_parallel_<非数字后缀>} / {@code player.parallel_<...>}）
+     * 备用池大小（每族）。每个实体注册 {@code 2 × 此值} 个额外控制器，所以有上限
+     * （{@link ControllerUtils#MAX_NAMED_PARALLEL_EXTRA_SLOTS}），不是越多越好。
+     * 默认值覆盖绝大多数模型；只有当模型声明的具名槽位超过默认值时才有必要提高。
+     * 0 = 关闭具名并行槽位（池不注册，具名槽位不播放）。
+     */
+    public static int NAMED_PARALLEL_EXTRA_SLOTS = ControllerUtils.DEFAULT_NAMED_PARALLEL_EXTRA_SLOTS;
+    /**
+     * 槽位后缀控制器（{@code player.<slot>_<后缀>}，slot ∈ {@link ControllerUtils#OPENYSM_SLOTS}）
+     * 备用池大小。官方把同一槽位下所有名字都当成独立控制器加载并按名字母序叠加，所以一个槽位
+     * 可以同时挂 {@code @player_ctrl_<slot>.molang} 控制脚本和若干 JSON 控制器；YSMU 的
+     * GeckoLib 控制器是按名字固定的（一个槽位一个），只能用一个跨槽位共享的池承载后缀控制器。
+     * 池是每个实体注册的控制器，所以有上限（{@link ControllerUtils#MAX_SLOT_EXTRA_CONTROLLERS}）；
+     * 0 = 关闭（后缀控制器不播放）。
+     */
+    public static int SLOT_EXTRA_CONTROLLERS = ControllerUtils.DEFAULT_SLOT_EXTRA_CONTROLLERS;
     public static int THREAD_COUNT = 4;
     public static int BANDWIDTH_LIMIT = 0;
     public static int PLAYER_SYNC_TIMEOUT = 60;
     public static boolean LOW_BANDWIDTH_USAGE = false;
     public static boolean ACCEPT_SOUND_FX = true;
+    /** 玩家手动 /ysm sync 重新同步的冷却秒数：-1 = 完全拒绝，0 = 不限。 */
+    public static int RESYNC_COOLDOWN_SECONDS = 600;
+
+    // Offhand item render hiding
+    /** 隐藏副手物品渲染的总开关（第二页 GUI 开关，默认开启）。 */
+    public static boolean HIDE_OFFHAND_DEFOLIAGE_AXE = true;
+    /** 在副手中时完全不渲染的物品（格式 modid:itemname，精确匹配不区分大小写）。
+     *  影响第一人称手持渲染、第三人称模型手持物品层与 HUD 自拍模型。
+     *  默认隐藏 Extra Utilities 的除叶子斧（defoliage axe）。 */
+    public static String[] HIDDEN_OFFHAND_ITEMS = new String[] { "ExtraUtilities:defoliageAxe" };
+
+    // Animation config
+    // `ANIMATION_TRANSITION_TICKS` (the reference branch's global "GeckoLib animation transition length in ticks",
+    // its `Config.java:180`, used at its `AnimationManager.java:673` and as the constructor argument of every
+    // controller in its `CustomPlayerEntity.java:75-118`) is deliberately **not** carried. This port passes
+    // upstream's per-controller lengths instead, and that choice is documented at
+    // `client/entity/CustomPlayerEntity.java:47-58` with the upstream source of each value
+    // (`client/controller/collections/PlayerControllerCollection.java:31-71`: the parallel axes, the pre/post slots
+    // and the armor slots are 0, `main`/`hold`/`use` are 0.1, `swing`/`cap`/the preview channels are 0). Wiring the
+    // reference's single global value in would overwrite all of them with 4 ticks (0.2 s) - and the length is not
+    // cosmetic: the engine pins a controller's clock at 0 while `AnimationState.Transitioning` until
+    // `tick >= transitionLengthTicks`, so 0.2 s on a 0-length one-shot blends into its first frame and cuts the tail
+    // off. A model's own `blend_transition` still overrides per state (`OpenYsmPlayerControllerRuntime`). The dead
+    // switch was deleted rather than left declared-but-inert; see `tmp/dead-switches-audit.md`.
+
+    /** 移动动画防滑步（stride matching）总开关（默认关闭）：
+     *  按真实水平速度缩放 walk/run/sneak 等移动类动画的播放倍速，
+     *  使步态周期与位移匹配，减少脚在地面滑动的观感。
+     *  默认关闭：该功能假设每个动画循环恰好是两步（一个完整步幅），
+     *  但不少模型设计成 1 步或 3/4 步，强行匹配反而更怪，按需开启。 */
+    public static boolean ANIMATION_SPEED_MATCH = false;
+    /** 防滑步基础倍率：整体缩放防滑步播放倍速（1.0 = 各步态规范步幅）。
+     *  唯一的外部调节旋钮——所有模型动画整体偏快/偏慢时在此微调；
+     *  各步态的规范步幅是内部常量（walk/run 4.317、sneak 1.295、swim 1.727），
+     *  最终的可视化逐模型校准页（方案 C）会覆盖此值。 */
+    public static double ANIMATION_SPEED_MATCH_BASE = 1.0;
+    /** 防滑步倍速平滑响应系数（配置允许 0.05~1.0，默认 0.5；每 tick 向目标倍速逼近的比例）。
+     *  越小越平滑但反应越慢；越大反应越快但急起急停可能可见。 */
+    public static double ANIMATION_SPEED_MATCH_RESPONSE = 0.5;
 
     /**
      * 在 Mod preInit 阶段调用，用于初始化配置文件并进行首次加载。
@@ -65,6 +407,13 @@ public class Config {
         DISABLE_SELF_MODEL = syncBoolean("DisableSelfModel", Configuration.CATEGORY_GENERAL, DISABLE_SELF_MODEL, "Prevents rendering of self player's model", load);
         DISABLE_OTHER_MODEL = syncBoolean("DisableOtherModel", Configuration.CATEGORY_GENERAL, DISABLE_OTHER_MODEL, "Prevents rendering of other player's model", load);
         DISABLE_SELF_HANDS = syncBoolean("DisableSelfHands", Configuration.CATEGORY_GENERAL, DISABLE_SELF_HANDS, "Prevents rendering of self player's hand", load);
+        // Upstream's two sub-entity switches, same names and same default (ClientConfig.java:48-52); see the field
+        // declarations for the bypass points they are read at.
+        DISABLE_PROJECTILE_MODEL = syncBoolean("DisableProjectileModel", Configuration.CATEGORY_GENERAL, DISABLE_PROJECTILE_MODEL, "Prevents rendering of projectile model", load);
+        DISABLE_VEHICLE_MODEL = syncBoolean("DisableVehicleModel", Configuration.CATEGORY_GENERAL, DISABLE_VEHICLE_MODEL, "Prevents rendering of vehicle model", load);
+        // Model authorization: the restricted set is named by the config/ysmu/auth scan root, not by a switch (see
+        // api/ModelAuthorization). RestrictedAuth is upstream's asset gate and defaults to off.
+        RESTRICTED_AUTH = syncBoolean("RestrictedAuth", "ysm_sync", RESTRICTED_AUTH, "Withhold a restrictive (config/ysmu/auth) model's assets from players who are not authorized for it. Off by default: unauthorized players can still render other players wearing it, as upstream's default does. Selection of a restricted model always needs a grant regardless of this switch.", load);
         DEFAULT_MODEL_ID = syncString("DefaultModelId", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_ID, "The default model ID when a player first enters the game", load);
         DEFAULT_MODEL_TEXTURE = syncString("DefaultModelTexture", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_TEXTURE, "The default model texture when a player first enters the game", load);
 
@@ -74,18 +423,98 @@ public class Config {
         PLAYER_POS_Y = syncInt("PlayerPosY", "extra_player_render", PLAYER_POS_Y, "Player position y in screen", 0, Integer.MAX_VALUE, load);
         PLAYER_SCALE = syncDouble("PlayerScale", "extra_player_render", PLAYER_SCALE, "Player scale in screen", 8.0, 360.0, load);
         PLAYER_YAW_OFFSET = syncDouble("PlayerYawOffset", "extra_player_render", PLAYER_YAW_OFFSET, "Player yaw offset in screen", load);
+        SWAP_CONFIG_SIDES = syncBoolean("SwapConfigSides", "extra_player_render", SWAP_CONFIG_SIDES, "Swap wheel config panel and preview sides", load);
+        HUD_FOLLOW_MODE = syncInt("HudFollowMode", "extra_player_render", HUD_FOLLOW_MODE, "HUD paperdoll follow mode: 0 = vanilla, 1 = vanilla smooth (smoothed offset, no abrupt snap), 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock, default)", HUD_FOLLOW_VANILLA, HUD_FOLLOW_YSM_SMOOTH, load);
 
-        // OpenYSM model sync config values
+        // GUI config values
+        GUI_ENHANCEMENTS = syncBoolean("GuiEnhancements", "gui", GUI_ENHANCEMENTS, "Enable model selection GUI enhancements (foreground/background textures and GUI animations)", load);
+        SHOW_MODEL_ID_FIRST = syncBoolean("ShowModelIdFirst", "gui", SHOW_MODEL_ID_FIRST, "Whether to display model ID first in the model selection screen, instead of the model name filled in by the model author.", load);
+        SHOW_LOADING_PROGRESS = syncBoolean("ShowLoadingProgress", "gui", SHOW_LOADING_PROGRESS, "Show model sync progress bar overlay", load);
+        GUI_MODEL_PREVIEW_REFRESH = syncInt("GuiModelPreviewRefresh", "gui", GUI_MODEL_PREVIEW_REFRESH, "Preview grid FBO refresh. -1 = auto (whole-page shared budget), 0 = static (only on interaction), 1-4 = refresh every N frames. Higher = smoother animation but more GPU load.", -1, 4, load);
+        GUI_HUD_PREVIEW_CACHE = syncBoolean("GuiHudPreviewCache", "gui", GUI_HUD_PREVIEW_CACHE, "HUD selfie model FBO cache. Disable for every-frame rendering (no performance gain).", load);
+
+        // OpenYSM model sync config values (port-specific: the port's own sync channel switch)
         ENABLE_OPEN_YSM_SYNC_PROTOCOL = syncBoolean("EnableOpenYsmSyncProtocol", "openysm_sync", ENABLE_OPEN_YSM_SYNC_PROTOCOL, "Whether to use the appended OpenYSM hash/cache/chunk sync path before legacy fallback", load);
-        THREAD_COUNT = syncInt("ThreadCount", "openysm_sync", THREAD_COUNT, "Target worker count for OpenYSM model sync tasks", 1, 32, load);
-        BANDWIDTH_LIMIT = syncInt("BandwidthLimit", "openysm_sync", BANDWIDTH_LIMIT, "OpenYSM model sync bandwidth limit in bytes per second. 0 means unlimited", 0, Integer.MAX_VALUE, load);
-        PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "openysm_sync", PLAYER_SYNC_TIMEOUT, "OpenYSM model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
-        LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "openysm_sync", LOW_BANDWIDTH_USAGE, "Whether OpenYSM sync should use smaller chunks and conservative throttling", load);
-        ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "openysm_sync", ACCEPT_SOUND_FX, "Whether OpenYSM sync should accept model sound effect resources", load);
+
+        // Local asset config values
+        HIGH_VERSION_GAME_PATH = syncString("HighVersionGamePath", "local_assets", HIGH_VERSION_GAME_PATH, "Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft). YSMU reads sounds.json and OGG files from here to play high-version sounds that Et-Futurum doesn't cover.", load);
+        HIGH_VERSION_ASSET_VERSION = syncString("HighVersionAssetVersion", "local_assets", HIGH_VERSION_ASSET_VERSION, "Asset version to use (e.g. '32'). Must match the version subfolder under assets/indexes/ in the game directory.", load);
+        HIGH_VERSION_JAR_VERSION = syncString("HighVersionJarVersion", "local_assets", HIGH_VERSION_JAR_VERSION, "Version directory under <gamePath>/versions/ whose client jar holds textures/particles (e.g. '26.2'). Newer Minecraft versions keep textures inside the version jar; leave empty if not needed.", load);
+
+        // Debug config values
+        DEBUG_CONTROLLER = syncBoolean("DebugController", "debug", DEBUG_CONTROLLER, "Enable controller transition/roaming debug logging ([YSMU-CTRL])", load);
+        DEBUG_WHEEL = syncBoolean("DebugWheel", "debug", DEBUG_WHEEL, "Enable wheel GUI debug logging ([YSMU-WHEEL], [YSMU-ROAM])", load);
+        DEBUG_MODEL_LOAD = syncBoolean("DebugModelLoad", "debug", DEBUG_MODEL_LOAD, "Enable model loading/debug logging ([YSMU-MODEL]). Master switch; sub-areas are gated by DebugModelScan/Sync/Parse/Render", load);
+        DEBUG_MODEL_SCAN = syncBoolean("DebugModelScan", "debug", DEBUG_MODEL_SCAN, "Server-side model discovery/cache build logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_SYNC = syncBoolean("DebugModelSync", "debug", DEBUG_MODEL_SYNC, "Client model sync protocol logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_PARSE = syncBoolean("DebugModelParse", "debug", DEBUG_MODEL_PARSE, "Model JSON parse & registration logging (needs DebugModelLoad)", load);
+        DEBUG_MODEL_BINARY = syncBoolean("DebugModelBinary", "debug", DEBUG_MODEL_BINARY, "Binary .ysm parse detail logging: offsets/HEXDUMP/per-anim/per-bone (needs DebugModelLoad). Default off to avoid log spam on large libraries.", load);
+        DEBUG_MODEL_RENDER = syncBoolean("DebugModelRender", "debug", DEBUG_MODEL_RENDER, "Model render/arrow/bone-dump logging + geometry/animTick statistics ([YSMU-GEO-PROBE]; needs DebugModelLoad)", load);
+        DEBUG_ANIMATION = syncBoolean("DebugAnimation", "debug", DEBUG_ANIMATION, "Enable animation playback debug logging ([YSMU-ANIM])", load);
+        DEBUG_SOUND = syncBoolean("DebugSound", "debug", DEBUG_SOUND, "Enable sound cache/playback debug logging ([YSM Sound])", load);
+        DEBUG_PARTICLE = syncBoolean("DebugParticle", "debug", DEBUG_PARTICLE, "Enable particle()/abs_particle() debug logging ([YSMU-PARTICLE])", load);
+        PARTICLE_Y_ADJUST = syncDouble("ParticleYAdjust", "debug", PARTICLE_Y_ADJUST, "Extra Y offset subtracted from particle()/abs_particle() spawn position, in blocks (debug/testing; default 0)", -10.0, 10.0, load);
+        PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
+        // `DebugMergedAnimations` (the reference branch's name) is deliberately absent: the `__ysm_merged__`
+        // synthesised animation it filters does not exist in this port. See the note beside PARTICLE_ZERO_OFFSET.
+        DEBUG_MOLANG_OVERLAY = syncBoolean("DebugMolangOverlay", "debug", DEBUG_MOLANG_OVERLAY, "Enable the Molang debug overlay and the /ysmclient Molang commands. Off by default: while off, no per-frame variable snapshot is taken, no overlay renders, no client command is registered, and this client ignores the /ysm debug|reset packets it is sent (the senders do not read this switch)", load);
+
+        // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
+        // an engine-owned switch, because the engine must not read this mod's config - the dependency direction is
+        // host to engine (Geckolib's AGENTS.md, "Host Contract"). The host is therefore the one that translates its
+        // own debug switches into that flag, which is what the reference branch did by hard-coding the read.
+        software.bernie.geckolib3.GeckoLib.geoStatsEnabled = DEBUG_MODEL_LOAD && DEBUG_MODEL_RENDER;
+
+        // Chat message config values
+        SHOW_WELCOME_MESSAGE = syncBoolean("ShowWelcomeMessage", "chat", SHOW_WELCOME_MESSAGE, "Show the welcome/info message when joining a world", load);
+        SHOW_MODEL_LOAD_CHAT = syncBoolean("ShowModelLoadChat", "chat", SHOW_MODEL_LOAD_CHAT, "Show server/client model load time and model counts in chat. Off by default: hidden unless some models failed to load", load);
+
+        // Model sync config values
+        RENDER_WEARABLE = syncBoolean("RenderWearable", "compatibility", RENDER_WEARABLE, "Whether to render external wearable models (e.g. AdventureBackpack2 backpack/copter/jetpack) on YSM model's back", load);
+        WEARABLE_RENDER_SCALE = syncDouble("WearableRenderScale", "compatibility", WEARABLE_RENDER_SCALE, "Scale factor for wearable model rendering (1.0 = default)", 0.1, 5.0, load);
+        ENABLE_DIRECT_BUFFER_WATCHDOG = syncBoolean("EnableDirectBufferWatchdog", "watchdog", ENABLE_DIRECT_BUFFER_WATCHDOG, "Safety-net: periodically check Direct Buffer usage and trigger GC when over threshold", load);
+        DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = syncInt("DirectBufferWatchdogThreshold", "watchdog", DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB, "Direct Buffer GC trigger threshold in MB", 128, 8192, load);
+        // `EnableSyncProtocol` (the reference branch's name for the OpenYSM channel switch) is deliberately absent:
+        // see `ENABLE_OPEN_YSM_SYNC_PROTOCOL`'s javadoc.
+        MOLANG_CONTROL_SCRIPTS = syncBoolean("MolangControlScripts", "animation", MOLANG_CONTROL_SCRIPTS, "Execute @player_ctrl_<slot>.molang animation-control scripts every frame (wiki: molang/script). When disabled only the statically extracted state->animation mapping is used", load);
+        NAMED_PARALLEL_EXTRA_SLOTS = syncInt("NamedParallelExtraSlots", "animation", NAMED_PARALLEL_EXTRA_SLOTS, "Extra pool controllers registered per parallel family (pre_parallel/parallel) to carry model-named parallel slots (player.pre_parallel_<name>). Each entity registers 2x this many extra controllers, so it is bounded; raise only if a model declares more named slots than the default. 0 disables named parallel slots.", 0, ControllerUtils.MAX_NAMED_PARALLEL_EXTRA_SLOTS, load);
+        SLOT_EXTRA_CONTROLLERS = syncInt("SlotExtraControllers", "animation", SLOT_EXTRA_CONTROLLERS, "Extra pool controllers, shared by all eight player.<slot> slots and routed per model, carrying suffix controllers such as player.pre_main_<suffix> or player.post_main_<suffix>. Upstream registers every name matching ^player\\.<slot>(_.+)?$ as its own controller, so one slot can host a control script plus several JSON controllers; each entity registers this many extra controllers, so it is bounded. Raise only if a model declares more suffixed controllers than the default. 0 disables suffix slot controllers.", 0, ControllerUtils.MAX_SLOT_EXTRA_CONTROLLERS, load);
+        THREAD_COUNT = syncInt("ThreadCount", "ysm_sync", THREAD_COUNT, "Target worker count for YSM model sync tasks", 1, 32, load);
+        BANDWIDTH_LIMIT = syncInt("BandwidthLimit", "ysm_sync", BANDWIDTH_LIMIT, "model sync bandwidth limit in bytes per second. 0 means unlimited", 0, Integer.MAX_VALUE, load);
+        PLAYER_SYNC_TIMEOUT = syncInt("PlayerSyncTimeout", "ysm_sync", PLAYER_SYNC_TIMEOUT, "model sync timeout in seconds", 5, Integer.MAX_VALUE, load);
+        RESYNC_COOLDOWN_SECONDS = syncInt("ResyncCooldownSeconds", "ysm_sync", RESYNC_COOLDOWN_SECONDS,
+            "Cooldown in seconds between player-triggered /ysm sync resyncs. -1 rejects the resync command entirely; 0 = no cooldown", -1, Integer.MAX_VALUE, load);
+        LOW_BANDWIDTH_USAGE = syncBoolean("LowBandwidthUsage", "ysm_sync", LOW_BANDWIDTH_USAGE, "Whether sync should use smaller chunks and conservative throttling", load);
+        ACCEPT_SOUND_FX = syncBoolean("AcceptSoundFX", "ysm_sync", ACCEPT_SOUND_FX, "Whether sync should accept model sound effect resources", load);
+        TEXTURE_TARGET_SIZE = syncInt("TextureTargetSize", "ysm_sync", TEXTURE_TARGET_SIZE, "Target texture dimension (px) uploaded to VRAM. 0 = full resolution. Larger textures are downscaled by a power of two (result in [target, 2*target)).", 0, 8192, load);
+        TEXTURE_VRAM_BUDGET_MB = syncInt("TextureVramBudget", "ysm_sync", TEXTURE_VRAM_BUDGET_MB, "YSM model texture VRAM budget in MB. 0 = unlimited. When uploaded texture VRAM exceeds this, least-recently-used models' GPU textures are freed (raw bytes stay in RAM, so re-upload is cheap and never white).", 0, 8192, load);
+        // `TextureReleaseBytesOnIdle` (the reference branch's name) is deliberately absent: the heap half of its idle
+        // texture policy is not ported. See the note in the "Texture VRAM config" block for what a future port needs.
+        GUI_POST_CLOSE_GRACE_SECONDS = syncInt("GuiPostCloseGraceSeconds", "ysm_sync", GUI_POST_CLOSE_GRACE_SECONDS, "Grace period (seconds) after closing the model preview GUI during which idle resource eviction is suppressed. Prevents full re-load when reopening the preview shortly after closing. 0 = disabled.", 0, 600, load);
+        // Port-specific switch, default OFF: the reference branch has no such switch and always runs the
+        // eviction (reference AssetManager.java:73-94). See Config#ENABLE_IDLE_ASSET_EVICTION.
+        ENABLE_IDLE_ASSET_EVICTION = syncBoolean("EnableIdleAssetEviction", "ysm_sync", ENABLE_IDLE_ASSET_EVICTION, "Release idle model geometry from GeckoLibCache and reload it from the encrypted client cache on next use (reference branch behaviour). DEFAULT OFF AND NOT YET VALIDATED IN THIS PORT: enabling it can evict geometry the port cannot rebuild (see .agent/phase32-asset-eviction-subsystem.md). Off = the AssetManager subsystem does nothing at all.", load);
+        HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
+        HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
+        // `AnimationTransitionTicks` (the reference branch's name) is deliberately absent: this port keeps
+        // upstream's per-controller transition lengths. See the note in the "Animation config" block.
+        ANIMATION_SPEED_MATCH = syncBoolean("AnimationSpeedMatch", "animation", ANIMATION_SPEED_MATCH, "Scale locomotion animation playback rate to actual movement speed to reduce foot sliding (stride matching).", load);
+        ANIMATION_SPEED_MATCH_BASE = syncDouble("AnimationSpeedMatchBase", "animation", ANIMATION_SPEED_MATCH_BASE, "Baseline rate for stride matching playback speed (1.0 = canonical per-gait strides). Playback = base x actualSpeed x cycleTime / gaitStride. Player speed is read live each frame so potion buffs/debuffs adapt automatically. Increase if animations play too slow, decrease if too fast.", 0.25, 4.0, load);
+        ANIMATION_SPEED_MATCH_RESPONSE = syncDouble("AnimationSpeedMatchResponse", "animation", ANIMATION_SPEED_MATCH_RESPONSE, "Smoothing response per tick for the stride-match speed multiplier (0.05-1.0). Lower = smoother but slower reaction.", 0.05, 1.0, load);
 
         // 检查配置是否已更改，如果已更改，则保存
         if (configuration.hasChanged()) {
             configuration.save();
+        }
+    }
+
+    private static String[] syncStringList(String name, String category, String[] currentValue, String comment, boolean load) {
+        Property prop = configuration.get(category, name, currentValue, comment);
+        if (load) {
+            return prop.getStringList();
+        } else {
+            prop.set(currentValue);
+            return currentValue;
         }
     }
 
@@ -112,20 +541,23 @@ public class Config {
     private static int syncInt(String name, String category, int currentValue, String comment, int min, int max, boolean load) {
         Property prop = configuration.get(category, name, currentValue, comment, min, max);
         if (load) {
-            return prop.getInt(currentValue);
+            // CU-09: Forge 1.7.10 的 Property.getInt(int)/getDouble(double) 不做 clamp（min/max 只写进注释，
+            // 见 Property.java:691-701/792-820），手改配置文件即可得到越界值；这里自行钳制。
+            return clamp(prop.getInt(currentValue), min, max);
         } else {
-            prop.set(currentValue);
-            return currentValue;
+            prop.set(clamp(currentValue, min, max));
+            return clamp(currentValue, min, max);
         }
     }
 
     private static double syncDouble(String name, String category, double currentValue, String comment, double min, double max, boolean load) {
         Property prop = configuration.get(category, name, currentValue, comment, min, max);
         if (load) {
-            return prop.getDouble(currentValue);
+            // CU-09: 同上，越界的 PlayerScale（例如手改成 1000）必须被钳制回 8..360。
+            return clamp(prop.getDouble(currentValue), min, max);
         } else {
-            prop.set(currentValue);
-            return currentValue;
+            prop.set(clamp(currentValue, min, max));
+            return clamp(currentValue, min, max);
         }
     }
 
@@ -137,5 +569,21 @@ public class Config {
             prop.set(currentValue);
             return currentValue;
         }
+    }
+
+    /** CU-09: 通用钳制，避免配置/GUI 写入越界值。 */
+    private static int clamp(int value, int min, int max) {
+        if (value < min) {
+            return min;
+        }
+        return value > max ? max : value;
+    }
+
+    /** CU-09: 通用钳制，避免配置/GUI 写入越界值。 */
+    private static double clamp(double value, double min, double max) {
+        if (value < min) {
+            return min;
+        }
+        return value > max ? max : value;
     }
 }

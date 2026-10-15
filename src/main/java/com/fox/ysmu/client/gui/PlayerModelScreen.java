@@ -1,12 +1,18 @@
 package com.fox.ysmu.client.gui;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
-import com.fox.ysmu.eep.ExtendedModelInfo;
-import com.fox.ysmu.eep.ExtendedStarModels;
+import com.fox.ysmu.ysmu;
+import com.fox.ysmu.client.ClientModelAccess;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientModelMetadataRegistry;
+import com.fox.ysmu.client.ClientPackInfo;
+import com.fox.ysmu.client.ClientPackRegistry;
 import com.fox.ysmu.client.gui.button.*;
+import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.RevokeModelGuiGrant;
 import com.fox.ysmu.util.ModelIdUtil;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.audio.PositionedSoundRecord;
@@ -17,6 +23,7 @@ import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.resources.I18n;
 import net.minecraft.util.*;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import org.apache.commons.lang3.tuple.Pair;
 import org.lwjgl.input.Mouse;
@@ -25,70 +32,143 @@ import org.lwjgl.opengl.GL11;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Model selection GUI: a preview column on the left and a ten-slot grid on the right.
+ * <p>
+ * The grid is folder aware, ported from the upstream 1.20 catalog browser: models that live in a directory under
+ * {@code config/ysmu/custom} are folded into one folder tile, clicking the tile lists the models inside it, the back
+ * arrow (or a right-click) returns to the parent folder, and the current folder path is drawn above the grid. The
+ * rules themselves live in {@link ModelBrowserState}.
+ */
 public class PlayerModelScreen extends GuiScreen {
-    protected final EntityPlayer player;
-    private Map<ResourceLocation, List<ResourceLocation>> models = Maps.newHashMap();
-    private List<ResourceLocation> modelOrderList;
-    private int maxPage;
+    /**
+     * Id of the selected model's settings icon. Deliberately far from the grid ids, which start at 11 and grow with the
+     * page, so it can never collide with a tile.
+     */
+    private static final int MODEL_SETTINGS_BUTTON_ID = 50;
+    private static final int SHOW_MODEL_ID_FIRST_BUTTON_ID = 51;
+    /**
+     * Id of the auth-category button. Upstream's category buttons carry no ids; this port's {@code actionPerformed}
+     * switches on them, so it needs one that is free: 0-10 are the header and page buttons, 11-20 the grid tiles
+     * (ten slots), 50/51 the two settings widgets.
+     */
+    private static final int AUTH_CATEGORY_BUTTON_ID = 52;
+
+    private final ModelSelectionTarget target;
+    /** Which folder is open and which page each folder is on; static state inside, like upstream. */
+    private final ModelBrowserState browser = new ModelBrowserState();
+    /**
+     * Decoded display path to model id for every model the client has, not only the visible category: the browser
+     * returns paths, and a star-category listing must still resolve to the ids it filtered.
+     */
+    private final Map<String, ResourceLocation> modelIdByPath = Maps.newHashMap();
     private GuiTextField textField;
-    private Category category;
-    private int page;
     private int x;
     private int y;
     private int lastClientModelCount = -1;
+    /** {@link ClientPackRegistry#version()} the tiles were built from, so late pack manifests refresh them. */
+    private int lastPackVersion = -1;
     private boolean requestedModelSync;
+    /** CU-16: 缩放因子在 initGui 时缓存，避免每帧重建 ScaledResolution。 */
+    private int scaleFactor = 1;
 
+    /**
+     * CU-03: 该构造器可能在主菜单（{@code thePlayer == null}）被调用 —— 此时 target 持有 null 玩家并返回安全值
+     * （预览实体为 null、型号/贴图为 null、apply 为 no-op），不会 NPE。新代码请优先使用
+     * {@link #PlayerModelScreen(EntityPlayer)} 并显式传玩家，或在入口处就拒绝 null。
+     */
     public PlayerModelScreen() {
-        this.category = Category.ALL;
-        this.player = Minecraft.getMinecraft().thePlayer;
+        this(Minecraft.getMinecraft().thePlayer);
     }
 
     public PlayerModelScreen(EntityPlayer player) {
-        this.category = Category.ALL;
-        this.player = player;
+        this.target = ModelSelectionTarget.of(player);
     }
 
+    /** Opens the same screen for a non-player entity, for example a companion handed over by another mod. */
+    public PlayerModelScreen(ModelSelectionTarget target) {
+        this.target = target;
+    }
+
+    public ModelSelectionTarget getTarget() {
+        return target;
+    }
+
+    /**
+     * Rebuilds the folder tree from the client's model list and applies the search box, the category and the open
+     * folder. Folders are derived from the model ids themselves, so a pack that was added or removed while the screen
+     * was open is picked up on the next call.
+     */
     private void calculateModelList() {
-        models = Maps.newHashMap();
-        if (this.category == Category.ALL) {
-            this.models.putAll(ClientModelManager.MODELS);
+        this.modelIdByPath.clear();
+        for (ResourceLocation modelId : ClientModelManager.MODELS.keySet()) {
+            // Two ids can only share a display path if two roots hold the same relative path; the first one wins so
+            // the grid stays stable across calls.
+            this.modelIdByPath.putIfAbsent(ModelIdUtil.getModelDisplayName(modelId), modelId);
         }
-        if (this.category == Category.STAR) {
-            ExtendedStarModels eep = ExtendedStarModels.get(this.player);
-            if (eep != null) {
-                for (ResourceLocation modelId : ClientModelManager.MODELS.keySet()) {
-                    if (eep.containModel(modelId)) {
-                        this.models.put(modelId, ClientModelManager.MODELS.get(modelId));
-                    }
-                }
-            }
-        }
-        if (textField != null) {
-            String search = this.textField.getText().toLowerCase(Locale.US);
-            models.entrySet()
-                .removeIf(next -> !ModelIdUtil.getModelDisplayName(next.getKey())
-                    .toLowerCase(Locale.US)
-                    .contains(search));
-        }
-        this.modelOrderList = Lists.newArrayList(models.keySet());
-        this.modelOrderList.sort(
-            Comparator.comparing(modelId -> ModelIdUtil.getModelDisplayName(modelId).toLowerCase(Locale.US)));
-        this.maxPage = (models.size() - 1) / 10;
+        // The server's pack manifests give folders their real name/description and cover; folders without one are
+        // derived from the model paths alone.
+        this.browser.rebuild(this.modelIdByPath.keySet(), ClientPackRegistry.names(), ClientPackRegistry.descriptions());
+        this.browser.filter(this.textField == null ? "" : this.textField.getText(), this::needsAuth, this::isStarred);
+    }
+
+    /**
+     * Whether the tile for this display path is locked, which is the one thing the auth category hides and the tile
+     * darkens for. {@link ClientModelAccess#needsAuth(net.minecraft.util.ResourceLocation)} folds upstream's two
+     * facts - {@code entry.authorizationRequired()} and {@code !authorized.test(hash)}
+     * ({@code client/gui/CatalogBrowserState.java:108-109}) - into the single predicate {@link ModelBrowserState}
+     * accepts, because that class holds display paths and must stay free of Minecraft-side lookups.
+     * <p>
+     * Like {@link #isStarred(String)} beside it, this predicate is evaluated when the screen rebuilds its list
+     * ({@code initGui} / {@code calculateModelList}), so the auth <em>listing</em> follows the same refresh cadence as
+     * the star listing. The tile's own lock state is read live instead ({@code ModelButton#needAuth}), so a grant
+     * revoked while the screen is open turns the tile dark at once even though it stays listed until the next rebuild.
+     */
+    private boolean needsAuth(String displayPath) {
+        ResourceLocation modelId = this.modelIdByPath.get(displayPath);
+        return modelId != null && ClientModelAccess.needsAuth(modelId);
+    }
+
+    private boolean isStarred(String displayPath) {
+        ResourceLocation modelId = this.modelIdByPath.get(displayPath);
+        return modelId != null && this.target.isStarred(modelId);
     }
 
     @Override
     public void initGui() {
+        // Suppress idle asset eviction while this preview is open (reference PlayerModelScreen.java:117).
+        // Only the AssetManager subsystem reads this flag, and that subsystem no-ops while
+        // Config.ENABLE_IDLE_ASSET_EVICTION is off.
+        ClientModelManager.setGuiOpen(true);
+        // 翻页 / 换分类 / 重新 initGui 都会丢掉旧按钮,而每个预览 tile 各自持有一个离屏 FBO(行 43):
+        // 释放只能在这里做(参考的 disposePreviewButtons,其 PlayerModelScreen.java:449-459)。
+        this.disposePreviewButtons();
         // clearWidgets() -> buttonList.clear()
         this.buttonList.clear();
+        // Entering the screen replays every tile's preview animation from its first frame, like re-opening the
+        // upstream catalog: the per-tile hover/focus state is dropped. The tiles' own animatables need no reset
+        // because each tile owns one and disposePreviewButtons() closes it - which is also why
+        // AnimatableCacheUtil.ANIMATABLE_CACHE is no longer cleared here: after the catalog moved to per-tile
+        // CustomGuiPlayerEntity instances (upstream PlayerModelScreen.java:56) its only remaining reader is the
+        // first-person arm (FirstPersonHandRenderer:593), and dropping that on every page flip would reset the arm's
+        // animation clock and leave its FML ticker registered with nothing to unregister it.
+        com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
+        com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
+        // 最后一道兜底：列表为空说明两条通道都没把模型送到（例如玩家在服务端 reload 之前就打开了界面）。
+        // 这里无条件再向服务端要一次 legacy 同步 —— 它按客户端自报的 md5 求差集，代价只是真正缺的那几个文件，
+        // 不是整批重传；用 17 协议开关把它关掉，只会让这个界面在模型丢失时永远空着。
         if (ClientModelManager.MODELS.isEmpty() && !this.requestedModelSync) {
             this.requestedModelSync = true;
             ClientModelManager.sendSyncModelMessage();
         }
         this.calculateModelList();
         this.lastClientModelCount = ClientModelManager.MODELS.size();
+        this.lastPackVersion = ClientPackRegistry.version();
 
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;
+        // CU-16: 缓存缩放因子（initGui 在 setWorldAndResolution 之后调用，屏幕尺寸变化会重新 initGui）。
+        this.scaleFactor = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
 
         String perText = "";
         boolean focus = false;
@@ -96,7 +176,11 @@ public class PlayerModelScreen extends GuiScreen {
             perText = textField.getText();
             focus = textField.isFocused();
         }
-        textField = new GuiTextField(this.fontRendererObj, x + 144, y + 6, 158, 16);
+        // Upstream's search box is 140 wide (PlayerModelScreen.java:131), which is what leaves room for the category
+        // row at x+288/x+308/x+328 (:186-188). This port had widened it to 158, ending at x+302 and therefore under the
+        // star button once the auth button took its upstream slot; the width is back to upstream's so the three
+        // category buttons keep upstream's positions without overlapping the box.
+        textField = new GuiTextField(this.fontRendererObj, x + 144, y + 6, 140, 16);
         textField.setText(perText);
         textField.setTextColor(0xF3EFE0);
         textField.setFocused(focus);
@@ -104,29 +188,90 @@ public class PlayerModelScreen extends GuiScreen {
 
         // 按钮创建和点击逻辑分离 使用唯一的 ID 来标识按钮
         // addRenderableWidget -> this.buttonList.add
-        this.buttonList.add(new TextureCountButton(0, x + 5, y + 5));
+        // CU-05: 贴图数量/收藏按钮与 ModelButton、STAR 过滤使用同一个 ModelSelectionTarget 主体。
+        this.buttonList.add(new TextureCountButton(0, x + 5, y + 5, this.target));
+        // Model information (authors with their avatars, tips, license). Upstream puts it in the header row; here the
+        // header slot is taken by the texture counter, so it sits directly below it.
+        this.buttonList.add(new FlatIconButton(7, x + 5, y + 27, 20, 20, 80, 16).setTooltips("gui.yes_steve_model.model.info"));
         this.buttonList.add(new FlatIconButton(1, x + 28, y + 5, 79, 20, 32, 16).setTooltips("gui.yes_steve_model.model.texture"));
-        this.buttonList.add(new StarButton(2, x + 110, y + 5));
+        if (this.target.supportsStars()) {
+            this.buttonList.add(new StarButton(2, x + 110, y + 5, this.target));
+        }
+        // Folder navigation: the back arrow only exists inside a folder, next to the breadcrumb. Upstream uses the
+        // (0, 32) cell of the GUI atlas for it.
+        if (!this.browser.currentPack().isEmpty()) {
+            this.buttonList.add(new FlatIconButton(4, x + 110, y + 27, 20, 20, 0, 32).setTooltips("gui.back"));
+        }
         this.buttonList.add(new FlatIconButton(3, x + 328, y + 5, 18, 18, 32, 0).setTooltips("gui.yes_steve_model.all_models"));
-        this.buttonList.add(new FlatIconButton(5, x + 308, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
+        // The category row is upstream's order and atlas cells: all (u=32), auth (u=48), star (u=0)
+        // (PlayerModelScreen.java:186-188 adds them at x+328/x+308/x+288). Authorization exists for every target, so
+        // this button is not gated on supportsStars() the way the star button is.
+        this.buttonList.add(
+            new FlatIconButton(AUTH_CATEGORY_BUTTON_ID, x + 308, y + 5, 18, 18, 48, 0).setTooltips("gui.yes_steve_model.auth_models"));
+        if (this.target.supportsStars()) {
+            this.buttonList.add(new FlatIconButton(5, x + 288, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
+        }
         this.buttonList.add(new FlatIconButton(6, x + 397, y + 5, 18, 18, 16, 16).setTooltips("gui.yes_steve_model.config"));
+        // The selected model's own settings panel (the pack's 模型设置), offered only when the model declares one.
+        // The global options icon stays at (397, 5); this one sits below it and reuses the same settings glyph.
+        if (ModelConfigRegistry.hasSettings(this.target.getModelId())) {
+            this.buttonList.add(
+                new FlatIconButton(MODEL_SETTINGS_BUTTON_ID, x + 397, y + 27, 18, 18, 16, 16)
+                    .setTooltips("gui.yes_steve_model.model.config.title"));
+        }
         this.buttonList.add(new FlatIconButton(8, x + 377, y + 5, 18, 18, 80, 0).setTooltips("gui.yes_steve_model.open_model_folder.open"));
+        // Upstream PlayerModelScreen.java:175-184 puts the switch at (x + 5, y - 22); it only changes the card
+        // title, so the widget reads the config value and writes it back on press.
+        this.buttonList.add(
+            ConfigCheckBox.forLabel(
+                SHOW_MODEL_ID_FIRST_BUTTON_ID,
+                x + 5,
+                y - 22,
+                110,
+                I18n.format("gui.yes_steve_model.show_model_id_first"),
+                Config.SHOW_MODEL_ID_FIRST));
         this.buttonList.add(new FlatColorButton(9, x + 198, y + 215, 52, 14, I18n.format("gui.yes_steve_model.pre_page")));
         this.buttonList.add(new FlatColorButton(10, x + 308, y + 215, 52, 14, I18n.format("gui.yes_steve_model.next_page")));
 
-        if (this.page > this.maxPage) {
-            this.page = 0;
-        }
+        this.addGridButtons();
+    }
+
+    /** Fills the ten grid slots; folder tiles take the slots before model tiles, exactly like upstream's catalog. */
+    private void addGridButtons() {
         int buttonId = 11;
+        List<String> packs = this.browser.packs();
+        List<String> models = this.browser.models();
         for (int i = 0; i < 10; i++) {
-            int modelIndex = i + this.page * 10;
-            if (modelIndex >= models.size()) {
-                break;
-            }
-            ResourceLocation id = modelOrderList.get(modelIndex);
+            int slotIndex = i + this.browser.page() * 10;
             int xStart = x + 143 + 55 * (i % 5);
             int yStart = y + 28 + 93 * (i / 5);
-            this.buttonList.add(new ModelButton(buttonId++, xStart, yStart, Pair.of(id, models.get(id)), ClientModelManager.EXTRA_INFO.get(ModelIdUtil.getMainId(id)), player));
+            if (slotIndex < packs.size()) {
+                String hierarchy = packs.get(slotIndex);
+                ClientPackInfo pack = ClientPackRegistry.get(hierarchy);
+                this.buttonList.add(
+                    new FolderButton(
+                        buttonId++,
+                        xStart,
+                        yStart,
+                        hierarchy,
+                        this.browser.packName(hierarchy),
+                        pack == null ? null : pack.icon,
+                        pack == null ? null : pack.description));
+                continue;
+            }
+            int modelIndex = slotIndex - packs.size();
+            if (modelIndex >= 0 && modelIndex < models.size()) {
+                ResourceLocation id = this.modelIdByPath.get(models.get(modelIndex));
+                if (id != null) {
+                    this.buttonList.add(
+                        new ModelButton(
+                            buttonId++,
+                            xStart,
+                            yStart,
+                            Pair.of(id, ClientModelManager.MODELS.get(id)),
+                            target));
+                }
+            }
         }
     }
 
@@ -136,12 +281,12 @@ public class PlayerModelScreen extends GuiScreen {
             case 0:
                 break;
             case 1:
-                ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-                if (eep != null) {
-                    List<ResourceLocation> textures = ClientModelManager.MODELS.get(eep.getModelId());
+                ResourceLocation currentModel = this.target.getModelId();
+                if (currentModel != null) {
+                    List<ResourceLocation> textures = ClientModelManager.MODELS.get(currentModel);
                     if (textures != null) {
                         // setScreen -> displayGuiScreen
-                        this.mc.displayGuiScreen(new PlayerTextureScreen(this, eep.getModelId(), textures));
+                        this.mc.displayGuiScreen(new PlayerTextureScreen(this, currentModel, textures));
                     }
                 }
                 break;
@@ -151,39 +296,75 @@ public class PlayerModelScreen extends GuiScreen {
                 }
                 break;
             case 3:
-                if (this.category != Category.ALL) {
-                    this.category = Category.ALL;
-                    this.page = 0;
+                if (this.browser.category() != ModelBrowserState.Category.ALL) {
+                    this.browser.category(ModelBrowserState.Category.ALL);
                     this.initGui();
                 }
                 break;
+            case 4:
+                // Back arrow: leave the open folder.
+                this.browser.backToParent();
+                this.initGui();
+                break;
             case 5:
-                if (this.category != Category.STAR) {
-                    this.category = Category.STAR;
-                    this.page = 0;
+                if (this.browser.category() != ModelBrowserState.Category.STAR) {
+                    this.browser.category(ModelBrowserState.Category.STAR);
+                    this.initGui();
+                }
+                break;
+            case AUTH_CATEGORY_BUTTON_ID:
+                // Upstream's addCategoryButton (:200-208) ignores a press on the category that is already selected.
+                if (this.browser.category() != ModelBrowserState.Category.AUTH) {
+                    this.browser.category(ModelBrowserState.Category.AUTH);
                     this.initGui();
                 }
                 break;
             case 6:
                 this.mc.displayGuiScreen(new ConfigScreen(this));
                 break;
+            case 7:
+                // Model information: authors (with avatars), tips and license of the model applied to this target.
+                if (this.target.getModelId() != null) {
+                    // The folder channel's metadata is filled when the model is published, so ask for the build now;
+                    // ModelInfoScreen re-reads in drawScreen, so the page fills in by itself if it is opened before
+                    // that has happened.
+                    ClientModelManager.ensureGeometry(this.target.getModelId());
+                    this.mc.displayGuiScreen(new ModelInfoScreen(this, this.target.getModelId()));
+                }
+                break;
             case 8:
                 this.mc.displayGuiScreen(new OpenModelFolderScreen(this));
                 break;
             case 9:
-                if (this.page > 0) {
-                    this.page--;
+                if (this.browser.page() > 0) {
+                    this.browser.page(this.browser.page() - 1);
                     this.initGui();
                 }
                 break;
             case 10:
-                if (this.page < this.maxPage) {
-                    this.page++;
+                if (this.browser.page() < this.browser.maxPage()) {
+                    this.browser.page(this.browser.page() + 1);
                     this.initGui();
                 }
                 break;
+            case SHOW_MODEL_ID_FIRST_BUTTON_ID:
+                Config.SHOW_MODEL_ID_FIRST = !Config.SHOW_MODEL_ID_FIRST;
+                if (button instanceof ConfigCheckBox checkbox) {
+                    checkbox.setChecked(Config.SHOW_MODEL_ID_FIRST);
+                }
+                Config.save();
+                this.initGui();
+                break;
+            case MODEL_SETTINGS_BUTTON_ID:
+                if (this.target.getModelId() != null) {
+                    this.mc.displayGuiScreen(new ModelConfigScreen(this, this.target.getModelId()));
+                }
+                break;
             default:
-                if (button instanceof ModelButton) {
+                if (button instanceof FolderButton folder) {
+                    this.browser.enterPack(folder.getHierarchy());
+                    this.initGui();
+                } else if (button instanceof ModelButton) {
                     ((ModelButton) button).doPress();
                 }
                 break;
@@ -192,6 +373,10 @@ public class PlayerModelScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        // 行 43:预览刷新预算每个渲染帧推进一次。参考把它挂在 ClientEventHandler.onRenderTick
+        // (参考 :118),本任务不能改 ClientEventHandler;而这一页的两个平铺页屏幕就是该策略唯一的消费者,
+        // 所以按渲染帧在这里推进一次,语义相同:先发布上一帧统计到的可见数量,再让按钮在这一帧里累加。
+        PreviewRefreshPolicy.beginFrame();
         // renderBackground(graphics) -> drawDefaultBackground()
         this.drawDefaultBackground();
 
@@ -201,20 +386,37 @@ public class PlayerModelScreen extends GuiScreen {
         // textField.render -> textField.drawTextBox
         textField.drawTextBox();
 
-        int scale = new ScaledResolution(mc, mc.displayWidth, mc.displayHeight).getScaleFactor();
+        // CU-16: 使用 initGui 缓存的缩放因子。
+        int scale = this.scaleFactor;
         int scissorX = (this.x + 5) * scale;
         int scissorY = mc.displayHeight - ((this.y + 200) * scale);
         int scissorW = 125 * scale;
         int scissorH = 171 * scale;
+        // CU-13: scissor 必须在 finally 里恢复，否则纸娃娃渲染一旦抛异常，整个界面都会被裁剪。
         GL11.glEnable(GL11.GL_SCISSOR_TEST);
-        GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
-        // func_147046_a(x,y,scale,toMouseX,toMouseY,entity)
-        GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, player);
-        GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        try {
+            GL11.glScissor(scissorX, scissorY, scissorW, scissorH);
+            // func_147046_a(x,y,scale,toMouseX,toMouseY,entity)
+            // CU-03: 预览实体为 null（主菜单打开的界面 / target 持有 null 玩家）时跳过纸娃娃，
+            // 否则 GuiInventory.func_147046_a 会在 GuiInventory.java:96 解引用 null 而 NPE。
+            EntityLivingBase preview = this.target.getPreviewEntity();
+            if (preview != null) {
+                GuiInventory.func_147046_a(x + 67, y + 190, 70, x + 67 - mouseX, y + 180 - 95 - mouseY, preview);
+            }
+        } finally {
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+        }
 
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep != null) {
-            String modelName = ModelIdUtil.getModelDisplayName(eep.getModelId());
+        ResourceLocation selectedModel = this.target.getModelId();
+        if (selectedModel != null) {
+            // Upstream PlayerModelScreen.java:363-374: the preview name is the author-declared name with the leaf
+            // name as the fallback, and it does not follow the Show Model ID First switch. The pack's own language
+            // table for the running locale is consulted before that declared name, exactly as upstream translates at
+            // display time (ModelInfoView.translateOr:91-93).
+            String modelName = ClientModelMetadataRegistry.displayName(
+                selectedModel,
+                ClientModelMetadataRegistry.currentLocale(),
+                ModelIdUtil.getModelFileName(selectedModel));
             // font -> fontRendererObj
             List<String> modelNameSplit = fontRendererObj.listFormattedStringToWidth(modelName, 125);
             int lineY = y + 205;
@@ -225,13 +427,32 @@ public class PlayerModelScreen extends GuiScreen {
             }
         }
 
+        // Breadcrumb of the open folder, drawn above the grid like upstream's "currentPack" line.
+        if (!this.browser.currentPack().isEmpty()) {
+            this.drawString(fontRendererObj, this.browser.currentPack(), x + 142, y - 12, 0xAAAAAA);
+        }
+
         if (textField.getText().isEmpty() && !textField.isFocused()) {
             this.drawString(fontRendererObj, EnumChatFormatting.ITALIC + I18n.format("gui.yes_steve_model.search"), x + 148, y + 10, 0x777777);
         }
 
-        String pageInfo = String.format("%d/%d", page + 1, this.maxPage + 1);
+        // CU-18: 空模型列表时给出空态提示（此前只显示"1/1"，属误导性 UI）。
+        if (this.browser.models().isEmpty() && this.browser.packs().isEmpty()) {
+            String emptyText = I18n.format("gui.yes_steve_model.empty_models");
+            this.drawString(
+                fontRendererObj,
+                emptyText,
+                x + 138 + (282 - fontRendererObj.getStringWidth(emptyText)) / 2,
+                y + 120,
+                0x777777);
+        }
+
+        String pageInfo = "%d/%d".formatted(this.browser.page() + 1, this.browser.maxPage() + 1);
         this.drawString(fontRendererObj, pageInfo, x + 138 + (282 - fontRendererObj.getStringWidth(pageInfo)) / 2, y + 223 - fontRendererObj.FONT_HEIGHT / 2, 0xF3EFE0);
 
+        // 行 43:自动模式的实时读数(参考 PlayerModelScreen.java:337-341 把它单独放一行,因为和版本号拼在
+        // 一起会被"前一页/后一页"按钮挡住)。文本与参考逐字一致、没有语言键,理由见 PreviewRefreshPolicy#describeMode。
+        this.drawString(fontRendererObj, PreviewRefreshPolicy.describeMode(), x + 2, y + 216, 0x777777);
         String debugInfo = String.format("%s-%s", "1.7.10", Tags.VERSION);
         this.drawString(fontRendererObj, debugInfo, x + 2, y + 226, 0x555555);
         // super.render -> super.drawScreen, 这会绘制所有按钮
@@ -244,9 +465,17 @@ public class PlayerModelScreen extends GuiScreen {
                 }
             }
             if (button instanceof ModelButton m) {
-                if (m.func_146115_a() && m.tooltips != null && !m.tooltips.isEmpty()) {
-                    List<String> tooltipStrings = m.tooltips.stream().map(IChatComponent::getFormattedText).collect(Collectors.toList());
+                // Read at the moment it is shown: the extra info comes from the model's geometry, which is parsed on
+                // demand, so at construction time - when the screen has drawn nothing yet - it is usually not there.
+                List<IChatComponent> tooltips = m.tooltips();
+                if (m.func_146115_a() && tooltips != null && !tooltips.isEmpty()) {
+                    List<String> tooltipStrings = tooltips.stream().map(IChatComponent::getFormattedText).collect(Collectors.toList());
                     this.func_146283_a(tooltipStrings, mouseX, mouseY);
+                }
+            }
+            if (button instanceof FolderButton folder) {
+                if (folder.func_146115_a() && !folder.tooltips.isEmpty()) {
+                    this.func_146283_a(folder.tooltips, mouseX, mouseY);
                 }
             }
         }
@@ -257,7 +486,10 @@ public class PlayerModelScreen extends GuiScreen {
     public void updateScreen() {
         this.textField.updateCursorCounter();
         int currentModelCount = ClientModelManager.MODELS.size();
-        if (currentModelCount != this.lastClientModelCount) {
+        // Pack manifests arrive in the same sync round as the models; when they land after the last model was
+        // registered there is no count change to notice, so the pack version is watched as well.
+        int currentPackVersion = ClientPackRegistry.version();
+        if (currentModelCount != this.lastClientModelCount || currentPackVersion != this.lastPackVersion) {
             this.initGui();
         }
     }
@@ -266,6 +498,12 @@ public class PlayerModelScreen extends GuiScreen {
     protected void mouseClicked(int mouseX, int mouseY, int button) {
         super.mouseClicked(mouseX, mouseY, button);
         this.textField.mouseClicked(mouseX, mouseY, button);
+        // 1.7.10 GuiScreen only dispatches left clicks, so a right click is always "go up one folder".
+        if (button == 1 && !this.browser.currentPack().isEmpty()) {
+            this.mc.getSoundHandler().playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation("gui.button.press"), 1.0F));
+            this.browser.backToParent();
+            this.initGui();
+        }
     }
 
     // charTyped and keyPressed -> keyTyped
@@ -274,7 +512,7 @@ public class PlayerModelScreen extends GuiScreen {
         String perText = this.textField.getText();
         if (this.textField.textboxKeyTyped(typedChar, keyCode)) {
             if (!Objects.equals(perText, this.textField.getText())) {
-                this.page = 0;
+                this.browser.resetPage();
                 this.initGui();
             }
         } else {
@@ -306,13 +544,13 @@ public class PlayerModelScreen extends GuiScreen {
     }
 
     private void scrollPage(int delta) {
-        if (delta > 0 && this.page > 0) {
-            this.page--;
+        if (delta > 0 && this.browser.page() > 0) {
+            this.browser.page(this.browser.page() - 1);
             this.mc.getSoundHandler().playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation("gui.button.press"), 1.0F));
             this.initGui();
         }
-        if (delta < 0 && this.page < this.maxPage) {
-            this.page++;
+        if (delta < 0 && this.browser.page() < this.browser.maxPage()) {
+            this.browser.page(this.browser.page() + 1);
             this.mc.getSoundHandler().playSound(PositionedSoundRecord.func_147674_a(new ResourceLocation("gui.button.press"), 1.0F));
             this.initGui();
         }
@@ -323,10 +561,45 @@ public class PlayerModelScreen extends GuiScreen {
         return false;
     }
 
-    private enum Category {
-        /**
-         * 不同页面类别
-         */
-        ALL, STAR
+    /**
+     * NF-01: 关闭界面时撤销 {@code api/ModelGuiApi} 发放的实体选择授权。
+     * <p>
+     * 包由 fix-network 交付（{@code network/message/RevokeModelGuiGrant}，packet id 98；
+     * {@code NETWORK_PROTOCOL} 已随之 bump 到 2）。服务端 handler 只回收**发送者自己**的授权：
+     * {@code RevokeModelGuiGrant.Handler}（{@code network/message/RevokeModelGuiGrant.java:51-68}）调用
+     * {@code ModelGuiApi.revokeSelectionGrant(sender, entityId)}，而 ModelGuiApi 的授权表按发送者 UUID 归档，
+     * 因此客户端即使伪造别人的 entity id 也撤不掉别人的授权。
+     * <p>
+     * {@code getGrantId() == -1} 表示"该 target 不需要授权"（本地玩家改自己，见
+     * {@link ModelSelectionTarget#getGrantId()}），此时不发送。
+     */
+    @Override
+    public void onGuiClosed() {
+        // Start the post-close grace window during which idle asset eviction stays suppressed
+        // (reference PlayerModelScreen.java:464).
+        ClientModelManager.setGuiOpen(false);
+        this.disposePreviewButtons();
+        int grantId = this.target.getGrantId();
+        if (grantId != -1) {
+            ysmu.LOG.debug("Model selection GUI closed, revoking grant for entity {}", grantId);
+            NetworkHandler.CHANNEL.sendToServer(new RevokeModelGuiGrant(grantId));
+        }
+    }
+
+    /**
+     * Releases the off-screen FBO of every preview tile on this screen.
+     * <p>
+     * Called before {@code buttonList.clear()} in {@link #initGui()} (page flips, category switches, the model count
+     * changing under an open screen) and from {@link #onGuiClosed()}. Without it each flip leaks one GL texture per
+     * tile, because nothing else frees a {@code FboCache}. Reference {@code PlayerModelScreen.java:449-459}.
+     */
+    private void disposePreviewButtons() {
+        for (Object button : this.buttonList) {
+            if (button instanceof ModelButton modelButton) {
+                modelButton.dispose();
+            } else if (button instanceof TextureButton textureButton) {
+                textureButton.dispose();
+            }
+        }
     }
 }

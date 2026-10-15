@@ -1,5 +1,6 @@
 package com.fox.ysmu.network.message;
 
+import java.util.Collections;
 import java.util.Set;
 
 import net.minecraft.util.ResourceLocation;
@@ -26,18 +27,35 @@ public class SyncStarModels implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        int size = buf.readInt();
-        this.starModels = Sets.newHashSet();
-        for (int i = 0; i < size; i++) {
-            String modelIdStr = ByteBufUtils.readUTF8String(buf);
-            this.starModels.add(new ResourceLocation(modelIdStr));
+        // N-06/N-10: the size comes from the peer. Compare it with the readable bytes before allocating (each
+        // entry needs at least a two-byte length prefix) and soft-fail instead of throwing.
+        try {
+            int size = buf.readInt();
+            if (size < 0 || size > buf.readableBytes()) {
+                ysmu.LOG.warn(
+                    "Ignoring malformed YSM star model list: size={}, readableBytes={}",
+                    size,
+                    buf.readableBytes());
+                this.starModels = null;
+                return;
+            }
+            Set<ResourceLocation> parsed = Sets.newHashSet();
+            for (int i = 0; i < size; i++) {
+                String modelIdStr = ByteBufUtils.readUTF8String(buf);
+                parsed.add(new ResourceLocation(modelIdStr));
+            }
+            this.starModels = parsed;
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM star model list: {}", e.toString());
+            this.starModels = null;
         }
     }
 
     @Override
     public void toBytes(ByteBuf buf) {
-        buf.writeInt(this.starModels.size());
-        for (ResourceLocation modelId : this.starModels) {
+        Set<ResourceLocation> safeStarModels = this.starModels == null ? Collections.emptySet() : this.starModels;
+        buf.writeInt(safeStarModels.size());
+        for (ResourceLocation modelId : safeStarModels) {
             ByteBufUtils.writeUTF8String(buf, modelId.toString());
         }
     }
@@ -46,8 +64,13 @@ public class SyncStarModels implements IMessage {
 
         @Override
         public IMessage onMessage(SyncStarModels message, MessageContext ctx) {
-            if (ctx.side == Side.CLIENT) {
-                ysmu.proxy.handleStarModels(message);
+            if (ctx.side == Side.CLIENT && message.starModels != null) {
+                // N-10: never let a handler body escape into FML's catch(Throwable) -> rejectHandshake.
+                try {
+                    ysmu.proxy.handleStarModels(message);
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to apply synced YSM star models", e);
+                }
             }
             return null;
         }

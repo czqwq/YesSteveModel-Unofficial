@@ -18,6 +18,7 @@ import org.apache.commons.io.filefilter.FileFileFilter;
 import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
 
 import it.unimi.dsi.fastutil.Pair;
@@ -43,9 +44,26 @@ public final class YesModelUtils {
      * 加密方法
      */
     private static final String ENCRYPTION_METHOD = "AES";
+    /**
+     * 容器头部长度：HEAD(4) + VERSION(4) + 总 MD5(16)。比这更短的文件不可能是合法的 YSGP 容器。
+     */
+    private static final int CONTAINER_HEADER_SIZE = 24;
+    private static final int AES_IV_LENGTH = 16;
 
     public static Map<String, byte[]> input(File ysmFile) throws IOException {
         byte[] data = FileUtils.readFileToByteArray(ysmFile);
+        // M-18：旧实现无条件 bytes2Int(data, 0)/bytes2Int(data, 4)：0~7 字节的损坏/半截文件会抛
+        // ArrayIndexOutOfBoundsException，而该异常不被本方法声明、也不被 YsmFormat.cacheAllModels 的
+        // catch (IOException) 捕获，会一路冒泡打断 ServerModelManager.reloadPacks()（启动崩溃 / `/ysm reload`
+        // 崩服）。这里对超短文件直接按“不是本容器”处理。
+        if (data.length < CONTAINER_HEADER_SIZE) {
+            ysmu.LOG.warn(
+                "Ignoring {} as a YSGP container: only {} byte(s), the {} byte header is incomplete",
+                ysmFile,
+                data.length,
+                CONTAINER_HEADER_SIZE);
+            return Collections.emptyMap();
+        }
         int head = ByteInteger.bytes2Int(data, 0);
         int version = ByteInteger.bytes2Int(data, 4);
         if (head != HEAD) {
@@ -56,7 +74,7 @@ public final class YesModelUtils {
         }
 
         byte[] md5 = ByteArrays.copy(data, 8, 16);
-        byte[] modelFilesData = ByteArrays.copy(data, 24, data.length - 24);
+        byte[] modelFilesData = ByteArrays.copy(data, CONTAINER_HEADER_SIZE, data.length - CONTAINER_HEADER_SIZE);
         if (!Arrays.equals(md5, Md5Utils.md5(modelFilesData))) {
             return Collections.emptyMap();
         }
@@ -64,6 +82,7 @@ public final class YesModelUtils {
         Map<String, byte[]> outputs = Maps.newHashMap();
         ByteArrayInputStream tmp = new ByteArrayInputStream(modelFilesData);
         while (tmp.available() > 0) {
+            int remainingBefore = tmp.available();
             try {
                 Pair<String, byte[]> ysmFileData;
                 if (version == VERSION) {
@@ -72,8 +91,17 @@ public final class YesModelUtils {
                     ysmFileData = ysmToFileNew(tmp);
                 }
                 outputs.put(ysmFileData.left(), ysmFileData.right());
-            } catch (GeneralSecurityException | DataFormatException e) {
-                e.printStackTrace();
+            } catch (GeneralSecurityException | DataFormatException | RuntimeException e) {
+                // 单个条目损坏（截断/负长度/解密失败/解压失败）只跳过该条目；必须确认流有进展，
+                // 否则“失败但没消费任何字节”会让这个 while 变成死循环。
+                ysmu.LOG.warn(
+                    "Skipping malformed entry in {} ({} byte(s) left to read): {}",
+                    ysmFile,
+                    remainingBefore,
+                    e.toString());
+                if (tmp.available() >= remainingBefore) {
+                    break;
+                }
             }
         }
         return outputs;
@@ -85,15 +113,12 @@ public final class YesModelUtils {
         String name = readString(tmp);
         int size = readInt(tmp);
 
-        byte[] passwordBytes = new byte[16];
-        byte[] ivBytes = new byte[16];
-        tmp.read(passwordBytes);
-        tmp.read(ivBytes);
+        byte[] passwordBytes = readExact(tmp, AES_IV_LENGTH, "AES key");
+        byte[] ivBytes = readExact(tmp, AES_IV_LENGTH, "AES iv");
         SecretKeySpec key = new SecretKeySpec(passwordBytes, ENCRYPTION_METHOD);
         IvParameterSpec iv = new IvParameterSpec(ivBytes);
 
-        byte[] fileData = new byte[size];
-        tmp.read(fileData);
+        byte[] fileData = readExact(tmp, size, "encrypted file body");
 
         ByteArrayOutputStream decryptData = AESUtil.decrypt(key, iv, fileData);
         byte[] rawData = DeflateUtil.decompressBytes(decryptData.toByteArray());
@@ -108,12 +133,9 @@ public final class YesModelUtils {
         int fileSize = readInt(tmp);
         int cipherSecretKeySize = readInt(tmp);
 
-        byte[] cipherSecretKey = new byte[cipherSecretKeySize];
-        byte[] ivBytes = new byte[16];
-        byte[] fileData = new byte[fileSize];
-        tmp.read(cipherSecretKey);
-        tmp.read(ivBytes);
-        tmp.read(fileData);
+        byte[] cipherSecretKey = readExact(tmp, cipherSecretKeySize, "cipher secret key");
+        byte[] ivBytes = readExact(tmp, AES_IV_LENGTH, "AES iv");
+        byte[] fileData = readExact(tmp, fileSize, "encrypted file body");
 
         byte[] keyFromMd5 = getKeyFromMd5(fileData);
         SecretKey secretSecretKey = AESUtil.getKey(keyFromMd5);
@@ -185,7 +207,7 @@ public final class YesModelUtils {
             try {
                 output.write(fileToBytes(file));
             } catch (IOException | GeneralSecurityException e) {
-                e.printStackTrace();
+                ysmu.LOG.warn("Failed to pack {} into the YSGP container", file, e);
             }
         });
         return output.toByteArray();
@@ -260,15 +282,13 @@ public final class YesModelUtils {
 
     private static String readString(ByteArrayInputStream stream) throws IOException {
         int size = readInt(stream);
-        byte[] stringBytes = new byte[size];
-        stream.read(stringBytes);
+        byte[] stringBytes = readExact(stream, size, "string body");
         return new String(stringBytes, StandardCharsets.UTF_8);
     }
 
     private static String readBase64String(ByteArrayInputStream stream) throws IOException {
         int size = readInt(stream);
-        byte[] stringBytes = new byte[size];
-        stream.read(stringBytes);
+        byte[] stringBytes = readExact(stream, size, "base64 string body");
         return new String(
             Base64.getDecoder()
                 .decode(stringBytes),
@@ -279,11 +299,29 @@ public final class YesModelUtils {
         return readInt(stream) != 0;
     }
 
-    @SuppressWarnings("all")
     private static int readInt(ByteArrayInputStream stream) throws IOException {
-        byte[] sizeBytes = new byte[4];
-        stream.read(sizeBytes);
+        byte[] sizeBytes = readExact(stream, 4, "int");
         return ByteInteger.bytes2Int(sizeBytes, 0);
+    }
+
+    /**
+     * 按容器里声明的长度读满 {@code size} 字节（M-18 的长度上限校验）。
+     *
+     * 长度先与 {@code stream.available()} 比较**再**分配数组：这样既不会为损坏文件里的
+     * {@code 0x7FFFFFFF} 之类的长度申请内存（{@code OutOfMemoryError}），也不会出现
+     * {@code NegativeArraySizeException}；读到一半的短读同样按 IOException 处理。
+     */
+    private static byte[] readExact(ByteArrayInputStream stream, int size, String what) throws IOException {
+        if (size < 0 || size > stream.available()) {
+            throw new IOException(
+                "Declared " + what + " length " + size + " exceeds the " + stream.available() + " remaining byte(s)");
+        }
+        byte[] bytes = new byte[size];
+        int read = stream.read(bytes);
+        if (read != size) {
+            throw new IOException("Unexpected EOF while reading " + what + " (" + read + "/" + size + " byte(s))");
+        }
+        return bytes;
     }
 
 }

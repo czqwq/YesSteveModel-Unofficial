@@ -7,12 +7,17 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.lwjgl.util.vector.Quaternion;
 
-import com.fox.ysmu.compat.Axis;
-import com.fox.ysmu.compat.Utils;
+import software.bernie.geckolib3.compat.Axis;
+import software.bernie.geckolib3.compat.Utils;
 
 import software.bernie.geckolib3.geo.render.built.GeoBone;
 import software.bernie.geckolib3.geo.render.built.GeoCube;
 
+/**
+ * YSMU: Replaced GeckoLib's original LWJGL-only RenderUtils with JOML-based
+ * matrix operations (self-contained, no dependency on mod code). Added
+ * convenience methods: prepMatrixForBone(), invertAndMultiplyMatrices().
+ */
 public final class RenderUtils {
 
     public static void translateMatrixToBone(GeoBone bone) {

@@ -1,6 +1,8 @@
 package com.fox.ysmu.model.resource;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.ysmu;
 import rip.ysm.security.YSMByteBuf;
 import io.netty.buffer.Unpooled;
 
@@ -14,12 +16,24 @@ public class YSMBinaryDeserializer implements AutoCloseable {
     private final YSMByteBuf reader;
     private final int format;
     private final RawYsmModel model;
+    /**
+     * Whether this stream is one of this mod's own baked sync payloads rather than a real OpenYSM {@code .ysm} file.
+     * <p>
+     * The two are read by the two constructors, and the baked layout has two extra per-animation strings at the end
+     * of each animation record ({@code anim_speed} / {@code anim_time_update}, see
+     * {@link YSMBinarySerializer#writeAnimationFileContent}). Reading them from a real {@code .ysm} - which has no
+     * such fields - would misparse every animation after the first, so the distinction is explicit here instead of
+     * being inferred from {@code format}: a real file declares its format in its header, and a payload is read with
+     * the format the baker used, which is the same number.
+     */
+    private final boolean bakedPayload;
 
     public YSMBinaryDeserializer(byte[] decompressedData) {
         this.reader = new YSMByteBuf(Unpooled.wrappedBuffer(decompressedData));
         this.format = (int) this.reader.readDword();
         this.model = new RawYsmModel();
         this.model.formatVersion = this.format;
+        this.bakedPayload = false;
     }
 
     public YSMBinaryDeserializer(byte[] decompressedData, int format) {
@@ -27,6 +41,7 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         this.format = format;
         this.model = new RawYsmModel();
         this.model.formatVersion = this.format;
+        this.bakedPayload = true;
     }
 
 
@@ -38,7 +53,13 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         } else if (format <= 32) {
             deserializeModern();
         } else {
-            throw new UnsupportedOperationException("Unsupported OpenYSM binary format: " + format);
+            // M-24:dev 基线对 format > 32 直接抛 UnsupportedOperationException,新版本模型会被整包跳过且
+            // 只剩一句没有版本号的警告。参考实现(OpenYSM 的 YSMBinaryDeserializer:35-41)对
+            // 16 以上一律按 modern 布局解析,这里跟随该宽容策略,并把版本号写进日志。
+            ysmu.LOG.warn(
+                "OpenYSM binary format {} is newer than the supported 32; parsing it with the format-32 layout on a best-effort basis",
+                format);
+            deserializeModern();
         }
         if (closeOnExit) {
             this.reader.close();
@@ -391,7 +412,14 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         parseYSMJson();
     }
 
+    private void logOffset(String label) {
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY) {
+            ysmu.LOG.info("[YSMU-MODEL] {} @ 0x{}", label, Integer.toHexString(reader.getOffset()));
+        }
+    }
+
     private void parseSubEntity(Map<String, RawYsmModel.RawSubEntity> targetMap, String categoryName, int index) {
+        logOffset("parseSubEntity ENTER " + categoryName + "[" + index + "]");
         RawYsmModel.RawSubEntity subEntity = new RawYsmModel.RawSubEntity();
         String subModuleName = "";
         if (format <= 26) {
@@ -400,10 +428,14 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         } else {
             subEntity.identifier = categoryName + "_" + index; // >=26沒有Header Name
         }
+        logOffset("parseSubEntity hasSubAnim FLAG");
         int animationCount = reader.readVarInt();
         for (int i = 0; i < animationCount; ++i) {
+            logOffset("parseSubEntity anim HASH start");
             String hash = reader.readString();
+            logOffset("parseSubEntity anim HASH done -> call parseAnimations");
             RawYsmModel.RawAnimationFile rawAnimationFile = parseAnimations();
+            logOffset("parseSubEntity parseAnimations DONE");
             subEntity.animationFiles.put(
                     categoryName,
                     rawAnimationFile
@@ -411,8 +443,24 @@ public class YSMBinaryDeserializer implements AutoCloseable {
             rawAnimationFile.fileHash = hash;
         }
 
+        logOffset("parseSubEntity hasSubController FLAG");
+        // Hex dump the raw bytes at transition boundary to compare with C++ offsets
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY) {
+            int pos = reader.getOffset();
+            int dumpLen = Math.min(200, reader.getRawBuf().readableBytes());
+            byte[] raw = new byte[dumpLen];
+            reader.getRawBuf().getBytes(pos, raw);
+            StringBuilder sb = new StringBuilder("[YSMU-MODEL] HEXDUMP @ 0x");
+            sb.append(Integer.toHexString(pos)).append(" (").append(dumpLen).append(" bytes):");
+            for (int bi = 0; bi < raw.length; bi++) {
+                if (bi % 32 == 0) sb.append('\n');
+                sb.append(String.format("%02X ", raw[bi] & 0xFF));
+            }
+            ysmu.LOG.info(sb.toString());
+        }
         parseAnimationControllers(subEntity.animationControllerFiles, false);
 
+        logOffset("parseSubEntity texture start");
         RawYsmModel.RawTexture baseTex = new RawYsmModel.RawTexture();
         SpecialImageResult imgRes = parseSpecialImage();
         baseTex.hash = imgRes.hash;
@@ -425,6 +473,7 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         subEntity.textures.put(baseTex.name, baseTex);
 
         // Sub Textures
+        logOffset("parseSubEntity subTexture count");
         int subTextureSize = reader.readVarInt();
         for (int i = 0; i < subTextureSize; ++i) {
             RawYsmModel.RawTexture.SubTexture subTex = new RawYsmModel.RawTexture.SubTexture();
@@ -439,15 +488,20 @@ public class YSMBinaryDeserializer implements AutoCloseable {
             baseTex.subTextures.add(subTex);
         }
 
+        logOffset("parseSubEntity modelHash start");
         String modelHash = reader.readString();
+        logOffset("parseSubEntity call parseModels");
         subEntity.model = parseModels();
+        logOffset("parseSubEntity parseModels DONE");
         subEntity.model.sha256 = modelHash;
 
 
         if (format > 26) {
+            logOffset("parseSubEntity footer names start");
             int footerFlag = reader.readVarInt(); // always 01
             String footerSubModuleName = reader.readString();
             subEntity.identifier = footerSubModuleName;
+            logOffset("parseSubEntity footer names DONE");
         }
 
         targetMap.put(subEntity.identifier, subEntity);
@@ -677,8 +731,11 @@ public class YSMBinaryDeserializer implements AutoCloseable {
     private RawYsmModel.RawAnimationFile parseAnimations() {
         RawYsmModel.RawAnimationFile animFile = new RawYsmModel.RawAnimationFile();
 
+        logOffset("parseAnimations ENTER (before animCount)");
         int animationCount = reader.readVarInt();
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY) ysmu.LOG.info("[YSMU-MODEL] parseAnimations animCount={}", animationCount);
         for (int animIndex = 0; animIndex < animationCount; ++animIndex) {
+            logOffset("parseAnimations anim[" + animIndex + "] name start");
             RawYsmModel.RawAnimation anim = new RawYsmModel.RawAnimation();
             anim.name = reader.readString();
             anim.length = reader.readFloat() / 20.0f;
@@ -687,6 +744,7 @@ public class YSMBinaryDeserializer implements AutoCloseable {
             if (format > 9) {
                 anim.unkInt1 = reader.readVarInt();
                 anim.unkInt2 = reader.readVarInt();
+                logOffset("parseAnimations anim[" + animIndex + "] blendWeight");
                 int blendWeightMolangCount = reader.readVarInt();
                 for (int i = 0; i < blendWeightMolangCount; i++) {
                     // 1 = float
@@ -702,10 +760,17 @@ public class YSMBinaryDeserializer implements AutoCloseable {
                 anim.unkInt4 = reader.readVarInt();
             }
 
+            logOffset("parseAnimations anim[" + animIndex + "] bones");
             int boneCount = reader.readVarInt();
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && boneCount > 3) {
+                ysmu.LOG.info("[YSMU-MODEL]   bones={}", boneCount);
+            }
             for (int i = 0; i < boneCount; ++i) {
                 RawYsmModel.RawBoneAnimation ba = new RawYsmModel.RawBoneAnimation();
                 ba.boneName = reader.readString();
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && boneCount > 4 && i == 0) {
+                    logOffset("    first bone '" + ba.boneName + "'");
+                }
                 parseChannel(ba.rotation);
                 parseChannel(ba.position);
                 parseChannel(ba.scale);
@@ -713,10 +778,20 @@ public class YSMBinaryDeserializer implements AutoCloseable {
             }
 
             // Timeline
+            logOffset("parseAnimations anim[" + animIndex + "] timeline");
             int timelineEventGroupsCount = reader.readVarInt();
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && timelineEventGroupsCount > 10) {
+                ysmu.LOG.info("[YSMU-MODEL]   timeline groups={}", timelineEventGroupsCount);
+            }
             for (int i = 0; i < timelineEventGroupsCount; ++i) {
                 RawYsmModel.RawTimelineEvent event = new RawYsmModel.RawTimelineEvent();
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && timelineEventGroupsCount > 10 && i == 0) {
+                    logOffset("  first timeline group");
+                }
                 int timelineEventsCount = reader.readVarInt();
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && timelineEventsCount > 15) {
+                    ysmu.LOG.info("[YSMU-MODEL]   timeline group[{}] events={}", i, timelineEventsCount);
+                }
                 for (int j = 0; j < timelineEventsCount; ++j) {
                     event.events.add(reader.readString());
                 }
@@ -726,18 +801,38 @@ public class YSMBinaryDeserializer implements AutoCloseable {
 
             // Effects
             if (format > 9) {
+                logOffset("parseAnimations anim[" + animIndex + "] effects");
                 int soundEffectsCount = reader.readVarInt();
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && soundEffectsCount > 0) {
+                    ysmu.LOG.info("[YSMU-MODEL]   soundEffects={}", soundEffectsCount);
+                }
                 for (int i = 0; i < soundEffectsCount; i++) {
                     RawYsmModel.RawSoundEffect sfx = new RawYsmModel.RawSoundEffect();
+                    if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY && i < 3) {
+                        logOffset("    sfx[" + i + "] name");
+                    }
                     sfx.effectName = reader.readString();
                     sfx.timestamp = reader.readFloat() / 20.0f;
                     anim.soundEffects.add(sfx);
                 }
             }
+            // Baked payloads carry Bedrock's `anim_speed` / `anim_time_update` after the effects block; a real
+            // `.ysm` does not have them at all, which is what `bakedPayload` decides. See the field's javadoc.
+            if (bakedPayload) {
+                anim.animSpeed = readOptionalString();
+                anim.animTimeUpdate = readOptionalString();
+            }
+            logOffset("parseAnimations anim[" + animIndex + "] DONE (" + anim.name + ")");
             animFile.animations.put(anim.name, anim);
         }
 
+        logOffset("parseAnimations EXIT");
         return animFile;
+    }
+
+    /** Reads the {@code 0}/{@code 1}+string pair {@code YSMBinarySerializer.writeOptionalString} writes. */
+    private String readOptionalString() {
+        return reader.readVarInt() != 0 ? reader.readString() : null;
     }
 
     private void parseChannel(List<RawYsmModel.RawKeyframe> channel) {
@@ -782,7 +877,9 @@ public class YSMBinaryDeserializer implements AutoCloseable {
     }
 
     private void parseAnimationControllers(List<RawYsmModel.RawAnimationControllerFile> targetList, boolean readName) {
+        logOffset("parseAnimationControllers ENTER count");
         int controllerCount = reader.readVarInt();
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY) ysmu.LOG.info("[YSMU-MODEL] parseAnimationControllers count={}, readName={}", controllerCount, readName);
         for (int i = 0; i < controllerCount; i++) {
             RawYsmModel.RawAnimationControllerFile file = new RawYsmModel.RawAnimationControllerFile();
 
@@ -800,7 +897,9 @@ public class YSMBinaryDeserializer implements AutoCloseable {
     }
 
     private void parseAnimationControllerBody(Map<String, RawYsmModel.RawAnimationController> targetMap) {
+        logOffset("parseAnimationControllerBody ENTER");
         int animationCount = reader.readVarInt();
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_BINARY) ysmu.LOG.info("[YSMU-MODEL] parseAnimationControllerBody animationCount={}", animationCount);
         for (int animIndex = 0; animIndex < animationCount; ++animIndex) {
             RawYsmModel.RawAnimationController entry = new RawYsmModel.RawAnimationController();
             entry.animationName = reader.readString();

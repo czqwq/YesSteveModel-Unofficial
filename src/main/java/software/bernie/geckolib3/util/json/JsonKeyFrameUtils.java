@@ -37,9 +37,9 @@ public class JsonKeyFrameUtils {
         IValue previousYValue = null;
         IValue previousZValue = null;
 
-        List<KeyFrame<IValue>> xKeyFrames = new ArrayList();
-        List<KeyFrame<IValue>> yKeyFrames = new ArrayList();
-        List<KeyFrame<IValue>> zKeyFrames = new ArrayList();
+        List<KeyFrame<IValue>> xKeyFrames = new ArrayList<>(element.size());
+        List<KeyFrame<IValue>> yKeyFrames = new ArrayList<>(element.size());
+        List<KeyFrame<IValue>> zKeyFrames = new ArrayList<>(element.size());
 
         for (int i = 0; i < element.size(); i++) {
             Map.Entry<String, JsonElement> keyframe = element.get(i);
@@ -141,14 +141,22 @@ public class JsonKeyFrameUtils {
     private static JsonArray getKeyFrameVector(JsonElement element) {
         if (element.isJsonArray()) {
             return element.getAsJsonArray();
-        } else {
+        } else if (element.isJsonObject()) {
             return element.getAsJsonObject()
                 .get("vector")
                 .getAsJsonArray();
+        } else {
+            // Primitive value (e.g. "1.4583": 0.0) — expand to [val, val, val]
+            JsonArray arr = new JsonArray();
+            arr.add(element);
+            arr.add(element);
+            arr.add(element);
+            return arr;
         }
     }
 
     private static boolean hasEasingType(JsonElement element) {
+        if (!element.isJsonObject()) return false;
         return element.getAsJsonObject()
             .has("easing")
             || element.getAsJsonObject()
@@ -209,9 +217,7 @@ public class JsonKeyFrameUtils {
 
                 if (entryObj.has("pre")) {
                     JsonElement postElement = entryObj.get("pre");
-                    JsonArray array = postElement.isJsonArray() ? postElement.getAsJsonArray()
-                        : postElement.getAsJsonObject()
-                            .getAsJsonArray("vector");
+                    JsonArray array = getKeyFrameVector(postElement);
                     JsonObject object = new JsonObject();
                     object.add("vector", array);
                     if (entryObj.has("lerp_mode")) {
@@ -222,9 +228,7 @@ public class JsonKeyFrameUtils {
 
                 if (entryObj.has("post")) {
                     JsonElement postElement = entryObj.get("post");
-                    JsonArray array = postElement.isJsonArray() ? postElement.getAsJsonArray()
-                        : postElement.getAsJsonObject()
-                            .getAsJsonArray("vector");
+                    JsonArray array = getKeyFrameVector(postElement);
                     JsonObject object = new JsonObject();
                     object.add("vector", array);
                     if (entryObj.has("lerp_mode")) {
@@ -261,9 +265,7 @@ public class JsonKeyFrameUtils {
 
                 if (entryObj.has("pre")) {
                     JsonElement postElement = entryObj.get("pre");
-                    JsonArray array = postElement.isJsonArray() ? postElement.getAsJsonArray()
-                        : postElement.getAsJsonObject()
-                            .getAsJsonArray("vector");
+                    JsonArray array = getKeyFrameVector(postElement);
                     JsonObject object = new JsonObject();
                     object.add("vector", array);
                     if (entryObj.has("lerp_mode")) {
@@ -274,9 +276,7 @@ public class JsonKeyFrameUtils {
 
                 if (entryObj.has("post")) {
                     JsonElement postElement = entryObj.get("post");
-                    JsonArray array = postElement.isJsonArray() ? postElement.getAsJsonArray()
-                        : postElement.getAsJsonObject()
-                            .getAsJsonArray("vector");
+                    JsonArray array = getKeyFrameVector(postElement);
                     JsonObject object = new JsonObject();
                     object.add("vector", array);
                     if (entryObj.has("lerp_mode")) {

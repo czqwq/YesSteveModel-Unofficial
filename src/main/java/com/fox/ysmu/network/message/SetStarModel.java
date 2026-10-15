@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.eep.ExtendedStarModels;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -47,9 +48,15 @@ public class SetStarModel implements IMessage {
 
         @Override
         public IMessage onMessage(SetStarModel message, MessageContext ctx) {
-            EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-            if (sender != null) {
-                handleEEP(message, sender);
+            // N-10: a handler that throws is turned into a disconnect by FMLProxyPacket.processPacket ->
+            // rejectHandshake, so the body is guarded and a bad packet is only logged.
+            try {
+                EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
+                if (sender != null) {
+                    handleEEP(message, sender);
+                }
+            } catch (Exception e) {
+                ysmu.LOG.warn("Ignoring malformed YSM star-model packet", e);
             }
             return null;
         }
@@ -57,7 +64,8 @@ public class SetStarModel implements IMessage {
         private void handleEEP(SetStarModel message, EntityPlayerMP sender) {
             ExtendedStarModels eep = ExtendedStarModels.get(sender);
             if (eep != null) {
-                ResourceLocation modelLoc = message.modelId.isEmpty() ? null : new ResourceLocation(message.modelId);
+                ResourceLocation modelLoc = message.modelId == null || message.modelId.isEmpty() ? null
+                    : new ResourceLocation(message.modelId);
                 if (message.isAdd) {
                     eep.addModel(modelLoc);
                 } else {

@@ -1,9 +1,9 @@
 package com.fox.ysmu.model.resource;
 
 import static com.fox.ysmu.model.ServerModelManager.ARM_ANIMATION_FILE_NAME;
-import static com.fox.ysmu.model.ServerModelManager.CUSTOM;
 import static com.fox.ysmu.model.ServerModelManager.EXTRA_ANIMATION_FILE_NAME;
 import static com.fox.ysmu.model.ServerModelManager.MAIN_ANIMATION_FILE_NAME;
+import static com.fox.ysmu.model.ServerModelManager.defaultAnimationFile;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -20,6 +20,7 @@ import javax.imageio.ImageIO;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.format.Type;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
@@ -43,12 +44,47 @@ public final class RawYsmModelAdapter {
 
     public static boolean isBridgeable(RawYsmModel raw) {
         if (raw == null || raw.mainEntity == null) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+                if (raw == null) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: raw is null");
+                else ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: mainEntity is null for {}", raw.modelId);
+            }
             return false;
         }
         if (!hasGeometry(raw.mainEntity.mainModel)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: no mainModel geometry for {}", raw.modelId);
             return false;
         }
         if (!hasGeometry(raw.mainEntity.armModel)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL] isBridgeable false: no armModel geometry for {}", raw.modelId);
+            return false;
+        }
+        for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+                ysmu.LOG.info("[YSMU-MODEL]   check texture {}: format={}, dataLen={}, w={}, h={}, ok={}",
+                    texture.name, texture.imageFormat,
+                    texture.data == null ? 0 : texture.data.length,
+                    texture.width, texture.height, hasLegacyTextureData(texture));
+            }
+            if (hasLegacyTextureData(texture)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * M-01:"能否产出可用的 OpenYSM 二进制载荷"的独立判定。
+     * OpenYSM 二进制只序列化 bones/cubes/faces 与关键帧(见
+     * {@link YSMBinarySerializer#writeGeometry}),不写 {@code geometry.sourceJson},
+     * 所以这里必须忽略 sourceJson、只认已烘焙的面。对 dev 基线的散件模型
+     * ({@code YSMFolderDeserializer.parseGeometry} 只填 bones、不填 cubes)它返回 false,
+     * 从而跳过 {@code ModelCacheWriter.writeOpenYsm},不再下发一个几何为空的缓存。
+     */
+    public static boolean isBinaryPayloadBridgeable(RawYsmModel raw) {
+        if (raw == null || raw.mainEntity == null) {
+            return false;
+        }
+        if (countBakedFaces(raw.mainEntity.mainModel) <= 0 || countBakedFaces(raw.mainEntity.armModel) <= 0) {
             return false;
         }
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
@@ -57,6 +93,20 @@ public final class RawYsmModelAdapter {
             }
         }
         return false;
+    }
+
+    /** 已烘焙(可直接序列化)的面数;只看 bones/cubes/faces,与 sourceJson 无关。 */
+    public static int countBakedFaces(RawYsmModel.RawGeometry geometry) {
+        if (geometry == null) {
+            return 0;
+        }
+        int faces = 0;
+        for (RawYsmModel.RawBone bone : geometry.bones) {
+            for (RawYsmModel.RawCube cube : bone.cubes) {
+                faces += cube.faces.size();
+            }
+        }
+        return faces;
     }
 
     public static ModelData toLegacyModelData(RawYsmModel raw, String modelId) throws IOException {
@@ -68,7 +118,47 @@ public final class RawYsmModelAdapter {
         model.put("main", toGeometryJson(raw, raw.mainEntity.mainModel, true));
         model.put("arm", toGeometryJson(raw, raw.mainEntity.armModel, false));
 
+        // Projectile sub-entity geometry (a pack's files.projectiles entry, e.g. #arrow). The key is
+        // "projectile_<matchId>" and ClientModelManager turns it back into the sub-model id
+        // "<model>/projectile_<matchId>" that the renderer looks up.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null || sub.model == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                try {
+                    model.put("projectile_" + matchId, toGeometryJson(raw, sub.model, false));
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to convert projectile geometry {} for model {}", matchId, modelId, e);
+                }
+            }
+        }
+
+        // Vehicle sub-entity geometry (a pack's files.vehicles entry, e.g. #minecraft:boat). Same key shape as the
+        // projectile block above - "vehicle_<matchId>" - and ClientModelManager turns it back into the sub-model id
+        // "<model>/vehicle_<matchId>" that VehicleRenderer looks up.
+        //
+        // Upstream carries the same data as a render target of kind RENDER_TARGET_KIND_VEHICLE
+        // (RawModelAssembler.java:224-228) and bakes it into the same "main" geometry/animation domain as a
+        // projectile (ModelRenderTargetLoader.java:259-271). This port has no render-target kind, so the sub-model id
+        // is the whole carrier - exactly as it is for projectiles.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null || sub.model == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                try {
+                    model.put("vehicle_" + matchId, toGeometryJson(raw, sub.model, false));
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to convert vehicle geometry {} for model {}", matchId, modelId, e);
+                }
+            }
+        }
+
         Map<String, byte[]> textures = new LinkedHashMap<>();
+        Map<String, Map<Integer, byte[]>> components = new LinkedHashMap<>();
         for (RawYsmModel.RawTexture texture : raw.mainEntity.textures.values()) {
             if (texture.data == null) {
                 continue;
@@ -87,6 +177,68 @@ public final class RawYsmModelAdapter {
                 fileName = texture.name.endsWith(".png") ? texture.name : texture.name + ".png";
             }
             textures.put(fileName, textureData);
+            components.put(fileName, pbrComponents(texture));
+        }
+        // Projectile sub-entity textures. The key carries the matchId as well as the file name, because the renderer
+        // picks a projectile's texture by searching for "projectile_<matchId>_" in the id.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawTexture texture : sub.textures.values()) {
+                    if (texture.data == null) {
+                        continue;
+                    }
+                    byte[] textureData = getLegacyTextureData(texture);
+                    if (textureData == null) {
+                        ysmu.LOG.warn(
+                            "Skipping unsupported projectile texture {} (format {}) for {}",
+                            textureName(texture),
+                            texture.imageFormat,
+                            matchId);
+                        continue;
+                    }
+                    String textureKey = "projectile_" + matchId + "_" + texture.name;
+                    if (!textureKey.endsWith(".png")) {
+                        textureKey += ".png";
+                    }
+                    textures.put(textureKey, textureData);
+                    components.put(textureKey, pbrComponents(texture));
+                }
+            }
+        }
+        // Vehicle sub-entity textures, keyed like the projectile ones: "vehicle_<matchId>_<file>". VehicleRenderer
+        // picks a vehicle's texture by searching for "vehicle_<matchId>_" in the registered texture ids, so the key
+        // carries the matchId as well as the file name.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawTexture texture : sub.textures.values()) {
+                    if (texture.data == null) {
+                        continue;
+                    }
+                    byte[] textureData = getLegacyTextureData(texture);
+                    if (textureData == null) {
+                        ysmu.LOG.warn(
+                            "Skipping unsupported vehicle texture {} (format {}) for {}",
+                            textureName(texture),
+                            texture.imageFormat,
+                            matchId);
+                        continue;
+                    }
+                    String textureKey = "vehicle_" + matchId + "_" + texture.name;
+                    if (!textureKey.endsWith(".png")) {
+                        textureKey += ".png";
+                    }
+                    textures.put(textureKey, textureData);
+                    components.put(textureKey, pbrComponents(texture));
+                }
+            }
         }
         if (textures.isEmpty()) {
             throw new IOException("RawYsmModel has no legacy-compatible player textures");
@@ -101,9 +253,145 @@ public final class RawYsmModelAdapter {
                 putAnimationFile(animations, entry.getKey(), entry.getValue());
             }
         }
+        // Projectile animations and controllers. Both are complete data on a sub-entity
+        // (RawSubEntity.animationFiles / animationControllerFiles) and were previously thrown away here - the only
+        // place that handled them was the server-sync path. Losing them is not "one animation fewer": with no
+        // AnimationFile for the projectile the renderer returns before sampling anything, the geometry stays in its
+        // bind pose, and every sub-model the pack hides by scaling a bone (bow, crossbow, the effect boxes) is drawn
+        // at once.
+        //
+        // The keys match FolderFormat's: animation "projectile_<matchId>", controller "projectile_ctrl_<matchId>".
+        // ClientModelManager resolves both to the same sub-model id, so the local and synced paths agree.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
+                    putAnimationFile(animations, "projectile_" + matchId, animationFile);
+                }
+                for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
+                    if (controllerFile == null) {
+                        continue;
+                    }
+                    byte[] data = controllerFile.sourceJson == null ? createControllerJson(controllerFile)
+                        : controllerFile.sourceJson;
+                    if (data != null && data.length > 0) {
+                        animations.put("projectile_ctrl_" + matchId, data);
+                    }
+                }
+            }
+        }
+        // Vehicle animations and controllers, keyed like the projectile ones: animation "vehicle_<matchId>",
+        // controller "vehicle_ctrl_<matchId>". They must NOT merge into the player's animation namespace - a pack's
+        // boat set and its player set can both define a clip name, and merging lets one overwrite the other - so
+        // ClientModelManager registers each under the vehicle's own sub-model id, exactly as it does for projectiles.
+        for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.vehicles.entrySet()) {
+            RawYsmModel.RawSubEntity sub = entry.getValue();
+            if (sub == null) {
+                continue;
+            }
+            for (String matchId : matchIdsOf(sub)) {
+                for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
+                    putAnimationFile(animations, "vehicle_" + matchId, animationFile);
+                }
+                for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
+                    if (controllerFile == null) {
+                        continue;
+                    }
+                    byte[] data = controllerFile.sourceJson == null ? createControllerJson(controllerFile)
+                        : controllerFile.sourceJson;
+                    if (data != null && data.length > 0) {
+                        animations.put("vehicle_ctrl_" + matchId, data);
+                    }
+                }
+            }
+        }
         putAnimationControllers(animations, raw);
 
-        return new ModelData(modelId, Type.FOLDER, model, textures, animations);
+        // The pack's GUI presentation images: its ysm.json's gui_background / gui_foreground, already read and
+        // normalised to PNG by the parser (YSMFolderDeserializer.loadGuiImage:240-251 passes the ids
+        // "gui_foreground" / "gui_background" into RawYsmModel.RawImage.name). Upstream reads the same two paths into
+        // the model's settings as presentation image blobs (format/parser/ModelInfoBuilder.java:57-64) and its catalog
+        // card requests them per model (client/gui/button/CatalogModelCardState.java:238-246); the port has no
+        // manifest, so they travel beside the payload in ModelData#getGuiImages and the selection tile draws them.
+        //
+        // Deliberately NOT the two maps next door: `textures` is the model's texture *list* - ServerModelInfo is
+        // built from its key set (ModelData's constructor) and the selection screen offers it as selectable skins, so
+        // a GUI background in there would become a skin and move the texture count - and `model` is a map of geometry
+        // files that ClientModelManager parses as JSON key by key.
+        Map<String, byte[]> guiImages = new LinkedHashMap<>();
+        for (RawYsmModel.RawImage image : raw.properties.backgroundImages) {
+            if (image == null || image.data == null || StringUtils.isBlank(image.name)) {
+                continue;
+            }
+            guiImages.put(image.name, image.data);
+        }
+
+        // The model's metadata links travel beside the wheel declarations for the same reason they do: this bridge is
+        // the only place a parsed RawYsmModel becomes a client payload, so both sync channels get them here - the
+        // OpenYSM channel calls this from OpenYsmModelSyncClient, and the legacy container is written from the
+        // ModelData this returns (EncryptTools.LINKS_MODEL_VERSION carries the field on that channel).
+        // Upstream draws the first two on its information screen (client/gui/ModelInfoScreen.java:111-124).
+        //
+        // The GUI preview declaration rides here for the same reason, and because this bridge is also the route the
+        // built-in default's payload takes: `loadDefaultModel` reads `builtin/default` with YSMFolderDeserializer and
+        // hands the parsed model straight to this method (ClientModelManager:2430), so without this the fallback -
+        // which declares `"preview_animation": "gui"` - would reach the GUI registration with nothing to register.
+        // Upstream has both values in the loaded model's settings and reads them off it where the card needs them
+        // (client/gui/button/CatalogModelCardState.java:228, :160).
+        //
+        // The language tables ride here too, and for the same reason: this is the only place a parsed RawYsmModel
+        // becomes a client payload, so both sync channels get them - the OpenYSM channel calls this from
+        // OpenYsmModelSyncClient, and the legacy container is written from the ModelData this returns. Upstream
+        // resolves a name at display time against the tables it collected from the pack
+        // (format/schema/model/views/ModelInfoView.java:45-58 collects them, :95-111 translate() = requested locale
+        // else en_us). Only the table is carried: RawLanguageFile.hash is never read upstream, and the client display
+        // layer stores the plain nested map.
+        Map<String, Map<String, String>> languageFiles = new LinkedHashMap<>();
+        if (raw.languageFiles != null) {
+            for (Map.Entry<String, RawYsmModel.RawLanguageFile> entry : raw.languageFiles.entrySet()) {
+                RawYsmModel.RawLanguageFile file = entry.getValue();
+                if (entry.getKey() == null || file == null || file.data == null || file.data.isEmpty()) {
+                    continue;
+                }
+                languageFiles.put(entry.getKey(), new LinkedHashMap<>(file.data));
+            }
+        }
+        return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
+            com.fox.ysmu.data.WheelDeclarations.from(raw.properties), components,
+            raw.metadata == null ? null : raw.metadata.links,
+            raw.properties == null ? null : raw.properties.previewAnimation,
+            raw.properties != null && raw.properties.disablePreviewRotation,
+            languageFiles);
+    }
+
+    /**
+     * The entity ids a sub-entity (projectile or vehicle) answers to: its declared {@code match} list, or its
+     * identifier when it declares none.
+     * <p>
+     * One sub-entity may match several entity types (a pack's {@code #arrow} covering both {@code minecraft:arrow} and
+     * {@code minecraft:spectral_arrow}), and each needs its own entry under its own id, because the renderer looks a
+     * sub-entity up by the entity type it is drawing. A leading {@code #} is upstream's entity-type-tag syntax
+     * ({@code RawModelAssembler.java:253-255} writes the string verbatim into {@code RenderTarget.match}); 1.7.10 has
+     * no data-driven entity tags, so the consumer strips it and compares the rest - the id written here stays exactly
+     * as the pack wrote it.
+     */
+    private static java.util.List<String> matchIdsOf(RawYsmModel.RawSubEntity sub) {
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        if (sub.matchIds != null && sub.matchIds.length > 0) {
+            for (String matchId : sub.matchIds) {
+                if (StringUtils.isNotBlank(matchId)) {
+                    ids.add(matchId);
+                }
+            }
+            return ids;
+        }
+        if (StringUtils.isNotBlank(sub.identifier)) {
+            ids.add(sub.identifier);
+        }
+        return ids;
     }
 
     private static boolean hasGeometry(RawYsmModel.RawGeometry geometry) {
@@ -125,19 +413,45 @@ public final class RawYsmModelAdapter {
 
     private static boolean hasLegacyTextureData(RawYsmModel.RawTexture texture) {
         if (texture == null || texture.data == null) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: texture null or data null");
             return false;
         }
         if (texture.imageFormat == PNG_FORMAT) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: PNG format, OK");
             return true;
+        }
+        // 参考在成功分支内打印 "RGBA format, OK"。这里不能把最后那句 return 改写成 if/return true
+        // （纯诊断改动不得改其它语句），所以条件原样重复一次，只多出一条被门控的日志语句。
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE
+            && texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture)) {
+            ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: RGBA format, OK");
         }
         return texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture);
     }
 
+    private static Map<Integer, byte[]> pbrComponents(RawYsmModel.RawTexture texture) {
+        Map<Integer, byte[]> output = new LinkedHashMap<>();
+        // Legacy YSMClientMapper:117-126: 1=NORMAL, 2=SPECULAR, attached to this base, not skins.
+        for (RawYsmModel.RawTexture.SubTexture sub : texture.subTextures) {
+            if (sub.data == null || sub.specularType != 1 && sub.specularType != 2) continue;
+            RawYsmModel.RawTexture component = new RawYsmModel.RawTexture();
+            component.data = sub.data;
+            component.imageFormat = sub.imageFormat;
+            component.width = sub.width;
+            component.height = sub.height;
+            byte[] png = getLegacyTextureData(component);
+            if (png != null) output.put(sub.specularType, png);
+        }
+        return output;
+    }
+
     private static byte[] getLegacyTextureData(RawYsmModel.RawTexture texture) {
         if (texture.imageFormat == PNG_FORMAT) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: PNG, returning as-is ({} bytes)", texture.data.length);
             return texture.data;
         }
         if (texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture)) {
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: RGBA->PNG ({}x{})", texture.width, texture.height);
             return convertRgbaToPng(texture.data, texture.width, texture.height);
         }
         return null;
@@ -179,6 +493,8 @@ public final class RawYsmModelAdapter {
         }
 
         JsonObject description = getOrCreateDescription(root);
+        // RawModelAssembler:204,270 gives player/arm and replacement targets the same active settings.
+        if (raw != null) description.addProperty("ysm_all_cutout", raw.properties.allCutout);
         if (includeModelInfo) {
             applyOpenYsmModelInfo(raw, description);
         }
@@ -312,6 +628,26 @@ public final class RawYsmModelAdapter {
     private static void applyOpenYsmModelInfo(RawYsmModel raw, JsonObject description) {
         description.addProperty("ysm_height_scale", (double) raw.properties.heightScale);
         description.addProperty("ysm_width_scale", (double) raw.properties.widthScale);
+        // The renderer orders its layer pass by this, and the packed payload is the only place the client can read it
+        // from, so it travels with the other host-specific model properties.
+        description.addProperty("ysm_render_layers_first", raw.properties.renderLayersFirst);
+        // The texture the model declares as its own default. Upstream resolves the texture that gets drawn inside
+        // the model that was loaded - the requested name, then this declared default, then the first entry
+        // (ModelManifestLookup:10-29) - and the packed payload is the only place the client can read it from, so it
+        // travels with the other host-specific properties, exactly like render_layers_first above. The client still
+        // validates it against the model's own texture list before binding it, the way upstream's containsTexture
+        // does, so the field's own "default" sentinel and a stale name fall through instead of binding nothing.
+        if (raw.properties.defaultTexture != null && !raw.properties.defaultTexture.isEmpty()) {
+            description.addProperty("ysm_default_texture", raw.properties.defaultTexture);
+        }
+        // Upstream's forceCulling, which it parses from the pack's "all_cutout"
+        // (format/parser/pojo/manifest/settings/ModelProperties.java:35-36 names the field forceCulling and gives it
+        // @SerializedName("all_cutout")) and feeds to its bake. The port parses and syncs that field already
+        // (YSMFolderDeserializer:174, YSMBinarySerializer:491 / YSMBinaryDeserializer:620) and carries it here under a
+        // ysm_ name like the other host-specific properties, so the client holds what upstream's client holds.
+        // Nothing consumes it yet: upstream's only consumer is the native bake, so that is recorded as a divergence
+        // rather than filled with an invented consumer.
+        description.addProperty("ysm_all_cutout", raw.properties.allCutout);
 
         JsonObject extraInfo = new JsonObject();
         extraInfo.addProperty("name", raw.metadata.name);
@@ -343,31 +679,116 @@ public final class RawYsmModelAdapter {
         description.add("ysm_extra_info", extraInfo);
     }
 
+    /**
+     * The wheel's flat, baked label array: element {@code i} is the label of the {@code i}-th entry the pack declared.
+     *
+     * <p>Two shapes are handled, and the first one is byte-for-byte what this method always produced:</p>
+     * <ul>
+     *   <li><b>Legacy</b> - the pack's keys are literally {@code extra0..extra7}. Then slot {@code i} is
+     *       {@code extra<i>}, which is also the animation name the play path uses, so labels and actions line up with
+     *       no further mapping (M-14: only up to the last defined slot, trailing slots trimmed, a {@code '#'}-prefixed
+     *       value not used as a label).</li>
+     *   <li><b>Named</b> (YSM 2.3.0+) - the keys are the animation names themselves, in declaration order, and the
+     *       <em>values</em> are the labels. LaPluma 2.5.3 declares exactly this: {@code HI}, {@code WHAT}, {@code Bird},
+     *       {@code Illustration0}, {@code Illustration1} plus three {@code '#...'} sub-page markers, and its
+     *       {@code extra.animation.json} really defines those named clips. Upstream's roulette works from the same
+     *       ordered pairs and shows {@code LanguageManager.getI18n(model, "properties.extra_animation." + key, value)}
+     *       ({@code tmp/YesSteveModel-dev-1.20/.../client/gui/AnimationRouletteScreen.java:719-750}), which is the rule
+     *       {@link #extraAnimationLabel} applies here.</li>
+     * </ul>
+     *
+     * <p>The declaration order is the slot order on purpose: it is the order the rich table arrives in
+     * ({@code ModelConfigRegistry.wheelEntriesFor}, filled from the same map by the sync path), so element {@code i}
+     * here is the label of entry {@code i} there. Both are backed by a {@code LinkedHashMap} that the folder parser
+     * fills in JSON order and the binary serializer/deserializer round-trips in that order
+     * ({@code YSMBinarySerializer:468-469} writes the entries in iteration order, {@code YSMBinaryDeserializer:687-689}
+     * reads them back into a {@code LinkedHashMap}), so the mapping is stable across both channels and across
+     * restarts.</p>
+     */
     private static String[] getExtraAnimationNames(RawYsmModel raw) {
         if (raw.properties.extraAnimations.isEmpty()) {
             return new String[0];
         }
-        String[] names = new String[EXTRA_ANIMATION_SLOT_COUNT];
-        boolean hasAny = false;
+        // M-14:只回填到最后一个已定义的槽位。dev 基线固定返回 8 个元素,未定义槽位是 null,
+        // 会写进引擎的 extra_animation_names 数组里(消费端按槽位下标取值,所以不能重排,
+        // 但可以把尾部未定义的槽裁掉)。
+        int lastDefined = -1;
         for (int i = 0; i < EXTRA_ANIMATION_SLOT_COUNT; i++) {
-            String key = "extra" + i;
-            if (!raw.properties.extraAnimations.containsKey(key)) {
-                continue;
+            if (raw.properties.extraAnimations.containsKey("extra" + i)) {
+                lastDefined = i;
             }
-            String label = getLocalizedValue(raw, "properties.extra_animation." + key);
-            if (StringUtils.isBlank(label)) {
-                String configured = raw.properties.extraAnimations.get(key);
-                if (StringUtils.isNotBlank(configured) && !configured.startsWith("#")) {
+        }
+        if (lastDefined >= 0) {
+            String[] names = new String[lastDefined + 1];
+            for (int i = 0; i <= lastDefined; i++) {
+                names[i] = legacyExtraAnimationLabel(raw, "extra" + i);
+            }
+            return names;
+        }
+        String[] names = new String[raw.properties.extraAnimations.size()];
+        int index = 0;
+        for (String key : raw.properties.extraAnimations.keySet()) {
+            names[index++] = extraAnimationLabel(raw, key);
+        }
+        return names;
+    }
+
+    /**
+     * The legacy {@code extra<i>} label rule, unchanged: the pack's language file for
+     * {@code properties.extra_animation.<key>}, else the declared value when it is not a {@code '#'} reference, else
+     * the key itself. A legacy pack's keys are the animation names, so its labels and its playable slots are the same
+     * thing and nothing has to be substituted here.
+     */
+    private static String legacyExtraAnimationLabel(RawYsmModel raw, String key) {
+        String label = getLocalizedValue(raw, "properties.extra_animation." + key);
+        if (StringUtils.isBlank(label)) {
+            String configured = raw.properties.extraAnimations.get(key);
+            if (StringUtils.isNotBlank(configured) && !configured.startsWith("#")) {
+                label = configured;
+            }
+        }
+        return StringUtils.isBlank(label) ? key : label;
+    }
+
+    /**
+     * The label of one named entry, exactly upstream's rule
+     * ({@code AnimationRouletteScreen.java:719-750}): the pack's language file for
+     * {@code properties.extra_animation.<key>} wins, then the declared value - except that a value which is a
+     * {@code '#'} reference to a declared settings button is shown as that button's own {@code name}, which is what
+     * upstream substitutes before the language lookup ({@code :726-736}); if the reference names no known button it is
+     * shown as written. A blank result falls back to the key, so a sector is never unlabelled.
+     * <p>
+     * The {@code '#'} in a <em>key</em> needs no special case here: it is a sub-page marker, and its value (for
+     * example {@code 更多动作}) is the label the pack wrote for it.
+     */
+    private static String extraAnimationLabel(RawYsmModel raw, String key) {
+        String label = getLocalizedValue(raw, "properties.extra_animation." + key);
+        if (StringUtils.isBlank(label)) {
+            String configured = raw.properties.extraAnimations.get(key);
+            if (StringUtils.isNotBlank(configured)) {
+                if (configured.startsWith("#")) {
+                    RawYsmModel.ExtraAnimationButton button =
+                        findExtraAnimationButton(raw, configured.substring(1));
+                    label = button != null && StringUtils.isNotBlank(button.name) ? button.name : configured;
+                } else {
                     label = configured;
                 }
             }
-            if (StringUtils.isBlank(label)) {
-                label = key;
-            }
-            names[i] = label;
-            hasAny = true;
         }
-        return hasAny ? names : new String[0];
+        return StringUtils.isBlank(label) ? key : label;
+    }
+
+    /** One declared {@code extra_animation_buttons} entry by id, or {@code null} when the pack declares no such id. */
+    private static RawYsmModel.ExtraAnimationButton findExtraAnimationButton(RawYsmModel raw, String id) {
+        if (StringUtils.isBlank(id)) {
+            return null;
+        }
+        for (RawYsmModel.ExtraAnimationButton button : raw.properties.extraAnimationButtons) {
+            if (id.equals(button.id)) {
+                return button;
+            }
+        }
+        return null;
     }
 
     private static String getLocalizedValue(RawYsmModel raw, String key) {
@@ -447,12 +868,30 @@ public final class RawYsmModelAdapter {
     }
 
     private static boolean putAnimationFile(Map<String, byte[]> animations, String key,
-        RawYsmModel.RawAnimationFile animationFile) {
+        RawYsmModel.RawAnimationFile animationFile) throws IOException {
         if (animationFile == null) {
             return false;
         }
         if (animationFile.sourceJson != null) {
-            animations.put(key, animationFile.sourceJson);
+            // Preserve unknown source metadata, replacing only timeline with parser-normalized statements (G06).
+            try {
+                JsonObject root = new com.google.gson.JsonParser().parse(
+                    new String(animationFile.sourceJson, StandardCharsets.UTF_8)).getAsJsonObject();
+                JsonObject sourceAnimations = root.getAsJsonObject("animations");
+                if (sourceAnimations != null) {
+                    for (RawYsmModel.RawAnimation animation : animationFile.animations.values()) {
+                        JsonElement entry = sourceAnimations.get(animation.name);
+                        if (entry != null && entry.isJsonObject()) {
+                            JsonObject json = entry.getAsJsonObject();
+                            json.remove("timeline");
+                            putTimeline(json, animation.timelineEvents);
+                        }
+                    }
+                }
+                animations.put(key, ysmu.GSON.toJson(root).getBytes(StandardCharsets.UTF_8));
+            } catch (RuntimeException failure) {
+                throw new IOException("Could not normalize source animation timelines for " + key, failure);
+            }
             return true;
         }
         if (!animationFile.animations.isEmpty()) {
@@ -485,6 +924,13 @@ public final class RawYsmModelAdapter {
         if (animation.blendWeight != null) {
             json.add("blend_weight", molangValue(animation.blendWeight));
         }
+        // Bedrock's per-animation `anim_speed` / `anim_time_update`. They have to be re-emitted here because this
+        // method IS the animation JSON for a baked payload: `putAnimationFile` prefers `RawAnimationFile.sourceJson`,
+        // and a payload has none (`YSMBinarySerializer` does not write it), so every binary-channel model's animation
+        // JSON is generated from the structure - and a field this method does not write is a field the engine never
+        // sees. `ClientModelManager.attachAnimSpeed` is the reader on the other end.
+        putOptionalText(json, "anim_speed", animation.animSpeed);
+        putOptionalText(json, "anim_time_update", animation.animTimeUpdate);
 
         JsonObject bones = new JsonObject();
         for (RawYsmModel.RawBoneAnimation boneAnimation : animation.boneAnimations) {
@@ -508,6 +954,11 @@ public final class RawYsmModelAdapter {
         return json;
     }
 
+    /**
+     * M-17:内部 loopMode 到 JSON 的映射。1 = LOOP、3 = HOLD_ON_LAST_FRAME、0 = PLAY_ONCE;
+     * 2 不写 loop 字段(交给引擎默认值)。散件解析侧必须产出同一套编号,否则
+     * hold_on_last_frame 会被降级成"引擎默认"。
+     */
     private static void putLoopMode(JsonObject json, int loopMode) {
         if (loopMode == 1) {
             json.addProperty("loop", true);
@@ -518,8 +969,17 @@ public final class RawYsmModelAdapter {
         }
     }
 
-    private static void putChannel(JsonObject bone, String channelName, List<RawYsmModel.RawKeyframe> keyframes) {
-        if (keyframes.isEmpty()) {
+    /**
+     * Adds {@code key} as a string property when the value is non-blank. Bedrock writes these as either a number or
+     * a MoLang expression, and the engine's own fields are Strings, so a number that came in as text stays text.
+     */
+    private static void putOptionalText(JsonObject json, String key, String value) {
+        if (value != null && !value.trim().isEmpty()) {
+            json.addProperty(key, value);
+        }
+    }
+
+    private static void putChannel(JsonObject bone, String channelName, List<RawYsmModel.RawKeyframe> keyframes) {        if (keyframes.isEmpty()) {
             return;
         }
         if (keyframes.size() == 1) {
@@ -646,7 +1106,11 @@ public final class RawYsmModelAdapter {
     }
 
     private static byte[] readDefaultAnimation(String fileName) throws IOException {
-        Path defaultPath = CUSTOM.resolve("default").resolve(fileName);
+        // SOURCE 在这里（:1238-1249）加的回退是 BUILT/default/<fileName>，那条路径在本仓永远不命中：内置
+        // default 现在是现代 ysm.json 包，动画在 builtin/default/animations/ 下，根目录只有 ysm.json 与
+        // models|textures|avatar|lang。实际解析见 ServerModelManager.defaultAnimationFile（先 custom/default，
+        // 再 builtin/default/animations）。
+        Path defaultPath = defaultAnimationFile(fileName);
         if (Files.isRegularFile(defaultPath)) {
             return Files.readAllBytes(defaultPath);
         }

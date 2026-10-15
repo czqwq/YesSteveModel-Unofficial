@@ -52,6 +52,12 @@ public class YSMBinarySerializer {
         }
     }
 
+    /**
+     * The stream this writes is the one {@link YSMBinaryDeserializer}'s two-argument constructor reads - the sync
+     * payload layout - for every {@code writeFooter} value; {@code writeFooter} only controls the trailing footer, not
+     * the animation records. The one-argument constructor is the real {@code .ysm} reader, and a real file has no
+     * {@code anim_speed} / {@code anim_time_update} fields (see {@link #writeAnimationFileContent}).
+     */
     private static void writeModern(YSMByteBuf buf, RawYsmModel model, int format) {
         writeSoundFiles(buf, model.soundFiles, format);
         writeFunctionFiles(buf, model.functionFiles);
@@ -132,10 +138,35 @@ public class YSMBinarySerializer {
             writeGeometry(buf, sub.model, format);
             if (format > 26) {
                 buf.writeVarInt(0x01); // footer
-                buf.writeString(sub.identifier);
+                buf.writeString(subEntityIdentifier(sub));
             }
             index++;
         }
+    }
+
+    /**
+     * The name a sub-entity's footer carries.
+     * <p>
+     * A pack declares the entity types a projectile answers to in its {@code match} list, and the {@code match} is the
+     * only thing that says a given sub-entity is the arrow. When the declaration is the object form the parsed
+     * identifier already is that entity type, but the array form synthesises a positional name
+     * ({@code projectile_0}) - and writing that would leave the receiving client with a projectile it cannot match to
+     * any entity, so the arrow renders vanilla. The footer therefore carries the first declared match id whenever
+     * there is one.
+     * <p>
+     * Only the first is written, because the footer is a single string and widening it would change the layout that
+     * is also used to read genuine upstream {@code .ysm} files. A sub-entity covering several entity types therefore
+     * keeps all of them when it is loaded locally, and the first one when it arrives over the network.
+     */
+    private static String subEntityIdentifier(RawYsmModel.RawSubEntity sub) {
+        if (sub.matchIds != null) {
+            for (String matchId : sub.matchIds) {
+                if (matchId != null && !matchId.isEmpty()) {
+                    return matchId;
+                }
+            }
+        }
+        return sub.identifier != null ? sub.identifier : "";
     }
 
     private static void writeGeometry(YSMByteBuf buf, RawYsmModel.RawGeometry geo, int format) {
@@ -226,6 +257,31 @@ public class YSMBinarySerializer {
                     buf.writeFloat(sfx.timestamp * 20f);
                 }
             }
+
+            // Bedrock's per-animation `anim_speed` / `anim_time_update` (number or MoLang expression).
+            //
+            // **Which layout gets them.** This serializer's output is always read by `YSMBinaryDeserializer`'s
+            // two-argument constructor - `writeFooter` only controls the trailing footer, and the layout of the
+            // animation records is the same either way (the format round-trip tests serialize with
+            // `writeFooter=false` and read with the two-argument constructor). The one-argument constructor is the
+            // real OpenYSM `.ysm` reader, and a real file has no such fields, so they are written here and read only
+            // there. That is what keeps a third-party `.ysm` parseable: it never goes through this writer.
+            //
+            // A payload written by an older build is not a problem either: the OpenYSM channel is refused outright
+            // when the two sides' version strings differ (`C2SVersionCheck17.Handler`, `PROTOCOL_VERSION =
+            // Tags.VERSION`), and a cached payload from another build is not found because the cache name carries
+            // `OPEN_YSM_BAKE_VERSION`, which this change bumps.
+            writeOptionalString(buf, anim.animSpeed);
+            writeOptionalString(buf, anim.animTimeUpdate);
+        }
+    }
+
+    /** {@code 0} for null/empty, else {@code 1} followed by the string - one explicit presence byte per field. */
+    private static void writeOptionalString(YSMByteBuf buf, String value) {
+        boolean present = value != null && !value.isEmpty();
+        buf.writeVarInt(present ? 1 : 0);
+        if (present) {
+            buf.writeString(value);
         }
     }
 

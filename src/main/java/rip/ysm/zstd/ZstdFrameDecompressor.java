@@ -55,6 +55,7 @@ import static rip.ysm.zstd.Util.verify;
 import static java.lang.String.format;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 class ZstdFrameDecompressor
 {
     private static final int[] DEC_32_TABLE = {4, 1, 2, 1, 4, 4, 4, 4};

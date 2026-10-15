@@ -47,7 +47,16 @@ public class JsonAnimationUtils {
      *         and the JsonElement is the actual animation
      */
     public static Set<Map.Entry<String, JsonElement>> getAnimations(JsonObject json) {
-        return getObjectListAsArray(json.getAsJsonObject("animations"));
+        if (json == null || !json.has("animations") || json.get("animations").isJsonNull()) {
+            // Some models put non-animation JSON (controllers, molang, etc.) in the
+            // animation map. Defensively return an empty set instead of NPE.
+            return new java.util.LinkedHashSet<>();
+        }
+        JsonObject animations = json.getAsJsonObject("animations");
+        if (animations == null) {
+            return new java.util.LinkedHashSet<>();
+        }
+        return getObjectListAsArray(animations);
     }
 
     /**
@@ -90,8 +99,34 @@ public class JsonAnimationUtils {
                     .isJsonObject()) {
                     JsonObject valueObject = entrySet.getValue()
                         .getAsJsonObject();
-                    if (valueObject.has("post")) {
-                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), valueObject.get("post")));
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
                     }
                 } else {
                     output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
@@ -128,8 +163,34 @@ public class JsonAnimationUtils {
                     .isJsonObject()) {
                     JsonObject valueObject = entrySet.getValue()
                         .getAsJsonObject();
-                    if (valueObject.has("post")) {
-                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), valueObject.get("post")));
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
                     }
                 } else {
                     output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
@@ -166,8 +227,34 @@ public class JsonAnimationUtils {
                     .isJsonObject()) {
                     JsonObject valueObject = entrySet.getValue()
                         .getAsJsonObject();
-                    if (valueObject.has("post")) {
-                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), valueObject.get("post")));
+                    if (valueObject.has("pre")) {
+                        // Bedrock step keyframe (the value changes between `pre` and
+                        // `post`, i.e. the bone jumps at this time). Hand the raw
+                        // object to JsonKeyFrameUtils, which emits the two frames
+                        // GeckoLib needs to reproduce the jump. Wrapping it into a
+                        // single vector here used to drop `pre` entirely, which
+                        // turned every step into a linear ramp AND, worse, made the
+                        // interval *before* a channel's first keyframe use that
+                        // keyframe's `post` value instead of its `pre` value — so
+                        // one-shot effect bones (a lightning bone meant to flash for
+                        // one frame) stayed visible long before they should.
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
+                    } else if (valueObject.has("post")) {
+                        JsonElement postValue = valueObject.get("post");
+                        JsonObject wrapped = new JsonObject();
+                        if (postValue.isJsonPrimitive()) {
+                            JsonArray arr = new JsonArray();
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            arr.add(postValue);
+                            wrapped.add("vector", arr);
+                        } else {
+                            wrapped.add("vector", postValue);
+                        }
+                        if (valueObject.has("lerp_mode")) {
+                            wrapped.add("lerp_mode", valueObject.get("lerp_mode"));
+                        }
+                        output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), wrapped));
                     }
                 } else {
                     output.add(new AbstractMap.SimpleEntry<>(entrySet.getKey(), entrySet.getValue()));
@@ -364,6 +451,21 @@ public class JsonAnimationUtils {
         }
         if (animation.animationLength == null) {
             animation.animationLength = calculateLength(animation.boneAnimations);
+        } else {
+            // 长度必须覆盖关键帧跨度。Bedrock 的"阶梯关键帧" `{"pre":…,"post":…}` 在
+            // JsonKeyFrameUtils 里被展开成两个间隔 1e-7 秒的关键帧；如果阶梯正好在动画末尾，
+            // 关键帧跨度就比 JSON 里的 animation_length 大 2e-6 tick。采样 tick 会被钳到
+            // animation_length，从而落在最后一段阶梯**内部**（约 2% 处）："停在最后一帧"永远
+            // 拿不到 post 值，而是插值出 ~0.02 倍的结果。
+            // 实例：某弹射物把箭身缩放到 0.8 的阶梯放在 post_main 末尾，实测只剩 0.015 ——
+            // 整套光效骨骼被压到 2%，看起来像"动画没生效、模型停在绑定姿势"。
+            // 把长度抬到至少等于跨度即可：tick 钳到跨度末端，最后一段正好插值到 post。
+            double keyFrameSpan = calculateLength(animation.boneAnimations);
+            // calculateLength 用 Double.MAX_VALUE 表示"一个关键帧都没有"（纯 timeline 动画），
+            // 那种动画的长度不能被改写。
+            if (keyFrameSpan > 0 && keyFrameSpan < Double.MAX_VALUE) {
+                animation.animationLength = Math.max(animation.animationLength, keyFrameSpan);
+            }
         }
 
         return animation;
@@ -371,11 +473,15 @@ public class JsonAnimationUtils {
 
     private static String instructionString(JsonElement element) {
         if (element instanceof JsonArray) {
+            // YSMU：YSM 允许 timeline 写成字符串数组（官方 Bedrock 是单表达式）。数组元素之间用
+            // ";" **加换行** 拼接，不能只用 ";"：元素里可以有 C 风格行注释，而"注释吃到行尾"的
+            // 语义需要换行才能终止 —— 没有换行时第一个 `//` 会把后面所有语句全部吃掉
+            // （实测一条 21959 字符的 timeline 被剥成空串，模型 Molang 一行都不执行）。
             StringBuilder out = new StringBuilder();
             JsonArray array = element.getAsJsonArray();
             for (int i = 0; i < array.size(); i++) {
                 if (i > 0) {
-                    out.append(';');
+                    out.append(";\n");
                 }
                 out.append(array.get(i).getAsString());
             }

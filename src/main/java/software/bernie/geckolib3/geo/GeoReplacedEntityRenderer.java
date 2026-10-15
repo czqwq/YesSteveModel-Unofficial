@@ -62,6 +62,7 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
         this.renderManager = RenderManager.instance;
         this.modelProvider = modelProvider;
         this.animatable = animatable;
+        this.currentAnimatable = animatable;
     }
 
     public static void registerReplacedEntity(Class<? extends IAnimatable> itemClass,
@@ -76,80 +77,29 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
     @Override
     public void doRender(EntityLivingBase entity, double x, double y, double z, float entityYaw, float partialTicks) {
         if (!(entity instanceof EntityLivingBase)) return;
+        // Ensure currentAnimatable is synced for getEntityTexture()
+        if (this.animatable != null) {
+            this.currentAnimatable = this.animatable;
+        }
         GlStateManager.pushMatrix();
         try {
             GlStateManager.translate(x, y, z);
 
-            // TODO: entity.isPassenger() looks redundant here
-            boolean shouldSit = /* entity.isPassenger() && */ (entity.ridingEntity != null
-                && entity.ridingEntity.shouldRiderSit());
-            EntityModelData entityModelData = new EntityModelData();
-            entityModelData.isSitting = shouldSit;
-            entityModelData.isChild = entity.isChild();
+            AnimationEvent predicate = buildAnimationEvent(entity, partialTicks, this.animatable);
+            // The four locals the layer pass below needs are the event's own inputs. The two head values are carried
+            // negated inside the entity data (see buildAnimationEvent, which keeps the engine's signs), so they are
+            // negated back here rather than computed a second time.
+            EntityModelData entityModelData = (EntityModelData) predicate.getExtraData()
+                .get(0);
+            float limbSwing = predicate.getLimbSwing();
+            float limbSwingAmount = predicate.getLimbSwingAmount();
+            float netHeadYaw = -entityModelData.netHeadYaw;
+            float headPitch = -entityModelData.headPitch;
 
-            float f = Interpolations.lerpYaw(entity.prevRenderYawOffset, entity.renderYawOffset, partialTicks);
-            float f1 = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
-            float netHeadYaw = f1 - f;
-
-            // 修复头部旋转角度突变问题
-            netHeadYaw = wrapDegrees(netHeadYaw);
-
-            if (shouldSit && entity.ridingEntity instanceof EntityLivingBase livingentity) {
-                f = Interpolations
-                    .lerpYaw(livingentity.prevRenderYawOffset, livingentity.renderYawOffset, partialTicks);
-                netHeadYaw = f1 - f;
-                float f3 = wrapDegrees(netHeadYaw);
-                if (f3 < -85.0F) {
-                    f3 = -85.0F;
-                }
-
-                if (f3 >= 85.0F) {
-                    f3 = 85.0F;
-                }
-
-                f = f1 - f3;
-                if (f3 * f3 > 2500.0F) {
-                    f += f3 * 0.2F;
-                }
-
-                netHeadYaw = f1 - f;
-            }
-
-            float headPitch = Interpolations.lerp(entity.prevRotationPitch, entity.rotationPitch, partialTicks);
-            /*
-             * TODO: vanilla mobs can't sleep in beds in 1.12.2 and below if
-             * (entity.getPose() == Pose.SLEEPING) { Direction direction =
-             * entity.getBedDirection(); if (direction != null) { float f4 =
-             * entity.getEyeHeight(Pose.STANDING) - 0.1F; stack.translate((double) ((float)
-             * (-direction.getXOffset()) * f4), 0.0D, (double) ((float)
-             * (-direction.getZOffset()) * f4)); } }
-             */
             float f7 = this.handleRotationFloat(entity, partialTicks);
-            this.applyRotations(entity, f7, f, partialTicks);
+            this.applyRotations(entity, f7, this.resolveBodyYaw(entity, partialTicks, entityModelData.isSitting),
+                partialTicks);
 
-            float limbSwingAmount = 0.0F;
-            float limbSwing = 0.0F;
-            if (!shouldSit && entity.isEntityAlive()) {
-                limbSwingAmount = Interpolations.lerp(entity.prevLimbSwingAmount, entity.limbSwingAmount, partialTicks);
-                limbSwing = entity.limbSwing - entity.limbSwingAmount * (1.0F - partialTicks);
-                if (entity.isChild()) {
-                    limbSwing *= 3.0F;
-                }
-
-                if (limbSwingAmount > 1.0F) {
-                    limbSwingAmount = 1.0F;
-                }
-            }
-            entityModelData.headPitch = -headPitch;
-            entityModelData.netHeadYaw = -netHeadYaw;
-
-            AnimationEvent predicate = new AnimationEvent(
-                animatable,
-                limbSwing,
-                limbSwingAmount,
-                partialTicks,
-                !(limbSwingAmount > -0.15F && limbSwingAmount < 0.15F),
-                Collections.singletonList(entityModelData));
             GeoModel model = modelProvider.getModel(modelProvider.getModelLocation(animatable));
             if (modelProvider instanceof IAnimatableModel) {
                 ((IAnimatableModel<T>) modelProvider)
@@ -161,21 +111,36 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                 GlStateManager.translate(0, 0.01f, 0);
                 Minecraft.getMinecraft().renderEngine.bindTexture(getEntityTexture(entity));
                 Color renderColor = getRenderColor(entity, partialTicks);
+                boolean layersFirst = shouldRenderLayersFirst(animatable);
+                if (layersFirst) {
+                    renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
+                        renderColor);
+                }
 
-                if (!entity.isInvisibleToPlayer(Minecraft.getMinecraft().thePlayer)) render(
-                    model,
-                    entity,
-                    partialTicks,
-                    (float) renderColor.getRed() / 255f,
-                    (float) renderColor.getGreen() / 255f,
-                    (float) renderColor.getBlue() / 255f,
-                    (float) renderColor.getAlpha() / 255);
+                if (!entity.isInvisibleToPlayer(Minecraft.getMinecraft().thePlayer)) {
+                    // Upstream asks for the render type here and hands it to the draw
+                    // (com/elfmcys/ysm/geckolib3/geo/GeoReplacedEntityRenderer.java:88-90). 1.7.10 has no
+                    // shouldEntityAppearGlowing, so the glowing flag is always false. The translucency question goes
+                    // to the animatable, which is the host that owns this model's textures.
+                    YsmRenderType renderType = getRenderType(
+                        getEntityTexture(entity),
+                        true,
+                        false,
+                        hasTranslucentVertices(animatable));
+                    render(
+                        model,
+                        entity,
+                        renderType,
+                        partialTicks,
+                        (float) renderColor.getRed() / 255f,
+                        (float) renderColor.getGreen() / 255f,
+                        (float) renderColor.getBlue() / 255f,
+                        (float) renderColor.getAlpha() / 255);
+                }
 
-                if (entity instanceof EntityPlayer) {
-                    for (GeoLayerRenderer layerRenderer : this.layerRenderers) {
-                        layerRenderer.render(entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw,
-                            headPitch, renderColor);
-                    }
+                if (!layersFirst) {
+                    renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
+                        renderColor);
                 }
                 if (entity instanceof EntityLiving) {
                     Entity leashHolder = ((EntityLiving) entity).getLeashedToEntity();
@@ -185,6 +150,9 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                 }
                 RenderHurtColor.render(this, model, entity, entity, partialTicks);
             } catch (Exception e) {
+                // Report instead of swallowing: a failure here leaves the entity with no GeckoLib frame at all, and
+                // the debug flag alone used to make that indistinguishable from an empty model.
+                reportRenderFailure("entity " + entity + " with model " + model, e);
                 if (ConfigHandler.debugPrintStacktraces) {
                     e.printStackTrace();
                 }
@@ -192,6 +160,7 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                 GlStateManager.popMatrix();
             }
         } catch (Exception e) {
+            reportRenderFailure("entity " + entity, e);
             if (ConfigHandler.debugPrintStacktraces) {
                 e.printStackTrace();
             }
@@ -200,6 +169,124 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
         }
 
         this.passSpecialRender(entity, x, y, z);
+    }
+
+    /**
+     * The entity's body yaw for this frame, sitting-aware: the entity's own interpolated yaw, or - when a sitting
+     * entity's head is clamped against the seat it is riding - the yaw left after that clamp. This is the value
+     * {@link #applyRotations} rotates by.
+     *
+     * <p>
+     * Split out of {@link #doRender} unchanged (the same computation, with the head yaw passed in) so that the frame's
+     * event and the frame's draw cannot disagree about the body yaw. Engine edit recorded in
+     * {@code .agent/phase22-first-person-arm-pose.md} and {@code PROVENANCE.md}.
+     */
+    protected float resolveBodyYaw(EntityLivingBase entity, float partialTicks, boolean shouldSit) {
+        float f = Interpolations.lerpYaw(entity.prevRenderYawOffset, entity.renderYawOffset, partialTicks);
+        if (!shouldSit || !(entity.ridingEntity instanceof EntityLivingBase livingentity)) {
+            return f;
+        }
+        float headYaw = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
+        f = Interpolations.lerpYaw(livingentity.prevRenderYawOffset, livingentity.renderYawOffset, partialTicks);
+        float f3 = wrapDegrees(headYaw - f);
+        if (f3 < -85.0F) {
+            f3 = -85.0F;
+        }
+        if (f3 >= 85.0F) {
+            f3 = 85.0F;
+        }
+        f = headYaw - f3;
+        if (f3 * f3 > 2500.0F) {
+            f += f3 * 0.2F;
+        }
+        return f;
+    }
+
+    /**
+     * Builds the animation event for one rendered frame of {@code entity}, over {@code eventAnimatable}.
+     *
+     * <p>
+     * Extracted from {@link #doRender} unchanged so that a second animatable bound to the same entity can be ticked
+     * with the same per-frame values: the port's first-person arm is its own animatable
+     * ({@code com.fox.ysmu.client.entity.CustomFirstPersonArmEntity}) and is posed by the same event its body would
+     * get. Upstream has exactly this shape - one event builder per entity, used by both the body and the arm
+     * ({@code geckolib3/model/AnimatableEntity.java:280-339} builds it, {@code :341-390} ticks with it, and
+     * {@code client/entity/CustomFirstPersonArmEntity.java:105-108} is the arm's own setup). Engine edit recorded in
+     * {@code .agent/phase22-first-person-arm-pose.md} and {@code PROVENANCE.md}.
+     *
+     * @param eventAnimatable the animatable this event is for; the renderer's own for a world draw, the arm's own for
+     *                        a first-person arm tick
+     */
+    public AnimationEvent<T> buildAnimationEvent(EntityLivingBase entity, float partialTicks, T eventAnimatable) {
+        // TODO: entity.isPassenger() looks redundant here
+        boolean shouldSit = /* entity.isPassenger() && */ (entity.ridingEntity != null
+            && entity.ridingEntity.shouldRiderSit());
+        EntityModelData entityModelData = new EntityModelData();
+        entityModelData.isSitting = shouldSit;
+        entityModelData.isChild = entity.isChild();
+
+        float f1 = Interpolations.lerpYaw(entity.prevRotationYawHead, entity.rotationYawHead, partialTicks);
+        float f = this.resolveBodyYaw(entity, partialTicks, shouldSit);
+        float netHeadYaw = f1 - f;
+        if (!shouldSit || !(entity.ridingEntity instanceof EntityLivingBase)) {
+            // 修复头部旋转角度突变问题
+            netHeadYaw = wrapDegrees(netHeadYaw);
+        }
+
+        float headPitch = Interpolations.lerp(entity.prevRotationPitch, entity.rotationPitch, partialTicks);
+        /*
+         * TODO: vanilla mobs can't sleep in beds in 1.12.2 and below if
+         * (entity.getPose() == Pose.SLEEPING) { Direction direction =
+         * entity.getBedDirection(); if (direction != null) { float f4 =
+         * entity.getEyeHeight(Pose.STANDING) - 0.1F; stack.translate((double) ((float)
+         * (-direction.getXOffset()) * f4), 0.0D, (double) ((float)
+         * (-direction.getZOffset()) * f4)); } }
+         */
+
+        float limbSwingAmount = 0.0F;
+        float limbSwing = 0.0F;
+        if (!shouldSit && entity.isEntityAlive()) {
+            limbSwingAmount = Interpolations.lerp(entity.prevLimbSwingAmount, entity.limbSwingAmount, partialTicks);
+            limbSwing = entity.limbSwing - entity.limbSwingAmount * (1.0F - partialTicks);
+            if (entity.isChild()) {
+                limbSwing *= 3.0F;
+            }
+
+            if (limbSwingAmount > 1.0F) {
+                limbSwingAmount = 1.0F;
+            }
+        }
+        entityModelData.headPitch = -headPitch;
+        entityModelData.netHeadYaw = -netHeadYaw;
+
+        return new AnimationEvent<>(
+            eventAnimatable,
+            limbSwing,
+            limbSwingAmount,
+            partialTicks,
+            !(limbSwingAmount > -0.15F && limbSwingAmount < 0.15F),
+            Collections.singletonList(entityModelData));
+    }
+
+    /**
+     * Draws every registered layer (held item, armor, back attachments) for one frame.
+     * <p>
+     * 附加层（手持物、护甲等）不再只对玩家开放：穿 YSM 模型的女仆不是 EntityPlayer，但同样需要
+     * 把物品挂在她自己的骨骼上画出来。因此这里放宽到任何 EntityLivingBase。
+     * 安全跳过条件：这一帧必须同时有 animatable 和可用的 geoModel。缺任一项时层没有骨架可挂
+     * （取骨骼或贴图时会 NPE），所以宁可不画；层自身也应各自检查自己的 geoModel 是否可用。
+     * <p>
+     * Called before or after the model depending on {@link #shouldRenderLayersFirst(Object)}.
+     */
+    private void renderLayers(GeoModel model, EntityLivingBase entity, float limbSwing, float limbSwingAmount,
+        float partialTicks, float ageInTicks, float netHeadYaw, float headPitch, Color renderColor) {
+        if (animatable == null || model == null) {
+            return;
+        }
+        for (GeoLayerRenderer layerRenderer : this.layerRenderers) {
+            layerRenderer.render(entity, limbSwing, limbSwingAmount, partialTicks, ageInTicks, netHeadYaw, headPitch,
+                renderColor);
+        }
     }
 
     protected void preRenderCallback(EntityLivingBase entitylivingbaseIn, float partialTickTime) {}
@@ -404,7 +491,7 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                     y + d14 * (double) (f3 * f3 + f3) * 0.5D + (double) ((24.0F - (float) j) / 18.0F + 0.125F) + 0.025D,
                     z + d15 * (double) f3);
             }
-            tessellator.draw();
+            software.bernie.geckolib3.util.TessellatorBufferKeep.draw(tessellator);
             tessellator.startDrawing(5);
 
             for (int k = 0; k <= 24; ++k) {
@@ -431,7 +518,7 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                     z + d15 * (double) f7 + 0.025D);
             }
 
-            tessellator.draw();
+            software.bernie.geckolib3.util.TessellatorBufferKeep.draw(tessellator);
             GlStateManager.enableLighting();
             GlStateManager.enableTexture2D();
             GlStateManager.enableCull();

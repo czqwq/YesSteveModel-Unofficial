@@ -17,22 +17,27 @@ import io.netty.buffer.Unpooled;
 
 class OpenYsmSyncProtocolTest {
 
+    /** N-11: both payload directions and the complete-feedback echo the sync session id. */
+    private static final int TEST_SESSION_ID = 0x5EED;
+
     @Test
     void modelSyncPayloadMessagesRoundTripOpaqueBytes() {
         byte[] payload = new byte[] { 1, 2, 3, 4, 5 };
 
-        C2SModelSyncPayload17 c2s = new C2SModelSyncPayload17(payload);
+        C2SModelSyncPayload17 c2s = new C2SModelSyncPayload17(TEST_SESSION_ID, payload);
         ByteBuf c2sBuf = Unpooled.buffer();
         c2s.toBytes(c2sBuf);
         C2SModelSyncPayload17 decodedC2s = new C2SModelSyncPayload17();
         decodedC2s.fromBytes(c2sBuf);
 
-        S2CModelSyncPayload17 s2c = new S2CModelSyncPayload17(payload);
+        S2CModelSyncPayload17 s2c = new S2CModelSyncPayload17(TEST_SESSION_ID, payload);
         ByteBuf s2cBuf = Unpooled.buffer();
         s2c.toBytes(s2cBuf);
         S2CModelSyncPayload17 decodedS2c = new S2CModelSyncPayload17();
         decodedS2c.fromBytes(s2cBuf);
 
+        assertEquals(TEST_SESSION_ID, decodedC2s.getSessionId());
+        assertEquals(TEST_SESSION_ID, decodedS2c.getSessionId());
         assertArrayEquals(payload, decodedC2s.getData());
         assertArrayEquals(payload, decodedS2c.getData());
     }
@@ -52,6 +57,7 @@ class OpenYsmSyncProtocolTest {
         decodedS2cVersion.fromBytes(s2cVersionBuf);
 
         C2SCompleteFeedback17 feedback = new C2SCompleteFeedback17(
+            TEST_SESSION_ID,
             C2SCompleteFeedback17.STATUS_SUCCESS,
             3,
             2,
@@ -64,6 +70,7 @@ class OpenYsmSyncProtocolTest {
 
         assertEquals("client-version", decodedC2sVersion.getVersion());
         assertEquals("server-version", decodedS2cVersion.getVersion());
+        assertEquals(TEST_SESSION_ID, decodedFeedback.getSessionId());
         assertEquals(C2SCompleteFeedback17.STATUS_SUCCESS, decodedFeedback.getStatus());
         assertEquals(3, decodedFeedback.getLoaded());
         assertEquals(2, decodedFeedback.getDownloaded());

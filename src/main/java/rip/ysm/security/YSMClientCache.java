@@ -12,11 +12,16 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import com.fox.ysmu.ysmu;
+
 public class YSMClientCache {
 
     public static String generateCacheFileName(long hash1, long hash2, byte[] rtKey) {
         if (rtKey == null || rtKey.length != 56) return null;
-        int seed = 114514; // todo: 换成真随机数
+        // S-04（记录级）：该 seed 与参考实现逐字节相同，源码注释 "todo: 换成真随机数" 也是上游原文。
+        // 缓存文件名因此可预测，但内容仍由 CityHash 签名 + verifyFileContent 校验，不构成安全缺陷；
+        // 这里保持与参考一致（换 seed 会让已有客户端缓存全部失效），只在审计记录里登记。
+        int seed = 114514;
 
         MT19937 mt = new MT19937(Integer.toUnsignedLong(seed));
         long m1 = hash1 ^ mt.extract_number();
@@ -56,7 +61,10 @@ public class YSMClientCache {
 
             long verif = calculatedHash ^ hash1 ^ hash2;
             return verif == realHash;
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            // M-16：旧实现静默 return false（“文件不可读”与“签名不符”无法区分，latest.log 里查不到线索）。
+            // 返回语义不变，只补一条日志。
+            ysmu.LOG.warn("Failed to verify YSM client cache file {}", cacheFile, e);
             return false;
         }
     }
