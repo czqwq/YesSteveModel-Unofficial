@@ -61,10 +61,13 @@ class OpenYsmControllerNameAliasesTest {
 
     @Test
     void theControllersJavaWiringNamesStillTryTheirUpstreamNames() {
-        Object[][] expectations = { { "main_controller", "player.main" }, { "hold_mainhand_controller", "player.hold_mainhand" },
+        // No `parallel_<i>` entry here on purpose: the port used to offer the grouped `player.parallel_0` to every
+        // parallel controller as a fallback, which made 14_momo's per-index definitions play the wrong clips. The
+        // per-index name is now the only one tried (see aParallelControllerIsBoundToItsClipByNameNotByPosition).
+        Object[][] expectations = { { "main_controller", "player.main" },
+            { "hold_mainhand_controller", "player.hold_mainhand" },
             { "hold_offhand_controller", "player.hold_offhand" }, { "swing_controller", "player.swing" },
-            { "use_controller", "player.use" }, { "cap_controller", "player.cap" },
-            { "parallel_3_controller", "player.parallel_0" }, { "pre_parallel_2_controller", "player.pre_parallel_0" } };
+            { "use_controller", "player.use" }, { "cap_controller", "player.cap" } };
         for (Object[] expectation : expectations) {
             String geckoName = (String) expectation[0];
             String upstreamName = (String) expectation[1];
@@ -87,27 +90,6 @@ class OpenYsmControllerNameAliasesTest {
             OpenYsmPlayerControllerRuntime.candidateControllerNames("parallel_3_controller")
                 .contains("parallel_3"),
             "the stripped controller name must stay reachable");
-    }
-
-    /**
-     * Upstream creates one parallel controller per definition the model declares, so a model that writes
-     * {@code player.parallel_4} expects that state machine to drive controller 4. This port used to send every
-     * parallel controller at the grouped {@code player.parallel_0}, which left {@code _1}..{@code _7} unreachable.
-     */
-    @Test
-    void aParallelControllerPrefersItsOwnDefinitionOverTheGroupedList() {
-        List<String> names = OpenYsmPlayerControllerRuntime.candidateControllerNames("parallel_4_controller");
-        assertTrue(names.contains("player.parallel_4"), names.toString());
-        assertTrue(
-            names.indexOf("player.parallel_4") < names.indexOf("player.parallel_0"),
-            "the per-index definition must be tried before the grouped fallback: " + names);
-        assertTrue(names.contains("player.parallel_0"), "the grouped list must stay reachable as a fallback: " + names);
-
-        List<String> preNames = OpenYsmPlayerControllerRuntime.candidateControllerNames("pre_parallel_2_controller");
-        assertTrue(preNames.contains("player.pre_parallel_2"), preNames.toString());
-        assertTrue(
-            preNames.indexOf("player.pre_parallel_2") < preNames.indexOf("player.pre_parallel_0"),
-            "the pre-parallel axis follows the same rule: " + preNames);
     }
 
     /**

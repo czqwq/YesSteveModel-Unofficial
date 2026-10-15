@@ -14,6 +14,11 @@ The engine's source is in this repository under three package roots:
 
 327 files in total, verified 327/327 byte-identical to the source repository at snapshot time.
 
+ImageStream (the JPEG/WebP/AVIF decoder library, `src/main/java/rip/ysm/imagestream`, 238 files plus its two
+`META-INF/services/javax.imageio.spi.*` files) is vendored the same way but is not part of the engine; its
+provenance and licence note are in `NOTICE.md`, and why it is source rather than a jar in
+`.agent/phase54-imagestream-packaging.md`.
+
 The `@Mod` annotation and its `preInit` handler were removed from
 `software/bernie/geckolib3/GeckoLib.java`, which stays as a plain class carrying `LOG` and the
 `geoStatsEnabled` switch (17 read sites in 11 engine files, plus `Config.java:294`). That was the only

@@ -125,7 +125,7 @@ config/ysmu/custom 中的 .ysm 文件也会被扫描。仅包含 main.json、arm
 
 config/ysmu/auth 是第三个扫描根（上游的 auth 根，见"模型授权"条）：放进去的模型/包与 custom 完全同构（同样的目录结构与 .ysm 文件规则），只是它的模型需要 `/ysm auth` 授权才能被玩家选用；同名冲突时 auth 胜过 custom（优先级 1 < 2）。这个目录默认是空的——**空目录 = 没有任何模型受限**，所以升级后的服务器行为与之前一致。
 
-模型图像在解析时规范化为 PNG。ModelImageConverter 用 libs/ImageStream--SNAPSHOT.jar 中内置的解码器（上游 OpenYSM 声明为 com.github.OpenYSM:ImageStream 的库）解码 BMP/JPEG/WebP/AVIF 并重新编码为 PNG，镜像上游的 YSMClientMapper；PNG 原样通过，无法解码的图像保持原样并每格式警告一次。因此客户端只接收 PNG，ClientModelMetadataRegistry 为旧缓存保留自己的格式守卫。该 jar 由 dependencies.gradle 末尾块未重定位地嵌入模组 jar，因为 GTNH 约定将 shadowImplementation 依赖重定位到 com/fox/ysmu/shadow/...，会破坏直接解码器调用和 META-INF/services/javax.imageio.spi.* 名称。
+模型图像在解析时规范化为 PNG。ModelImageConverter 用 libs/ImageStream--SNAPSHOT.jar 中内置的解码器（上游 OpenYSM 声明为 com.github.OpenYSM:ImageStream 的库）解码 BMP/JPEG/WebP/AVIF 并重新编码为 PNG，镜像上游的 YSMClientMapper；PNG 原样通过，无法解码的图像保持原样并每格式警告一次。因此客户端只接收 PNG，ClientModelMetadataRegistry 为旧缓存保留自己的格式守卫。**ImageStream 现在按源码 vendor 在 `src/main/java/rip/ysm/imagestream/**`（238 个文件）与 `src/main/resources/META-INF/services/javax.imageio.spi.*`**，与 GeckoLib 引擎同形。原先它是 `libs/` 里的一个 jar：由 `zipTree` 块嵌进产物、并挂上 dev 启动类路径，而那份 jar 是 Java 17 字节码（major 61）——1.7.10 的 FML 会用读不了它的 ASM 扫描每个类路径 jar，报 `Zip file … failed to read properly, it will be ignored` 并丢掉整个容器，三个解码器随即 `NoClassDefFoundError`（owner 的 runServer 日志实测）。源码化后由本仓自己编译、随其余代码一起降级到 JVM 8，产物不再依赖任何 `libs/` jar，也不会与代码漂移。见 .agent/phase54-imagestream-packaging.md。
 
 模型选择和纹理屏幕通过 ModelPreviewRegistry（同步载荷中的模型 preview_animation，未声明时为 idle）加 ModelPreviewAnimationState（上游 CatalogModelPreviewAnimationState 的移植）动画化每个图块。模型只需定义名为 hover、hover_fadeout 和 focus 的动画即可选择额外通道；淡出窗口是该动画长度。RenderUtil.renderEntityInInventory(..., hovered, focused) 驱动状态机并在预览 animatable 上设置 AnimationData.shouldPlayWhilePaused，因为打开 GUI 会暂停单人游戏，引擎否则拒绝推进时钟——无该标志图块渲染为冻结姿势。
 
@@ -197,7 +197,7 @@ Gradle 可直接运行，但运行中的构建占用项目：守护进程持有�
 `.\gradlew.bat test --tests "software.bernie.geckolib3.geo.material.*" --tests "com.fox.ysmu.client.ClientModelManager*"`），
 全量 `test` 是近千个用例、每次都要一分钟以上并占住整个源码树，不值得在迭代中重复。只有在交付前的最终确认、
 或改动横跨多处、无法判断影响面时才跑全量；跑全量时也只读失败断言与 `build/test-results/test/TEST-*.xml`，
-并记住 `OpenYsmControllerNameAliasesTest` 的两条失败是既有的，与本次改动无关。
+并注意原先这里记的"`OpenYsmControllerNameAliasesTest` 两条失败是既有的"已不成立：那两条断言的是被刻意去掉的 grouped `player.parallel_0` 回退，已删除，全量套件现在应当全绿。
 
 基于本机文件的测试不入库，只在本机跑。 有些测试必须直接读本机才有的东西——`run/` 的运行目录、`tmp/` 下的模型包——它们在克隆和 CI 上只会 `assumeTrue` 跳过，留着等于让仓库带一堆永不执行的用例，所以它们已被 `git rm --cached` 移出索引并列进 `.gitignore`（当前十项：LaPlumaSwordSwingReproTest、RunPoseDiagnosticTest、ChargeCircleDecalRendersTranslucentTest、ClientModelManagerOnDemandBuildTest、ClientModelManagerRegistrationCostTest、TranslucentTexelSamplingTest、YsmSyncChannelParityTest、ModelImageConverterTest、OpenYsmBakeRoundTripTest、LaPlumaToggleTimelineReproTest），本地照常运行。**不要为这类测试新造入库版本**：若测试真正需要的只是"能构建的字节"，用 `com.fox.ysmu.client.GeometryFixtures` 的写法——有真包就用真包，没有就用内联几何，永远都会跑（`GeometryFixtures` 及其五个使用者就是照这条留在库里的）。新增同类测试时把路径补进 `.gitignore` 那份清单。
 

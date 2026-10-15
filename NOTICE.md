@@ -18,3 +18,13 @@
 `All Rights Reserved`，**未收录**在本仓库中（本仓库没有它们的再分发授权）。
 
 因此：**不得将本仓库的内置模型资产用于商业用途**，即使代码本身是 MIT。
+
+## 第三方源码
+
+- `src/main/java/{software,com/eliotlash,net/geckominecraft}`：GeckoLib 3 动画引擎，MIT 许可，见
+  `LICENSE-geckolib-engine.txt` 与 `PROVENANCE.md`。
+- `src/main/java/rip/ysm/imagestream`（238 个文件）与 `src/main/resources/META-INF/services/javax.imageio.spi.*`：
+  ImageStream 图片解码库（JPEG/WebP/AVIF），取自 <https://github.com/OpenYSM/ImageStream> 提交
+  `71fa2bf3ce9ac646b8c68c0acfc3da7f7337cc14`（2026-05-05；上游声明为 `rip.ysm:imagestream:1.0-SNAPSHOT`，
+  `source/target=17`）。**上游仓库未声明任何许可证**；本仓按上游 YSM 相同的方式随包分发这些解码器，
+  Owner 已知悉并接受。
