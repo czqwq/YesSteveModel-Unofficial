@@ -4,6 +4,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 
 import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.event.api.SpecialPlayerRenderEvent;
 import com.fox.ysmu.util.AnimatableCacheUtil;
@@ -27,27 +28,34 @@ import org.lwjgl.opengl.GL12;
 import org.lwjgl.util.glu.Project;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.animation.AnimationDomain;
+import com.fox.ysmu.client.entity.CustomFirstPersonArmEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.compat.BackhandCompat;
 
 import software.bernie.geckolib3.core.IAnimatable;
+import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
+import software.bernie.geckolib3.geo.IGeoRenderer;
+import software.bernie.geckolib3.geo.YsmRenderType;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
-import software.bernie.geckolib3.geo.render.built.GeoCube;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
-import software.bernie.geckolib3.geo.render.built.GeoQuad;
-import software.bernie.geckolib3.geo.render.built.GeoVertex;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class FirstPersonHandRenderer {
 
     private static final String RIGHT_ARM = "RightArm";
     private static final float HAND_SWING_SCALE = 0.8F;
-    private static final float GECKO_ARM_TO_BIPED_X = -0.5F;
+    /**
+     * Where the arm model's shoulder is placed in the vanilla biped arm's frame. Upstream's own constants
+     * ({@code CustomFirstPersonArmRenderer}: {@code poseStack.translate(±0.25, 1.8, 0)} then {@code scale(-1, -1, 1)}),
+     * with the y value expressed as the built-in models' shoulder pivot (29 px) - upstream's {@code 1.8} is that same
+     * anchor to two decimals. See {@link #alignGeckoArmToVanillaBipedArm}.
+     */
+    private static final float GECKO_ARM_TO_BIPED_X = -0.25F;
     private static final float GECKO_ARM_SHOULDER_TO_BIPED_ORIGIN_Y = 29.0F / 16.0F;
     private static final float GECKO_ARM_TO_BIPED_Z = 0.0F;
     private static final float GECKO_ARM_ROLL_DEGREES = 180.0F;
-    private static final ArmRollPivot DEFAULT_ARM_ROLL_PIVOT = new ArmRollPivot(2.0F / 16.0F, 0.0F);
 
     private FirstPersonHandRenderer() {}
 
@@ -211,7 +219,9 @@ public final class FirstPersonHandRenderer {
                 rightArm,
                 texture,
                 partialTicks);
-            if (renderOffhand) {
+            // 配置隐藏的副手物品（如 Extra Utilities 除叶子斧）在第一人称不渲染
+            // (reference branch FirstPersonHandRenderer.java:206).
+            if (renderOffhand && !BackhandCompat.isHiddenOffhandItem(BackhandCompat.getOffhandItem(player))) {
                 BackhandCompat.renderOffhand(partialTicks);
             }
         } finally {
@@ -255,9 +265,41 @@ public final class FirstPersonHandRenderer {
             (float) (light / 65536));
     }
 
+    /**
+     * Ticks the first-person arm once for this frame, so the bone this frame draws is posed by its own controllers
+     * instead of sitting at its bind pose.
+     *
+     * <p>
+     * The gap this closes: the arm's {@code GeoModel} is read straight out of the engine's cache
+     * ({@link #getCustomHandRenderContext}, {@code GeckoLibCache#getGeoModels}), and a {@code GeoModel}'s bones only
+     * enter an {@code AnimationProcessor} through {@code AnimatedGeoModel#getModel} - which the port only ever called
+     * with the <em>main</em> model id (the world path: {@code GeoReplacedEntityRenderer#doRender}). Upstream instead
+     * ticks a {@code CustomFirstPersonArmEntity} of its own every frame and draws the result. See
+     * {@code CustomFirstPersonArmEntity#tickFirstPersonArm}.
+     *
+     * <p>
+     * The event is the frame's own, built by the renderer for <em>this</em> animatable
+     * ({@code GeoReplacedEntityRenderer#buildAnimationEvent}), so the arm reads the same limb and head values, and
+     * publishes the same MoLang values, as the body does in the same frame.
+     */
+    private static void poseFirstPersonArm(CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer,
+        EntityPlayer player, float partialTicks) {
+        if (!(customPlayer instanceof CustomFirstPersonArmEntity arm)) {
+            return;
+        }
+        if (!(renderer.getGeoModelProvider() instanceof CustomPlayerModel provider)) {
+            return;
+        }
+        AnimationEvent<CustomPlayerEntity> event = renderer.buildAnimationEvent(player, partialTicks, arm);
+        arm.tickFirstPersonArm(provider, event);
+    }
+
     private static void renderCustomEmptyMainHand(Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
         CustomPlayerRenderer renderer, CustomPlayerEntity customPlayer, GeoBone rightArm, ResourceLocation texture,
         float partialTicks) {
+        // Pose the arm before drawing it, which is what upstream's arm renderer does
+        // (client/renderer/CustomFirstPersonArmRenderer.java:27-28: checkModelUpdate() then update(partialTick)).
+        poseFirstPersonArm(renderer, customPlayer, player, partialTicks);
         GL11.glPushMatrix();
         try {
             applyVanillaEmptyHandTransform(player, itemRenderer, partialTicks);
@@ -268,10 +310,15 @@ public final class FirstPersonHandRenderer {
             // entity's raw selection: the arm follows the same rule as the body, as upstream's arm renderer does.
             mc.getTextureManager()
                 .bindTexture(texture);
-            prepareCustomArmState();
+            // The state this draw gets is the state the world path draws this same geometry with, not a state of the
+            // arm path's own; see armRenderType.
+            YsmRenderType renderType = armRenderType(renderer, texture, customPlayer.hasTranslucentVertices());
+            prepareCustomArmState(renderType);
             try {
-                alignGeckoArmToVanillaBipedArm(rightArm);
-                renderRightArmBone(renderer, rightArm, customPlayer);
+                alignGeckoArmToVanillaBipedArm();
+                GeoModel armModel = GeckoLibCache.getInstance().getGeoModels().get(ModelIdUtil.getArmId(
+                    ModelIdUtil.getModelIdFromMainId(customPlayer.getMainModel())));
+                renderer.renderMaterialRoot(customPlayer, armModel, rightArm, texture, renderType);
             } finally {
                 restoreCustomArmState();
             }
@@ -311,35 +358,94 @@ public final class FirstPersonHandRenderer {
         GL11.glTranslatef(5.6F, 0.0F, 0.0F);
     }
 
-    private static void prepareCustomArmState() {
-        // Upstream draws this arm unconditionally with CustomTranslucentRenderType
-        // (client/renderer/CustomFirstPersonArmRenderer.java:39), i.e. blending and back-face culling. This path does
-        // not go through IGeoRenderer#render - it draws the bone directly - so the state its type would set is applied
-        // here, and culling is the half that matters: without it the zero-uv back faces of the model's flat decals
-        // are drawn as single-texel slabs over the art.
-        GlStateManager.enableBlend();
-        OpenGlHelper.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
+    /**
+     * The render type this arm is drawn with: the same ask the world path makes for the same model and the same
+     * texture, through the same {@code IGeoRenderer#getRenderType} the world path and the preview path call
+     * ({@code com/elfmcys/ysm/geckolib3/geo/IGeoRenderer.java:33-39}; the port's callers are
+     * {@code GeoReplacedEntityRenderer.java:180-184} and {@code RenderUtil.java:492-493}).
+     * <p>
+     * It is deliberately <em>not</em> upstream's arm answer taken on its own. Upstream hands its first-person arm
+     * {@code CustomTranslucentRenderType} unconditionally
+     * ({@code client/renderer/CustomFirstPersonArmRenderer.java:39}), which wraps {@code RenderType.entityTranslucent}:
+     * blending and back-face culling, no alpha test. Upstream's world path asks the model instead and answers
+     * {@code RenderType.entityCutoutNoCull} - alpha test, no blending, no culling - for a model without a translucent
+     * vertex. In 1.20 the type applies its own state, so the arm's different answer is invisible there; 1.7.10 has no
+     * {@code RenderType}, this path draws the bone directly, and hardcoding the arm's answer gave an opaque model
+     * alpha test off (a texel with alpha 0 is not discarded: the black patch over the unlit inside of the far face)
+     * and culling on (a face of a flat or single-layer piece is dropped: the see-through holes). The arm is that
+     * model's own geometry, so the model's answer is the one that must be used - the same geometry drawn two ways in
+     * one frame is the defect.
+     */
+    static YsmRenderType armRenderType(IGeoRenderer<?> renderer, ResourceLocation texture, boolean translucent) {
+        return renderer.getRenderType(texture, true, false, translucent);
+    }
+
+    /**
+     * Applies the chosen type with {@code IGeoRenderer#render}'s own rules ({@code IGeoRenderer.java:77-95}), because
+     * this path draws the bone directly instead of going through {@code render}.
+     */
+    private static void prepareCustomArmState(YsmRenderType type) {
+        if (type.isCull()) {
+            GlStateManager.enableCull();
+        } else {
+            GlStateManager.disableCull();
+        }
+        if (type.isAlphaTest()) {
+            GlStateManager.enableAlpha();
+            GlStateManager.alphaFunc(GL11.GL_GREATER, type.getAlphaRef());
+        } else {
+            GlStateManager.disableAlpha();
+        }
+        if (type.isBlend()) {
+            GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            GlStateManager.enableBlend();
+        } else {
+            GlStateManager.disableBlend();
+        }
+        // render() enables texture 2D for its draw (:95). This path binds the texture itself and must do the same:
+        // the vanilla hand pass it replaces does not enable it either.
+        GL11.glEnable(GL11.GL_TEXTURE_2D);
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+    }
+
+    /**
+     * Leaves what {@code IGeoRenderer#render} leaves ({@code IGeoRenderer.java:116-118}): no blend, no alpha test, and
+     * culling back on for the vanilla passes that follow this one.
+     */
+    private static void restoreCustomArmState() {
+        GlStateManager.disableBlend();
         GlStateManager.disableAlpha();
         GlStateManager.enableCull();
+        // 镜像绕序的复位：见 alignGeckoArmToVanillaBipedArm，与 CustomPlayerItemInHandLayer.java:113 的写法一致。
+        GL11.glFrontFace(GL11.GL_CCW);
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }
 
-    private static void restoreCustomArmState() {
-        GlStateManager.enableCull();
-        GlStateManager.disableBlend();
-        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-    }
-
-    private static void alignGeckoArmToVanillaBipedArm(GeoBone rightArm) {
-        ArmRollPivot rollPivot = findArmRollPivot(rightArm);
+    /**
+     * Places the arm model where the vanilla biped arm sits, in the same shape upstream uses
+     * ({@code CustomFirstPersonArmRenderer}: translate to the shoulder, then {@code scale(-1, -1, 1)}).
+     * <p>
+     * One deliberate difference: 1.7.10's first-person camera looks down {@code -Z} where 1.20's looks down
+     * {@code +Z}, so the arm needs one more half-turn about Y - which is what {@link #GECKO_ARM_ROLL_DEGREES} is. It
+     * is applied <b>about the origin</b>, exactly like upstream's scale: a rotation about any other point also
+     * translates, and that translation is whatever the pivot happens to be. The arm used to be rolled about the
+     * centre of its own bounding box, which made the offset a property of each pack's geometry (0.23 blocks for the
+     * built-in default arm, more for an arm whose cubes sit off the bone axis, e.g. {@code LaPluma2.5.3} whose arm
+     * cubes live in child bones spanning x -2.6..+4.2 px) - the arm was drawn displaced from the hand and from where
+     * the pack authored it. See {@code .agent/phase46-first-person-arm-alignment.md}.
+     */
+    private static void alignGeckoArmToVanillaBipedArm() {
         GL11.glTranslatef(
             GECKO_ARM_TO_BIPED_X,
             GECKO_ARM_SHOULDER_TO_BIPED_ORIGIN_Y,
             GECKO_ARM_TO_BIPED_Z);
         GL11.glScalef(1.0F, -1.0F, 1.0F);
-        GL11.glTranslatef(rollPivot.x, 0.0F, rollPivot.z);
+        // 镜像导致的面剔除反转：模型矩阵从这里起是负行列式（det = -1），而 GL 的正反面按屏幕空间绕序判定，
+        // 于是模型自己的正面到这一步成了背面。修正方式与镜像物品完全相同（CustomPlayerItemInHandLayer.java:107，
+        // 同一句中文注释），只在镜像生效期间改绕序；不剔除的分支（cutout/no-cull）不受影响，剔除的分支
+        // （translucent）才不会把该看见的正面剔掉、只留远侧内壁。复位见 restoreCustomArmState。
+        GL11.glFrontFace(GL11.GL_CW);
         GL11.glRotatef(GECKO_ARM_ROLL_DEGREES, 0.0F, 1.0F, 0.0F);
-        GL11.glTranslatef(-rollPivot.x, 0.0F, -rollPivot.z);
     }
 
     private static void renderRightArmBone(CustomPlayerRenderer renderer, GeoBone rightArm,
@@ -348,30 +454,6 @@ public final class FirstPersonHandRenderer {
         tessellator.startDrawing(GL11.GL_QUADS);
         renderer.renderRecursively(tessellator, customPlayer, rightArm, 1.0F, 1.0F, 1.0F, 1.0F);
         tessellator.draw();
-    }
-
-    private static ArmRollPivot findArmRollPivot(GeoBone rightArm) {
-        ArmRollBounds bounds = new ArmRollBounds();
-        collectArmRollBounds(rightArm, bounds);
-        return bounds.hasValues()
-            ? new ArmRollPivot((bounds.minX + bounds.maxX) * 0.5F, (bounds.minZ + bounds.maxZ) * 0.5F)
-            : DEFAULT_ARM_ROLL_PIVOT;
-    }
-
-    private static void collectArmRollBounds(GeoBone bone, ArmRollBounds bounds) {
-        for (GeoCube cube : bone.childCubes) {
-            for (GeoQuad quad : cube.quads) {
-                if (quad == null) {
-                    continue;
-                }
-                for (GeoVertex vertex : quad.vertices) {
-                    bounds.include(vertex.position.x, vertex.position.z);
-                }
-            }
-        }
-        for (GeoBone child : bone.childBones) {
-            collectArmRollBounds(child, bounds);
-        }
     }
 
     private static Optional<GeoBone> findRightArmBone(GeoModel geoModel) {
@@ -394,34 +476,6 @@ public final class FirstPersonHandRenderer {
         }
     }
 
-    private static final class ArmRollPivot {
-        private final float x;
-        private final float z;
-
-        private ArmRollPivot(float x, float z) {
-            this.x = x;
-            this.z = z;
-        }
-    }
-
-    private static final class ArmRollBounds {
-        private float minX = Float.POSITIVE_INFINITY;
-        private float maxX = Float.NEGATIVE_INFINITY;
-        private float minZ = Float.POSITIVE_INFINITY;
-        private float maxZ = Float.NEGATIVE_INFINITY;
-
-        private void include(float x, float z) {
-            this.minX = Math.min(this.minX, x);
-            this.maxX = Math.max(this.maxX, x);
-            this.minZ = Math.min(this.minZ, z);
-            this.maxZ = Math.max(this.maxZ, z);
-        }
-
-        private boolean hasValues() {
-            return this.minX != Float.POSITIVE_INFINITY;
-        }
-    }
-
     private static CustomHandRenderContext getCustomHandRenderContext(Minecraft mc, EntityPlayer player,
         ItemRenderer itemRenderer) {
         if (!shouldRenderCustomHand(mc, player, itemRenderer)) {
@@ -432,20 +486,35 @@ public final class FirstPersonHandRenderer {
         if (eep == null) {
             return null;
         }
-        ResourceLocation modelId = eep.getModelId();
-        if (modelId == null) {
+        ResourceLocation requested = eep.getModelId();
+        if (requested == null) {
             return null;
         }
         // The arm model is built together with the rest of the model, on demand. Ask for it here so a player who is
         // holding nothing but looking at their own hand still gets the model built; the lookup below stays null-safe
         // for the few frames before that finishes.
-        com.fox.ysmu.client.ClientModelManager.ensureGeometry(modelId);
+        com.fox.ysmu.client.ClientModelManager.ensureGeometry(requested);
         // ...but the arm geometry outlives a connection in the engine's cache while this connection's textures do
         // not, and this path binds the model's texture directly (see renderCustomEmptyMainHand). A stale arm from the
         // previous server would therefore bind a texture that has not been uploaded, so the custom hand waits for
         // this connection to publish the model and the vanilla hand is used until then.
-        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(modelId)) {
-            return null;
+        //
+        // The arm follows the *body's applied model*, which is upstream's own wiring: its arm entity is told the body's
+        // model hash and reads the body's texture name and texture id back
+        // (client/entity/CustomFirstPersonArmEntity.java:22,59-66,74-76), so the two never show different models. While
+        // the requested model is Pending or Failed, the arm therefore uses what the body is showing
+        // (AppliedModelRegistry); with nothing applied yet it stays vanilla, which is this port's equivalent of
+        // upstream's arm target simply not being loaded.
+        ResourceLocation modelId = requested;
+        ResourceLocation textureId = eep.getSelectTexture();
+        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(requested)) {
+            AppliedModelRegistry.Applied applied = AppliedModelRegistry.applied(player);
+            if (!com.fox.ysmu.client.ClientModelManager.hasModelContent(requested) || applied == null
+                || !com.fox.ysmu.client.ClientModelManager.isModelPublished(applied.mainModelId())) {
+                return null;
+            }
+            modelId = applied.mainModelId();
+            textureId = applied.textureId();
         }
         GeoModel geoModel = GeckoLibCache.getInstance()
             .getGeoModels()
@@ -460,7 +529,7 @@ public final class FirstPersonHandRenderer {
         if (renderer == null) {
             return null;
         }
-        CustomPlayerEntity customPlayer = getCustomHandPlayer(modelId, eep, player);
+        CustomPlayerEntity customPlayer = getCustomHandPlayer(modelId, textureId, player);
         if (customPlayer == null) {
             return null;
         }
@@ -477,13 +546,32 @@ public final class FirstPersonHandRenderer {
         return new CustomHandRenderContext(renderer, customPlayer, rightArm.get(), texture);
     }
 
-    private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ExtendedModelInfo eep,
+    /**
+     * The animatable this arm draws with: {@link CustomFirstPersonArmEntity}, i.e. the model read from the
+     * first-person animation domain rather than the model proper's ({@link AnimationDomain}). Upstream's counterpart
+     * is {@code CustomFirstPersonArmEntity} and its {@code fpArmAnimations} store
+     * ({@code model/resource/client/render/ModelRenderTargetLoader.java:251-253}).
+     * <p>
+     * It is cached under the model's {@code arm} id, not under the model id a GUI preview uses, so the arm can never
+     * inherit a pose or a model a preview left on that animatable. Since the catalog tiles moved to their own
+     * {@code CustomGuiPlayerEntity} instances, this cache holds the arm and nothing else: no screen invalidates it any
+     * more, so the entry lives until {@code CacheBuilder}'s five-minute idle expiry and the arm's animation clock is
+     * not reset by opening or paging through the model browser.
+     * <p>
+     * The main model id is still set on it, because the things this arm asks of its animatable are about the model
+     * (scale, layer order, roaming namespace), not about which file its animation comes from.
+     *
+     * @param textureId the texture this model is drawn with - the player's selection, or the applied model's own
+     *                  texture while a newer selection is still Pending or Failed; see the caller
+     */
+    private static CustomPlayerEntity getCustomHandPlayer(ResourceLocation modelId, ResourceLocation textureId,
         EntityPlayer player) {
+        ResourceLocation firstPersonKey = ModelIdUtil.getArmId(modelId);
         IAnimatable animatable;
         try {
-            animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(modelId, () -> {
-                CustomPlayerEntity entity = new CustomPlayerEntity();
-                entity.setTexture(eep.getSelectTexture());
+            animatable = AnimatableCacheUtil.ANIMATABLE_CACHE.get(firstPersonKey, () -> {
+                CustomPlayerEntity entity = new CustomFirstPersonArmEntity();
+                entity.setTexture(textureId);
                 return entity;
             });
         } catch (ExecutionException e) {
@@ -492,7 +580,7 @@ public final class FirstPersonHandRenderer {
         if (animatable instanceof CustomPlayerEntity customPlayer) {
             customPlayer.setPlayer(player);
             customPlayer.setMainModel(ModelIdUtil.getMainId(modelId));
-            customPlayer.setTexture(eep.getSelectTexture());
+            customPlayer.setTexture(textureId);
             return customPlayer;
         }
         return null;

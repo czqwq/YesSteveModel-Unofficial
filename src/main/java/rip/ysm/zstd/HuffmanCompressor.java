@@ -17,6 +17,7 @@ import static rip.ysm.zstd.Constants.SIZE_OF_LONG;
 import static rip.ysm.zstd.Constants.SIZE_OF_SHORT;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 
+@SuppressWarnings("removal")
 final class HuffmanCompressor
 {
     private HuffmanCompressor()

@@ -12,7 +12,7 @@ import net.minecraft.client.resources.I18n;
  * 模组设置页。分页显示：第 1/2 页沿用参考分支的开关与循环按钮分组。
  * <p>
  * 本移植分支 {@code Config} 多出来的调试/调优字段（DEBUG_*、PARTICLE_Y_ADJUST、PARTICLE_ZERO_OFFSET、
- * GUI_POST_CLOSE_GRACE_SECONDS、ANIMATION_TRANSITION_TICKS 等）**没有**对应的
+ * GUI_POST_CLOSE_GRACE_SECONDS 等）**没有**对应的
  * {@code gui.yes_steve_model.config.*} 语言键，参考分支也没有为它们提供界面，因此它们只保留在
  * config/ysmu.cfg 里可改，不在此页暴露（不自行编造中英文文案）。
  */
@@ -42,8 +42,13 @@ public class ConfigScreen extends GuiScreen {
             addCheckbox(1,  x + 5, y + 25 + i++ * 22, "disable_self_model",       Config.DISABLE_SELF_MODEL);
             addCheckbox(2,  x + 5, y + 25 + i++ * 22, "disable_other_model",     Config.DISABLE_OTHER_MODEL);
             addCheckbox(4,  x + 5, y + 25 + i++ * 22, "disable_self_hands",      Config.DISABLE_SELF_HANDS);
+            // 子实体开关：upstream 的设置页就在这一组里(`ClientConfig.java:48-52` 定义，其 `ConfigScreen.java:44-45`
+            // 放复选框),所以本仓照做;文案用 upstream 的原文。
+            addCheckbox(16, x + 5, y + 25 + i++ * 22, "disable_projectile_model", Config.DISABLE_PROJECTILE_MODEL);
+            addCheckbox(17, x + 5, y + 25 + i++ * 22, "disable_vehicle_model",  Config.DISABLE_VEHICLE_MODEL);
             addCheckbox(5,  x + 5, y + 25 + i++ * 22, "disable_player_render",   Config.DISABLE_PLAYER_RENDER);
-            addCheckbox(6,  x + 5, y + 25 + i++ * 22, "swap_config_sides",       Config.SWAP_CONFIG_SIDES);
+            // `swap_config_sides` (id 6) 的复选框已移除：本仓轮盘没有配置面板/预览，那个开关点不动。
+            // 值仍在 config/ysmu.cfg（见 Config.SWAP_CONFIG_SIDES 的注释）。
             addCheckbox(8,  x + 5, y + 25 + i++ * 22, "gui_enhancements",        Config.GUI_ENHANCEMENTS);
             // 预览刷新：点击循环离散值（0-4），文本置中与其他点击项一致
             this.buttonList.add(new FlatColorButton(9, x + 5, y + 25 + i++ * 22, 400, 20,
@@ -91,7 +96,7 @@ public class ConfigScreen extends GuiScreen {
                 page = (page + 1) % PAGE_COUNT;
                 this.initGui();
                 break;
-            case 1: case 2: case 3: case 4: case 5: case 6: case 8:
+            case 1: case 2: case 3: case 4: case 5: case 6: case 8: case 16: case 17:
                 actionPage0(button);
                 break;
             case 7: case 9: case 11: case 12: case 13: case 14:
@@ -123,11 +128,23 @@ public class ConfigScreen extends GuiScreen {
                 ((ConfigCheckBox) button).doPress();
                 break;
             case 6:
-                Config.SWAP_CONFIG_SIDES = !Config.SWAP_CONFIG_SIDES;
-                ((ConfigCheckBox) button).doPress();
+                // `swap_config_sides` is deliberately not exposed: this port's AnimationRouletteScreen has neither a
+                // config panel nor a 3D preview, so the reference's feature it switches has no seam here and the
+                // checkbox did nothing when clicked. The value stays in `config/ysmu.cfg`
+                // (`Config.SWAP_CONFIG_SIDES`, which records the reference's five usage sites) - the same treatment
+                // `NamedParallelExtraSlots` gets above, for the same reason: a control that visibly does nothing
+                // reads as a bug, while a config-file-only value does not lie.
                 break;
             case 8:
                 Config.GUI_ENHANCEMENTS = !Config.GUI_ENHANCEMENTS;
+                ((ConfigCheckBox) button).doPress();
+                break;
+            case 16:
+                Config.DISABLE_PROJECTILE_MODEL = !Config.DISABLE_PROJECTILE_MODEL;
+                ((ConfigCheckBox) button).doPress();
+                break;
+            case 17:
+                Config.DISABLE_VEHICLE_MODEL = !Config.DISABLE_VEHICLE_MODEL;
                 ((ConfigCheckBox) button).doPress();
                 break;
         }

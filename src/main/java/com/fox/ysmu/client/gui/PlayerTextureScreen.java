@@ -2,6 +2,7 @@ package com.fox.ysmu.client.gui;
 
 import com.fox.ysmu.client.gui.button.FlatColorButton;
 import com.fox.ysmu.client.gui.button.TextureButton;
+import com.fox.ysmu.client.renderer.PreviewRefreshPolicy;
 import net.minecraft.client.audio.PositionedSoundRecord;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
@@ -40,10 +41,13 @@ public class PlayerTextureScreen extends GuiScreen {
 
     @Override
     public void initGui() {
+        // 翻页 / 重新 initGui 会丢掉旧 tile,每个 tile 的离屏 FBO(行 43)只能在这里释放 —— 否则每翻一页
+        // 泄漏一张 GL 贴图(参考 PlayerTextureScreen.java:583-585 的同一处理)。
+        this.disposePreviewButtons();
         this.buttonList.clear();
-        // Same as the model screen: a fresh visit starts the preview animations over.
+        // Same as the model screen: a fresh visit starts the preview animations over, and each tile owns (and
+        // disposes) its own animatable, so ANIMATABLE_CACHE is not cleared here - see PlayerModelScreen#initGui.
         com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
-        com.fox.ysmu.util.AnimatableCacheUtil.ANIMATABLE_CACHE.invalidateAll();
         com.fox.ysmu.util.AnimatableCacheUtil.TEXTURE_GUI_CACHE.invalidateAll();
         this.x = (width - 420) / 2;
         this.y = (height - 235) / 2;
@@ -96,10 +100,12 @@ public class PlayerTextureScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTick) {
+        // 行 43:预览刷新预算每个渲染帧推进一次(见 PlayerModelScreen#drawScreen 的说明)。
+        PreviewRefreshPolicy.beginFrame();
         this.drawDefaultBackground();
         this.drawGradientRect(x, y, x + 420, y + 235, 0xff_222222, 0xff_222222);
 
-        String texturePageInfo = String.format("%d/%d", texturePage + 1, this.maxTexturePage + 1);
+        String texturePageInfo = "%d/%d".formatted(texturePage + 1, this.maxTexturePage + 1);
         this.drawString(fontRendererObj, texturePageInfo, x + 251 + (56 - fontRendererObj.getStringWidth(texturePageInfo)) / 2, y + 10, 0xF3EFE0);
 
         super.drawScreen(mouseX, mouseY, partialTick);
@@ -140,5 +146,20 @@ public class PlayerTextureScreen extends GuiScreen {
     @Override
     public boolean doesGuiPauseGame() {
         return false;
+    }
+
+    @Override
+    public void onGuiClosed() {
+        // 关闭贴图页时同样要释放每个 tile 的离屏 FBO(参考 PlayerTextureScreen.java:583-585)。
+        this.disposePreviewButtons();
+    }
+
+    /** Releases the off-screen FBO of every texture tile on this screen; see {@link TextureButton#dispose()}. */
+    private void disposePreviewButtons() {
+        for (Object button : this.buttonList) {
+            if (button instanceof TextureButton textureButton) {
+                textureButton.dispose();
+            }
+        }
     }
 }

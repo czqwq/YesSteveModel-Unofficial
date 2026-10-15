@@ -48,6 +48,12 @@ public final class YsmFormat {
                     }
                     String modelId = ModelIdUtil.getInternalModelId(
                         removeExtension(OpenYsmFormat.toModelName(rootPath, file)));
+                    ModelIndexCache.Source source = ModelIndexCache
+                        .Source.of(ModelIndexCache.Scanner.LEGACY_YSM, rootPath, file);
+                    // 命中索引则跳过这个 .ysm：不解包、不解密、不烘 ModelData、不加密。
+                    if (ModelIndexCache.restoreIfHit(source, modelId)) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     try {
                         Map<String, byte[]> data = YesModelUtils.input(file.toFile());
                         if (data.isEmpty()) {
@@ -67,7 +73,9 @@ public final class YsmFormat {
 
                         ServerModelInfo info = cacheModel(data, modelId);
                         if (info != null) {
-                            CACHE_NAME_INFO.put(modelId, info);
+                            // 第 6 项：唯一登记入口（显式来源优先级 + 同名冲突日志），不再是裸 put。
+                            registerModel(modelId, info, null, file, rootPath);
+                            ModelIndexCache.remember(source, modelId, info, null);
                         }
                     } catch (Exception | LinkageError e) {
                         ysmu.LOG.warn("Failed to cache legacy .ysm model {}", file, e);
@@ -113,16 +121,19 @@ public final class YsmFormat {
     }
 
     private static byte[] getBytes(Map<String, byte[]> data, String fileName) throws IOException {
+        // M1/D7:模型自己没带这份动画时落到内置 default。SOURCE 里根本没有 YsmFormat（.ysm 的解包路径是本仓自己的
+        // 实现），所以这条内置回退是本仓的扩展，不是照抄；路径解析与 FolderFormat 共用
+        // ServerModelManager.defaultAnimationFile。
         if (MAIN_ANIMATION_FILE_NAME.equals(fileName) && !data.containsKey(MAIN_ANIMATION_FILE_NAME)) {
-            Path filePath = CUSTOM.resolve("default/main.animation.json");
+            Path filePath = defaultAnimationFile(MAIN_ANIMATION_FILE_NAME);
             return FileUtils.readFileToByteArray(filePath.toFile());
         }
         if (ARM_ANIMATION_FILE_NAME.equals(fileName) && !data.containsKey(ARM_ANIMATION_FILE_NAME)) {
-            Path filePath = CUSTOM.resolve("default/arm.animation.json");
+            Path filePath = defaultAnimationFile(ARM_ANIMATION_FILE_NAME);
             return FileUtils.readFileToByteArray(filePath.toFile());
         }
         if (EXTRA_ANIMATION_FILE_NAME.equals(fileName) && !data.containsKey(EXTRA_ANIMATION_FILE_NAME)) {
-            Path filePath = CUSTOM.resolve("default/extra.animation.json");
+            Path filePath = defaultAnimationFile(EXTRA_ANIMATION_FILE_NAME);
             return FileUtils.readFileToByteArray(filePath.toFile());
         }
 

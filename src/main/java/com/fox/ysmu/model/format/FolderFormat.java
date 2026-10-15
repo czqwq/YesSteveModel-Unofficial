@@ -67,9 +67,17 @@ public final class FolderFormat {
                         return FileVisitResult.CONTINUE;
                     }
                     String modelId = ModelIdUtil.getInternalModelId(OpenYsmFormat.toModelName(rootPath, dir));
+                    ModelIndexCache.Source source = ModelIndexCache
+                        .Source.of(ModelIndexCache.Scanner.LEGACY_FOLDER, rootPath, dir);
+                    // 命中索引则跳过整个模型目录：不读 main.json/arm.json/贴图，不烘 ModelData，不加密。
+                    if (ModelIndexCache.restoreIfHit(source, modelId)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
                     ServerModelInfo info = cacheModel(dir, modelId);
                     if (info != null) {
-                        CACHE_NAME_INFO.put(modelId, info);
+                        // 第 6 项：唯一登记入口（显式来源优先级 + 同名冲突日志），不再是裸 put。
+                        registerModel(modelId, info, null, dir, rootPath);
+                        ModelIndexCache.remember(source, modelId, info, null);
                     }
                     return FileVisitResult.SKIP_SUBTREE;
                 }
@@ -152,17 +160,20 @@ public final class FolderFormat {
 
     private static byte[] getBytes(Path root, String fileName) throws IOException {
         Path filePath = root.resolve(fileName);
+        // M1/D7:模型自己没带这份动画时落到内置 default。SOURCE 的 FolderFormat.getBytes(:202-237) 只有
+        // CUSTOM/default 一条路径（连它自己都没修），本仓按实际布局补上内置回退，见
+        // ServerModelManager.defaultAnimationFile。
         if (MAIN_ANIMATION_FILE_NAME.equals(fileName) && !filePath.toFile()
             .isFile()) {
-            filePath = CUSTOM.resolve("default/main.animation.json");
+            filePath = defaultAnimationFile(MAIN_ANIMATION_FILE_NAME);
         }
         if (ARM_ANIMATION_FILE_NAME.equals(fileName) && !filePath.toFile()
             .isFile()) {
-            filePath = CUSTOM.resolve("default/arm.animation.json");
+            filePath = defaultAnimationFile(ARM_ANIMATION_FILE_NAME);
         }
         if (EXTRA_ANIMATION_FILE_NAME.equals(fileName) && !filePath.toFile()
             .isFile()) {
-            filePath = CUSTOM.resolve("default/extra.animation.json");
+            filePath = defaultAnimationFile(EXTRA_ANIMATION_FILE_NAME);
         }
 
         if (MAIN_MODEL_FILE_NAME.equals(fileName) || ARM_MODEL_FILE_NAME.equals(fileName)) {

@@ -9,10 +9,6 @@ pluginManagement {
                 includeGroupByRegex("com\\.gtnewhorizons\\..+")
             }
         }
-        maven {
-            name = "reposiliteRepositoryGtnhPublic"
-            url = uri("https://maven.gaytnh.com/gtnh-public")
-        }
         gradlePluginPortal()
         mavenCentral()
         maven {
@@ -27,5 +23,5 @@ pluginManagement {
 }
 
 plugins {
-    id("com.gtnewhorizons.gtnhsettingsconvention") version("2.0.29")
+    id("com.gtnewhorizons.gtnhsettingsconvention") version("2.0.34")
 }

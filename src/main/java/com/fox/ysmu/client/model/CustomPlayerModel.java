@@ -183,15 +183,35 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         clearHeadPoseOffsets();
         List extraData = animationEvent.getExtraData();
         MolangParser parser = GeckoLibCache.getInstance().parser;
-        if (!Minecraft.getMinecraft()
+        if (animatable instanceof com.fox.ysmu.client.entity.CustomGuiPlayerEntity preview
+            && preview.getQueryPlayer() != null) {
+            // Upstream CustomGuiPlayerEntity owns its query entity, physics and processor. The approved off-model
+            // forms use the same shape, not the world owner temporarily posed by an inventory renderer.
+            EntityModelData previewData = new EntityModelData();
+            previewData.isSitting = preview.getQueryPlayer().isRiding();
+            previewData.isChild = preview.getQueryPlayer().isChild();
+            previewData.netHeadYaw = preview.getQueryPlayer().rotationYawHead - preview.getQueryPlayer().renderYawOffset;
+            previewData.headPitch = preview.getQueryPlayer().rotationPitch;
+            AnimationRegister.setParserValue(animationEvent, parser, previewData, preview.getQueryPlayer(), false);
+            try {
+                super.setLivingAnimations(animatable, instanceId, animationEvent);
+                com.fox.ysmu.client.roaming.ModelFormExecution.drain(preview);
+            } finally {
+                MolangPhysicsRuntime.end();
+            }
+        } else if (!Minecraft.getMinecraft()
             .isGamePaused() && extraData.size() == 1
             && extraData.get(0) instanceof EntityModelData data
             && animatable instanceof CustomPlayerEntity customPlayer
             && customPlayer.getPlayer() != null) {
             EntityPlayer player = customPlayer.getPlayer();
-            AnimationRegister.setParserValue(animationEvent, parser, data, player);
+            AnimationRegister.setParserValue(animationEvent, parser, data, player, customPlayer.firesHumanoidHooks());
             try {
                 super.setLivingAnimations(animatable, instanceId, animationEvent);
+                // Upstream AnimationProcessor.java:259-265 executes form tasks in postProcess, after animation.
+                if (customPlayer.firesHumanoidHooks()) {
+                    com.fox.ysmu.client.roaming.ModelFormExecution.drain(customPlayer);
+                }
                 this.codeAnimation(animationEvent, data, player);
             } finally {
                 MolangPhysicsRuntime.end();
@@ -250,6 +270,36 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         private HeadPoseOffset(float rotationX, float rotationY) {
             this.rotationX = rotationX;
             this.rotationY = rotationY;
+        }
+    }
+
+    /**
+     * 资源框架释放一份几何（{@code ReleaseMode.DROP_HEAP}）时调用，把 {@code model}
+     * 转达给渲染器持有的那一个模型实例，让它松手（丢骨骼登记 + 清 {@code currentModel}）。
+     *
+     * <p>见 {@link AnimatedGeoModel#onModelReleased(GeoModel)}：不这么做的话，"最后渲染过的
+     * 那份几何"会一直被强引用，{@code DROP_HEAP} 只搬走了 GeckoLibCache 里的登记项，
+     * 堆内存并没有真的释放。渲染器实例在客户端初始化后才存在，所以这里全程容错：
+     * 拿不到实例（关服/早期）就没有东西需要松手。
+     *
+     * <p>Reference {@code CustomPlayerModel.java:421-438}。
+     */
+    public static void onGeoModelReleased(GeoModel model) {
+        if (model == null) {
+            return;
+        }
+        try {
+            com.fox.ysmu.client.renderer.CustomPlayerRenderer renderer =
+                com.fox.ysmu.client.ClientProxy.getInstance();
+            if (renderer == null) {
+                return;
+            }
+            AnimatedGeoModel provider = renderer.getGeoModelProvider();
+            if (provider != null) {
+                provider.onModelReleased(model);
+            }
+        } catch (Throwable ignored) {
+            // 未初始化 / 正在关闭：没有需要松手的登记项。
         }
     }
 

@@ -105,9 +105,11 @@ public final class ModelImageConverter {
                     warnOnce(format, "the format is not recognised");
                     return null;
             }
-        } catch (Exception | LinkageError e) {
-            // A missing ImageStream (or an image its decoders reject) must not fail the model: keep the original
-            // bytes, exactly like before this class existed, and say so once per format.
+        } catch (Throwable e) {
+            // Throwable, not `Exception | LinkageError`: AWT's SPI registry raises ServiceConfigurationError (an
+            // Error) when the ImageStream providers are invisible to it - see PackFormat.readImageSize. A missing
+            // ImageStream (or an image its decoders reject) must not fail the model: keep the original bytes,
+            // exactly like before this class existed, and say so once per format.
             warnOnce(format, e.getClass()
                 .getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage()));
             return null;
@@ -118,14 +120,19 @@ public final class ModelImageConverter {
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             ImageIO.write(image, "PNG", out);
             return out.toByteArray();
-        } catch (IOException e) {
+        } catch (Throwable e) {
+            // Same reason as decode: keep the original bytes rather than fail the model.
             warnOnce(FORMAT_PNG, "PNG re-encoding failed: " + e);
             return null;
         }
     }
 
-    /** PNG dimensions straight from the IHDR chunk, without decoding the pixels. */
-    private static int[] pngSize(byte[] data) {
+    /**
+     * PNG dimensions straight from the IHDR chunk, without decoding the pixels. Public because
+     * {@code PackFormat} reads the {@code ysm-pack.png} cover's size the same way, and there must be one such
+     * parser: the caller is responsible for confirming the bytes are a PNG first.
+     */
+    public static int[] pngSize(byte[] data) {
         if (data.length < 24) {
             return new int[] { 0, 0 };
         }

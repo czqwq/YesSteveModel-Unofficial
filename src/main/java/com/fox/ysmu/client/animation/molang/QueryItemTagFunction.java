@@ -93,8 +93,12 @@ public class QueryItemTagFunction extends Function {
      *   <li><b>未映射</b>（来源可用但我们没实现）：只在 {@code DebugController} 下提示一次，
      *       这是真正值得补映射的信号。</li>
      * </ul>
+     * <p>
+     * {@code public} 是为了让控制器条件路径（{@code OpenYsmControllerExpressionEvaluator}
+     * 的 {@code query.equipped_item_*_tag} 分支）共用这**一份**判定：两条路径匹配同一批标签，
+     * 提示也必须只能有一条实现，否则一条路径报"这个标签答不了"、另一条静默返回 false。
      */
-    private static void reportUnsupported(String tag) {
+    public static void reportUnsupported(String tag) {
         if (ItemTagMatcher.statusOf(tag) == ItemTagMatcher.Status.SUPPORTED) {
             return;
         }

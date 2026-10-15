@@ -12,6 +12,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -41,6 +42,14 @@ class ModelBrowserStateTest {
         state.rebuild(modelPaths, Collections.emptyMap(), Collections.emptyMap());
     }
 
+    /**
+     * Filter with nothing locked: the authorization predicate says "no model is restricted and ungranted", which is
+     * what every test but the auth ones means. The auth tests call {@code state.filter} directly with a real one.
+     */
+    private void filter(String query, Predicate<String> starred) {
+        state.filter(query, path -> false, starred);
+    }
+
     private static Map<String, String> names(String... hierarchyThenName) {
         Map<String, String> map = new HashMap<>();
         for (int i = 0; i < hierarchyThenName.length; i += 2) {
@@ -53,7 +62,7 @@ class ModelBrowserStateTest {
     void rootShowsOnlyDirectChildFoldersAndRootModels() {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid", "wine_fox/02_new_year", "wine_fox/2024/party"));
 
-        state.filter("", path -> false);
+        filter("", path -> false);
 
         assertEquals(Collections.singletonList("steve"), state.models());
         assertEquals(Collections.singletonList("wine_fox/"), state.packs());
@@ -65,7 +74,7 @@ class ModelBrowserStateTest {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid", "wine_fox/02_new_year", "wine_fox/2024/party"));
 
         state.enterPack("wine_fox/");
-        state.filter("", path -> false);
+        filter("", path -> false);
 
         assertEquals(Arrays.asList("wine_fox/01_taisho_maid", "wine_fox/02_new_year"), state.models());
         assertEquals(Collections.singletonList("wine_fox/2024/"), state.packs());
@@ -75,17 +84,17 @@ class ModelBrowserStateTest {
     void nestedFoldersAreSynthesisedFromTheModels() {
         rebuild(Collections.singletonList("a/b/c"));
 
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(Collections.singletonList("a/"), state.packs());
         assertTrue(state.models().isEmpty());
 
         state.enterPack("a/");
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(Collections.singletonList("a/b/"), state.packs());
         assertTrue(state.models().isEmpty());
 
         state.enterPack("a/b/");
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(Collections.singletonList("a/b/c"), state.models());
         assertTrue(state.packs().isEmpty());
     }
@@ -118,7 +127,7 @@ class ModelBrowserStateTest {
 
         state.enterPack("z/");
         state.page(1);
-        state.filter("", path -> false);
+        filter("", path -> false);
 
         assertEquals(1, state.maxPage());
         assertEquals(1, state.page());
@@ -128,7 +137,7 @@ class ModelBrowserStateTest {
     void hashPrefixMatchesFoldersOnly() {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid"));
 
-        state.filter("#wine", path -> false);
+        filter("#wine", path -> false);
 
         assertTrue(state.models().isEmpty());
         assertEquals(Collections.singletonList("wine_fox/"), state.packs());
@@ -139,7 +148,7 @@ class ModelBrowserStateTest {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid"));
         state.enterPack("wine_fox/");
 
-        state.filter("steve", path -> false);
+        filter("steve", path -> false);
 
         assertEquals(Collections.singletonList("steve"), state.models());
         assertTrue(state.packs().isEmpty());
@@ -150,7 +159,7 @@ class ModelBrowserStateTest {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid"));
         state.category(Category.STAR);
 
-        state.filter("", "wine_fox/01_taisho_maid"::equals);
+        filter("", "wine_fox/01_taisho_maid"::equals);
 
         assertEquals(Collections.singletonList("wine_fox/01_taisho_maid"), state.models());
         assertTrue(state.packs().isEmpty());
@@ -161,7 +170,58 @@ class ModelBrowserStateTest {
         rebuild(Arrays.asList("steve", "wine_fox/01_taisho_maid"));
         state.category(Category.STAR);
 
-        state.filter("", path -> path.equals("steve"));
+        filter("", path -> path.equals("steve"));
+
+        assertEquals(Collections.singletonList("steve"), state.models());
+    }
+
+    @Test
+    void authCategoryHidesRestrictedAndUngrantedModelsAndKeepsTheOthers() {
+        rebuild(Arrays.asList("steve", "wine_fox/granted", "wine_fox/locked"));
+        state.category(Category.AUTH);
+
+        // Upstream's rule is `entry.authorizationRequired() && !authorized.test(hash)`
+        // (CatalogBrowserState.java:108-109); this class is handed the folded answer because it holds display paths and
+        // no access information. `wine_fox/granted` is a restricted model the player holds a grant for, i.e. needAuth
+        // is false for it, and `steve` is public.
+        state.filter("", path -> path.equals("wine_fox/locked"), path -> false);
+
+        assertEquals(Arrays.asList("steve", "wine_fox/granted"), state.models());
+        // Every category but ALL is flat: upstream drops the folder list in the same branch
+        // (CatalogBrowserState.java:125).
+        assertTrue(state.packs().isEmpty());
+    }
+
+    @Test
+    void authRuleOnlyAppliesInsideTheAuthCategory() {
+        rebuild(Arrays.asList("locked_model", "steve"));
+
+        state.filter("", path -> path.equals("locked_model"), path -> false);
+
+        // The all category still lists a locked model - upstream darkens its tile instead of hiding it - so the auth
+        // rule must not leak into it.
+        assertEquals(Arrays.asList("locked_model", "steve"), state.models());
+    }
+
+    @Test
+    void starCategoryShowsALockedModelThatIsStarred() {
+        rebuild(Arrays.asList("locked_model", "steve"));
+        state.category(Category.STAR);
+
+        state.filter("", path -> path.equals("locked_model"), "locked_model"::equals);
+
+        // Upstream evaluates the star rule independently of the auth rule, so a locked model the player starred is
+        // listed; the tile draws it dark and unclickable.
+        assertEquals(Collections.singletonList("locked_model"), state.models());
+        assertTrue(state.packs().isEmpty());
+    }
+
+    @Test
+    void authCategoryStillAppliesTheSearchQuery() {
+        rebuild(Arrays.asList("locked_model", "steve"));
+        state.category(Category.AUTH);
+
+        state.filter("steve", path -> path.equals("locked_model"), path -> false);
 
         assertEquals(Collections.singletonList("steve"), state.models());
     }
@@ -170,14 +230,14 @@ class ModelBrowserStateTest {
     void folderThatDisappearedSendsTheViewBackToTheRoot() {
         rebuild(Collections.singletonList("gone/model"));
         state.enterPack("gone/");
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals("gone/", state.currentPack());
         assertEquals(Collections.singletonList("gone/model"), state.models());
 
         rebuild(Collections.singletonList("other"));
 
         assertEquals("", state.currentPack());
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(Collections.singletonList("other"), state.models());
         assertTrue(state.packs().isEmpty());
     }
@@ -191,13 +251,13 @@ class ModelBrowserStateTest {
         many.add("pack_/inner");
         rebuild(many);
 
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(11, state.models().size() + state.packs().size());
         assertEquals(1, state.maxPage());
 
         state.page(1);
         rebuild(Collections.singletonList("model_0"));
-        state.filter("", path -> false);
+        filter("", path -> false);
 
         assertEquals(0, state.maxPage());
         assertEquals(0, state.page());
@@ -207,7 +267,7 @@ class ModelBrowserStateTest {
     void searchKeepsTheAlphabeticalPathOrder() {
         rebuild(Arrays.asList("b_pack/z", "a_pack/y"));
 
-        state.filter("_pack", path -> false);
+        filter("_pack", path -> false);
 
         List<String> models = state.models();
         assertEquals(Arrays.asList("a_pack/y", "b_pack/z"), models);
@@ -221,7 +281,7 @@ class ModelBrowserStateTest {
             names("wine_fox/", "酒狐与小伙伴"),
             Collections.emptyMap());
 
-        state.filter("", path -> false);
+        filter("", path -> false);
 
         assertEquals(Collections.singletonList("wine_fox/"), state.packs());
         assertEquals("酒狐与小伙伴", state.packName("wine_fox/"));
@@ -231,12 +291,12 @@ class ModelBrowserStateTest {
     void packWithoutAnyModelsIsStillBrowsable() {
         state.rebuild(Collections.emptyList(), names("empty_pack/", "Empty Pack"), Collections.emptyMap());
 
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals(Collections.singletonList("empty_pack/"), state.packs());
         assertEquals("Empty Pack", state.packName("empty_pack/"));
 
         state.enterPack("empty_pack/");
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertTrue(state.models().isEmpty());
         assertTrue(state.packs().isEmpty());
     }
@@ -248,13 +308,13 @@ class ModelBrowserStateTest {
             names("wine_fox/", "酒狐与小伙伴"),
             names("wine_fox/", "可爱酒狐和她的小伙伴们"));
 
-        state.filter("#酒狐", path -> false);
+        filter("#酒狐", path -> false);
         assertEquals(Collections.singletonList("wine_fox/"), state.packs());
 
-        state.filter("#可爱", path -> false);
+        filter("#可爱", path -> false);
         assertEquals(Collections.singletonList("wine_fox/"), state.packs());
 
-        state.filter("#Wine Fox", path -> false);
+        filter("#Wine Fox", path -> false);
         assertTrue(state.packs().isEmpty());
     }
 
@@ -265,11 +325,11 @@ class ModelBrowserStateTest {
             names("a/", "", "a/b/", "   "),
             Collections.emptyMap());
 
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals("a", state.packName("a/"));
 
         state.enterPack("a/");
-        state.filter("", path -> false);
+        filter("", path -> false);
         assertEquals("b", state.packName("a/b/"));
     }
 }

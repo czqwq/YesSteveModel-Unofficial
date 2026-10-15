@@ -8,15 +8,22 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import javax.annotation.Nullable;
+
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.api.ModelAuthorization;
 import com.fox.ysmu.data.EncryptTools;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.format.ServerModelInfo;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.util.ThreadTools;
@@ -81,6 +88,47 @@ public class SyncModelFiles implements IMessage {
         }
     }
 
+    /**
+     * Whether {@code player} may be handed {@code internalModelId}'s bytes: the one asset gate both sync channels
+     * apply before a model leaves the server, i.e. the port of upstream's asset admission.
+     *
+     * <p><b>Upstream.</b> {@code network/dispatch/ServerAssetTransfers.accept(ModelChunkRequest):234-243} reads
+     * {@code ServerConfig.RESTRICTED_AUTH} ({@code config/ServerConfig.java:13,56-57}) and refuses the chunk when
+     * {@code model/session/server/ServerModelSession.canRequest(modelId, AssetRef.Kind.CHUNK, restrictedAuth):205-221}
+     * says no, which is exactly: the switch is on, the model is neither {@code PUBLIC} nor granted, and it is not the
+     * model an operator force-set on this player ({@code ignoresGrantsFor}, {@code :219-220}). With the switch off -
+     * upstream's and this port's default - every request passes, and that is what lets every client render other
+     * players' models. The presentation half of upstream's gate ({@code :299,447} still serves {@code PREVIEW} and
+     * {@code ICON}) has no counterpart here: this port's presentation travels inside the model payload, so there is no
+     * smaller unit to allow - recorded in {@code .agent/phase53-model-authorization.md}.</p>
+     *
+     * <p><b>Callers.</b> {@code SyncModelFiles.Handler.sendModelFiles} (the legacy cache file and its
+     * {@code RequestLoadModel} reply) and {@code network/sync/OpenYsmModelSyncServer} (the 17 index and its packet-05
+     * payload). {@code internalModelId} is the identity both of them hold: a
+     * {@link com.fox.ysmu.model.ServerModelManager#CACHE_NAME_INFO} key in the legacy channel and
+     * {@code OpenYsmSyncInfo.getModelId()} in the 17 channel - the internal id
+     * {@code ModelAuthorization.allRegisteredModelIds} wraps in {@code ysmu:}, so the id is rebuilt the same way here
+     * and {@code ServerModelManager.accessOf} resolves the model's winning source root.</p>
+     */
+    public static boolean mayTransferAssets(EntityPlayer player, String internalModelId) {
+        ResourceLocation modelId = new ResourceLocation(ysmu.MODID, internalModelId);
+        ExtendedModelInfo selection = ExtendedModelInfo.get(player);
+        return mayTransferAssets(Config.RESTRICTED_AUTH, ModelAuthorization.grantsOf(player), internalModelId,
+            selection != null && selection.ignoresGrantsFor(modelId));
+    }
+
+    /**
+     * The same decision with the player-owned inputs already resolved, so a unit JVM can pin it without a server
+     * ({@code network/ModelAssetGateTest}): {@code grants} is {@link ModelAuthorization#grantsOf(EntityPlayer)}, and
+     * {@code null} means the grant table was never attached rather than "no grants" - see
+     * {@code api/ModelAuthorization.canSelect} for why that must not refuse.
+     */
+    public static boolean mayTransferAssets(boolean restrictedAuth, @Nullable Set<ResourceLocation> grants,
+        String internalModelId, boolean ignoresGrants) {
+        return ModelAuthorization.canRequest(restrictedAuth, grants,
+            internalModelId == null ? null : new ResourceLocation(ysmu.MODID, internalModelId), ignoresGrants);
+    }
+
     public static class Handler implements IMessageHandler<SyncModelFiles, IMessage> {
 
         @Override
@@ -131,10 +179,17 @@ public class SyncModelFiles implements IMessage {
             // Built-in models and every model OpenYsmFormat cannot produce a payload for stay legacy-only, which is
             // what ServerModelManager's sync notes require; with the protocol off nothing changes at all.
             boolean openYsmOwnsModels = Config.ENABLE_OPEN_YSM_SYNC_PROTOCOL;
+            // Authorization (RestrictedAuth): a restricted model this player may not receive is dropped here, before
+            // the md5 list exists, so it is excluded from BOTH halves below - the RequestLoadModel reply ("you already
+            // have it, load it": the client decrypts its own cached file and registers that model,
+            // RequestLoadModel.java:202-221) and the file/chunk send. Upstream refuses the same moment
+            // (ServerAssetTransfers.java:234-243 -> ServerModelSession.canRequest:205-221); with the switch off, the
+            // default, the predicate is true for every model and this round is byte-identical to before.
             // D-01 (network侧): filter through the shared "well-formed cache file name" predicate and drop null
             // md5 entries. A null md5 would otherwise reach CACHE_SERVER.resolve(null) and NPE inside the send task.
             Collection<String> cache = CACHE_NAME_INFO.entrySet()
                 .stream()
+                .filter(entry -> mayTransferAssets(sender, entry.getKey()))
                 .filter(entry -> !(openYsmOwnsModels && OPEN_YSM_SYNC_INFO.containsKey(entry.getKey())))
                 .map(
                     entry -> entry.getValue()
@@ -175,11 +230,13 @@ public class SyncModelFiles implements IMessage {
                     return;
                 }
 
-                ysmu.LOG.info(
-                    "Sending large YSM legacy model cache {} in chunks: size={} bytes, chunk={} bytes",
-                    md5,
-                    fileLength,
-                    SendModelFileChunk.MAX_CHUNK_BYTES);
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SYNC) {
+                    ysmu.LOG.info(
+                        "Sending large YSM legacy model cache {} in chunks: size={} bytes, chunk={} bytes",
+                        md5,
+                        fileLength,
+                        SendModelFileChunk.MAX_CHUNK_BYTES);
+                }
                 int offset = 0;
                 byte[] buffer = new byte[SendModelFileChunk.MAX_CHUNK_BYTES];
                 try (InputStream input = FileUtils.openInputStream(modelFile)) {

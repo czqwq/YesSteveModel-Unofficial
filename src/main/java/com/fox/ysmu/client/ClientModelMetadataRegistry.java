@@ -4,16 +4,20 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 import javax.imageio.stream.ImageInputStream;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureManager;
+import net.minecraft.client.resources.Language;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.texture.OuterFileTexture;
@@ -67,6 +71,34 @@ public final class ClientModelMetadataRegistry {
         public String tips = "";
         public String license = "";
         public final List<Author> authors = new ArrayList<>();
+        /**
+         * The model's language tables, locale to key/value, exactly as its pack's {@code lang/*.json} declare them
+         * ({@code ModelData#getLanguageFiles}). Empty when the model declares none, which is also what every payload
+         * that arrived over a channel predating the field carries.
+         */
+        public final Map<String, Map<String, String>> languageFiles = new LinkedHashMap<>();
+
+        /**
+         * A key resolved for a display locale, using upstream's exact lookup: the requested locale, else
+         * {@code en_us} ({@code format/schema/model/views/ModelInfoView.java:95-102} {@code translate} tries the
+         * locale and then {@code en_us}; {@code :104-111} is the single-table lookup underneath it).
+         *
+         * @return the value, or {@code null} when neither table declares the key
+         */
+        @Nullable
+        public String localized(String key, String locale) {
+            String value = localizedIn(key, locale);
+            return value != null ? value : localizedIn(key, "en_us");
+        }
+
+        @Nullable
+        private String localizedIn(String key, String locale) {
+            if (key == null || locale == null) {
+                return null;
+            }
+            Map<String, String> table = languageFiles.get(locale);
+            return table == null ? null : table.get(key);
+        }
     }
 
     private static final Map<ResourceLocation, Metadata> METADATA = Maps.newConcurrentMap();
@@ -134,6 +166,79 @@ public final class ClientModelMetadataRegistry {
     /** Metadata for a model, or {@code null} when the client never received any. */
     public static Metadata get(ResourceLocation modelId) {
         return modelId == null ? null : METADATA.get(modelId);
+    }
+
+    /**
+     * Records the language tables a model's pack declares ({@code lang/*.json}). Must run on the client thread, like
+     * the rest of this registry.
+     * <p>
+     * The tables are kept exactly as the pack wrote them - the locale keys are its own file names ({@code zh_cn},
+     * {@code en_us}) - because which locale to resolve is a display-time question: the callers pass the running locale
+     * in, normalized by {@link #currentLocale()}. Upstream does the same, collecting the tables when it builds a
+     * model's info view and translating a key where the card is actually drawn
+     * ({@code format/schema/model/views/ModelInfoView.java:45-58,95-111}).
+     */
+    public static void acceptLanguageFiles(ResourceLocation modelId, Map<String, Map<String, String>> files) {
+        if (modelId == null || files == null || files.isEmpty()) {
+            return;
+        }
+        Metadata metadata = metadata(modelId);
+        metadata.languageFiles.clear();
+        for (Map.Entry<String, Map<String, String>> entry : files.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null || entry.getValue()
+                .isEmpty()) {
+                continue;
+            }
+            metadata.languageFiles.put(
+                entry.getKey(),
+                Collections.unmodifiableMap(new LinkedHashMap<>(entry.getValue())));
+        }
+        version++;
+    }
+
+    /**
+     * The running game locale in the form the packs name their language files: 1.7.10 reports {@code zh_CN} /
+     * {@code en_US} while the files are {@code zh_cn.json} / {@code en_us.json}, so the code is lower-cased and
+     * {@code '-'} folded to {@code '_'} ({@code Language.getLanguageCode():23}).
+     */
+    public static String currentLocale() {
+        Language language = Minecraft.getMinecraft()
+            .getLanguageManager()
+            .getCurrentLanguage();
+        return language == null ? "" : normalizeLocale(language.getLanguageCode());
+    }
+
+    /** Lower-cases a locale code and folds {@code '-'} to {@code '_'} (see {@link #currentLocale()}). */
+    static String normalizeLocale(@Nullable String locale) {
+        return locale == null ? "" : locale.toLowerCase(Locale.ROOT)
+            .replace('-', '_');
+    }
+
+    /**
+     * The name to draw for a model: the pack's own localized {@code metadata.name} for the running locale, else the
+     * name the model's geometry declares, else the caller's leaf name.
+     * <p>
+     * That is upstream's fallback chain: {@code ModelInfoView.translateOr:91-93} returns the caller's default when
+     * neither the requested locale nor {@code en_us} declares the key, and the port's default for the name is the
+     * geometry's {@code extra_info} name followed by the leaf name - the order the three name-drawing sites already
+     * used before they consulted a language table at all.
+     *
+     * @param locale the running locale, as produced by {@link #currentLocale()}. It is passed in rather than read
+     *               here so the resolution rule is testable without a Minecraft instance.
+     * @param leafName the last resort, normally the model's file name
+     */
+    public static String displayName(ResourceLocation modelId, String locale, String leafName) {
+        Metadata metadata = get(modelId);
+        if (metadata != null) {
+            String localized = metadata.localized("metadata.name", locale);
+            if (isNotBlank(localized)) {
+                return localized;
+            }
+            if (isNotBlank(metadata.name)) {
+                return metadata.name;
+            }
+        }
+        return leafName == null ? "" : leafName;
     }
 
     /** Bumped on every change, so an open GUI can refresh instead of polling. */

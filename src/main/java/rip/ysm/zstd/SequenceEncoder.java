@@ -31,6 +31,7 @@ import static rip.ysm.zstd.FiniteStateEntropy.optimalTableLog;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static rip.ysm.zstd.Util.checkArgument;
 
+@SuppressWarnings("removal")
 final class SequenceEncoder
 {
     private static final int DEFAULT_LITERAL_LENGTH_NORMALIZED_COUNTS_LOG = 6;

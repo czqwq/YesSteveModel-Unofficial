@@ -29,6 +29,37 @@ public final class ControllerUtils {
     public static final String OPENYSM_POST_USE_CONTROLLER = "player.post_use";
 
     /**
+     * The first-person arm's controller category - upstream's {@code CATEGORY} in
+     * {@code client/controller/collections/FPArmControllerCollection.java:22}.
+     * <p>
+     * Unlike the player's own controllers, whose port names drop the {@code player.} category
+     * ({@code main_controller} for upstream's {@code player.main}), the arm's keep upstream's spelling verbatim.
+     * That is not cosmetic: the pack-script lookup and the OpenYSM controller lookup both derive their key from the
+     * controller's name ({@code PackUserFunctions#scriptForController} turns {@code fp.arm.misc} into
+     * {@code fp.arm_ctrl_misc}, which is upstream's {@code scriptName} at
+     * {@code client/controller/SingleControllerDiscovery.java:19}), and a name the port invented would match neither.
+     */
+    public static final String FP_ARM_CATEGORY = "fp.arm";
+
+    /** Upstream's {@code fp.arm.misc} ({@code FPArmControllerCollection.java:27}). */
+    public static final String FP_ARM_MISC_CONTROLLER = FP_ARM_CATEGORY + ".misc";
+
+    /** Upstream's {@code fp.arm.parallel_<i>} ({@code FPArmControllerCollection.java:28-29}). */
+    public static final String FP_ARM_PARALLEL_CONTROLLER_PREFIX = FP_ARM_CATEGORY + ".parallel_";
+
+    /** Upstream's {@code fp.arm.armor_<slot>} ({@code FPArmControllerCollection.java:30-31}). */
+    public static final String FP_ARM_ARMOR_CONTROLLER_PREFIX = FP_ARM_CATEGORY + ".armor_";
+
+    /**
+     * The number of numeric parallel slots the arm family carries, the same eight the player's own
+     * {@code parallel_0..7} family has: upstream's arm discovery uses the same {@code ^parallel[0-7]$} animation-name
+     * pattern for both ({@code client/controller/ParallelControllerDiscovery.java:32}, whose {@code multi} flag is
+     * {@code true} for the arm at {@code FPArmControllerCollection.java:28} and for the player at
+     * {@code PlayerControllerCollection.java:68}).
+     */
+    public static final int FP_ARM_PARALLEL_SLOTS = 8;
+
+    /**
      * 具名并行槽位（{@code player.pre_parallel_<非数字后缀>} / {@code player.parallel_<...>}）
      * 备用池大小的**默认值**。wiki 只定义数字槽位，但官方对非数字后缀也发控制器；池子固定是为了
      * 不受"模型切换而 {@code registerControllers} 只跑一次"的影响。
@@ -55,16 +86,15 @@ public final class ControllerUtils {
      * （如 {@code player.pre_main} 与 {@code player.pre_main_mecha_mgr}）。YSMU 的 GeckoLib
      * 控制器是**按名字固定**注册的，一个槽位只有一个，所以用下面的共享备用池承载后缀控制器。
      */
-    public static final java.util.List<String> OPENYSM_SLOTS = java.util.Collections.unmodifiableList(
-        java.util.Arrays.asList(
-            "pre_main",
-            "post_main",
-            "pre_hold",
-            "post_hold",
-            "pre_swing",
-            "post_swing",
-            "pre_use",
-            "post_use"));
+    public static final java.util.List<String> OPENYSM_SLOTS = java.util.List.of(
+        "pre_main",
+        "post_main",
+        "pre_hold",
+        "post_hold",
+        "pre_swing",
+        "post_swing",
+        "pre_use",
+        "post_use");
 
     /** 槽位后缀控制器备用池的控制器名前缀（{@code openysm_slot_extra_<i>_controller}）。
      *  名字里没有模型信息：第 i 个池控制器承载当前模型第 i 个 {@code player.<slot>_<后缀>}。 */

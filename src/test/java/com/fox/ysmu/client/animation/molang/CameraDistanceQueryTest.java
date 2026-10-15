@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import net.minecraft.entity.item.EntityBoat;
+
 /**
  * {@code query.distance_from_camera} 必须是**相机**到实体的距离。
  *
@@ -54,6 +56,36 @@ class CameraDistanceQueryTest {
         // 实体挪到 (4, 0, 0)：正好落在镜头上，距离只剩眼睛高度。
         assertEquals(EYE_Y, CameraDistanceQuery.distance(
             0.0D, EYE_Y, 0.0D, 4.0D, 0.0D, 0.0D, BACK, 90.0F, 0.0F, 1), 0.001D);
+    }
+
+    @Test
+    void subEntityDistanceUsesViewYawNotTargetYawAndCurrentTargetOrigin() {
+        EntityBoat view = new EntityBoat(null);
+        view.yOffset = 0.0F;
+        view.prevPosX = 8.0D;
+        view.posX = 12.0D;
+        view.prevPosY = view.posY = 0.0D;
+        view.prevPosZ = view.posZ = 0.0D;
+        view.rotationYaw = 90.0F;
+        EntityBoat target = new EntityBoat(null);
+        target.prevPosX = -100.0D; // target origin is not interpolated: upstream uses entity.position()
+        target.posX = 14.0D;
+        target.posY = target.posZ = 0.0D;
+        target.rotationYaw = -90.0F;
+
+        assertEquals(EYE_Y, CameraDistanceQuery.forView(target, view, 0.5F, BACK, 1), 0.001D);
+        assertEquals(Math.sqrt(64.0D + EYE_Y * EYE_Y),
+            CameraDistanceQuery.forView(target, view, 0.5F, BACK, 2), 0.001D);
+        assertEquals(Math.sqrt(16.0D + EYE_Y * EYE_Y),
+            CameraDistanceQuery.forView(target, view, 0.5F, 0.0D, 0), 0.001D);
+    }
+
+    @Test
+    void absentViewOrTargetHasNoCameraDistance() {
+        EntityBoat entity = new EntityBoat(null);
+        assertEquals(0.0D, CameraDistanceQuery.forView(entity, null, 0.5F, BACK, 1));
+        assertEquals(0.0D, CameraDistanceQuery.forView(null, entity, 0.5F, BACK, 1));
+        assertEquals(0.0D, CameraDistanceQuery.forEntity(null, 0.5F));
     }
 
     /** 俯仰会抬高镜头：pitch=45° 时相机在 (0, 1.62+2.83, -2.83)。 */

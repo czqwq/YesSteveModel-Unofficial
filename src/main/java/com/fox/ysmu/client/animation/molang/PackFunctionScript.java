@@ -72,10 +72,22 @@ public final class PackFunctionScript {
     /**
      * Registers the script's own {@code t.*} / {@code v.*} variables on the given parser; call once before
      * {@link #evaluate}. Names the host already registered (queries, {@code ysm.*}) are left alone.
+     * <p>
+     * 名字先过 {@link MolangParser#canonicalVariableName} —— 与解析器自己的注册表、玩家/投射物控制器轴、
+     * 引擎作用域表 {@code MolangPhysicsRuntime} 完全同一条规则（AGENTS.md「Molang variable names are
+     * case-insensitive」，上游 {@code api/molang/MolangNames#identifier:29-35}）。
+     * <p>
+     * 修的是这里的一处漏网：{@code assignedVariables} 是**原样**从脚本里抠出来的
+     * （{@code collectAssignedVariables} 保留大小写），而 {@code MolangParser.VARIABLES} 的键全是规范名。
+     * 于是脚本写 {@code v.Foo=1;} 时，{@code containsKey("v.Foo")} 查不到已有的 {@code v.foo}，这里就
+     * 再注册一个 {@code v.Foo}；而 {@code getVariable}/{@code parseExpression} 查的一律是小写化的
+     * {@code v.foo}，脚本赋值于是落在那个查不到的重名条目上、读回来永远是 0。前缀那一半
+     * （{@code variable.} → {@code v.}）本来就是对的，缺的是大小写那一半。
      */
     public void registerVariables(MolangParser parser) {
         for (String name : this.assignedVariables) {
             String normalized = name.startsWith("variable.") ? "v." + name.substring("variable.".length()) : name;
+            normalized = MolangParser.canonicalVariableName(normalized);
             if (!normalized.startsWith("t.") && !normalized.startsWith("v.")) {
                 continue;
             }

@@ -68,6 +68,11 @@ class ClientModelManagerAnimationInstallTest {
         GeckoLibCache.getInstance()
             .getAnimations()
             .remove(mainId());
+        // A payload is installed as one file per animation domain (AnimationDomain), so the first-person file this
+        // install also writes has to go with it; an empty one would otherwise stay behind for the next test.
+        GeckoLibCache.getInstance()
+            .getAnimations()
+            .remove(ModelIdUtil.getArmId(MODEL_ID));
         ClientModelManager.MODELS.remove(MODEL_ID);
     }
 

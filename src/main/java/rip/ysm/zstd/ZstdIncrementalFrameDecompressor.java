@@ -38,6 +38,7 @@ import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 public class ZstdIncrementalFrameDecompressor
 {
     private enum State {

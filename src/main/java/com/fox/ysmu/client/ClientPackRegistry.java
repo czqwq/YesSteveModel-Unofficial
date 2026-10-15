@@ -4,6 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureManager;
@@ -126,7 +127,7 @@ public final class ClientPackRegistry {
                 return value;
             }
         }
-        return fallback == null ? "" : fallback;
+        return Objects.requireNonNullElse(fallback, "");
     }
 
     private static String translation(ClientPackInfo pack, String locale, String key) {

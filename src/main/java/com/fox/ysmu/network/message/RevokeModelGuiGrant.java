@@ -19,10 +19,12 @@ import io.netty.buffer.ByteBuf;
  * trusts it for anything except releasing a grant that belongs to the sending player, so a client cannot revoke
  * somebody else's grant.
  * <p>
- * The client send line itself is not part of this task: {@code PlayerModelScreen.onGuiClosed} already reads
- * {@code ModelSelectionTarget.getGrantId()} and carries the TODO for it, but that file lives in
- * {@code client/gui/**}, outside this task's inScope. Until it is switched on, deduplicated grants still expire
- * through the ModelGuiApi TTL, on logout and on world unload.
+ * The client send line exists: {@code client/gui/PlayerModelScreen.onGuiClosed()} reads
+ * {@code ModelSelectionTarget.getGrantId()} and sends this packet for it whenever the id is not {@code -1}
+ * ({@code client/gui/PlayerModelScreen.java:512-516}). It is registered as serverbound id 98
+ * ({@code network/NetworkHandler.java:88-94,247-252}). A target that needs no grant (the local player editing
+ * itself) reports {@code -1} and sends nothing; for everything else the explicit revoke is what keeps the grant from
+ * living until its ModelGuiApi TTL, a logout or a world unload.
  */
 public class RevokeModelGuiGrant implements IMessage {
 

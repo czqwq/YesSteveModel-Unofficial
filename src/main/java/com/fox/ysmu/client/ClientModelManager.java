@@ -1,9 +1,11 @@
 package com.fox.ysmu.client;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -12,8 +14,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
@@ -25,26 +29,37 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.Nullable;
+import javax.imageio.ImageIO;
 
+import com.fox.ysmu.Config;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.TextureManager;
+import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.util.*;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.FileFileFilter;
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.client.animation.AnimationDomain;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
+import com.fox.ysmu.client.animation.controller.ModDependency;
+import com.fox.ysmu.client.animation.controller.ModDependencyRegistry;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
+import com.fox.ysmu.client.texture.CustomTextureManager;
+import com.fox.ysmu.client.texture.ModelTextureRegistry;
 import com.fox.ysmu.client.texture.OuterFileTexture;
+import com.fox.ysmu.client.texture.TextureHolder;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.FolderFormat;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.model.resource.RawYsmModelAdapter;
+import com.fox.ysmu.model.resource.YSMFolderDeserializer;
 import com.fox.ysmu.model.resource.YsmControllerResources;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelFiles;
 import com.fox.ysmu.util.GsonHelper;
@@ -114,6 +129,122 @@ public class ClientModelManager {
     public static Set<ResourceLocation> TRANSLUCENT_TEXTURES = Sets.newHashSet();
     public static Map<ResourceLocation, List<IChatComponent>> EXTRA_INFO = Maps.newHashMap();
     public static Map<ResourceLocation, String[]> EXTRA_ANIMATION_NAME = Maps.newHashMap();
+
+    /** The image id the parser files a pack's {@code gui_background} under ({@code YSMFolderDeserializer.loadGuiImage}). */
+    public static final String GUI_IMAGE_BACKGROUND = "gui_background";
+    /** The image id the parser files a pack's {@code gui_foreground} under. */
+    public static final String GUI_IMAGE_FOREGROUND = "gui_foreground";
+    /**
+     * The GUI presentation images a model declares, keyed by the model id the selection screen uses and then by the
+     * image's own id ({@link #GUI_IMAGE_BACKGROUND} / {@link #GUI_IMAGE_FOREGROUND}).
+     * <p>
+     * They are the pack's {@code gui_background} / {@code gui_foreground} (an OpenYSM-format model's
+     * {@code ysm.json}), which upstream reads into the model's settings as presentation image blobs and its catalog
+     * card draws behind and over the model preview
+     * ({@code format/parser/ModelInfoBuilder.java:57-64}, {@code client/gui/button/CatalogModelCardState.java:238-246},
+     * {@code client/gui/button/CatalogModelButton.java:104-106}). They are neither model textures nor geometry, so
+     * they are neither in {@link #MODELS} nor in the geometry map - see {@code ModelData#getGuiImages}.
+     */
+    private static final Map<ResourceLocation, Map<String, byte[]>> GUI_IMAGES = Maps.newHashMap();
+    /**
+     * The published texture of each GUI image, keyed by model id + image id, plus the holder that keeps its
+     * registration alive; see {@link #guiImageTextureFor}.
+     */
+    private static final Map<String, GuiImageTexture> GUI_IMAGE_TEXTURES = Maps.newHashMap();
+
+    /**
+     * Records the GUI presentation images a model declares.
+     * <p>
+     * Called from {@link #registerAll} with the payload's own map, i.e. from the same registration the texture list
+     * and the sub-entity indexes come from, and keyed the same way. Self-healing like those: a payload that declares
+     * none removes the entry instead of leaving the previous payload's images in place.
+     */
+    private static void indexGuiImages(ResourceLocation modelId, Map<String, byte[]> images) {
+        if (images == null || images.isEmpty()) {
+            GUI_IMAGES.remove(modelId);
+            return;
+        }
+        GUI_IMAGES.put(modelId, new LinkedHashMap<>(images));
+    }
+
+    /** The declared bytes of one GUI image, or {@code null} when the model declares no such image. */
+    @Nullable
+    public static byte[] guiImageBytesFor(@Nullable ResourceLocation modelId, @Nullable String imageId) {
+        if (modelId == null || imageId == null) {
+            return null;
+        }
+        Map<String, byte[]> images = GUI_IMAGES.get(modelId);
+        return images == null ? null : images.get(imageId);
+    }
+
+    /**
+     * The published texture of one GUI image, created on first use; {@code null} when the model declares none or its
+     * bytes cannot be decoded.
+     * <p>
+     * The lifecycle is upstream's: its catalog card creates the texture from the image source, registers it with
+     * {@code CustomTextureManager.register(texture, 10 * 20)} and keeps the returned holder so the registration stays
+     * alive while the card does, releasing it on close
+     * ({@code client/gui/button/CatalogModelCardState.java:261-274} and {@code :276-296}). This port keeps the holder
+     * in {@link #GUI_IMAGE_TEXTURES} instead, so a model's image is uploaded once per session rather than once per
+     * tile - a page flip rebuilds every button - and drops them all in {@link #clearRuntimeModelCaches} together with
+     * an explicit release, the same two steps {@code ModelTextureRegistry#clear} uses and for the same reason: the
+     * platform's texture map keeps the texture object reachable, so the reachability trigger cannot fire on its own.
+     */
+    @Nullable
+    public static ResourceLocation guiImageTextureFor(@Nullable ResourceLocation modelId, @Nullable String imageId) {
+        byte[] bytes = guiImageBytesFor(modelId, imageId);
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        String key = modelId + "/" + imageId;
+        GuiImageTexture cached = GUI_IMAGE_TEXTURES.get(key);
+        if (cached != null) {
+            return cached.id;
+        }
+        try {
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
+            if (image == null) {
+                ysmu.LOG.warn("Unsupported YSM GUI image {} of model {}", imageId, modelId);
+                return null;
+            }
+            ResourceLocation id = new ResourceLocation(
+                ysmu.MODID,
+                "gui_image/" + modelId.getResourcePath() + "/" + imageId);
+            DynamicTexture texture = new DynamicTexture(image);
+            GUI_IMAGE_TEXTURES.put(key, new GuiImageTexture(id, texture, CustomTextureManager.register(texture, id)));
+            return id;
+        } catch (IOException e) {
+            ysmu.LOG.warn("Failed to decode YSM GUI image {} of model {}", imageId, modelId, e);
+            return null;
+        }
+    }
+
+    /** Drops every GUI image and starts the delayed release of the textures they were published as. */
+    private static void clearGuiImages() {
+        GUI_IMAGES.clear();
+        for (GuiImageTexture image : GUI_IMAGE_TEXTURES.values()) {
+            CustomTextureManager.release(image.texture);
+        }
+        GUI_IMAGE_TEXTURES.clear();
+    }
+
+    /**
+     * One published GUI image texture. The holder is kept only so the registration stays alive - dropping it is what
+     * arms {@code CustomTextureManager}'s release - which is why it is a field and not a local.
+     */
+    private static final class GuiImageTexture {
+
+        private final ResourceLocation id;
+        private final DynamicTexture texture;
+        private final TextureHolder holder;
+
+        private GuiImageTexture(ResourceLocation id, DynamicTexture texture, TextureHolder holder) {
+            this.id = id;
+            this.texture = texture;
+            this.holder = holder;
+        }
+    }
+
     /**
      * The projectile sub-entity ids a model declares - the {@code match} entries of its
      * {@code files.projectiles} - keyed by the model id.
@@ -135,7 +266,39 @@ public class ClientModelManager {
     public static final String PROJECTILE_KEY_PREFIX = "projectile_";
     /** The key prefix a bridged projectile animation-controller file uses. */
     private static final String PROJECTILE_CONTROLLER_KEY_PREFIX = "projectile_ctrl_";
+
+    /**
+     * The vehicle sub-entities a model declares ({@code files.vehicles} - keyed by the model id), same shape and same
+     * reason as {@link #PROJECTILE_MODEL_IDS}: a vehicle model replaces a vanilla entity's renderer, and the renderer
+     * has to find which of the model's sub-entities answers to the entity type it is drawing (the built-in default
+     * declares {@code #minecraft:boat}, {@code minecraft:chest_boat} and {@code minecraft:minecart}).
+     */
+    public static Map<ResourceLocation, List<String>> VEHICLE_MODEL_IDS = Maps.newHashMap();
+    /**
+     * The textures belonging to a model's vehicle sub-entities, as full sub-model ids, carrying both the match id and
+     * the file name ({@code <model>/vehicle_<matchId>_<name>.png}) - the same rule as
+     * {@link #PROJECTILE_TEXTURE_IDS}.
+     */
+    public static Map<ResourceLocation, List<ResourceLocation>> VEHICLE_TEXTURE_IDS = Maps.newHashMap();
+    /** The key prefix a bridged vehicle sub-entity uses inside a {@link ModelData} payload. */
+    public static final String VEHICLE_KEY_PREFIX = "vehicle_";
+    /** The key prefix a bridged vehicle animation-controller file uses. */
+    private static final String VEHICLE_CONTROLLER_KEY_PREFIX = "vehicle_ctrl_";
+    /**
+     * The built-in default model's animations for the main domain, i.e. the fallback a model's own set is completed
+     * from. Upstream resolves the fallback per domain ({@code defaultAnimations.fallback(domain)},
+     * {@code ModelRenderTargetLoader.java:376}), so the first-person domain has its own entry below.
+     */
     public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
+    /**
+     * The built-in default model's {@code fp_arm} set, the fallback for the first-person domain.
+     * <p>
+     * {@code builtin/default/animations/fp.arm.animation.json} declares {@code parallel0..7} with no bones at all,
+     * which is the control case for the domain split: as long as the default's own {@code main} clips are merged into
+     * the main domain only, those stubs can no longer replace the built-in {@code parallel0}/{@code parallel1} that
+     * drive the default model's eyes and ribbon.
+     */
+    public static AnimationFile DEFAULT_FIRST_PERSON_ANIMATION_FILE = new AnimationFile();
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
@@ -150,6 +313,120 @@ public class ClientModelManager {
      *  Those files are decrypted with the session client key, not the legacy password. */
     private static final java.util.Set<ResourceLocation> OPENYSM_CACHE_FORMAT =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Whether the model preview GUI (PlayerModelScreen) is currently open.
+     * While true, all idle resource eviction (geo/anim/texture GPU + heap bytes)
+     * is suppressed to prevent re-load thrash when the user briefly closes and
+     * reopens the preview.
+     * <p>
+     * Reference {@code ClientModelManager.java:187-214}. It is only read by the
+     * {@code client/asset} eviction subsystem, which is off unless
+     * {@code com.fox.ysmu.Config.ENABLE_IDLE_ASSET_EVICTION} is turned on.
+     */
+    private static volatile boolean GUI_OPEN = false;
+    /**
+     * Timestamp (System.currentTimeMillis) of the last GUI close.
+     * Used with {@code com.fox.ysmu.Config.GUI_POST_CLOSE_GRACE_SECONDS} to suppress eviction
+     * for a grace period after the GUI closes.
+     */
+    private static volatile long GUI_CLOSE_TIME = 0L;
+
+    /**
+     * Called by {@link com.fox.ysmu.client.gui.PlayerModelScreen} on open/close.
+     * <p>
+     * Ported from the reference branch ({@code ClientModelManager.java:198-203}). It is
+     * recorded unconditionally, and no behaviour follows from the flag while the eviction
+     * subsystem is off.
+     */
+    public static void setGuiOpen(boolean open) {
+        GUI_OPEN = open;
+        if (!open) {
+            GUI_CLOSE_TIME = System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * Returns true if idle eviction should be suppressed right now: either the
+     * GUI is currently open, or it was closed within the configured grace period.
+     */
+    public static boolean isIdleEvictionSuppressed() {
+        if (GUI_OPEN) return true;
+        long graceMs = (long) Config.GUI_POST_CLOSE_GRACE_SECONDS * 1000L;
+        if (graceMs <= 0L) return false;
+        return System.currentTimeMillis() - GUI_CLOSE_TIME < graceMs;
+    }
+
+    /** The built-in fallback model's path inside this mod's domain; see {@link #isDefaultModelId}. */
+    private static final String BUILT_IN_DEFAULT_MODEL = "default";
+
+    /**
+     * True when {@code id} — a base id, a mainId, or any sub-model id such as
+     * {@code ysmu:default/arm} — belongs to the <b>built-in fallback model</b>, the one this client materialises for
+     * itself ({@code loadDefaultModel}, read from {@code builtin/default} or a legacy {@code custom/default}) and
+     * draws whenever an entity's own model is not ready.
+     * <p>
+     * The pinned id is a fixed one, not the configurable default: upstream's own rule is the literal built-in
+     * default ({@code ClientModelRenderTargetManager#isDefault:620-624} -
+     * {@code rootKind == BUILTIN && path.equals("default")}) and it pins exactly those leases for the process
+     * ({@code RenderTargetLeaseOwnership.addRequired}). {@code Config.DEFAULT_MODEL_ID} is a different thing in
+     * upstream too - the <b>selection</b> default a fresh player starts with
+     * ({@code ModelSelectionService.selectDefault}) - and that model is an ordinary catalog entry which may be
+     * absent. Following the config here used to protect the wrong model whenever a player set
+     * {@code DefaultModelId} to something else, while the fallback the renderer actually draws
+     * ({@code CustomPlayerModel#DEFAULT_MAIN_MODEL}) stayed releasable.
+     * <p>
+     * Used to pin the fallback's geo entries against idle eviction (it has no {@code CACHED_MODEL_MD5} entry, so a
+     * released entry can never be reloaded through the lazy asset path) and its textures against the connection-level
+     * release ({@code ModelTextureRegistry#clear}).
+     * <p>
+     * Reference {@code ClientModelManager.java:347} (whose body is {@code isDefaultModelBundle}, {@code :329-336})
+     * strips the last path segment with {@code ModelIdUtil.getModelIdFromSubId}; this port has no such helper and uses
+     * {@link ModelIdUtil#getParentModelId} ({@code ModelIdUtil.java:45-52}), which is the same rule — "the model a
+     * sub-model id belongs to" — with the same behaviour for an id that has no segment to strip (it is returned
+     * unchanged).
+     */
+    public static boolean isDefaultModelId(ResourceLocation id) {
+        if (id == null) {
+            return false;
+        }
+        ResourceLocation base = ModelIdUtil.getParentModelId(id);
+        return ysmu.MODID.equals(base.getResourceDomain())
+            && BUILT_IN_DEFAULT_MODEL.equals(base.getResourcePath());
+    }
+
+    /**
+     * Whether the render paths may fall back on the built-in default model; see the field's own note. {@code false}
+     * means this client has no substitute to draw for a model that is not published yet, and the callers that would
+     * otherwise cancel the vanilla renderer must not do so ({@code CustomPlayerRenderer#canDrawFor}).
+     */
+    public static boolean isFallbackAvailable() {
+        return fallbackAvailable;
+    }
+
+    /**
+     * Whether this model's payload can be re-read from the encrypted client cache — the
+     * precondition for the lazy asset eviction's reload half.
+     * <p>
+     * Port-specific addition, with a port-specific reason: the reference's
+     * {@code loadLegacyModelData} ({@code ClientModelManager.java:1484-1508}) re-reads both the
+     * legacy ({@code EncryptTools.decryptModel}) and the OpenYSM format, and the reference calls
+     * it from every provider {@code load}. This port's {@link #loadLegacyModelData} is that bridge
+     * minus the legacy channel ({@link #loadRawModelFromCache}, {@code :2200-2227}) because the
+     * model → cache-file association for the legacy channel is recorded inside
+     * {@code network/message/RequestLoadModel}, which this task may not edit. Registering a
+     * geometry or an animation the reload cannot restore would mean evicting it into a permanent
+     * fallback to the built-in default, so the eviction must not adopt those models at all — see
+     * {@code .agent/phase32-asset-eviction-subsystem.md} and
+     * {@code .agent/phase40-eviction-members.md} (the animation half uses this same gate).
+     */
+    public static boolean hasReloadableClientCache(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return false;
+        }
+        ResourceLocation mainId = ModelIdUtil.getMainId(ModelIdUtil.getParentModelId(modelOrSubId));
+        return CACHED_MODEL_MD5.containsKey(mainId) && OPENYSM_CACHE_FORMAT.contains(mainId);
+    }
     /** Layout versions already reported, so an unsupported geometry format is logged once instead of 150 times. */
     private static final Map<String, Boolean> WARNED_UNSUPPORTED_LAYOUTS = Maps.newConcurrentMap();
     /**
@@ -235,6 +512,26 @@ public class ClientModelManager {
      */
     private static final Set<ResourceLocation> GEOMETRY_FAILED = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Whether the built-in fallback's resources are usable on this client: its geometry was installed and its own
+     * textures uploaded at least once, and no later refusal has taken them away again.
+     *
+     * <p>This is the port's form of upstream's {@code defaultInitialization} future: upstream materialises the whole
+     * intrinsic default at startup and every path that would need it goes through
+     * {@code ClientModelRenderTargetManager#requireAvailable} ({@code :626-632}), which throws until that initialization
+     * succeeded - "a blocking error is a default-initialization failure; an incomplete fallback must not be published"
+     * ({@code docs/product-decisions/decisions/model-fallback.md:29-39}). The port cannot fail the client's startup, so
+     * it answers the same question with this predicate and the render paths degrade explicitly instead; see
+     * {@code CustomPlayerRenderer#canDrawFor}.
+     *
+     * <p>Deliberately <b>not</b> cleared by {@link #clearRuntimeModelCaches}: the fallback's assets are independent of
+     * the model list being dropped ("ordinary model hot-loading, catalog switches, network interruption and cache
+     * eviction must not replace, modify or withdraw the default model assets",
+     * {@code model-fallback.md:41-43}), and the geometry and textures themselves survive a sync - the same reason the
+     * texture registry pins them and the asset eviction pins that geometry.
+     */
+    private static volatile boolean fallbackAvailable;
+
     /** The one thread that parses geometry. Created on first use so a dedicated server never starts it. */
     private static volatile ExecutorService modelLoader;
 
@@ -300,10 +597,44 @@ public class ClientModelManager {
         // The texture *list* is the model index the selection screen builds its tiles from, so it stays here; only
         // the uploads are deferred.
         indexTextures(modelId, data.getTexture());
+        // The model's GUI presentation images are indexed here for the same reason the texture list is: the selection
+        // screen needs them to draw a tile, and nothing about them needs the geometry build.
+        indexGuiImages(modelId, data.getGuiImages());
+        com.fox.ysmu.data.WheelDeclarations.Values declarations = data.getWheelDeclarations().values();
+        com.fox.ysmu.client.gui.ModelConfigRegistry.accept(
+            modelId, declarations.buttons, declarations.classifies, declarations.animations);
+        com.fox.ysmu.client.roaming.ClientRoamingKeys.accept(modelId, declarations.sha256);
+        // D2: the model's metadata links, indexed beside the wheel declarations and for the same reason - this is the
+        // one funnel both sync channels register a model through (the legacy container's LINKS_MODEL_VERSION section
+        // and the OpenYSM payload's metadata.links both end up in ModelData#getLinks), and the information screen is
+        // the only reader. Before this line the field was parsed and synced but nothing on the client consumed it.
+        com.fox.ysmu.client.gui.ModelConfigRegistry.acceptLinks(modelId, data.getLinks());
+        // The model's GUI preview declaration: which clip its selection tile plays and whether the tile keeps
+        // upstream's default framing. It used to be registered by the OpenYSM sync channel alone, so a payload that
+        // arrived any other way - the built-in default is read from builtin/ locally - reached the GUI with nothing
+        // declared and fell back to `idle`. Registering it here is the same funnel argument as the links above: this
+        // is the one place both sync channels (and the local built-in read) hand a payload to the client, and the
+        // selection screen is the only reader. Upstream resolves both off the loaded model where the card needs them
+        // (client/gui/button/CatalogModelPreviewAnimationState.java:21-24 takes the declared name, defaulting to
+        // `idle` exactly as ModelPreviewRegistry.previewFor does; CatalogModelCardState.java:228,
+        // CatalogModelButton.java:160 read them off the model's settings).
+        com.fox.ysmu.client.gui.ModelPreviewRegistry
+            .accept(modelId, data.getPreviewAnimation(), data.isDisablePreviewRotation());
+        // The model's own language tables reach the client through this same funnel and for the same reason as the
+        // links and the preview declaration above: both sync channels - and the local read of the built-in default -
+        // end here, and the model information screen plus the two selection screens' name lines are the only readers.
+        // The lookup itself happens where the name is drawn (ClientModelMetadataRegistry.displayName), mirroring
+        // upstream, which translates against the tables it collected from the pack at the point the card is rendered
+        // (format/schema/model/views/ModelInfoView.java:91-111).
+        ClientModelMetadataRegistry.acceptLanguageFiles(modelId, data.getLanguageFiles());
         // A model's projectile sub-entities are indexed here rather than at publish time, because an arrow can be
         // drawn by a client whose player model has not been built yet (someone else's arrow), and the renderer needs
         // the index to decide whether this model has one at all.
         indexProjectiles(modelId, data);
+        // Vehicles are indexed for the same reason and at the same moment: a boat can be drawn by a client whose
+        // passenger's model was never the local player's, and the renderer needs the index to decide whether this
+        // model has a vehicle sub-entity at all.
+        indexVehicles(modelId, data);
         if (eager) {
             installNow(data);
         } else {
@@ -312,11 +643,13 @@ public class ClientModelManager {
             // the models, so they are parked and installed on the first request for one of them.
             deferAnimations(modelId, data);
         }
-        ysmu.LOG.info(
-            "YSM client registered model {}: totalModelEntries={}, textureCount={}",
-            modelId,
-            MODELS.size(),
-            MODELS.get(modelId) == null ? 0 : MODELS.get(modelId).size());
+        if (com.fox.ysmu.Config.DEBUG_MODEL_LOAD && com.fox.ysmu.Config.DEBUG_MODEL_PARSE) {
+            ysmu.LOG.info(
+                "YSM client registered model {}: totalModelEntries={}, textureCount={}",
+                modelId,
+                MODELS.size(),
+                MODELS.get(modelId) == null ? 0 : MODELS.get(modelId).size());
+        }
         if (signature != null) {
             REGISTERED_MODEL_CONTENT.put(modelId, signature);
         }
@@ -431,7 +764,7 @@ public class ClientModelManager {
                 publishGeo(geo);
             }
         }
-        if (!uploadTextures(modelId, data.getTexture())) {
+        if (!uploadTextures(modelId, data.getTexture(), Collections.emptyMap(), data.getPbrComponents(), Collections.emptyMap())) {
             ysmu.LOG.warn(
                 "YSM client cannot draw the built-in default model: one of its textures could not be uploaded");
             rollbackPublishedGeometry(modelId);
@@ -475,6 +808,27 @@ public class ClientModelManager {
         return id != null && GEOMETRY_READY.contains(id);
     }
 
+    /**
+     * Whether this connection has a payload for this model at all: the server sent it and it was registered, whether
+     * or not its geometry was built - or could be built. Accepts either the model's own id or a sub-model id
+     * ({@code .../main}, {@code .../arm}).
+     * <p>
+     * This is the port's form of upstream's catalog lookup ({@code ClientCatalogSnapshot#find}, empty for a model the
+     * client never received) and it is the question that tells "wait, and keep what is on screen" apart from "there is
+     * nothing to wait for": a <em>Pending</em> or <em>Failed</em> model the client has keeps the model the entity is
+     * already shown with, while an id with no content at all goes to the built-in default
+     * ({@code EntityModelBinding:106-112} releases the primary and installs the fallback for that case,
+     * {@code :297-302} does the same when the catalog loses the applied model's content).
+     */
+    public static boolean hasModelContent(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return false;
+        }
+        // The texture list is keyed by the model's own id, so a sub-model id is answered by its parent - while an id
+        // that already is the model's own is answered directly (its path may itself contain segments).
+        return MODELS.containsKey(modelOrSubId) || MODELS.containsKey(ModelIdUtil.getParentModelId(modelOrSubId));
+    }
+
     /** Whether this model's build failed, so it is treated as one this client never received. */
     public static boolean isGeometryFailed(@Nullable ResourceLocation id) {
         return id != null && GEOMETRY_FAILED.contains(id);
@@ -499,6 +853,37 @@ public class ClientModelManager {
             return true;
         }
         if (GEOMETRY_READY.contains(id)) {
+            // Reference wiring, adapted to this port's single geometry choke point. The reference's
+            // render paths each ask the framework for the geometry they are about to draw
+            // (CustomPlayerRenderer.java:144 `.get()`, :166 `.touch()`, FirstPersonHandRenderer
+            // :430/:437, RenderUtil:492, ModelButton:122) and that is what keeps a live model out of
+            // the idle eviction. This port has one shared entry point for every geometry reader
+            // (world, HUD overlay and GUI tiles all come through here), so the same two answers are
+            // asked here instead of at each draw site.
+            //
+            // Both calls are gated on the switch: with it off this branch is exactly what it was.
+            // The seam only applies to an engine geometry key, i.e. a sub-model id of a model whose
+            // bare id is registered in MODELS - the readiness markers also carry the bare model id,
+            // which no publish ever puts in the engine cache, and for a model inside a pack folder
+            // that bare id still has a path segment (so the sub-name test alone would not exclude
+            // it). `touch()` is a no-op for a key the manager does not know
+            // (AssetCache.java:112-117), so an unmanaged id costs nothing; `get()` is only asked for
+            // an engine geometry key whose geometry is really missing from the cache, which is what
+            // an eviction leaves behind.
+            if (com.fox.ysmu.client.asset.AssetManager.isEnabled()
+                && !MODELS.containsKey(id)
+                && !ModelIdUtil.getSubNameFromId(id)
+                    .isEmpty()) {
+                if (GeckoLibCache.getInstance()
+                    .getGeoModels()
+                    .get(id) == null) {
+                    com.fox.ysmu.client.asset.AssetManager.geo(id)
+                        .get();
+                } else {
+                    com.fox.ysmu.client.asset.AssetManager.geo(id)
+                        .touch();
+                }
+            }
             return true;
         }
         if (GEOMETRY_FAILED.contains(id)) {
@@ -573,10 +958,45 @@ public class ClientModelManager {
                         entry.getKey(),
                         modelId,
                         failure);
+                    // Upstream's PARTIAL outcome: the model still renders, one of its resources does not. Reported
+                    // from here (the loader thread) is fine - the notifier batches and flushes on the client tick.
+                    com.fox.ysmu.client.render.ModelFailureNotifier.report(
+                        modelId,
+                        com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.PARTIAL);
                 }
             }
-            COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, data, generation));
+            Map<String, Map<Integer, BufferedImage>> components = new LinkedHashMap<>();
+            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                Map<Integer, BufferedImage> roles = new LinkedHashMap<>();
+                for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
+                    try { roles.put(role.getKey(), OuterFileTexture.decode(role.getValue())); }
+                    catch (Exception failure) { ysmu.LOG.warn("Could not decode PBR component {} of {}", role.getKey(), base.getKey(), failure); }
+                }
+                components.put(base.getKey(), roles);
+            }
+            COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, components, data, generation));
         } catch (Throwable failure) {
+            if (isTransientBuildFailure(failure)) {
+                // Environmental, not content: an OOM or a linkage error says nothing about the bytes, and the same
+                // payload may well build on the next attempt. Upstream keeps this kind out of its deterministic
+                // negative cache ({@code ResourceFailure.Kind.TRANSIENT}, ModelRenderTargetLoader:118-131) and gives
+                // the expensive attempt no new eligibility until the content or the connection changes
+                // (failure-and-recovery.md:28). Leaving the payload parked with its request marker set is exactly
+                // that here: nothing re-submits the build per frame, the model is not reported as missing
+                // (isModelAvailable still answers true, so an entity keeps the renderer and its applied model), and a
+                // new payload or a reconnect - parkGeometry's GEOMETRY_REQUESTED.remove - makes it retryable.
+                ysmu.LOG.warn(
+                    "YSM client could not build model {} ({}); this is an environment failure, so the model stays "
+                        + "parked instead of being quarantined - a new payload or a reconnect may build it",
+                    modelId,
+                    failure.getClass()
+                        .getName(),
+                    failure);
+                com.fox.ysmu.client.render.ModelFailureNotifier.report(
+                    modelId,
+                    com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.FALLBACK);
+                return;
+            }
             ysmu.LOG.warn("Failed to build geometry for model {}", modelId, failure);
             // A build that threw is a deterministic failure - the same bytes will throw again - so the model is
             // quarantined rather than retried. Upstream makes the same distinction and quarantines deterministic
@@ -587,12 +1007,43 @@ public class ClientModelManager {
     }
 
     /**
+     * Whether a failed build is an <b>environment</b> failure rather than a content failure.
+     *
+     * <p>Upstream makes exactly this split and carries it into the failure kind it records: a resource whose reason is
+     * {@code AssetLoadException.Reason.CONTENT} becomes {@code ResourceFailure.Kind.DETERMINISTIC} and everything else
+     * {@code TRANSIENT} ({@code model/resource/client/render/ModelRenderTargetLoader.java:107-131}); deterministic
+     * failures are frozen per content version in the negative cache, while a transient one only costs the current
+     * attempt. The port's payload is already in memory (no disk access to fail), so the environmental half is the JVM
+     * itself: {@link Error} - an {@code OutOfMemoryError} while baking a large model, a {@code LinkageError} from a
+     * half-loaded engine, a {@code StackOverflowError} from a pathological bone tree. Everything an
+     * {@code Exception} - a malformed payload, an unsupported geometry version, a build that cannot be represented -
+     * is content, and the same bytes will fail again.
+     *
+     * <p>Neither kind is retried per frame; the difference is that a transient one does not mark the model dead for
+     * the rest of the connection. Package private so the rule itself can be pinned without running a loader thread.
+     */
+    static boolean isTransientBuildFailure(Throwable failure) {
+        return failure instanceof Error;
+    }
+
+    /**
      * Installs at most {@link #MAX_PUBLISH_PER_TICK} finished models.
      * <p>
      * Called from the client tick, so the work that has to happen on this thread - putting the geometry where the
      * renderer looks for it, and uploading textures - is spread over frames instead of being done in one.
      */
     public static void tick() {
+        // Reference wiring: the reference drives AssetManager.tick() from its periodic cache sweep,
+        // which runs every 60 s (reference ClientModelManager.java:1750, called from
+        // unloadUnusedCaches). This port's client tick is the equivalent hook; AssetManager
+        // rate-limits its own scan to the same order of magnitude and no-ops entirely while
+        // Config.ENABLE_IDLE_ASSET_EVICTION is off.
+        com.fox.ysmu.client.asset.AssetManager.tick();
+        // The render-thread step of the texture release mechanism: drain the cleanup events that texture holders
+        // becoming unreachable produced, then perform the releases whose grace delay has run out. Upstream drives
+        // the same call from its client tick (upstream client/event/ClientTickEvent.java:28 ->
+        // CustomTextureManager.tick, upstream :38-41). No-op when nothing is registered.
+        ModelTextureRegistry.tick();
         for (int published = 0; published < MAX_PUBLISH_PER_TICK; published++) {
             BuiltModel built = COMPLETED_BUILDS.poll();
             if (built == null) {
@@ -670,7 +1121,7 @@ public class ClientModelManager {
         // never reached the texture manager, which is the resource-pack fallback and the shared missing texture.
         // TextureManager absorbs an ordinary bad image by substituting the missing texture and still registering the
         // id, so this only triggers on something abnormal.
-        if (!uploadTextures(built.modelId, built.textures, built.textureImages)) {
+        if (!uploadTextures(built.modelId, built.textures, built.textureImages, built.data.getPbrComponents(), built.componentImages)) {
             ysmu.LOG.warn(
                 "YSM client cannot draw model {}: one of its textures could not be uploaded; it is quarantined",
                 built.modelId);
@@ -830,8 +1281,21 @@ public class ClientModelManager {
         }
     }
 
-    /** The body of both refusal paths; callers hold {@link #GEOMETRY_STATE_LOCK}. */
+    /** Body of the refusal paths; callers hold {@link #GEOMETRY_STATE_LOCK}. */
     private static void refuseGeometryLocked(ResourceLocation modelId) {
+        if (isDefaultModelId(modelId)) {
+            // The fallback itself failed: whatever was installed is rolled back with the same refusal, so no render
+            // path may keep assuming it can fall back on it. See #isFallbackAvailable.
+            fallbackAvailable = false;
+        }
+        // Upstream's FALLBACK outcome: this model failed and the affected entities are drawn as the built-in default
+        // (its own wording, ModelFailureNotificationAggregator.Outcome.FALLBACK). The port reports it at the model
+        // level, because that is where a refusal happens; upstream reports it per entity binding, so the same failure
+        // reaches a projectile or vehicle as STOPPED instead - those renderers restore their host, which is what this
+        // port's arrow and vehicle paths report for their own content failures.
+        com.fox.ysmu.client.render.ModelFailureNotifier.report(
+            modelId,
+            com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.FALLBACK);
         for (ResourceLocation id : allIdsOf(modelId)) {
             GEOMETRY_FAILED.add(id);
             // A refusal supersedes a publish: leaving the ready marker set would make the id report itself published
@@ -844,6 +1308,14 @@ public class ClientModelManager {
 
     private static void markGeometryReady(ResourceLocation modelId) {
         synchronized (GEOMETRY_STATE_LOCK) {
+            if (isDefaultModelId(modelId)) {
+                // Geometry published and this model's textures uploaded by the same publish step: the fallback is
+                // usable from here on, and stays so across a sync (see #isFallbackAvailable).
+                fallbackAvailable = true;
+            }
+            // Upstream forgets a model that is loaded again, so a failure of a later payload is announced again
+            // (ModelFailureNotificationAggregator#recovered:42-46).
+            com.fox.ysmu.client.render.ModelFailureNotifier.recovered(modelId);
             for (ResourceLocation id : allIdsOf(modelId)) {
                 GEOMETRY_READY.add(id);
                 PENDING_GEOMETRY.remove(id);
@@ -889,6 +1361,14 @@ public class ClientModelManager {
      * Content fingerprint of everything {@link #registerAll} installs for a model: the geometry, texture and
      * animation bytes plus the digest the server published as this model's metadata.
      * <p>
+     * The GUI presentation images are part of it because {@code registerAll} indexes them too: a payload whose only
+     * change is its {@code gui_background} / {@code gui_foreground} must not be skipped as "identical content is
+     * already registered", or the tile would keep drawing the previous payload's images.
+     * <p>
+     * The GUI preview declaration ({@code preview_animation} / {@code disable_preview_rotation}) is part of it for the
+     * same reason: {@code registerAll} hands it to {@code ModelPreviewRegistry}, so a payload whose only change is the
+     * clip its tile plays must not be skipped either.
+     * <p>
      * Returns {@code null} when no digest is available, in which case the caller registers unconditionally rather
      * than assuming that two models are equal.
      */
@@ -899,6 +1379,19 @@ public class ClientModelManager {
             updateDigest(digest, data.getModel());
             updateDigest(digest, data.getTexture());
             updateDigest(digest, data.getAnimation());
+            updateDigest(digest, data.getGuiImages());
+            // Separated like the file names above, so the declaration cannot run into whatever is hashed next.
+            digest.update(data.getPreviewAnimation().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update((byte) (data.isDisablePreviewRotation() ? 1 : 0));
+            digest.update(data.getWheelDeclarations().encode().getBytes(StandardCharsets.UTF_8));
+            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                digest.update(base.getKey().getBytes(StandardCharsets.UTF_8));
+                for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
+                    digest.update((byte) (int) role.getKey());
+                    digest.update(role.getValue());
+                }
+            }
             ServerModelInfo info = data.getInfo();
             String md5 = info == null ? null : info.getMd5();
             if (md5 != null) {
@@ -948,12 +1441,16 @@ public class ClientModelManager {
      */
     static void deferAnimations(ResourceLocation modelId, ModelData data) {
         ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
-        // Anything already installed under this id belongs to the payload being replaced, so it goes first: readers
-        // that ask CustomPlayerEntity.getAnimation() without installing first (the id-only users in AnimationManager)
-        // would otherwise act on the previous payload's file until the new one happens to be installed.
-        GeckoLibCache.getInstance()
-            .getAnimations()
-            .remove(mainId);
+        // Anything already installed under either of this model's animation ids belongs to the payload being replaced,
+        // so it goes first: readers that ask CustomPlayerEntity.getAnimation() without installing first (the id-only
+        // users in AnimationManager) would otherwise act on the previous payload's file until the new one happens to
+        // be installed. Both ids, because the payload is installed as one file per domain
+        // ({@link AnimationDomain}); leaving the first-person file behind would keep the previous pack's arm clips.
+        for (String domain : AnimationDomain.ALL) {
+            GeckoLibCache.getInstance()
+                .getAnimations()
+                .remove(AnimationDomain.animationFileId(modelId, domain));
+        }
         if (data.getAnimation()
             .isEmpty()) {
             // This payload declares no animations of its own, so the model is meant to fall back to the built-in
@@ -1053,6 +1550,9 @@ public class ClientModelManager {
         }
         ModelData data = takePendingAnimations(mainId);
         if (data == null) {
+            // Nothing parked: either this model's animations are already installed, or it declares none of its own
+            // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
+            keepAnimationsResident(mainId);
             return;
         }
         try {
@@ -1063,6 +1563,93 @@ public class ClientModelManager {
             // payload is gone either way, so the model simply has no animation file of its own for this connection -
             // the same outcome it had before installation became lazy, where the one attempt happened at registration.
             ysmu.LOG.warn("Failed to register animations for model {}", mainId, failure);
+            // A failed install must not be adopted: the eviction would then hold an entry the reload cannot
+            // restore into the state a successful install would have produced.
+            return;
+        }
+        // Reference wiring, adapted to this port's lazy install. The reference hands the file it just installed to
+        // the asset framework at the same moment (reference ClientModelManager.java:644, inside applyPreParsed) and
+        // its AssetManager.tick() touches exactly this entry to pin the built-in default (reference
+        // AssetManager.java:81-82). Two gates, the same pair as publishGeo's: the switch, and the port-specific
+        // reloadability test documented on hasReloadableClientCache - a payload this port cannot re-read must never
+        // be adopted by a cache whose whole job is to evict it. What is cached is the animation map itself, i.e. the
+        // install rule's own input, and not the whole ModelData: the geometry and texture bytes that also ride in
+        // it are dropped at install in this port and must not be kept alive for the rest of the session.
+        if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(mainId)) {
+            com.fox.ysmu.client.asset.AssetManager.registerAnim(mainId, data.getAnimation());
+        }
+    }
+
+    /**
+     * The animation half of {@link #ensureGeometry}'s anti-eviction seam: a model whose animations were evicted must
+     * get them back, and one that is being drawn must not be evicted at all.
+     * <p>
+     * Called from {@link #ensureAnimations}, which {@code CustomPlayerModel.getAnimation} reaches on every animation
+     * lookup - i.e. once per drawn model per frame - and which is the port's single animation choke point, exactly as
+     * {@code ensureGeometry} is for geometry. The reference instead asks at each render site
+     * ({@code CustomPlayerEntity.java:198}, {@code RenderUtil.java:193}); one seam does the same job here.
+     * <p>
+     * Why the {@code managesAnimations} test rather than the engine cache alone: geometry has the invariant that a
+     * published model's geometry is in {@code GeckoLibCache}, so "the cache has no geometry" means "it was evicted".
+     * Animations have no such invariant - a model that declares no animations of its own legitimately has no file and
+     * falls back to the built-in default ({@code CustomPlayerEntity.getAnimation()} answers
+     * {@code DEFAULT_MAIN_ANIMATION} on a miss), and asking for a reload there would decrypt the whole payload to
+     * install clips it already falls back to. {@link com.fox.ysmu.client.asset.AssetManager#managesAnimations} is
+     * the record of "this subsystem adopted this model", which survives the eviction that drops the cache entry.
+     * <p>
+     * Both calls are gated on the switch, and the reloadability test is repeated because the "model to cache file"
+     * association can be dropped by a disconnect between the adoption and this call; a stale adoption then goes
+     * quiet instead of starting a load that is bound to fail.
+     */
+    private static void keepAnimationsResident(ResourceLocation mainId) {
+        if (!com.fox.ysmu.client.asset.AssetManager.isEnabled()
+            || !com.fox.ysmu.client.asset.AssetManager.managesAnimations(mainId)
+            || !hasReloadableClientCache(mainId)) {
+            return;
+        }
+        if (GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(mainId) == null) {
+            com.fox.ysmu.client.asset.AssetManager.anim(mainId)
+                .get();
+        } else {
+            com.fox.ysmu.client.asset.AssetManager.anim(mainId)
+                .touch();
+        }
+    }
+
+    /**
+     * Re-installs one model's animations after the per-domain files were released from the engine cache.
+     * <p>
+     * Client thread only, called from the asset framework's apply phase
+     * ({@code client/asset/provider/AnimationProvider#apply}). It is deliberately <em>not</em> a second
+     * implementation of this port's install rule: it calls {@link #registerAnimations} - the same private pipeline
+     * the first install ran, and the only thing that produces the two per-domain files ({@link AnimationDomain}),
+     * the per-domain default fallback and the conditions and controllers that go with them.
+     * <p>
+     * The reference's provider can be narrower because its model has one merged animation file: its
+     * {@code apply} only puts that file into {@code GeckoLibCache} (reference {@code provider/AnimationProvider.java:27-34}).
+     * A merged file cannot express this port's two domains - it is the defect {@code AnimationDomain} exists to fix -
+     * so the reload replays the rule with the animation map the provider just re-read. See
+     * {@code .agent/phase40-eviction-members.md}.
+     *
+     * @param animations the payload's animation file map, exactly as {@link ModelData#getAnimation()} returns it
+     */
+    public static void reinstallAnimations(@Nullable ResourceLocation mainId, @Nullable Map<String, byte[]> animations) {
+        if (mainId == null || animations == null || animations.isEmpty()) {
+            return;
+        }
+        if (!isClientThread()) {
+            // Same reason as ensureAnimations: this writes the engine's caches and several per-domain tables, and
+            // the apply phase that calls it runs on the client thread.
+            return;
+        }
+        try {
+            registerAnimations(mainId, animations);
+        } catch (Throwable failure) {
+            // Same guard as ensureAnimations': the payload is the freshly re-read one, so a failure here leaves the
+            // model on the built-in default fallback rather than taking down the client thread's task queue.
+            ysmu.LOG.warn("Failed to re-register animations for model {}", mainId, failure);
         }
     }
 
@@ -1143,17 +1730,20 @@ public class ClientModelManager {
          * from here failed to decode and is left to the client thread. See {@link #buildModel}.
          */
         private final Map<String, BufferedImage> textureImages;
+        private final Map<String, Map<Integer, BufferedImage>> componentImages;
         /** The exact payload these bytes came from; see the identity check in {@link #publishBuiltModel}. */
         private final ModelData data;
         /** The connection this build was queued on; see {@link #publishBuiltModel}. */
         private final long generation;
 
         private BuiltModel(ResourceLocation modelId, List<BuiltGeo> geometry, Map<String, byte[]> textures,
-            Map<String, BufferedImage> textureImages, ModelData data, long generation) {
+            Map<String, BufferedImage> textureImages, Map<String, Map<Integer, BufferedImage>> componentImages,
+            ModelData data, long generation) {
             this.modelId = modelId;
             this.geometry = geometry;
             this.textures = textures;
             this.textureImages = textureImages;
+            this.componentImages = componentImages;
             this.data = data;
             this.generation = generation;
         }
@@ -1224,6 +1814,15 @@ public class ClientModelManager {
             built.widthScale,
             built.extraInfo != null,
             extraAnimationNames != null ? extraAnimationNames.length : 0);
+        // Reference wiring: applyPreParsed hands every installed geometry to AssetManager
+        // (reference ClientModelManager.java:599). Gated twice for the same reason as every other
+        // AssetManager call site: with Config.ENABLE_IDLE_ASSET_EVICTION off the subsystem must do
+        // nothing at all. The reloadability test is the port-specific safety gate documented on
+        // hasReloadableClientCache: a geometry the port cannot re-read must never be adopted by a
+        // cache whose whole job is to evict it.
+        if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(built.id)) {
+            com.fox.ysmu.client.asset.AssetManager.registerGeo(built.id, built.model);
+        }
     }
 
     /**
@@ -1312,6 +1911,56 @@ public class ClientModelManager {
     }
 
     /**
+     * Records the vehicle sub-entities a model declares, so {@code VehicleRenderer} can ask "does this model have a
+     * vehicle for the entity I am drawing, and which texture is its own".
+     * <p>
+     * Both answers come out of the payload's key naming, which {@code RawYsmModelAdapter} produces:
+     * {@code vehicle_<matchId>} for the geometry and {@code vehicle_<matchId>_<file>.png} for the textures. The match
+     * id is kept exactly as the pack wrote it (a leading {@code #} included, e.g. {@code #minecraft:boat}), because
+     * that same string is the one embedded in the sub-model id the renderer has to build.
+     */
+    private static void indexVehicles(ResourceLocation modelId, ModelData data) {
+        List<String> matchIds = new ArrayList<>();
+        for (String key : data.getModel()
+            .keySet()) {
+            if (key.startsWith(VEHICLE_KEY_PREFIX)) {
+                String matchId = key.substring(VEHICLE_KEY_PREFIX.length());
+                if (!matchId.isEmpty()) {
+                    matchIds.add(matchId);
+                }
+            }
+        }
+        if (matchIds.isEmpty()) {
+            // Assigned rather than skipped, so a re-registration that drops the vehicles stops answering with the
+            // previous payload's list.
+            VEHICLE_MODEL_IDS.remove(modelId);
+            VEHICLE_TEXTURE_IDS.remove(modelId);
+            return;
+        }
+        VEHICLE_MODEL_IDS.put(modelId, matchIds);
+
+        List<ResourceLocation> vehicleTextures = new ArrayList<>();
+        for (String name : data.getTexture()
+            .keySet()) {
+            if (name.startsWith(VEHICLE_KEY_PREFIX)) {
+                vehicleTextures.add(ModelIdUtil.getSubModelId(modelId, name));
+            }
+        }
+        if (vehicleTextures.isEmpty()) {
+            VEHICLE_TEXTURE_IDS.remove(modelId);
+        } else {
+            VEHICLE_TEXTURE_IDS.put(modelId, vehicleTextures);
+        }
+        if (com.fox.ysmu.Config.DEBUG_MODEL_LOAD) {
+            ysmu.LOG.info(
+                "YSM client indexed vehicle sub-entities for {}: match={}, textures={}",
+                modelId,
+                matchIds,
+                vehicleTextures.size());
+        }
+    }
+
+    /**
      * Uploads every texture of a model.
      * <p>
      * A texture the game cannot decode is <em>not</em> a failure here: {@code TextureManager.loadTexture} catches the
@@ -1336,11 +1985,22 @@ public class ClientModelManager {
      */
     private static boolean uploadTextures(ResourceLocation id, Map<String, byte[]> mapData,
         Map<String, BufferedImage> decoded) {
+        return uploadTextures(id, mapData, decoded, Collections.emptyMap(), Collections.emptyMap());
+    }
+
+    private static boolean uploadTextures(ResourceLocation id, Map<String, byte[]> mapData,
+        Map<String, BufferedImage> decoded, Map<String, Map<Integer, byte[]>> components,
+        Map<String, Map<Integer, BufferedImage>> componentImages) {
         boolean complete = true;
         for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
             ResourceLocation textureId = ModelIdUtil.getSubModelId(id, entry.getKey());
             try {
-                registerTexture(textureId, entry.getValue(), decoded.get(entry.getKey()));
+                BufferedImage base = decoded.get(entry.getKey());
+                if (base != null && componentImages.containsKey(entry.getKey())) {
+                    ModelTextureRegistry.register(textureId, new OuterFileTexture(base, componentImages.get(entry.getKey())));
+                } else if (components.containsKey(entry.getKey())) {
+                    ModelTextureRegistry.register(textureId, new OuterFileTexture(entry.getValue(), components.get(entry.getKey())));
+                } else registerTexture(textureId, entry.getValue(), base);
             } catch (Throwable failure) {
                 // Throwable, like the other publish steps: an Error escaping into the client tick would take the tick
                 // down, and there is nothing to do with this texture either way.
@@ -1354,62 +2014,66 @@ public class ClientModelManager {
 
 
     /**
-     * Texture ids this client uploaded itself; see {@link #registerTexture}.
+     * Registers one texture, uploading the image the loader thread already decoded when there is one, and hands its
+     * lifecycle to {@link ModelTextureRegistry}.
      * <p>
-     * Internal to the upload bookkeeping and nothing else. It is deliberately NOT a gate on what the renderer may
-     * bind: the game's texture manager legitimately holds textures this mod never uploaded (the player's own skin for
-     * the built-in {@code steve}/{@code alex} models, another mod's textures), and upstream lets those through - the
-     * renderer resolves a model texture through the model's own list and carries anything else as an explicit render
-     * event override. In the same way, a model texture is checked against the model's own list in
-     * {@code CustomPlayerModel.textureFor}, not against this set.
+     * Texture ids this client uploaded itself used to be tracked here in {@code UPLOADED_TEXTURES}, a timestamp-free
+     * id set whose only job was to decide whether a re-registration may {@code deleteTexture}. That decision now
+     * belongs to the release mechanism, which owns the same question and needs the answer anyway:
+     * {@code CustomTextureManager.MinecraftHost} remembers, per id, whether the platform entry is this mod's own
+     * upload - the {@code loadTexture} return value is what tells the two apart - and deletes the previous GL texture
+     * only when it is. The reason the old set existed is unchanged and still honoured: an id the game mapped to its
+     * shared missing texture is not ours to delete, and deleting it would blank every missing texture in the game.
      * <p>
-     * What this set is for is the delete decision below: an id the game mapped to its shared missing texture is not
-     * ours to delete, and deleting it would blank every missing texture in the game.
-     * Kept for the life of the process on purpose: the GL textures survive a connection change, so an id that was
-     * ours stays ours.
-     */
-    private static final Set<ResourceLocation> UPLOADED_TEXTURES = ConcurrentHashMap.newKeySet();
-
-    private static void registerTexture(ResourceLocation id, byte[] data) {
-        registerTexture(id, data, null);
-    }
-
-    /**
-     * Registers one texture, uploading the image the loader thread already decoded when there is one.
+     * The set was deliberately NOT a gate on what the renderer may bind (the game's texture manager legitimately
+     * holds textures this mod never uploaded - the player's own skin for the built-in {@code steve}/{@code alex}
+     * models, another mod's textures), and neither is its replacement: a model texture is checked against the model's
+     * own list in {@code CustomPlayerModel.textureFor}, not against this bookkeeping.
      *
      * @param decoded the image prepared off-thread, or {@code null} to decode here; see {@link #buildModel}.
      */
     private static void registerTexture(ResourceLocation id, byte[] data, @Nullable BufferedImage decoded) {
-        TextureManager textureManager = Minecraft.getMinecraft()
-            .getTextureManager();
-        // R-01: loadTexture only replaces the map entry, so registering an id twice would leak the GL texture the
-        // previous OuterFileTexture uploaded and nothing would ever free it - but only an id this client really
-        // uploaded may be deleted. A texture the manager could not decode is mapped to its shared
-        // TextureUtil.missingTexture singleton, whose GL name every missing texture in the game draws with; deleting
-        // that would blank them all. loadTexture's return value is what tells the two apart.
-        if (UPLOADED_TEXTURES.contains(id)) {
-            textureManager.deleteTexture(id);
-        }
-        OuterFileTexture texture = decoded != null ? new OuterFileTexture(decoded) : new OuterFileTexture(data);
-        if (textureManager.loadTexture(id, texture)) {
-            UPLOADED_TEXTURES.add(id);
-        } else {
-            // The manager substituted the shared missing texture, so this id is not ours to delete next time.
-            UPLOADED_TEXTURES.remove(id);
-        }
+        // R-01: loadTexture only replaces the map entry, so re-registering an id twice would leak the GL texture the
+        // previous OuterFileTexture uploaded. That delete, and the "is this id ours to delete at all" decision, now
+        // live in the release mechanism: CustomTextureManager.MinecraftHost.register deletes the id's previous GL
+        // texture when the registration before it was this mod's own upload, and never when the game mapped the id to
+        // its shared missing texture - whose GL name every missing texture in the game draws with, so deleting it
+        // would blank them all. That replaces the timestamp-free ClientModelManager.UPLOADED_TEXTURES id set that
+        // used to answer exactly this question (see .agent/phase34-texture-release.md).
+        //
+        // The throw stays handled by the caller (uploadTextures): a texture that cannot be registered is not a reason
+        // to refuse the model.
+        ModelTextureRegistry.register(id, decoded != null ? new OuterFileTexture(decoded) : new OuterFileTexture(data));
     }
 
     private static void registerAnimations(ResourceLocation id, Map<String, byte[]> mapData) {
         Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
             .getAnimations();
-        AnimationFile main = new AnimationFile();
+        // A model's animation sets are split into *domains*, which is upstream's shape: the `fp_arm` set is the
+        // first-person arm's own set and every other set belongs to the model proper
+        // (DefaultAnimationKey.java:36-38 maps a `player` target's `fp_arm` set to `player/first-person` and
+        // everything else to `player/main`; ModelRenderTargetLoader.java:243-253 collects the files into exactly
+        // those two groups and bakes one animation store each). Installing one file per domain instead of one file
+        // for the whole payload is what stops a later set from redefining an earlier set's clip: with a single
+        // namespace, `fp_arm`'s `parallel0` (arms only, 0.2 s) replaced `main`'s (the model's body bones, 1.0 s) for
+        // every pack that ships a real first-person set, and the built-in default's own `parallel0`/`parallel1` were
+        // replaced by the empty `parallel0..7` stubs of its `fp.arm.animation.json`.
+        Map<String, AnimationFile> filesByDomain = new LinkedHashMap<>();
+        for (String domain : AnimationDomain.ALL) {
+            filesByDomain.put(domain, new AnimationFile());
+        }
         Map<String, byte[]> controllerFiles = new LinkedHashMap<>();
+        // 动画名 → 该动画**自身** JSON 引用到的可选模组 modId 集合，注册控制器后交给
+        // OpenYsmAnimationControllerRegistry.scanAnimKeyframesForDeps 展开依赖。
+        // (reference branch ClientModelManager.java:1083-1115, :700-703)
+        Map<String, Set<String>> animToModIds = new LinkedHashMap<>();
         // A projectile sub-entity's animation and controller files must NOT merge into the player's single animation
         // namespace: a pack's arrow animation set and its player set both define `parallel0`, and merging them lets
         // one overwrite the other for whichever is drawn second. Each projectile therefore gets its own AnimationFile
         // registered under its own sub-model id, which is what the projectile renderer looks up.
         ResourceLocation baseId = ModelIdUtil.getParentModelId(id);
         Map<ResourceLocation, byte[]> projectileControllerFiles = new LinkedHashMap<>();
+        Map<ResourceLocation, byte[]> vehicleControllerFiles = new LinkedHashMap<>();
         for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
             // The controller prefix is tested first: `projectile_ctrl_arrow` also starts with `projectile_`.
             if (entry.getKey()
@@ -1441,6 +2105,38 @@ public class ClientModelManager {
                 animations.put(projectileId, projectileAnimationFile(bytes, projectileId));
                 continue;
             }
+            // The vehicle family, same two branches and same reason as the projectile ones above: a pack's boat set
+            // and its player set can both define a clip name (`water`, `forward`, ...), and merging them would let one
+            // overwrite the other for whichever is drawn second. Each vehicle gets its own AnimationFile under its own
+            // sub-model id. The controller prefix is tested first: `vehicle_ctrl_<match>` also starts with `vehicle_`.
+            if (entry.getKey()
+                .startsWith(VEHICLE_CONTROLLER_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(VEHICLE_CONTROLLER_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
+                vehicleControllerFiles.put(vehicleId, bytes);
+                animations.computeIfAbsent(vehicleId, ignored -> new AnimationFile());
+                continue;
+            }
+            if (entry.getKey()
+                .startsWith(VEHICLE_KEY_PREFIX)) {
+                String matchId = entry.getKey()
+                    .substring(VEHICLE_KEY_PREFIX.length());
+                byte[] bytes = entry.getValue();
+                if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
+                // Same parser as the projectile branch: it is "one sub-entity's own animation file, never merged into
+                // the player's namespace", which is exactly what a vehicle needs too. Only its name and its log line
+                // say projectile.
+                animations.put(vehicleId, projectileAnimationFile(bytes, vehicleId));
+                continue;
+            }
             // Each file's bytes are decoded and parsed exactly once: that one JsonObject both answers "is this a
             // controller file?" and feeds the animation conversion. The previous shape parsed every file whose name
             // was not a controller name twice, because a probe parsed it to look for `animation_controllers` and the
@@ -1464,7 +2160,7 @@ public class ClientModelManager {
                     id,
                     e.getClass()
                         .getSimpleName(),
-                    StringUtils.defaultString(e.getMessage()));
+                    Objects.requireNonNullElse(e.getMessage(), ""));
                 continue;
             }
             if (jsonObject == null) {
@@ -1474,28 +2170,121 @@ public class ClientModelManager {
                 controllerFiles.put(entry.getKey(), bytes);
                 continue;
             }
-            mergeAnimationFile(main, animationFileFromJson(jsonObject));
+            // 逐动画扫描关键帧 Molang 表达式里对可选模组控制变量（如 ctrl.tac_hold_gun）的引用：
+            // 控制器的 animation 条目可能只是裸动画名、自己不带任何 condition，引用藏在动画关键帧里。
+            // 逐动画（而不是逐文件）是必须的：某个模型的 main.animation.json 里只有 sneak/sneaking
+            // 引用 ctrl.tac_，逐文件标记会把 pre_parallel0-7/表情/衣服全部误标为 tacz 依赖，
+            // 于是 tacz 未加载时 pre_parallel_0 控制器被整体跳过（衣服/表情永不播放）。
+            // (reference branch ClientModelManager.java:1073-1115)
+            for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
+                JsonElement animationJsonElement = animationEntry.getValue();
+                if (animationJsonElement == null || !animationJsonElement.isJsonObject()) {
+                    continue;
+                }
+                String animationJson = animationJsonElement.toString();
+                for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                    if (dependency.matches(animationJson)) {
+                        animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                            .add(dependency.getModId());
+                    }
+                }
+            }
+            mergeAnimationFile(
+                filesByDomain.get(AnimationDomain.ofAnimationSet(entry.getKey())),
+                animationFileFromJson(jsonObject));
         }
-        DEFAULT_ANIMATION_FILE.animations.forEach((name, action) -> {
-            if (!main.animations.containsKey(name)) {
-                main.putAnimation(name, action);
-            }
-        });
-        main.animations.forEach((name, animation) -> {
+        // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
+        // (`defaultAnimations.fallback(domain)`, ModelRenderTargetLoader.java:375-379): a name the model defines
+        // itself always wins, and a name it does not falls back to the default's clip for that domain.
+        // Which names came from that fallback is remembered, because a name the model merely inherits is not this
+        // model's to report: the built-in default model's own registration reports it once, and without this every
+        // model that inherits an unclassifiable default clip (`hold_mainhand:lance` on all 22 wine_fox models, for
+        // one) would warn about content its own files never mention.
+        Map<String, Set<String>> inheritedFromDefault = new LinkedHashMap<>();
+        for (String domain : AnimationDomain.ALL) {
+            AnimationFile target = filesByDomain.get(domain);
+            Set<String> inherited = new LinkedHashSet<>();
+            defaultAnimationFile(domain).animations.forEach((name, action) -> {
+                if (!target.animations.containsKey(name)) {
+                    target.putAnimation(name, action);
+                    inherited.add(name);
+                }
+            });
+            inheritedFromDefault.put(domain, inherited);
+        }
+        // Condition names are registered per domain, under the id that domain's animatable reads, which is upstream's
+        // two-store split (`ModelRenderTargetAssembler.java:53-60`: the player's own names into `conditionManager`, the
+        // `fp_arm` set's into `fpArmConditionManager`). The body's controllers look their conditional names up with the
+        // model's `main` id and the first-person arm's with the model's `arm` id
+        // (`ConditionManager#armorFor`), so each table must hold exactly its own domain's names - a name the `fp_arm`
+        // set declares is not a name the body's armor controller may play.
+        filesByDomain.get(AnimationDomain.MAIN)
+            .animations.forEach((name, animation) -> {
+                try {
+                    ConditionManager.addTest(
+                        id,
+                        name,
+                        !inheritedFromDefault.get(AnimationDomain.MAIN)
+                            .contains(name));
+                } catch (Exception e) {
+                    ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
+                }
+            });
+        ResourceLocation firstPersonId = AnimationDomain.animationFileId(baseId, AnimationDomain.FIRST_PERSON);
+        filesByDomain.get(AnimationDomain.FIRST_PERSON)
+            .animations.forEach((name, animation) -> {
+                try {
+                    com.fox.ysmu.client.animation.condition.FPArmConditionManager.addTest(
+                        firstPersonId,
+                        name,
+                        !inheritedFromDefault.get(AnimationDomain.FIRST_PERSON)
+                            .contains(name));
+                } catch (Exception e) {
+                    ysmu.LOG.warn(
+                        "Failed to register first-person animation condition {} for model {}",
+                        name,
+                        firstPersonId,
+                        e);
+                }
+            });
+        Set<String> installedAnimationNames = new LinkedHashSet<>();
+        for (String domain : AnimationDomain.ALL) {
+            AnimationFile file = filesByDomain.get(domain);
+            installedAnimationNames.addAll(file.animations.keySet());
+            animations.put(AnimationDomain.animationFileId(baseId, domain), file);
+        }
+        // The reference gates controller registration on the model actually declaring controller files
+        // (REF ClientModelManager.java:690 `if (!bundle.controllerFiles.isEmpty())`). Without that gate every
+        // built-in model gains a ControllerSet: the registry synthesises one controller per parallel animation
+        // name, and the built-in `default` pack declares no controller/ at all while its main.animation.json
+        // still defines pre_parallel0..7 and parallel0..7. Those 16 slots would leave the raw
+        // playLoopAnimation path for the OpenYSM state machine. The registry cleared a stale set for this id
+        // through the empty-file call; clearRuntimeModelCaches clears the whole registry per sync, and a
+        // re-registration of the same id carries the same payload, so nothing goes stale here.
+        if (!controllerFiles.isEmpty()) {
             try {
-                ConditionManager.addTest(id, name);
-            } catch (Exception e) {
-                ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
+                // animationNames is the animation set installed just above: the model's own animations plus the
+                // built-in defaults merged in, across both domains so a controller state that names a clip cannot
+                // lose its route. That is the port's counterpart of the `resourceAdapter.getAnimations(model,
+                // assets)` map OpenYSM's ParallelProcessor scans (ParallelControllerDiscovery.java:45).
+                OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values(), installedAnimationNames);
+            } catch (Throwable failure) {
+                // The animation set above is already installed, and the registry already handles a broken controller file
+                // per file, so this only catches something escaping that - an Error. Letting it through would make the
+                // caller report the whole model as failed when its animations are in fact usable.
+                ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
             }
-        });
-        animations.put(id, main);
-        try {
-            OpenYsmAnimationControllerRegistry.register(id, controllerFiles.values());
-        } catch (Throwable failure) {
-            // The animation set above is already installed, and the registry already handles a broken controller file
-            // per file, so this only catches something escaping that - an Error. Letting it through would make the
-            // caller report the whole model as failed when its animations are in fact usable.
-            ysmu.LOG.warn("Failed to register OpenYSM controllers for model {}", id, failure);
+        }
+        // 注册之后才展开依赖：scanAnimKeyframesForDeps 查的是已经建立的 ControllerSet。
+        // (reference branch ClientModelManager.java:697-703)
+        if (!animToModIds.isEmpty()) {
+            try {
+                OpenYsmAnimationControllerRegistry.scanAnimKeyframesForDeps(id, animToModIds);
+            } catch (Throwable failure) {
+                // 依赖展开只是优化（未加载模组的控制器被跳过）；失败时控制器照常按自己的条件运行，
+                // 不能因此把整个模型的注册判为失败。
+                ysmu.LOG.warn("Failed to scan animation keyframes for mod dependencies for model {}", id, failure);
+            }
         }
         // The projectile controllers live under the projectile's own sub-model id, which is also the id its geometry
         // and its AnimationFile are registered under.
@@ -1508,7 +2297,26 @@ public class ClientModelManager {
                 ysmu.LOG.warn("Failed to register projectile controllers for {}", entry.getKey(), failure);
             }
         }
-        ysmu.LOG.info("YSM client registered animations for {}: count={}", id, main.animations.size());
+        // The vehicle controllers live under the vehicle's own sub-model id, same rule as the projectile ones.
+        for (Map.Entry<ResourceLocation, byte[]> entry : vehicleControllerFiles.entrySet()) {
+            try {
+                OpenYsmAnimationControllerRegistry.register(
+                    entry.getKey(),
+                    java.util.Collections.singletonList(entry.getValue()));
+            } catch (Throwable failure) {
+                ysmu.LOG.warn("Failed to register vehicle controllers for {}", entry.getKey(), failure);
+            }
+        }
+        ysmu.LOG.info(
+            "YSM client registered animations for {}: count={}",
+            id,
+            filesByDomain.get(AnimationDomain.MAIN).animations.size());
+    }
+
+    /** The built-in default model's animations for one domain; see {@link AnimationDomain}. */
+    private static AnimationFile defaultAnimationFile(String domain) {
+        return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE
+            : DEFAULT_ANIMATION_FILE;
     }
 
     /** One projectile's animation file, parsed and never merged into the player's namespace. */
@@ -1523,7 +2331,7 @@ public class ClientModelManager {
                 projectileId,
                 e.getClass()
                     .getSimpleName(),
-                StringUtils.defaultString(e.getMessage()));
+                Objects.requireNonNullElse(e.getMessage(), ""));
             return new AnimationFile();
         }
     }
@@ -1546,8 +2354,9 @@ public class ClientModelManager {
             String animationName = entry.getKey();
             Animation animation;
             try {
-                animation = JsonAnimationUtils
-                    .deserializeJsonToAnimation(JsonAnimationUtils.getAnimation(jsonObject, animationName), parser);
+                Map.Entry<String, JsonElement> animEntry = JsonAnimationUtils.getAnimation(jsonObject, animationName);
+                animation = JsonAnimationUtils.deserializeJsonToAnimation(animEntry, parser);
+                attachAnimSpeed(animation, animEntry);
                 animationFile.putAnimation(animationName, animation);
             } catch (Exception e) {
                 ysmu.LOG.warn(
@@ -1555,10 +2364,46 @@ public class ClientModelManager {
                     animationName,
                     e.getClass()
                         .getSimpleName(),
-                    StringUtils.defaultString(e.getMessage()));
+                    Objects.requireNonNullElse(e.getMessage(), ""));
             }
         }
         return animationFile;
+    }
+
+    /**
+     * YSMU: 把模型动画 JSON 的 {@code anim_speed}（逐动画播放倍率，数字或 MoLang 表达式）与
+     * {@code anim_time_update}（自定义时间推进）挂到引擎 {@link Animation#animSpeed} /
+     * {@link Animation#animTimeUpdate}。这是全仓对这两个字段的唯一写入点：前者由
+     * {@code MovementSpeedMatcher.animSpeedFor} 消费，后者由 {@code AnimationController} 的时钟推进消费。
+     * <p>
+     * 形状照参考分支 {@code ClientModelManager.java:1275-1279}（它的 {@code getAnimationFile}），
+     * 但参考只写了 {@code anim_speed}。
+     * <p>
+     * <b>两条通道都读得到</b>：legacy 通道上散件模型的动画 JSON 是原样透传的
+     * （{@code FolderFormat}/{@code YsmFormat} 直接读文件字节；{@code RawYsmModelAdapter.putAnimationFile}
+     * 优先使用 {@code RawAnimationFile.sourceJson}），JSON 里的两个字段一直都在；OpenYSM 二进制通道上
+     * {@code sourceJson} 不存在，所以 JSON 是 {@code RawYsmModelAdapter.createAnimationJson} 从结构重新生成的，
+     * 而那两个字段现在既在 {@code RawYsmModel.RawAnimation} 里、也被二进制序列化器写出并被
+     * {@code createAnimationJson} 回写（{@code YSMBinarySerializer.writeAnimationFileContent} 尾部的两个
+     * {@code writeOptionalString}）。在此之前它们只在 legacy 通道存活，而默认通道是二进制通道。
+     */
+    private static void attachAnimSpeed(Animation animation, Map.Entry<String, JsonElement> animEntry) {
+        if (animEntry == null || !animEntry.getValue().isJsonObject()) {
+            return;
+        }
+        JsonObject animObject = animEntry.getValue().getAsJsonObject();
+        JsonElement speed = animObject.get("anim_speed");
+        if (speed != null && speed.isJsonPrimitive()) {
+            animation.animSpeed = speed.getAsString();
+        }
+        JsonElement weight = animObject.get("blend_weight");
+        if (weight != null && weight.isJsonPrimitive()) {
+            animation.blendWeight = weight.getAsString();
+        }
+        JsonElement timeUpdate = animObject.get("anim_time_update");
+        if (timeUpdate != null && timeUpdate.isJsonPrimitive()) {
+            animation.animTimeUpdate = timeUpdate.getAsString();
+        }
     }
 
     private static AnimationFile mergeAnimationFile(AnimationFile main, AnimationFile other) {
@@ -1567,19 +2412,48 @@ public class ClientModelManager {
     }
 
     public static void loadDefaultModel() {
+        // M1/D7:内置 default 现在是 config/ysmu/builtin/default 下的现代 ysm.json 包，config/ysmu/custom 只是用户
+        // 自己的根目录，新装机器上并没有 custom/default；仅按旧位置读会让这个方法在全新安装上直接抛
+        // FileNotFoundException，DEFAULT_ANIMATION_FILE 于是永远是空的。形状照 SOURCE
+        // ClientModelManager:1319-1348：先试旧布局，再回退到内置包。
+        ModelData data = null;
         try {
-            ModelData data = FolderFormat.getModelData(ServerModelManager.CUSTOM, "default");
+            data = FolderFormat.getModelData(ServerModelManager.CUSTOM, "default");
+        } catch (IOException e) {
+            ysmu.LOG.info("Legacy default model not found at CUSTOM/default, trying the built-in OpenYSM pack...");
+        }
+        if (data == null) {
+            // 新装机器走的就是这一支。
+            Path builtinDefault = ServerModelManager.BUILT.resolve("default");
+            if (Files.isDirectory(builtinDefault)) {
+                try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(builtinDefault)) {
+                    RawYsmModel raw = deserializer.deserialize();
+                    raw.modelId = "default";
+                    // SOURCE 在 :1336-1340 手动把 default_texture 填进它自己的 DEFAULT_TEXTURE 表，因为它这条路径
+                    // 绕开了会登记该字段的 OpenYSM 同步路径。本端不需要这一步：RawYsmModelAdapter 把
+                    // default_texture 写进几何的 ysm_default_texture，下面的 registerAll(eager) -> publishGeo 会
+                    // 照常把它读进 DECLARED_DEFAULT_TEXTURES。
+                    if (RawYsmModelAdapter.isBridgeable(raw)) {
+                        data = RawYsmModelAdapter.toLegacyModelData(raw, "default");
+                    }
+                } catch (Exception e2) {
+                    ysmu.LOG.warn("Failed to load default model from the built-in OpenYSM pack", e2);
+                }
+            }
+        }
+        if (data != null) {
             data.getAnimation()
                 .forEach((name, bytes) -> {
                     AnimationFile animationFile = getAnimationFile(new String(bytes, StandardCharsets.UTF_8));
-                    mergeAnimationFile(DEFAULT_ANIMATION_FILE, animationFile);
+                    // Domain-split like any other model's payload: the default model's own `fp_arm` set is the
+                    // first-person fallback, not one more main-domain set. See {@link AnimationDomain}.
+                    mergeAnimationFile(defaultAnimationFile(AnimationDomain.ofAnimationSet(name)), animationFile);
                 });
             // Eager: this is the substitute every not-yet-built model is drawn with, so it has to exist before any
             // other model asks for it.
             ClientModelManager.registerAll(data, true);
-        } catch (IOException e) {
-            ysmu.LOG.warn("Failed to load default model", e);
-            e.printStackTrace();
+        } else {
+            ysmu.LOG.warn("Failed to load default model from any format");
         }
     }
 
@@ -1601,15 +2475,19 @@ public class ClientModelManager {
 
     /** Client thread: resets the sync state, clears the runtime caches, then reads the cache directory. */
     private static void prepareModelSync() {
-        long generation = SYNC_GENERATION + 1L;
-        SYNC_GENERATION = generation;
+        final long generation;
+        synchronized (com.fox.ysmu.network.message.RequestLoadModel.class) {
+            generation = SYNC_GENERATION + 1L;
+            SYNC_GENERATION = generation;
+            PASSWORD = null;
+            PASSWORD_UUID = null;
+            com.fox.ysmu.network.message.RequestLoadModel.clearPendingLoads();
+        }
         pendingModelSync = null;
         ysmu.LOG.info(
             "YSM client starting model sync: currentModels={}, rememberedCachedModels={}",
             MODELS.size(),
             CACHE_MD5.size());
-        PASSWORD = null;
-        PASSWORD_UUID = null;
         clearCachedModelMd5();
         // CUI-01: the cache reset and the cache-directory listing run in this one client task, in this order, so
         // the reply describes the state the client is actually in when it is built.
@@ -1834,6 +2712,83 @@ public class ClientModelManager {
         }
     }
 
+    /**
+     * 后台线程：把一个模型在加密客户端缓存里的 payload 重新解密并桥接成 legacy {@link ModelData}。
+     * 不写任何缓存。
+     * <p>
+     * 这是参考分支 {@code loadLegacyModelData}（参考 {@code ClientModelManager.java:1484-1508}）在本仓的
+     * 等价物，只是本仓只有 OpenYSM 那半边：legacy（{@code EncryptTools} + 同步密码）通道的
+     * 「模型 → 缓存文件」关联记在 {@code network/message/RequestLoadModel}，而那个事实就是
+     * {@link #hasReloadableClientCache} 这个采纳门所依据的东西（见它的说明）。几何与动画两个 provider 的
+     * {@code load} 都走这一个桥，与参考的 {@code GeoModelProvider}/{@code AnimationProvider} 共用
+     * {@code loadLegacyModelData} 是同一个形状。
+     *
+     * @param mainModelId 主模型 id（如 "ysmu:model_id/main"）
+     * @return 桥接后的 payload；缺失、无法解密或无法桥接时返回 null
+     */
+    @Nullable
+    public static ModelData loadLegacyModelData(ResourceLocation mainModelId) {
+        if (mainModelId == null) {
+            return null;
+        }
+        com.fox.ysmu.model.resource.pojo.RawYsmModel raw = loadRawModelFromCache(mainModelId);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to bridge cached model data for {}: {}", mainModelId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 后台线程：从加密客户端缓存重解析单个 sub-model 的几何。
+     * 不写任何缓存；由 {@link com.fox.ysmu.client.asset.AssetManager} /
+     * {@code provider.GeoModelProvider} 在主线程 apply。
+     * <p>
+     * Reference {@code ClientModelManager.java:1616-1637}. The payload comes from
+     * {@link #loadLegacyModelData}, which is the reference's own bridge minus the legacy channel this
+     * port cannot re-read (see {@link #hasReloadableClientCache}), and it is the same call
+     * {@code provider/AnimationProvider} makes. The
+     * sub-model lookup is the reference's own rule ({@code ModelIdUtil.getSubModelId(baseId, key)}
+     * compared to {@code geoId}) and this port's {@link #buildGeo} is the same bake
+     * {@code publishGeo} installs, so a reloaded geometry is byte-for-byte the object the
+     * original build produced.
+     *
+     * @param geoId sub-model id（如 "ysmu:model_id/main"、"ysmu:model_id/arm"）
+     * @return 解析出的 GeoModel；缺失/损坏/本仓无法重载时返回 null
+     */
+    @Nullable
+    public static GeoModel parseSingleGeoFromCache(ResourceLocation geoId) {
+        if (geoId == null) {
+            return null;
+        }
+        // geoId is a sub-model id ("ysmu:model/main" or "ysmu:model/arm"). Derive the
+        // base id, then the main id for the encrypted-cache lookup. Calling
+        // getMainId(geoId) directly would append "/main" a second time (e.g.
+        // "ysmu:model/main/main") and miss the CACHED_MODEL_MD5 entry — silently
+        // failing every background reload (vanilla hand / missing model after idle).
+        ResourceLocation baseId = ModelIdUtil.getParentModelId(geoId);
+        ModelData data = loadLegacyModelData(ModelIdUtil.getMainId(baseId));
+        if (data == null) {
+            return null;
+        }
+        Map<String, byte[]> modelBytes = data.getModel();
+        if (modelBytes == null || modelBytes.isEmpty()) {
+            return null;
+        }
+        for (Map.Entry<String, byte[]> entry : modelBytes.entrySet()) {
+            ResourceLocation subId = ModelIdUtil.getSubModelId(baseId, entry.getKey());
+            if (geoId.equals(subId)) {
+                BuiltGeo built = buildGeo(subId, entry.getValue());
+                return built == null ? null : built.model;
+            }
+        }
+        return null;
+    }
+
     private static void clearRuntimeModelCaches() {
         ysmu.LOG.info(
             "YSM client clearing runtime model caches: models={}, scales={}, extraInfo={}, extraAnimations={}",
@@ -1872,6 +2827,10 @@ public class ClientModelManager {
         com.fox.ysmu.client.gui.ModelPreviewRegistry.clear();
         // The declared settings panels belong to the models being dropped as well, and for the same reason.
         com.fox.ysmu.client.gui.ModelConfigRegistry.clear();
+        com.fox.ysmu.client.roaming.ModelFormExecution.clear();
+        // The GUI presentation images belong to the dropped models, and their textures have to be released explicitly
+        // for the reason on guiImageTextureFor.
+        clearGuiImages();
         // Roaming namespaces are keyed by model content hash, so they belong to the dropped models too.
         com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
         com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
@@ -1889,9 +2848,37 @@ public class ClientModelManager {
         // were driving.
         PROJECTILE_MODEL_IDS.clear();
         PROJECTILE_TEXTURE_IDS.clear();
+        // The vehicle index belongs to the models being dropped for the same reason.
+        VEHICLE_MODEL_IDS.clear();
+        VEHICLE_TEXTURE_IDS.clear();
         com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.clear();
         com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime.clear();
         com.fox.ysmu.client.renderer.ArrowProjectileRenderer.clearDumpedTrees();
+        // The vehicle renderer's once-per-message warnings belong to the models being dropped too, so a reload reports
+        // a still-broken vehicle again instead of staying silent.
+        com.fox.ysmu.client.renderer.VehicleRenderer.clearWarnings();
+        // Reference wiring: the reference releases the framework's assets at this point too
+        // (reference ClientModelManager.java:2036 `AssetManager.clearAll()`). No-op while the
+        // switch is off, in which case the caches are empty anyway.
+        com.fox.ysmu.client.asset.AssetManager.clearAll();
+        // 防滑步的每玩家平滑倍速状态与表达式解析缓存随模型清空一起丢掉，避免换世界/重同步时
+        // 把上一个世界的倍速带到下一个。参考分支在同一个位置调用
+        // （reference ClientModelManager.java:2040 `MovementSpeedMatcher.clearAll()`）。
+        com.fox.ysmu.client.animation.MovementSpeedMatcher.clearAll();
+        // The model textures belong to the models being dropped here, so their registrations are released with them:
+        // this is upstream's explicit release trigger (upstream CustomTextureManager.release) driven from the port's
+        // existing model-unload path, and it is what makes the holders unreachable - the reachability trigger alone
+        // could never fire, because 1.7.10's texture map keeps every registered texture alive. Each release is still
+        // delayed by CustomTextureManager.DEFAULT_REMOVAL_DELAY_TICKS on the client tick, like upstream's. Runs after
+        // the model list was cleared above, so no render site can still resolve one of these ids
+        // (CustomPlayerModel.textureFor reads MODELS). See .agent/phase34-texture-release.md.
+        ModelTextureRegistry.clear();
+        // What each entity is currently shown with belongs to the model list being dropped here: upstream releases the
+        // applied target with the catalog content it came from (EntityModelBinding:297-302), and this port's clear is
+        // the whole list, so every record goes with it and the next frames draw the built-in default exactly as
+        // upstream does during session negotiation. What the *entities* are then re-drawn from is decided by
+        // CustomPlayerRenderer#resolveDrawnModel.
+        com.fox.ysmu.client.render.AppliedModelRegistry.clear();
     }
 
     /**

@@ -23,8 +23,8 @@ import net.minecraft.util.MathHelper;
  * 第三人称下永远显示害羞的脸红部件（用户报的遗留 bug），而第一人称因为
  * {@code !q.is_first_person} 为假所以看着正常。</p>
  *
- * <p>远程玩家／其它实体不受这条修复影响：它们的相机实体不是自己，
- * {@code getDistanceToEntity} 本来就是正确的相机到实体距离，保持原样。</p>
+ * <p>远程玩家保持既有的 {@code getDistanceToEntity} 路径（兼容已有玩家行为）；这仍是相机实体原点的距离，
+ * 不是第三人称偏移后的真实相机距离。子实体走 {@link #forEntity}，使用 renderViewEntity 重建相机位置。</p>
  *
  * <p><b>已知差距</b>：原版 {@code orientCamera()} 会用 8 条射线按"身后有没有方块"把第三人称距离
  * 缩短，而缩短后的值在 1.7.10 里只是局部变量、不写回字段。这里用的是字段
@@ -46,7 +46,7 @@ public final class CameraDistanceQuery {
             return 0.0D;
         }
         if (player != mc.thePlayer) {
-            // 远程玩家：相机实体不是它自己，这个距离本来就是对的。
+            // Preserve the legacy remote-player origin-distance answer; unlike forEntity this omits camera offset.
             return view.getDistanceToEntity(player);
         }
         float partialTicks = mc.timer == null ? 1.0F : mc.timer.renderPartialTicks;
@@ -64,6 +64,45 @@ public final class CameraDistanceQuery {
         return distance(eyeX, eyeY, eyeZ,
             player.posX, player.posY, player.posZ,
             back, player.rotationYaw, player.rotationPitch, thirdPersonView);
+    }
+
+    /**
+     * Upstream QueryBinding.java:67 binds distance for every entity, not just a player. Retain forPlayer's existing
+     * local/remote behaviour; vehicles and arrows measure from the render-view camera to their own current origin.
+     * 1.7.10 has no Camera object: orientCamera (EntityRenderer.java:554-558,575,589-599) computes its position from
+     * renderViewEntity, so use that structure rather than the target entity's yaw or the local player's position.
+     * The existing unclipped-distance limitation also applies here (see class javadoc); no extra state is kept.
+     */
+    public static double forEntity(Entity entity, float partialTicks) {
+        if (entity == null) {
+            return 0.0D;
+        }
+        if (entity instanceof EntityPlayer) {
+            return forPlayer((EntityPlayer) entity);
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null || mc.renderViewEntity == null) {
+            return 0.0D;
+        }
+        int thirdPersonView = mc.gameSettings.thirdPersonView;
+        EntityRenderer renderer = mc.entityRenderer;
+        double back = thirdPersonView > 0 && renderer != null
+            ? renderer.thirdPersonDistanceTemp
+                + (renderer.thirdPersonDistance - renderer.thirdPersonDistanceTemp) * partialTicks
+            : 0.0D;
+        return forView(entity, mc.renderViewEntity, partialTicks, back, thirdPersonView);
+    }
+
+    /** Camera-source/target separation, without touching the client singleton (also usable in unit tests). */
+    static double forView(Entity entity, Entity view, float partialTicks, double back, int thirdPersonView) {
+        if (entity == null || view == null) {
+            return 0.0D;
+        }
+        double eyeX = view.prevPosX + (view.posX - view.prevPosX) * partialTicks;
+        double eyeY = view.prevPosY + (view.posY - view.prevPosY) * partialTicks - (view.yOffset - EYE_HEIGHT);
+        double eyeZ = view.prevPosZ + (view.posZ - view.prevPosZ) * partialTicks;
+        return distance(eyeX, eyeY, eyeZ, entity.posX, entity.posY, entity.posZ,
+            back, view.rotationYaw, view.rotationPitch, thirdPersonView);
     }
 
     /** 纯计算部分（拆出来便于单测）：先按原版 {@code orientCamera} 求相机位置，再取到实体原点的距离。
