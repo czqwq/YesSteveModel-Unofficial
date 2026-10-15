@@ -1,0 +1,3 @@
+rip.ysm.imagestream.avif.AvifImageWriterSpi
+rip.ysm.imagestream.webp.WebpImageWriterSpi
+rip.ysm.imagestream.jpeg.JpegImageWriterSpi

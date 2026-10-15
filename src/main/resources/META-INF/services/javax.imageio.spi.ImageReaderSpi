@@ -1,0 +1,3 @@
+rip.ysm.imagestream.avif.AvifImageReaderSpi
+rip.ysm.imagestream.webp.WebpImageReaderSpi
+rip.ysm.imagestream.jpeg.JpegImageReaderSpi

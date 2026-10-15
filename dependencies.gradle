@@ -18,34 +18,10 @@ dependencies {
     // "类在不在"的能力探测 + 失败回退适配任意版本（缺失时 BaublesCompat 优雅降级）。
     devOnlyNonPublishable("com.github.GTNewHorizons:Baubles-Expanded:2.2.21-GTNH:dev")
     devOnlyNonPublishable("com.github.GTNewHorizons:GTNHLib:0.6.40:dev")
-    // ImageStream: the image decoder library upstream OpenYSM depends on (declared there as
-    // `minecraftLibrary("com.github.OpenYSM:ImageStream:-SNAPSHOT")` plus jarJar in OpenYSM/build.gradle).
-    // Its pure-Java JPEG/WebP/AVIF decoders are what let the server normalize every pack image to PNG while it
-    // parses a model (`ModelImageConverter`), so the client only ever receives PNG - which is why upstream never
-    // meets "no image reader" for a WebP/AVIF avatar.
-    //
-    // It is the one jar vendored in `libs/` rather than pulled from JitPack at build time, because the
-    // GTNH convention's `shadowImplementation` relocates its content to `com/fox/ysmu/shadow/...`: the direct
-    // decoder calls in `ModelImageConverter` and the `META-INF/services/javax.imageio.spi.*` entries would then
-    // point at packages that do not exist. The class files are embedded unrelocated by the block at the end of
-    // this file. Refresh the jar from `com.github.OpenYSM:ImageStream:-SNAPSHOT` if upstream fixes a decoder.
-    // (The GeckoLib engine used to be a second vendored jar here; it is now vendored as source under
-    // `src/main/java/{software,com/eliotlash,net/geckominecraft}` - see `PROVENANCE.md`.)
-    compileOnly files("libs/ImageStream--SNAPSHOT.jar")
-    testImplementation files("libs/ImageStream--SNAPSHOT.jar")
-    // Do NOT put the raw jar on the development runtime classpath (`devOnlyNonPublishable files(...)`).
-    // It used to be there and it broke every non-PNG image in dev runs: the jar is Java 17 bytecode
-    // (major 61) and 1.7.10's FML scans every classpath jar for @Mod classes with an ASM that cannot read
-    // it, so `JarDiscoverer` -> `ASMModParser` throws and FML drops the whole container
-    // ("Zip file ImageStream--SNAPSHOT.jar failed to read properly, it will be ignored"), after which
-    // `ModelImageConverter` met `NoClassDefFoundError: rip/ysm/imagestream/jpeg/JpegDecoder` for JPEG,
-    // WebP and AVIF and shipped those images unconverted (owner's `runServer` log, 06:14).
-    //
-    // The classes reach dev runs the same way they reach a released install: inside our own mod artifact.
-    // The block at the end of this file embeds them, and the GTNH convention's downgrader lowers them to
-    // JVM 8 (verified: `rip/ysm/imagestream/jpeg/JpegDecoder.class` in `build/libs/ysmu-*-dev.jar` is
-    // major 52, next to the untouched Java 17 copy in `META-INF/versions/17/`), so the development jar
-    // carries a loadable copy and no separate jar has to sit on the launch classpath.
+    // ImageStream (upstream's `minecraftLibrary("com.github.OpenYSM:ImageStream:-SNAPSHOT")` + jarJar) is vendored as
+    // source under `src/main/java/rip/ysm/imagestream/**` together with its two `META-INF/services/javax.imageio.spi.*`
+    // files, the same shape as the GeckoLib engine; its decoders are what let `ModelImageConverter` turn every pack
+    // image into PNG. See `PROVENANCE.md`.
     // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.6.2")
@@ -75,15 +51,4 @@ dependencies {
     test {
         useJUnitPlatform()
     }
-}
-
-// Embed the vendored ImageStream classes (and its ImageIO SPI entries) into the mod jar, unrelocated - the 1.7.10
-// counterpart of upstream's `jarJar`. Its manifest and signature files are excluded so the mod's own manifest wins.
-tasks.matching { it.name == 'shadowJar' || it.name == 'jar' }.configureEach { task ->
-    task.from(zipTree(file('libs/ImageStream--SNAPSHOT.jar'))) {
-        exclude 'META-INF/MANIFEST.MF'
-        exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'
-        exclude 'META-INF/maven/**'
-    }
-    task.duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
 }
