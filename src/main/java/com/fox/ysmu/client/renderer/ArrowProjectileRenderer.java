@@ -19,12 +19,14 @@ import org.lwjgl.opengl.GL11;
 import com.eliotlash.mclib.math.IValue;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.EntityQueryBindings;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ProjectileState;
 import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
+import com.fox.ysmu.client.render.ModelFailureNotifier;
 import com.fox.ysmu.util.IProjectileModelArrow;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.ProjectileGroundTracker;
@@ -126,6 +128,24 @@ public final class ArrowProjectileRenderer {
     }
 
     /**
+     * Tells the player that this projectile lost its YSM replacement, which is upstream's {@code STOPPED} outcome: the
+     * outcome for the entities that have no fallback target at all, since a projectile's
+     * {@code fallbackRenderTargetId()} is {@code null} ({@code CustomProjectileEntity:33-36}) and the replacement is
+     * therefore revoked rather than replaced by the built-in default
+     * ({@code ClientModelRenderTargetManager:246-250} picks STOPPED exactly then).
+     * <p>
+     * Only once the owner's model is really ready, or was refused: while its payload is still being built the arrow is
+     * drawn vanilla for a frame or two, and that is preparation, not a failure - upstream's outcome comes from a
+     * terminal {@code AcquireResult.Failed}, not from a pending one.
+     */
+    private static void reportReplacementRevoked(ResourceLocation modelId) {
+        ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+        if (ClientModelManager.isModelPublished(mainId) || ClientModelManager.isGeometryFailed(mainId)) {
+            ModelFailureNotifier.report(modelId, ModelFailureNotifier.Outcome.STOPPED);
+        }
+    }
+
+    /**
      * Tries to draw a custom projectile model for {@code entity}.
      *
      * @return {@code true} when a custom model was drawn, so the caller must skip vanilla rendering; {@code false}
@@ -135,6 +155,16 @@ public final class ArrowProjectileRenderer {
     public static boolean render(Entity entity, double x, double y, double z, float yaw, float partialTicks,
         ResourceLocation modelId, IGeoRenderer<?> geoRenderer) {
         if (modelId == null || entity == null) {
+            return false;
+        }
+        // Upstream's own bypass: EntityRenderDispatcherMixin.java:37 wraps the vanilla renderer call in
+        // `entity instanceof Projectile && !ClientConfig.DISABLE_PROJECTILE_MODEL.get()`, i.e. with the switch on the
+        // projectile replacement never runs and the vanilla renderer draws. Its second read, the animation ticker
+        // (client/animation/AnimationParallelTicker.java:60-63), has no counterpart here because this port samples the
+        // projectile's keyframes inside this same entry (applyProjectileAnimations), so returning before them is the
+        // whole of the upstream behaviour. Upstream's switch is consulted at the dispatcher, which for this port is
+        // this entry - a broad predicate at MixinRenderArrow would have to know about every other replacement as well.
+        if (Config.DISABLE_PROJECTILE_MODEL) {
             return false;
         }
         if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_RENDER) {
@@ -173,6 +203,7 @@ public final class ArrowProjectileRenderer {
             .get(projectileGeoId);
         if (projectileModel == null) {
             warnOnce("geo-not-found", "projectile geometry {} is not registered for {}", projectileGeoId, modelId);
+            reportReplacementRevoked(modelId);
             return false;
         }
 
@@ -299,6 +330,13 @@ public final class ArrowProjectileRenderer {
 
         double ageInTicks = arrow.ticksExisted + partialTicks;
 
+        // Publish the frame's subject and its entity-derived query values, exactly as the world path does
+        // (AnimationRegister#setParserValue:478-496). One table for both kinds: without this a projectile animation
+        // asking query.is_in_water answered with the local player's state, because these are live suppliers in a
+        // shared table rather than a per-draw snapshot.
+        MolangFrameContext.begin(arrow, ModelIdUtil.getMainId(modelId));
+        EntityQueryBindings.apply(GeckoLibCache.getInstance().parser, arrow, partialTicks);
+
         // In-ground detection reads the position delta rather than the motion vector: 1.7.10's EntityArrow leaves
         // motionX/Y/Z non-zero on a stuck arrow (onCollide does not always clear them), while prevPos vs pos is
         // reliable.
@@ -311,7 +349,8 @@ public final class ArrowProjectileRenderer {
         boolean debugThisTick = Config.DEBUG_ANIMATION && allowArrowDebug(arrow.getEntityId(), arrow.ticksExisted);
 
         setMolangVariable("ysm.in_ground", isInGround ? 1.0 : 0.0);
-        setMolangVariable("ysm.delta_movement_length", deltaLength);
+        // ysm.delta_movement_length is no longer published here: it is one of the names the shared
+        // EntityQueryBindings table defines for whichever entity the frame belongs to (same definition, no x20).
 
         // ysm.shoot_item_id: "the item that fired this arrow". 1.7.10 never syncs the firing weapon to the client
         // (shootingEntity is server-side only), so MixinEntityArrow captured the shooter's held item into a
@@ -322,6 +361,21 @@ public final class ArrowProjectileRenderer {
             ? projectileArrow.ysmu$getShootItemId()
             : null;
         setMolangVariable("ysm.shoot_item_id", MolangStringPool.intern(ProjectileShootItemIds.toModernId(shootItemId)));
+
+        // Upstream's `projectile_owner` is a **context** — `projectileVar("projectile_owner", ctx ->
+        // ctx.createChild(ctx.entity().getOwner()))` (client/animation/molang/YSMBinding.java:193) — and a pack reads it
+        // through the arrow operator (`ysm.projectile_owner->ysm.equipped_enchantment_level('Mainhand',
+        // 'minecraft:flame')`, tmp/wiki/molang_misc.md:148). 1.7.10 never syncs `EntityArrow.shootingEntity`, so
+        // MixinEntityArrow carries the shooter's **entity id** in a third datawatcher slot and this is where it becomes
+        // a context: `World#getEntityByID` back to the entity, then registered as a handle for the arrow operator's left
+        // side (see MolangStructContextAccess). A shooter the client has not loaded (a mob that is out of range, an
+        // arrow whose id slot was never written) resolves to null, and null publishes 0 — upstream's "no context",
+        // which reads as false and makes `??` take its right side. Fabricating a context there would hand a pack
+        // another entity's values, so the flat "0/1 = has a player owner" answer this used to publish is gone.
+        int ownerEntityId = arrow instanceof IProjectileModelArrow ownerArrow ? ownerArrow.ysmu$getProjectileOwnerId()
+            : 0;
+        net.minecraft.entity.Entity owner = ownerEntityId > 0 ? arrow.worldObj.getEntityByID(ownerEntityId) : null;
+        setMolangVariable("ysm.projectile_owner", com.fox.ysmu.client.animation.molang.MolangContextHandles.publish(owner));
 
         if (arrow.isDead) {
             GROUND_TRACKER.forget(arrow.getEntityId());
@@ -363,6 +417,7 @@ public final class ArrowProjectileRenderer {
         }
         if (activeAnimations.isEmpty()) {
             // No animation is active, so the bind pose is what should be drawn.
+            MolangFrameContext.end();
             return;
         }
 
@@ -382,6 +437,8 @@ public final class ArrowProjectileRenderer {
             renderZ,
             interpYaw,
             interpPitch);
+        // Paired with the begin above: a sub-entity must not stay the frame's subject for whatever is drawn after it.
+        MolangFrameContext.end();
     }
 
     /**
@@ -502,7 +559,14 @@ public final class ArrowProjectileRenderer {
         }
     }
 
-    private static void saveInitialSnapshots(List<GeoBone> bones) {
+    /**
+     * Package-visible rather than private since the vehicle path shares it ({@code VehicleRenderer}): a sub-entity
+     * that is not an {@code IAnimatable} has no {@code AnimationProcessor} to reset its bones, so both kinds reset
+     * them the same way before sampling - otherwise a bone the previous frame's animation moved and this frame's does
+     * not touch keeps the stale pose (for the built-in boat: its {@code water} clip offsets the {@code Boat} bone, and
+     * without the reset the boat stays lifted after leaving the water).
+     */
+    static void saveInitialSnapshots(List<GeoBone> bones) {
         if (bones == null) {
             return;
         }
@@ -512,7 +576,8 @@ public final class ArrowProjectileRenderer {
         }
     }
 
-    private static void resetBonesToSnapshot(List<GeoBone> bones) {
+    /** Package-visible for the same reason as {@link #saveInitialSnapshots}. */
+    static void resetBonesToSnapshot(List<GeoBone> bones) {
         if (bones == null) {
             return;
         }
@@ -655,9 +720,22 @@ public final class ArrowProjectileRenderer {
             .getEndValueDouble();
     }
 
-    /** Writes one projectile Molang variable into the shared parser table, registering it if absent. */
-    private static void setMolangVariable(String name, double value) {
-        MolangParser.VARIABLES.computeIfAbsent(name, key -> new LazyVariable(key, () -> 0.0D))
+    /**
+     * Writes one sub-entity Molang variable into the shared parser table, registering it if absent.
+     * <p>
+     * Package-visible since the vehicle path shares it: a sub-entity is sampled by hand rather than by an
+     * {@code AnimationProcessor}, so the values its keyframes and controller conditions read have to be published
+     * here for the duration of its draw.
+     * <p>
+     * The name goes through {@link MolangParser#canonicalVariableName} - the same single rule
+     * {@code ProjectileControllerRuntime#resolveVariable} reads by - so the two ends of this axis cannot key the same
+     * variable differently. The four names published here are already lower-case and every other writer of the table
+     * canonicalises, so this is a no-op for them today; it is the invariant that keeps a condition spelled with the
+     * pack's own capitalisation from missing the entry this method created.
+     */
+    static void setMolangVariable(String name, double value) {
+        String canonical = MolangParser.canonicalVariableName(name);
+        MolangParser.VARIABLES.computeIfAbsent(canonical, key -> new LazyVariable(key, () -> 0.0D))
             .set(value);
     }
 

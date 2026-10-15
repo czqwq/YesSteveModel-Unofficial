@@ -6,6 +6,7 @@ import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
 import com.fox.ysmu.network.message.SyncStarModels;
 
+import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.common.event.FMLInitializationEvent;
 import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
@@ -19,6 +20,9 @@ public class CommonProxy {
         Config.init(event.getSuggestedConfigurationFile());
         ServerModelManager.reloadPacks();
         ysmu.LOG.info("I am ysmu at version " + Tags.VERSION);
+        if (Loader.isModLoaded("geckolib")) {
+            ysmu.LOG.warn("Old geckolib-*.jar found: this build embeds the engine itself, so DELETE that jar or the two copies will conflict.");
+        }
     }
 
     // load "Do your mod setup. Build whatever data structures you care about. Register recipes." (Remove if not needed)

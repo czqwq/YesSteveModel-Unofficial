@@ -3,8 +3,6 @@ package com.fox.ysmu.network.message;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -12,9 +10,11 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.io.FileUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.util.Md5Utils;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
 
@@ -214,10 +214,12 @@ public class SendModelFileChunk implements IMessage {
                 ACCUMULATORS.remove(fileName, accumulator);
                 ClientModelManager.rememberCachedModel(fileName);
                 RequestLoadModel.loadModel(fileName);
-                ysmu.LOG.info(
-                    "Received chunked YSM model cache file {} ({} bytes)",
-                    fileName,
-                    accumulator.totalLength);
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SYNC) {
+                    ysmu.LOG.info(
+                        "Received chunked YSM model cache file {} ({} bytes)",
+                        fileName,
+                        accumulator.totalLength);
+                }
             } catch (Exception e) {
                 ACCUMULATORS.remove(fileName, accumulator);
                 ysmu.LOG.warn("Failed to finish YSM chunked model cache file " + fileName, e);
@@ -225,9 +227,17 @@ public class SendModelFileChunk implements IMessage {
         }
 
         /**
-         * Whether the payload hashes to the file name. Uses its own {@link MessageDigest} instance instead of the
-         * shared static one {@code util/Md5Utils} had before this round (M-07), so the check cannot be defeated by
-         * a concurrent digest.
+         * Whether the payload hashes to the file name.
+         *
+         * <p>The digest goes through {@link Md5Utils#md5Hex}, which owns the one hex form (lower case, two digits per
+         * byte - {@code HexFormat}, upstream's mechanism at {@code model/domain/Hash256.java:10,99}). The comparison
+         * stays {@code equalsIgnoreCase} and must: the name on the wire is the <b>upper case</b> form the server
+         * cache uses ({@code model/format/ModelCacheWriter.java:60} writes {@code md5Hex(...).toUpperCase(Locale.US)}
+         * into {@code ServerModelInfo.md5}, and {@code network/message/SyncModelFiles.java:196} sends that value as
+         * this packet's file name), while the digest is computed lower case. Case-insensitivity is also what the rest
+         * of this path already assumes: the client re-scans these names from disk with a case-insensitive hex test
+         * ({@code client/ClientModelManager.java:2065}) and {@code ServerModelInfo.hasWellFormedCacheFileName} accepts
+         * both cases. Normalising the name here would be a wire-visible behaviour change, so it is not done.
          */
         private boolean contentMatchesFileName(byte[] bytes, String fileName) {
             // D-01: the "well-formed cache file name" predicate is owned by the model side; reuse it instead of
@@ -235,23 +245,8 @@ public class SendModelFileChunk implements IMessage {
             if (!ServerModelInfo.hasWellFormedCacheFileName(fileName)) {
                 return false;
             }
-            try {
-                MessageDigest digest = MessageDigest.getInstance("MD5");
-                byte[] hash = digest.digest(bytes);
-                StringBuilder hex = new StringBuilder(hash.length * 2);
-                for (byte b : hash) {
-                    int value = b & 0xFF;
-                    if (value < 0x10) {
-                        hex.append('0');
-                    }
-                    hex.append(Integer.toHexString(value));
-                }
-                return hex.toString()
-                    .equalsIgnoreCase(fileName);
-            } catch (NoSuchAlgorithmException e) {
-                ysmu.LOG.warn("Cannot verify YSM chunked model cache {}: MD5 is unavailable", fileName, e);
-                return true;
-            }
+            return Md5Utils.md5Hex(bytes)
+                .equalsIgnoreCase(fileName);
         }
 
         /**

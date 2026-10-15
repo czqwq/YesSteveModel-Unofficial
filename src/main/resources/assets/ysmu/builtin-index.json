@@ -1,0 +1,124 @@
+{
+  "formatVersion": 1,
+  "note": "Built-in model contract. Each sha256 is the content digest of that model directory (see BuiltinModelIndex.sha256OfModelDir). intentionallyAbsent records upstream models this repository does not ship on purpose; they are not coverage failures, and finding them in the tree is an error.",
+  "models": [
+    {
+      "path": "default",
+      "sha256": "49bbdfeb9eaae9d5e62827a289f7a1746c40f0ff805afbae03403503d5ddc3a5"
+    },
+    {
+      "path": "misc/1_alex",
+      "sha256": "20c2232f1ac5220a2218bdd5ffcbbd1b26b765c1d516e7b6293e6c5fd5a272fd"
+    },
+    {
+      "path": "misc/2_steve",
+      "sha256": "ccd066a954074a370dc6056673edbdd7de37e2a1e309e21c2b4e287e9d6c457b"
+    },
+    {
+      "path": "misc/3_default_boy",
+      "sha256": "e058d571731755cf169bd2b41609d3efad9efe67823b00a74a73c212d740c3f1"
+    },
+    {
+      "path": "misc/4_default_controllers",
+      "sha256": "adfc2b14e2d92c3c6d5018bbee5d4e684d51f7ed2198810e27fca5c78d594645"
+    },
+    {
+      "path": "misc/5_qingluka",
+      "sha256": "2bbc6d7605d1491ec3686015d9abc06655e7f2b5dc159b9278452349592fa3aa"
+    },
+    {
+      "path": "misc/6_wine_fox",
+      "sha256": "a54a46e4865677ed9dfa40c5d151e28d317abd92e2c4f1ba12a2eef024c387f7"
+    },
+    {
+      "path": "wine_fox/01_taisho_maid",
+      "sha256": "0007f089f50a93cedcddcbefd8db79b46e0f547f21bb5b711dbe2b6c588b29c5"
+    },
+    {
+      "path": "wine_fox/02_new_year",
+      "sha256": "2338a3de8af9e4633f5e66cdffc92828f98337ec523cbf970c20c13f3a93f065"
+    },
+    {
+      "path": "wine_fox/03_astronaut",
+      "sha256": "c642bfed446e1ab80fc2fcae3666a58c6e2ced69793329855961702ec84ad285"
+    },
+    {
+      "path": "wine_fox/04_kongfu",
+      "sha256": "7f89afe1ef6fec49d34a34ffe96f7118e099740c378855f0b6a2bc4d5d76e3c2"
+    },
+    {
+      "path": "wine_fox/05_magical",
+      "sha256": "e596751a61b2f282abda333b5fa62d861da2a687e1871dcbe8f9bac19636d887"
+    },
+    {
+      "path": "wine_fox/06_hanfu",
+      "sha256": "cf52924e01059cddafc58be0d95fea2cab02b0c2010a45e9270a7fc782d231f4"
+    },
+    {
+      "path": "wine_fox/07_jk",
+      "sha256": "a0f44ff7f2d2a9c62294eafe8078548037b02071282e1b5eb8e403c31a88e68d"
+    },
+    {
+      "path": "wine_fox/08_sta",
+      "sha256": "2dd1ef6e459ed52daa679dc5af28c1897b98d1cd6bf2492bd920af2d3564972f"
+    },
+    {
+      "path": "wine_fox/11_salesperson",
+      "sha256": "bc23c4c1a59878e1ef03340c89f33b3fe95df6a0556aa4a62f7ae7fcc6ba37ed"
+    },
+    {
+      "path": "wine_fox/12_little",
+      "sha256": "de1587b470f115875715985e1f3ea6b2dc035098e8bfe041fa9cd68449742871"
+    },
+    {
+      "path": "wine_fox/13_matured",
+      "sha256": "7d4be5e4d024b873de463e954c5eeb24038ebb9b4556baa0e67eac04575e8d77"
+    },
+    {
+      "path": "wine_fox/14_momo",
+      "sha256": "a0047e881cfe1cb566cd50b5406706fb4198d77d1666fb6016c0adcc565ce1f1"
+    },
+    {
+      "path": "wine_fox/15_kluonoa",
+      "sha256": "306a603d832eb819ac6e54e99d799d82dcc0e81e7617a169e1593773fb1ef70b"
+    },
+    {
+      "path": "wine_fox/16_tactics",
+      "sha256": "6f8f23aa9226a2039df8c255dd843bf333f87a03856e810bcbeeac988cd8fc82"
+    },
+    {
+      "path": "wine_fox/18_wedding",
+      "sha256": "7bced336b1cc46982e97f649f9cae18828608f8bb0cf3092a8c3e69f6b57f069"
+    },
+    {
+      "path": "wine_fox/19_nine_tailed",
+      "sha256": "6b52c1597abc7df5060f81bf252a97df5e232b1fe46a838aefc7543862aca26f"
+    },
+    {
+      "path": "wine_fox/20_survivor",
+      "sha256": "c672fcfae814dcd0f17113546eb5cbd1ad36a4840c84ee2fdfe6930c82af2871"
+    },
+    {
+      "path": "wine_fox/21_saint",
+      "sha256": "c32c3d57a34b92fe4fb0a579b9dde009a7bd6550d95f4d3f5ae5d6020d95fe0e"
+    },
+    {
+      "path": "wine_fox/22_elf",
+      "sha256": "0de1d5f3562a2cd994ccca8f576af30ec81e0477b7a8b0c10442b30a17449beb"
+    }
+  ],
+  "intentionallyAbsent": [
+    {
+      "path": "wine_fox/09_hailuo",
+      "reason": "upstream ysm.json metadata.license.type = \"All Rights Reserved\"; this repository has no redistribution right for it (NOTICE.md)"
+    },
+    {
+      "path": "wine_fox/10_zhiban",
+      "reason": "upstream ysm.json metadata.license.type = \"All Rights Reserved\"; this repository has no redistribution right for it (NOTICE.md)"
+    },
+    {
+      "path": "wine_fox/17_mini",
+      "reason": "upstream ysm.json metadata.license.type = \"All Rights Reserved\"; this repository has no redistribution right for it (NOTICE.md)"
+    }
+  ]
+}

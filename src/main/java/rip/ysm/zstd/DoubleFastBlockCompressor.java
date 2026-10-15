@@ -17,6 +17,7 @@ import static rip.ysm.zstd.Constants.SIZE_OF_INT;
 import static rip.ysm.zstd.Constants.SIZE_OF_LONG;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 
+@SuppressWarnings("removal")
 class DoubleFastBlockCompressor
         implements BlockCompressor
 {

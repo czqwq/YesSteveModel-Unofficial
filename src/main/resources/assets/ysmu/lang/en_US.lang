@@ -4,14 +4,27 @@ gui.yes_steve_model.pre_page=Pre Page
 gui.yes_steve_model.next_page=Next Page
 gui.yes_steve_model.all_models=All Models
 gui.yes_steve_model.star_models=Star Models
+# The AUTH category button's tooltip (upstream en_us.json:7 "Auth Models", the label of its
+# PlayerModelScreen.java:187 button).
+gui.yes_steve_model.auth_models=Auth Models
 gui.yes_steve_model.config=Open Config GUI
 gui.yes_steve_model.download=Open Download GUI
 gui.yes_steve_model.search=Search models...
 gui.yes_steve_model.model.authors=§2§l▌ §3Authors: %s
 gui.yes_steve_model.model.license=§2§l▌ §3License: %s
+gui.yes_steve_model.model.source.builtin=§2§l▌ §3Source: Built-in
+gui.yes_steve_model.model.source.server=§2§l▌ §3Source: Server
+# The restricted model's source row: upstream's Source.AUTH vocabulary value
+# (client/gui/button/CatalogModelTooltipFormatter.java:173-180) whose text is "Authorized"
+# (en_us.json:437), drawn in this port's source-row style like builtin/server above.
+gui.yes_steve_model.model.source.auth=§2§l▌ §3Source: Authorized
 gui.yes_steve_model.model.texture=Select Texture
 gui.yes_steve_model.model.info=Open Info GUI
 gui.yes_steve_model.model.info.contact.click_hint=Click to copy the contact
+# The two link-type presets of the model information screen; upstream's own keys and strings (en_us.json:21-22,
+# its ModelInfoScreen LINK_TYPE_PRESET at :37-40). Any other declared type is shown as written.
+gui.yes_steve_model.url.home=Home Page
+gui.yes_steve_model.url.donate=Donate
 gui.yes_steve_model.model.star=Star Current Model
 gui.yes_steve_model.model.return=Return
 gui.yes_steve_model.model.config.title=Model Settings
@@ -21,11 +34,41 @@ gui.yes_steve_model.model.config.bad_range=invalid range
 gui.yes_steve_model.model.ground=Show/Hide Ground
 gui.yes_steve_model.model.reset=Reset View
 gui.yes_steve_model.model.stop=Stop Animation
+gui.yes_steve_model.show_model_id_first=Show Model ID First
 gui.yes_steve_model.config.disable_self_model=Prevents rendering of self player's model
 gui.yes_steve_model.config.disable_other_model=Prevents rendering of other player's model
 gui.yes_steve_model.config.print_animation_roulette_msg=Whether to print animation roulette play message
 gui.yes_steve_model.config.disable_self_hands=Prevents rendering of self player's hands
+# Upstream's own strings (its en_us.json), for the two sub-entity switches (ClientConfig.java:48-52).
+gui.yes_steve_model.config.disable_projectile_model=Prevents rendering of projectile model
+gui.yes_steve_model.config.disable_vehicle_model=Prevents rendering of vehicle model
 gui.yes_steve_model.config.disable_player_render=Disable extra player render
+gui.yes_steve_model.config.swap_config_sides=Swap config panel and preview sides
+gui.yes_steve_model.config.gui_enhancements=Enable GUI enhancements (foreground/background textures, GUI animations)
+gui.yes_steve_model.config.render_wearable=Render external wearable models (backpack/copter/jetpack)
+gui.yes_steve_model.config.wearable_render_scale=Wearable render scale
+gui.yes_steve_model.config.texture_target_size.0=Texture target size: Full resolution (default)
+gui.yes_steve_model.config.texture_target_size.256=Texture target size: 256 (max VRAM saving)
+gui.yes_steve_model.config.texture_target_size.512=Texture target size: 512
+gui.yes_steve_model.config.texture_target_size.1024=Texture target size: 1024
+gui.yes_steve_model.config.texture_target_size.2048=Texture target size: 2048 (near-full res)
+gui.yes_steve_model.config.texture_vram_budget.0=Texture VRAM budget: Unlimited (off)
+gui.yes_steve_model.config.texture_vram_budget.128=Texture VRAM budget: 128 MB (tight)
+gui.yes_steve_model.config.texture_vram_budget.256=Texture VRAM budget: 256 MB (default)
+gui.yes_steve_model.config.texture_vram_budget.512=Texture VRAM budget: 512 MB
+gui.yes_steve_model.config.texture_vram_budget.1024=Texture VRAM budget: 1024 MB
+gui.yes_steve_model.config.texture_vram_budget.2048=Texture VRAM budget: 2048 MB (loose)
+gui.yes_steve_model.config.page=Page %d
+gui.yes_steve_model.config.gui_model_preview_refresh=Preview refresh (-1=auto 0=static 1-4=every N frames)
+gui.yes_steve_model.config.gui_model_preview_refresh.-1=Preview refresh: Auto (adaptive, whole-page budget)
+gui.yes_steve_model.config.gui_model_preview_refresh.0=Preview refresh: Static (no periodic update)
+gui.yes_steve_model.config.gui_model_preview_refresh.1=Preview refresh: Every frame (Smooth Priority, high GPU load)
+gui.yes_steve_model.config.gui_model_preview_refresh.2=Preview refresh: Every 2 frames
+gui.yes_steve_model.config.gui_model_preview_refresh.3=Preview refresh: Every 3 frames
+gui.yes_steve_model.config.gui_model_preview_refresh.4=Preview refresh: Every 4 frames (FPS Priority)
+gui.yes_steve_model.config.hide_offhand_defoliage_axe=Hide the Healing Axe in offhand
+gui.yes_steve_model.config.animation_speed_match=Stride matching (anti foot-slide)
+gui.yes_steve_model.config.animation_speed_match_base=Stride match base rate
 gui.yes_steve_model.disclaimer.text=Thank you for using the mod, please be sure to read the relevant terms carefully and agree to the terms:\n\n\n1. The download and use of the mod is completely free, and the confidentiality of the model is not guaranteed in any form\n\n2. The dev team does not participate in the relevant model transactions, please bear the responsibility for the transaction disputes arising\n\n3. The creator enjoys the copyright of the model created, and also bears corresponding responsibilities, which has nothing to do with the dev team
 gui.yes_steve_model.disclaimer.read=I have read and agree the terms of use
 gui.yes_steve_model.disclaimer.close=Close
@@ -251,6 +294,7 @@ message.yes_steve_model.model.reload.error.no_arm_file=§6§l[§aYSM§6§l] §r'
 message.yes_steve_model.model.reload.error.no_texture_file=§6§l[§aYSM§6§l] §r'%s'§b folder missing texture file!
 message.yes_steve_model.model.reload.error.texture_name=§6§l[§aYSM§6§l] §r'%s'§b texture name is incorrect, it must be §c§nlowercase English characters, underscores or numbers
 message.yes_steve_model.model.reload.info=§6§l[§aYSM§6§l] §eAll models have been reloaded, use time: %sms
+message.yes_steve_model.model.reload.ready=§6§l[§aYSM§6§l] §eServer model cache ready (built in %s ms).
 message.yes_steve_model.model.set.success=§6§l[§aYSM§6§l] §rSet '%s' models for player '%s'
 message.yes_steve_model.model.animation_roulette.play=§6§l[§aYSM§6§l] §rPlay '%s' animation
 message.yes_steve_model.model.debug_animation.true=§6§l[§aYSM§6§l] §rAnimation debug enable
@@ -259,6 +303,12 @@ commands.yes_steve_model.export.success=§6§l[§aYSM§6§l] §eSaved as §r'con
 commands.yes_steve_model.export.not_exist=§6§l[§aYSM§6§l] §r'%s' is not exist
 key.yes_steve_model.player_model.desc=Open Player Model GUI
 key.yes_steve_model.animation_roulette.desc=Open Animation Roulette
+# Sub-menu depth limit of the roulette (upstream's own key, its AnimationRouletteScreen caps the path at 5 levels).
+gui.yes_steve_model.roulette.too_long=The roulette's path is too long
+# The roulette's movement lock: the key, and the button's two labels (upstream's own keys/strings, en_us.json:16-17,406).
+key.yes_steve_model.lock_roulette.desc=Lock Roulette
+gui.yes_steve_model.roulette.lock_on=Lock: ON
+gui.yes_steve_model.roulette.lock_off=Lock: OFF
 key.yes_steve_model.extra_animation.none=None
 key.yes_steve_model.extra_animation.0.desc=Play Extra Animation 0
 key.yes_steve_model.extra_animation.1.desc=Play Extra Animation 1
@@ -351,3 +401,188 @@ message.yes_steve_model.asset.fallback_jar_not_open=Version jar not opened (High
 message.yes_steve_model.asset.available_versions=Available versions: %s
 message.yes_steve_model.asset.load_failed=High-version asset loading failed (see log)
 message.yes_steve_model.asset.config_hint=(ysmu.cfg high-version asset config)
+gui.yes_steve_model.config.idle_asset_eviction=Release idle model geometry (reference-branch idle asset eviction). NOT YET VALIDATED IN THIS PORT: enabling it may release geometry this port cannot rebuild; leave it off unless you are deliberately comparing against the reference branch.
+
+# Molang debug overlay + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, off by default)
+gui.yes_steve_model.debug.title=[Molang Debug]  %s vars
+gui.yes_steve_model.debug.search=[search]
+gui.yes_steve_model.debug.search_hint=type...
+gui.yes_steve_model.debug.enter_search=[Enter] search
+gui.yes_steve_model.debug.help.scroll=scroll
+gui.yes_steve_model.debug.help.page=page
+gui.yes_steve_model.debug.help.close=close
+gui.yes_steve_model.debug.name=Name
+gui.yes_steve_model.debug.value=Value
+gui.yes_steve_model.debug.search_mode_hint=[search mode] Enter=confirm  Esc=cancel
+gui.yes_steve_model.debug.type.variable=variable
+gui.yes_steve_model.debug.type.ctrl=ctrl
+gui.yes_steve_model.debug.type.ysm=ysm
+gui.yes_steve_model.debug.type.query=query
+gui.yes_steve_model.debug.type.math=math
+message.yes_steve_model.debug.value.true=true
+message.yes_steve_model.debug.value.false=false
+message.yes_steve_model.debug.value.nan=NaN
+message.yes_steve_model.debug.value.pos_inf=+Inf
+message.yes_steve_model.debug.value.neg_inf=-Inf
+message.yes_steve_model.debug.no_match=§eNo variables matched.
+message.yes_steve_model.debug.count=§a%s variable(s):
+message.yes_steve_model.debug.item=  §e%s§r = %s
+message.yes_steve_model.debug.single_unknown=§e%s§r = §7<unknown>
+message.yes_steve_model.debug.single_value=§e%s§r = %s
+message.yes_steve_model.debug.matching=§a%s variable(s) matching §e%s§r:
+message.yes_steve_model.debug.eval_usage=§cUsage: /ysm debug eval <expression>
+message.yes_steve_model.debug.eval_result=§a%s§r = %s
+message.yes_steve_model.debug.eval_error=§cError evaluating: §f%s§c - %s
+message.yes_steve_model.debug.querying=§aQuerying %s variable(s)...
+message.yes_steve_model.debug.reset_done=§7Molang variables reset.
+message.yes_steve_model.debug.overlay_state_on=Debug overlay: §aON
+message.yes_steve_model.debug.overlay_state_off=Debug overlay: §7OFF
+message.yes_steve_model.debug.toggle_hint=§7Toggle with %s§7 in-game.
+message.yes_steve_model.debug.ysmclient.usage=Usage: /ysmclient <load|reset>
+message.yes_steve_model.debug.ysmclient.unknown=Unknown subcommand: %s. Use: load | reset
+commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §rLoading local models...
+commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §rLocal models: §e%s§r registered, §e%s§r skipped (already present), §e%s§r failed
+commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §rNo local models found.
+# Model sync completion report, gated by Config.SHOW_MODEL_LOAD_CHAT (row 46). The reference branch's strings use
+# %d; 1.7.10's ChatComponentTranslation only accepts %s (ChatComponentTranslation.java:121-124 throws on anything
+# else), so the numbers arrive pre-formatted and these strings use %s.
+message.yes_steve_model.sync.complete=§6§l[§aYSM§6§l] §aClient sync complete in %s ms
+message.yes_steve_model.sync.complete_models=§6§l[§aYSM§6§l] §aModel load finished: §e%s§a loaded, §e%s§a failed (total §e%s§a)
+
+# /ysm debug + /ysm reset - the server-side halves that forward to the issuing player's client
+# (YsmCommand.processDebug / processReset). Readable from the server console, so they stay plain text.
+commands.yes_steve_model.debug.usage=Usage: /ysm debug <query|eval|overlay>
+commands.yes_steve_model.debug.query.usage=Usage: /ysm debug query <variable> [variable2 ...]
+commands.yes_steve_model.debug.eval.usage=Usage: /ysm debug eval <expression>  (e.g. math.floor(3.7) or math.clamp(5,0,2)+1)
+commands.yes_steve_model.debug.unknown=Unknown debug subcommand: %s. Use: query | eval | overlay
+commands.yes_steve_model.reset.usage=Usage: /ysm reset <player|@a|@p>  - or use /ysmclient reset for yourself.
+commands.yes_steve_model.reset.done=Reset Molang variables for %s player(s).
+
+# /ysm help | play | setgamepath | buffer | welcome | sync - the rest of the command surface
+# (YsmCommand.processHelp / processPlay / processSetGamePath / processBuffer / processWelcome / processSync).
+# Same command family as the block above, so the same convention: plain text, no § colour codes and no [YSM]
+# prefix, because these lines are emitted server-side and also have to be readable in the server console.
+# Two exceptions, both printed by the client and never by the server, so they keep the client-chat prefix and
+# colours: the message.yes_steve_model.buffer.* group at the end (ShowBufferInfo) and the three
+# commands.yes_steve_model.welcome / .sound_hint / .help_hint lines below, which the join-world handler in
+# client/ClientEventHandler.java prints in the local player's chat. The command's own feedback
+# commands.yes_steve_model.welcome.on / .off stays plain text with the rest, because the server prints it.
+commands.yes_steve_model.play.no_data=Cannot play animation: player data not found.
+commands.yes_steve_model.play.not_found=Animation %s not found in current model.
+commands.yes_steve_model.play.done=Play: %s
+commands.yes_steve_model.setgamepath.usage=/ysm setgamepath <path> [version]
+commands.yes_steve_model.setgamepath.example=Example: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.setgamepath.none=No game path configured.
+commands.yes_steve_model.setgamepath.current=Current game path: %s
+commands.yes_steve_model.setgamepath.version=Asset version: %s
+commands.yes_steve_model.setgamepath.set=Game path set to: %s
+commands.yes_steve_model.setgamepath.cleared=Game path cleared.
+commands.yes_steve_model.setgamepath.local_notice=Changes are local only. Reconnect or reload models if needed.
+commands.yes_steve_model.buffer.querying=Querying buffer info...
+commands.yes_steve_model.welcome.on=Welcome message enabled.
+commands.yes_steve_model.welcome.off=Welcome message disabled.
+# The join-world welcome block (client-side; see the block comment above). %s is Tags.VERSION.
+commands.yes_steve_model.welcome=§6§l[§aYSMU§6§l] §rWelcome! You are running §eysmu %s§r. To change the YSM model, press Alt+Y
+commands.yes_steve_model.welcome.sound_hint=§6§l[§aYSMU§6§l] §7To enable missing sound effects (e.g. trident, goat horn), use §e/ysm setgamepath <path> [version]§7 to point to your modern Minecraft directory.
+commands.yes_steve_model.welcome.help_hint=§7Click §a§n[here]§r§7 or type §e/ysm help§7 to see all commands.
+commands.yes_steve_model.sync.resync.started=Resyncing models from the server...
+commands.yes_steve_model.sync.resync.cooldown=Resync is on cooldown. Try again in %s seconds.
+commands.yes_steve_model.sync.resync.disabled=Resync is disabled on this server.
+commands.yes_steve_model.sync.resync.failed=Resync could not be started (sync protocol disabled or not ready).
+commands.yes_steve_model.help.title=Help - use /ysm help <subcommand> for details
+commands.yes_steve_model.help.line.reload=  /ysm reload - rebuild the server-side model cache and resync every player (OP)
+commands.yes_steve_model.help.line.play=  /ysm play <animation> - play an animation of your current model (OP)
+commands.yes_steve_model.help.line.playsound=  /ysm playsound <name> - play a cached model sound (OP)
+commands.yes_steve_model.help.line.buffer=  /ysm buffer - print this client's buffer and heap usage (everyone)
+commands.yes_steve_model.help.line.setgamepath=  /ysm setgamepath <path> [version] - set the local game path for missing sounds/textures (everyone)
+commands.yes_steve_model.help.line.welcome=  /ysm welcome <on|off> - toggle the join welcome message (everyone)
+commands.yes_steve_model.help.line.sync=  /ysm sync - resync your own models (everyone)
+commands.yes_steve_model.help.line.reset=  /ysm reset [<player|@a|@p>] - reset Molang variables (OP)
+commands.yes_steve_model.help.line.debug=  /ysm debug <query|overlay|eval> - debug queries / overlay / eval (ADMIN)
+commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset> - load local models / reset Molang vars (everyone)
+commands.yes_steve_model.help.welcome_off=  Click [/ysm welcome off] or type it to stop the join welcome message
+commands.yes_steve_model.help.unknown=Unknown subcommand: %s. Use /ysm help to list all commands.
+commands.yes_steve_model.help.detail.title=Command: %s
+commands.yes_steve_model.help.detail.reload.usage=  Usage: /ysm reload
+commands.yes_steve_model.help.detail.reload.desc=  Rebuild the server-side model cache and resync all players. Example: /ysm reload
+commands.yes_steve_model.help.detail.play.usage=  Usage: /ysm play <animation>
+commands.yes_steve_model.help.detail.play.desc=  Play the named animation on your current model (server-authoritative). Example: /ysm play wave
+commands.yes_steve_model.help.detail.playsound.usage=  Usage: /ysm playsound <name>
+commands.yes_steve_model.help.detail.playsound.desc=  Play one of the model sounds cached in memory. Example: /ysm playsound trident
+commands.yes_steve_model.help.detail.buffer.usage=  Usage: /ysm buffer
+commands.yes_steve_model.help.detail.buffer.desc=  Print this client's direct-buffer, mapped-buffer and heap usage. Example: /ysm buffer
+commands.yes_steve_model.help.detail.setgamepath.usage=  Usage: /ysm setgamepath <path> [version]
+commands.yes_steve_model.help.detail.setgamepath.desc=  Point YSMU to a modern Minecraft directory to load missing sounds/textures. Client-side only. Example: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.help.detail.welcome.usage=  Usage: /ysm welcome <on|off>
+commands.yes_steve_model.help.detail.welcome.desc=  Toggle the join welcome message. Example: /ysm welcome off
+commands.yes_steve_model.help.detail.sync.usage=  Usage: /ysm sync
+commands.yes_steve_model.help.detail.sync.desc=  Restart the model sync for yourself (rate limited by ResyncCooldownSeconds). Example: /ysm sync
+commands.yes_steve_model.help.detail.reset.usage=  Usage: /ysm reset <player|@a|@p>
+commands.yes_steve_model.help.detail.reset.desc=  Reset Molang variable state of other players (roaming vars, frame physics, v.* leftovers) back to model defaults without reloading models. For yourself use /ysmclient reset. Supports vanilla selectors. Example: /ysm reset @a
+commands.yes_steve_model.help.detail.debug.usage=  Usage: /ysm debug <query|overlay|eval> [args]
+commands.yes_steve_model.help.detail.debug.desc=  Debug tooling: query Molang variables, toggle the debug overlay, or evaluate a Molang expression. Examples: /ysm debug query q.is_on_ground, /ysm debug eval math.floor(3.7)
+commands.yes_steve_model.help.detail.ysmclient.usage=  Usage: /ysmclient <load|reset>
+commands.yes_steve_model.help.detail.ysmclient.desc=  Client-side commands, no server needed. /ysmclient load registers locally scanned models (config/ysmu/custom + builtin) visible only to you; /ysmclient reset resets your Molang variables back to model defaults without reloading models. Example: /ysmclient load
+
+# ShowBufferInfo (/ysm buffer): printed in the issuing client's own chat by the client half, so this group keeps
+# the client-chat prefix and colours used by the other client-side message keys.
+message.yes_steve_model.buffer.direct=§6§l[§aYSM§6§l]§r §eDirect Buffer§r: §b%s MB§r used (§7%s buffers§r, cap §7%s MB§r)
+message.yes_steve_model.buffer.mapped=§6§l[§aYSM§6§l]§r §eMapped Buffer§r: §b%s MB§r
+message.yes_steve_model.buffer.heap=§6§l[§aYSM§6§l]§r §eHeap§r: §b%s MB§r / §b%s MB§r
+message.yes_steve_model.buffer.error=§6§l[§aYSM§6§l]§r §cError reading buffer info: %s
+
+# HUD paper-doll render (ExtraPlayerConfigScreen + the selfie pass in ClientEventHandler). The reference branch's
+# four follow-mode labels and the FBO-cache pair, copied verbatim; `[M]` / `[C]` are the reference's own
+# key/mouse hints.
+gui.yes_steve_model.hud_follow.vanilla=HUD Follow: Vanilla [M]
+gui.yes_steve_model.hud_follow.smooth=HUD Follow: Vanilla Smooth [M]
+gui.yes_steve_model.hud_follow.ysm=HUD Follow: YSM [M]
+gui.yes_steve_model.hud_follow.ysm_smooth=HUD Follow: YSM Smooth [M]
+gui.yes_steve_model.hud_cache.on=HUD FBO Cache: ON [C]
+gui.yes_steve_model.hud_cache.off=HUD FBO Cache: OFF [C]
+# SHOW_LOADING_PROGRESS overlay (row 45). `sync_model` is followed by the model name when the port knows one.
+gui.yes_steve_model.sync_model=Loading: 
+gui.yes_steve_model.sync_waiting=Waiting for server...
+
+# /ysm auth (model authorization; api/ModelAuthorization). A model is restricted when its winning source is the auth
+# root, config/ysmu/auth - there is no enable switch (upstream has none either: the auth root is the switch, and an
+# empty one restricts nothing). The feedback lines are a port addition - upstream's AuthCommand answers nothing on
+# success - and the two message.* keys are what a player sees when the server refuses or resets their selection.
+# Every one of these is drawn by ChatComponentTranslation, so each may only use `%s`: 1.7.10 throws for any other
+# conversion (ChatComponentTranslation.java:121-124), lazily, while the chat is being rendered, which shows up as
+# "the line never appears" rather than as an error. Argument order is (model, count) for add/remove and (count) for
+# all/clear, matching the send sites in command/YsmCommand.
+commands.yes_steve_model.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
+commands.yes_steve_model.auth.add.done=Granted model %s to %s player(s).
+commands.yes_steve_model.auth.remove.done=Revoked model %s from %s player(s).
+commands.yes_steve_model.auth.all.done=Granted every registered model to %s player(s).
+commands.yes_steve_model.auth.clear.done=Cleared every model grant of %s player(s).
+commands.yes_steve_model.auth.unknown_model=Unknown or ambiguous model path: %s
+message.yes_steve_model.auth.denied=§6§l[§aYSM§6§l]§r §cYou are not authorized to use model §e%s§r§c.
+message.yes_steve_model.auth.reset=§6§l[§aYSM§6§l]§r §cYour model §e%s§r§c is no longer authorized; reset to the server's default model.
+commands.yes_steve_model.help.line.auth=  /ysm auth <player|@a|@p> <add|remove|all|clear> [model] - manage model authorizations (OP)
+commands.yes_steve_model.help.detail.auth.usage=  Usage: /ysm auth <player|@a|@p> <add|remove> <model>  |  /ysm auth <player|@a|@p> <all|clear>
+commands.yes_steve_model.help.detail.auth.desc=  Manage which models a player may select. Only models whose winning source is the auth root (config/ysmu/auth) are restricted; built-in and custom models stay public. add/remove grant or revoke one model, all grants every registered model, clear revokes all of them. remove resets a player who is wearing exactly the revoked model, clear resets a player wearing a restricted model; both leave a forced selection alone. The model argument is a model name as the config directory spells it (wine_fox/01_taisho_maid) or a ysmu:<id>. Examples: /ysm auth Notch add default, /ysm auth @a clear
+
+# /ysm model set (upstream command/sub/ModelCommand.set:41-98). Refusal wording is upstream's (:61,72,86); the
+# receipts are a port addition, because upstream answers nothing on success. Only `%s` conversions - see the note
+# above the auth group. The texture argument is one of the model's own texture names (tab completion offers the
+# chosen model's list; the declared-default spelling "-" is not available here, see texture_dash_unavailable). A name
+# containing spaces cannot be spelled in this fixed-position argument - the 1.7.10 dispatcher splits on spaces - so
+# use the model's _name_<hex> id form there.
+commands.yes_steve_model.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
+commands.yes_steve_model.model.set.unknown_model=Unknown or ambiguous model path: %s
+commands.yes_steve_model.model.set.unknown_texture=Unknown texture for %s: %s
+commands.yes_steve_model.model.set.not_authorized=%s is not authorized for %s
+commands.yes_steve_model.model.set.texture_dash_unavailable=Texture "-" for %s needs the model's declared default texture, which this server does not keep; pass one of the model's texture names (tab completion lists them).
+commands.yes_steve_model.model.set.done=Set model %s for %s player(s).
+commands.yes_steve_model.help.line.model=  /ysm model set <player|@a|@p> <model> <texture> [true|false] - force a model on players (OP)
+commands.yes_steve_model.help.detail.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
+commands.yes_steve_model.help.detail.model.desc=  Force a model (and one of its textures) on other players; the fifth word true also ignores the model's authorization, as upstream's ignore_auth does. A restricted target that is not authorized is reported and skipped, the rest of the selector still gets the model. Upstream's /ysm model reload, errors and disable are not ported (use /ysm reload for the catalog rebuild). Example: /ysm model set Notch default default.png true
+
+# Model failure notices (upstream ModelFailureNotificationAggregator's three outcomes, plus this port's
+# built-in-fallback-unavailable notice). %s is a count; 1.7.10 chat keys accept no other specifier.
+message.yes_steve_model.model.failure.partial=§6§l[§aYSM§6§l] §e%s§r active model(s) have partial resource failures; rendering continues.
+message.yes_steve_model.model.failure.fallback=§6§l[§aYSM§6§l] §e%s§r active model(s) failed and are using the default model.
+message.yes_steve_model.model.failure.stopped=§6§l[§aYSM§6§l] §e%s§r active model(s) failed and could not be rendered.
+message.yes_steve_model.model.failure.default_unavailable=§6§l[§aYSM§6§l] §cThe built-in default model is unavailable, so player models are drawn by the vanilla renderer. See the log.

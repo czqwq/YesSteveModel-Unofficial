@@ -32,6 +32,7 @@ import static rip.ysm.zstd.Util.checkArgument;
 import static rip.ysm.zstd.Util.put24BitLittleEndian;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 final class ZstdFrameCompressor
 {
     static final int MAX_FRAME_HEADER_SIZE = 14;

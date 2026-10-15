@@ -11,6 +11,7 @@ import net.minecraft.client.Minecraft;
 
 import org.apache.commons.io.FileUtils;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.data.ModelData;
@@ -40,7 +41,8 @@ public class RequestLoadModel implements IMessage {
 
     /** Cache file names queued while the password is still missing (LinkedHashSet: ordered, no duplicates). */
     private static final Set<String> PENDING_LOADS = new LinkedHashSet<>();
-    private static boolean waitingForPassword;
+    private static volatile boolean waitingForPassword;
+    private static com.fox.ysmu.util.TickScheduler.Handle passwordWaiter;
 
     private String fileName;
 
@@ -81,7 +83,7 @@ public class RequestLoadModel implements IMessage {
      * runs on the background pool, never on the packet handler thread (N-04).
      */
     @SideOnly(Side.CLIENT)
-    public static void loadModel(String fileName) {
+    public static synchronized void loadModel(String fileName) {
         if (fileName == null || fileName.isEmpty()) {
             return;
         }
@@ -97,15 +99,15 @@ public class RequestLoadModel implements IMessage {
 
     /** N-12: called by SendModelPassword when the blob arrives, so queued loads continue instead of idling. */
     @SideOnly(Side.CLIENT)
-    public static void onPasswordAvailable() {
-        waitingForPassword = false;
+    public static synchronized void onPasswordAvailable() {
+        cancelPasswordWait();
         drainPendingLoads();
     }
 
     /** Drops queued loads, for example when the client leaves the world or starts a new sync round. */
     @SideOnly(Side.CLIENT)
-    public static void clearPendingLoads() {
-        waitingForPassword = false;
+    public static synchronized void clearPendingLoads() {
+        cancelPasswordWait();
         synchronized (PENDING_LOADS) {
             PENDING_LOADS.clear();
         }
@@ -124,42 +126,52 @@ public class RequestLoadModel implements IMessage {
             batch = new ArrayList<>(PENDING_LOADS);
             PENDING_LOADS.clear();
         }
+        // Capture before queueing, not after decrypting: a pool job can outlive this sync round.
+        long generation = ClientModelManager.currentGeneration();
+        byte[] password = ClientModelManager.PASSWORD;
+        UUID passwordUuid = ClientModelManager.PASSWORD_UUID;
         for (String fileName : batch) {
-            ThreadTools.THREAD_POOL.submit(() -> loadModelNow(fileName));
+            ThreadTools.THREAD_POOL.submit(() -> loadModelNow(fileName, generation, password, passwordUuid));
         }
     }
 
-    private static void schedulePasswordWait() {
+    private static synchronized void schedulePasswordWait() {
         if (waitingForPassword) {
             return;
         }
         waitingForPassword = true;
-        schedulePasswordWaitTick(0);
-    }
-
-    private static void schedulePasswordWaitTick(int elapsedTicks) {
-        Minecraft.getMinecraft()
-            .func_152344_a(() -> {
+        // Reference RequestLoadModel.java:70-86 uses a tick-driven timer, not recursive client callbacks.
+        // 1.7.10 Minecraft.java:2993-2997 executes a callback inline on the client thread: recursion does not wait.
+        final long generation = ClientModelManager.currentGeneration();
+        final long deadline = System.currentTimeMillis() + PASSWORD_WAIT_TICKS * 50L;
+        passwordWaiter = com.fox.ysmu.util.TickScheduler.client().scheduleEvery(50L, () -> {
+            synchronized (RequestLoadModel.class) {
                 if (!waitingForPassword) {
                     return;
                 }
-                if (passwordAvailable()) {
-                    waitingForPassword = false;
+                if (generation != ClientModelManager.currentGeneration()) {
+                    cancelPasswordWait();
+                    dropPendingLoads("a new model sync round started");
+                } else if (passwordAvailable()) {
+                    cancelPasswordWait();
                     drainPendingLoads();
-                    return;
-                }
-                if (Minecraft.getMinecraft().thePlayer == null) {
-                    waitingForPassword = false;
+                } else if (Minecraft.getMinecraft().thePlayer == null) {
+                    cancelPasswordWait();
                     dropPendingLoads("the client left the world");
-                    return;
-                }
-                if (elapsedTicks >= PASSWORD_WAIT_TICKS) {
-                    waitingForPassword = false;
+                } else if (System.currentTimeMillis() >= deadline) {
+                    cancelPasswordWait();
                     dropPendingLoads("timed out waiting for the YSM model password");
-                    return;
                 }
-                schedulePasswordWaitTick(elapsedTicks + 1);
-            });
+            }
+        });
+    }
+
+    private static void cancelPasswordWait() {
+        waitingForPassword = false;
+        if (passwordWaiter != null) {
+            passwordWaiter.cancel();
+            passwordWaiter = null;
+        }
     }
 
     private static void dropPendingLoads(String reason) {
@@ -175,10 +187,11 @@ public class RequestLoadModel implements IMessage {
 
     /** Pool worker: read the cache file, decrypt it and hand the ModelData back to the client thread. */
     @SideOnly(Side.CLIENT)
-    private static void loadModelNow(String fileName) {
+    private static void loadModelNow(String fileName, long generation, byte[] password, UUID passwordUuid) {
         try {
-            byte[] password = ClientModelManager.PASSWORD;
-            UUID passwordUuid = ClientModelManager.PASSWORD_UUID;
+            if (generation != ClientModelManager.currentGeneration()) {
+                return;
+            }
             if (password == null || passwordUuid == null) {
                 ysmu.LOG.warn("Cannot load YSM model cache file {} without the model password", fileName);
                 return;
@@ -191,12 +204,15 @@ public class RequestLoadModel implements IMessage {
             byte[] fileBytes = FileUtils.readFileToByteArray(modelFile);
             ModelData data = EncryptTools.decryptModel(UuidUtils.asBytes(passwordUuid), password, fileBytes);
             if (data != null) {
+                if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SYNC) {
+                    ysmu.LOG.info("[YSMU-MODEL] Decrypted model {} (id={}), registering...",
+                        fileName, data.getModelId());
+                }
                 // Resource registration always returns to the client thread. The generation this work started on
                 // travels with it: reading and decrypting a cache file takes long enough to outlive a disconnect and
                 // the join that follows, and registering after that would put the previous server's model into the
                 // new server's catalogue, where a build requested from it carries the new generation and therefore
                 // passes every guard.
-                long generation = ClientModelManager.currentGeneration();
                 Minecraft.getMinecraft()
                     .func_152344_a(() -> {
                         if (generation != ClientModelManager.currentGeneration()) {

@@ -7,6 +7,7 @@ import javax.annotation.Nullable;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
+import net.minecraft.util.MathHelper;
 
 import com.fox.ysmu.ysmu;
 
@@ -140,6 +141,41 @@ public final class EtFuturumCompat {
     /** The wing's Z angle in degrees. */
     public static double elytraRotZ(EntityPlayer player) {
         return Math.toDegrees(rotation(player, rotateZMethod, "getRotateElytraZ"));
+    }
+
+    /**
+     * 判断玩家是否在胸甲槽装备了鞘翅
+     *
+     * <p>不依赖 Et-Futurum，通过物品注册名中是否包含 "elytra" 来判断。</p>
+     *
+     * @param player 玩家实体
+     * @return 是否装备了鞘翅
+     */
+    public static boolean hasElytraEquipped(EntityPlayer player) {
+        if (player == null) return false;
+        ItemStack chest = player.getEquipmentInSlot(3); // 胸甲槽
+        if (chest == null || chest.getItem() == null) return false;
+        Object rawName = net.minecraft.item.Item.itemRegistry.getNameForObject(chest.getItem());
+        return rawName != null && rawName.toString().contains("elytra");
+    }
+
+    /**
+     * 获取玩家鞘翅飞行的进度分数（用于 Molang 变量）
+     *
+     * <p>基于垂直速度归一化到 [0, 1] 范围，方便动画混合。
+     * 当 Et-Futurum 加载时根据其飞行状态计算，否则按运动推断。</p>
+     *
+     * @param player 玩家实体
+     * @return 飞行进度 (0=未飞行, 0~1=飞行中)
+     */
+    public static double getElytraFlightProgress(EntityPlayer player) {
+        if (player == null || !isElytraFlying(player)) return 0.0d;
+        // 基于下落速度估算飞行强度
+        double speed = MathHelper.sqrt_double(
+            player.motionX * player.motionX +
+            player.motionY * player.motionY +
+            player.motionZ * player.motionZ);
+        return MathHelper.clamp_double(speed * 0.5, 0.0, 1.0);
     }
 
     private static float rotation(EntityPlayer player, Method method, String name) {

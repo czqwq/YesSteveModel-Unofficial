@@ -29,7 +29,10 @@ class CtrlScriptBindingTest {
     private static PlayState run(String source) {
         MolangParser parser = new MolangParser();
         CtrlScriptBinding.register(parser, Collections.emptyList());
-        return CtrlScriptBinding.evaluate(PackFunctionScript.parse(source), parser, null, null, null);
+        // A null animation id skips the `ctrl.set_animation` existence check, which is what these scripts need: this
+        // class pins the return-value-to-play-state mapping, not the hand-over guard that
+        // GuardedAnimationHandoverTest covers.
+        return CtrlScriptBinding.evaluate(PackFunctionScript.parse(source), parser, null, null, null, null);
     }
 
     @Test

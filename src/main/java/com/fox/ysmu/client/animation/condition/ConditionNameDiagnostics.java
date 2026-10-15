@@ -18,19 +18,52 @@ import com.fox.ysmu.ysmu;
  * {@code ConditionalHold/ConditionalUse/ConditionalSwing/ConditionArmor#addTest} only feed a name into the sets
  * the runtime queries when its suffix is a {@link EnumAction} name, a known {@link InnerClassify} item kind, or an
  * id/ore-dictionary form. Everything else ends up in {@code innerTest} and can never be returned by
- * {@code doExtraTest}, i.e. it is dropped silently. The repository's own built-in packs ship two such names today
- * ({@code use_mainhand:spyglass} / {@code use_offhand:spyglass} used to be two of them, and
- * {@code hold_mainhand:charged_crossbow} still is, because 1.7.10 has no crossbow).
+ * {@code doExtraTest}, i.e. it is dropped silently. The names this class exists to break are the ones with no
+ * producer at all: the built-in packs' {@code use_mainhand:spyglass} / {@code use_offhand:spyglass} used to be two of
+ * them, and the {@code <action>:<kind>_<variant>} forms a reference pack declares ({@code swing:sword_up},
+ * {@code hold_mainhand:bow_Yilumi}, ...) still are.
  *
  * <p>
- * This class changes no behaviour: {@link ConditionManager#addTest} calls it after classifying a name, and it
- * reports each (model, name) pair once, with the reason, so a pack author can see why an animation never plays.
+ * A hand predicate counts as a producer just as a classifier does, so the names one answers are not reported here:
+ * {@code hold_*:empty}, {@code hold_mainhand:fishing} and {@code hold_*:charged_crossbow} - see the note on
+ * {@link #HOLD_CHARGED_CROSSBOW_SUFFIX}.
+ *
+ * <p>
+ * All this class can see is the <em>condition</em> and <em>hand-predicate</em> routes, not every route a clip can
+ * have: a pack's own animation controller, a script, or an extra animation can play a clip whose name no classifier
+ * will ever return. The warning therefore reports what has been established - no condition classifier selects this
+ * name - rather than claiming the animation never plays at all. One family in the log is in exactly that position:
+ * a reference pack's {@code swing:sword_up} / {@code _down} / {@code _jump} are played by its own
+ * {@code player.parallel_5} controller states, not by a classifier.
+ *
+ * <p>
+ * A name is reported against the model that <em>declares</em> it. Every model inherits the built-in default model's
+ * clips for any name it does not define itself (the default-animation fallback), so a name the default declares and
+ * no classifier can return - {@code lance} is one - would otherwise be reported once per model that merely inherits
+ * it. {@link #warnIfUnclassifiable} is told which of the two happened and stays quiet for the inheriting model, while
+ * the built-in default model's own registration still reports the name once.
+ *
+ * <p>
+ * This class decides nothing but whether a warning is printed: {@link ConditionManager#addTest} calls it after
+ * classifying a name, and it reports each (model, name) pair once, with the reason, so a pack author can see why no
+ * classifier will ever return that name.
  */
 final class ConditionNameDiagnostics {
 
-    /** The two `hold_*:` suffixes that do have a route outside the kind/EnumAction sets. */
+    /**
+     * The `hold_*:` suffixes that do have a route outside the kind/EnumAction sets, i.e. the names the hand
+     * predicates produce themselves. Upstream answers all three the same way - {@code hold_*:empty} from
+     * {@code ConditionalHold#doTest} ({@code ConditionalHold.java:72-75}), {@code hold_mainhand:fishing} from
+     * {@code MainhandPredicate.java:47-51}, and {@code hold_*:charged_crossbow} from
+     * {@code MainhandPredicate.java:44-46} / {@code OffhandPredicate.java:31-33}. The port keeps the same three
+     * routes: {@code ConditionalHold#doTest} and {@code AnimationManager#predicateMainhandHold} /
+     * {@code #predicateOffhandHold}, the last of which reaches the charged-clip branch through
+     * {@code TinkersCrossbowCompat.isCrossbowLoaded} - a TiCon crossbow with its {@code InfiTool.Loaded} NBT flag
+     * set, which is 1.7.10's crossbow.
+     */
     private static final String HOLD_EMPTY_SUFFIX = "empty";
     private static final String HOLD_FISHING_SUFFIX = "fishing";
+    private static final String HOLD_CHARGED_CROSSBOW_SUFFIX = "charged_crossbow";
 
     private static final String[] HOLD_PREFIXES = { "hold_mainhand:", "hold_offhand:" };
     private static final String[] ACTION_PREFIXES = { "use_mainhand:", "use_offhand:", "swing:", "swing_offhand:" };
@@ -47,11 +80,18 @@ final class ConditionNameDiagnostics {
     private static final Set<String> WARNED = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     /**
-     * A-11: condition names whose kind no classifier here can ever produce, with the reason. The first two belong to
+     * A-11: condition names whose suffix no classifier can ever produce, with the reason. The first two belong to
      * items 1.7.10 does not have - a goat horn arrived in 1.17 and the brush in 1.20 - so there is nothing to classify.
      * {@code trident} is different: 1.7.10 has no vanilla trident either, and this port answers {@code spear} for a
      * trident-named item on purpose ({@code InnerClassify#getItemType} matches both keywords into one kind), so the
      * name is dead but the item is not - a pack has to write {@code :spear}.
+     * <p>
+     * {@code lance} is the third shape and the reason it is listed: the suffix is not a kind in <em>either</em>
+     * implementation, so this is not a mapping the port is missing - see its entry below.
+     * <p>
+     * A name is <em>not</em> listed here when it has a route outside the vocabulary: {@code hold_*:empty},
+     * {@code hold_mainhand:fishing} and {@code hold_*:charged_crossbow} are hand-predicate names, and a predicate is
+     * a producer exactly as a classifier is - see {@link #HOLD_CHARGED_CROSSBOW_SUFFIX}.
      * <p>
      * These are listed by name because the vocabulary check cannot see the difference: {@code trident} is a real kind
      * in {@code KNOWN_TYPE_KEYWORDS}, so {@link #isClassifiable} answers {@code true} and the pack would get no
@@ -73,6 +113,28 @@ final class ConditionNameDiagnostics {
             "trident",
             "`trident` is answered as `spear` here on purpose - 1.7.10 has no vanilla trident, so InnerClassify"
                 + " treats both keywords as one kind - write `:spear` instead");
+        // `lance` is not a vocabulary gap on this port's side. Upstream's `getClassify`
+        // (client/animation/condition/InnerClassify.java:22-66) returns one of a fixed set of kind words -
+        // slashblade, sword, gohei, axe, pickaxe, shovel, hoe, shield, crossbow, bow, fishing_rod, spear,
+        // throwable_potion - and never `lance`, and the 1.20.1 UseAnim enum has no such value either, so upstream
+        // cannot select these clips for any item. The clips are nevertheless shipped by the built-in default model
+        // (tmp/YesSteveModel-dev-1.20 .../builtin/default/animations/arm.animation.json:5960, :6073, :6174, :6708,
+        // :7161, copied into this port's assets/ysmu/builtin/default/animations/arm.animation.json at the same
+        // lines), and every model inherits them through the default-animation fallback. Three of the five are
+        // byte-identical to their `spear` counterparts in that same file (hold_mainhand, hold_offhand and swing;
+        // measured by comparing the parsed clips), so `lance` is that asset's second name for the polearm pose -
+        // most likely for a modded lance item - and not a pose the port lacks. Adding a `lance` kind here would
+        // invent a mapping upstream does not have, so the honest answer is that this is unreachable content in the
+        // shipped asset, not a missing port mapping.
+        reasons.put(
+            "lance",
+            "`lance` is not a kind either implementation can produce: upstream's getClassify returns only slashblade,"
+                + " sword, gohei, axe, pickaxe, shovel, hoe, shield, crossbow, bow, fishing_rod, spear and"
+                + " throwable_potion (InnerClassify.java:22-66), and this port adds no `lance`. The clips come from the"
+                + " built-in default model's arm animations - hold_mainhand:lance, hold_offhand:lance and swing:lance"
+                + " are byte-identical to their `spear` counterparts there - and every model inherits them through the"
+                + " default-animation fallback, so this is unreachable content in the shipped asset rather than a"
+                + " missing mapping");
         return Collections.unmodifiableMap(reasons);
     }
 
@@ -105,19 +167,17 @@ final class ConditionNameDiagnostics {
     /**
      * Warns once when {@code name} is a condition name that no legacy classifier can ever return.
      *
-     * @param id   the model's animation id
-     * @param name the animation name from the model's animation file
+     * @param id              the model's animation id
+     * @param name            the animation name from the model's animation file
+     * @param declaredByModel {@code false} when the model did not declare this clip itself but inherited it from the
+     *                        built-in default model through the default-animation fallback, in which case the
+     *                        default model's own registration reports it and the inheriting model stays quiet
      */
-    static void warnIfUnclassifiable(ResourceLocation id, String name) {
-        if (name == null || name.isEmpty()) {
+    static void warnIfUnclassifiable(ResourceLocation id, String name, boolean declaredByModel) {
+        if (!needsWarning(name, declaredByModel)) {
             return;
         }
         String unproducible = unproducibleKindReason(name);
-        // A-11: a name in UNPRODUCIBLE_KINDS is "classifiable" by the vocabulary check (it lists a real 1.20 kind),
-        // yet no classifier here can ever return it - which is exactly the silent case this class exists to break.
-        if (unproducible.isEmpty() && isClassifiable(name)) {
-            return;
-        }
         if (!WARNED.add(id + "|" + name)) {
             return;
         }
@@ -129,12 +189,37 @@ final class ConditionNameDiagnostics {
                 unproducible);
             return;
         }
+        // "No condition classifier selects it" is what was verified; the earlier wording also claimed the animation
+        // was ignored, which is false for the names a pack's own controller states play - three of the variants a
+        // reference pack declares (`swing:sword_up` / `_down` / `_jump`) are in exactly that position, so the last
+        // clause names that route instead of leaving a reader to conclude the clip is dead.
         ysmu.LOG.warn(
             "Condition animation '{}' of model {} cannot be selected by the 1.7.10 condition classifiers: suffix '{}'"
-                + " is neither an EnumAction name nor a known item kind (see InnerClassify); the animation is ignored",
+                + " is neither an EnumAction name nor a known item kind (see InnerClassify); no classifier will ever"
+                + " return this name, though a pack's own animation controller state can still play the clip",
             name,
             id,
             suffixOf(name));
+    }
+
+    /**
+     * Whether a warning is due for this name, before the once-per-(model, name) memory.
+     *
+     * <p>
+     * Pure, so the decision can be pinned by a test without a logger: {@code false} when the model merely inherited
+     * the clip from the built-in default model (the default's own registration reports it once), and otherwise
+     * {@code true} only when some classifier can never produce the name.
+     *
+     * @param declaredByModel whether the model's own animation files declare this name
+     */
+    static boolean needsWarning(String name, boolean declaredByModel) {
+        if (!declaredByModel || name == null || name.isEmpty()) {
+            return false;
+        }
+        // A-11: a name in UNPRODUCIBLE_KINDS is "classifiable" by the vocabulary check (it lists a real 1.20 kind),
+        // yet no classifier here can ever return it - which is exactly the silent case this class exists to break, so
+        // the reason lookup is asked first and independently of isClassifiable.
+        return !unproducibleKindReason(name).isEmpty() || !isClassifiable(name);
     }
 
     static void clear() {
@@ -199,7 +284,9 @@ final class ConditionNameDiagnostics {
     }
 
     private static boolean isEmptyOrFishingOrActionOrKind(String suffix) {
-        return HOLD_EMPTY_SUFFIX.equals(suffix) || HOLD_FISHING_SUFFIX.equals(suffix) || isActionOrKind(suffix);
+        return HOLD_EMPTY_SUFFIX.equals(suffix) || HOLD_FISHING_SUFFIX.equals(suffix)
+            || HOLD_CHARGED_CROSSBOW_SUFFIX.equals(suffix)
+            || isActionOrKind(suffix);
     }
 
     private static boolean isActionOrKind(String suffix) {

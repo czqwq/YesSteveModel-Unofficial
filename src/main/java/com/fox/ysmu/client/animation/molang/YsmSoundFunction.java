@@ -4,11 +4,11 @@ import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
 
 import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.EntityPlayer;
+import com.fox.ysmu.client.audio.MolangSoundContext;
+import com.fox.ysmu.client.audio.MolangSoundPlayback;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Config;
-import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.ysmu;
 
@@ -28,9 +28,10 @@ import software.bernie.geckolib3.core.molang.MolangStringPool;
  * </pre>
  * <p>{@code id} 是本次播放的逻辑标识；{@code sound_name} 写法与声音关键帧一致
  * （模型音效名 / {@code namespace:path} / 本地高版本资产路径）。{@code flags}
- * 位标志（1=强制替换、2=全局、4=循环）在 1.7.10 里部分不适用：{@link YSMSoundManager}
- * 的播放本身先停同名再播（天然替换），循环音效与全局上下文无对应能力，故忽略；
- * {@code volume}/{@code pitch} 缺省 1.0。</p>
+ * 位标志（1=强制替换、2=当前 animatable 的全局 manager、4=循环）按上游执行。
+ * bit 2 不是无衰减，只有 GUI 上下文使用 UI 音效。数字 id 使用负数命名空间，0 匿名；
+ * {@code volume}/{@code pitch} 缺省 1.0，显式值限制 0.001~1000。
+ * 依据当前上游 {@code SoundFunction.java:70-123} 与 {@code MolangContext.java:220-235}。</p>
  *
  * <p>字符串参数经 {@link MolangStringPool} 池化为整数 id，求值时刻还原；
  * 实体上下文由 {@link ParticleEffectUtil#setCurrentEntity} 每帧写入，
@@ -100,63 +101,52 @@ public abstract class YsmSoundFunction extends Function {
         }
     }
 
+    /** Legacy double values encode strings with the existing pool; numeric ids occupy the negative namespace. */
+    static Integer soundId(double value) {
+        int raw = (int) value;
+        if (MolangStringPool.get(raw) != null) return raw;
+        int numeric = -raw;
+        return numeric > 0 ? null : numeric;
+    }
+
+    static float configuredValue(double value) {
+        // Upstream ValueConversions.asFloat:46-55 converts NaN to zero before Mth.clamp.
+        float converted = (float) value;
+        return Math.max(0.001f, Math.min(1000f, Float.isNaN(converted) ? 0f : converted));
+    }
+
     @Override
     public double get() {
         try {
-            Entity entity = ParticleEffectUtil.getCurrentEntity();
-            if (entity == null) {
-                return 0.0d;
-            }
-            // 归属 = 当前求值的实体（模型持有者）。音效的播放/停止都按归属分层，
-            // 否则一个模型脚本的 stop_all_sounds 会把别人的音效一起掐掉
-            // （参考实现里 global=0/缺省 的语义就是"只停当前实体上下文"）。
-            String ownerSlot = YSMSoundManager.ownerKey(entity instanceof EntityPlayer ? (EntityPlayer) entity : null);
+            if (args.length > (stopAll ? 1 : stop ? 2 : 5)) return 0;
+            MolangSoundContext context = MolangSoundContext.current();
+            if (context != null && !context.allowsEmitting()) return 0;
+            Entity entity = context == null ? MolangFrameContext.getFrameEntity() : context.entity();
+            if (entity == null && context == null) entity = ParticleEffectUtil.getCurrentEntity();
+            Object owner = context == null ? entity : context.owner();
+            if (owner == null) return 0;
             if (stopAll) {
-                // stop_all_sounds(global?)：global 非 0 时停全局，否则只停当前实体的上下文。
                 boolean global = args.length > 0 && getArg(0) != 0;
-                if (global) {
-                    YSMSoundManager.stopAll();
-                } else {
-                    YSMSoundManager.stopAll(ownerSlot);
-                }
-                return 1.0d;
+                MolangSoundPlayback.stopAll(context == null ? owner : context.manager(global));
+                return 1;
             }
-            String id = MolangStringPool.get((int) getArg(0));
+            Integer id = soundId(getArg(0));
+            if (id == null) return 0;
             if (stop) {
-                // 停止按该 id（作为 soundName）播放的活跃音源。global（第二个参数）为真时
-                // 不限定归属，与参考实现的 stop_sound(id, global?) 一致。
-                if (id != null && !id.isEmpty()) {
-                    if (args.length > 1 && getArg(1) != 0) {
-                        YSMSoundManager.stopSound(id);
-                    } else {
-                        YSMSoundManager.stopSound(ownerSlot, id);
-                    }
-                }
-                return 1.0d;
-            }
-            // play
-            if (id == null || id.isEmpty()) {
-                return 0.0d;
+                boolean global = args.length == 2 && getArg(1) != 0;
+                return MolangSoundPlayback.stop(context == null ? owner : context.manager(global), id) ? 1 : 0;
             }
             String soundName = MolangStringPool.get((int) getArg(1));
-            if (soundName == null || soundName.isEmpty()) {
-                return 0.0d;
-            }
-            float volume = args.length > 3 ? (float) getArg(3) : 1.0f;
-            float pitch = args.length > 4 ? (float) getArg(4) : 1.0f;
-            // 参考分支的取法：当前模型 id 由引擎提供的 MolangPhysicsRuntime#getCurrentModelId() 给出
-            // （即渲染期骨骼追踪记下的那个模型主 id，与本文件顶部的 {@link MolangPhysicsRuntime} 一致）。
-            ResourceLocation modelId = MolangPhysicsRuntime.getCurrentModelId();
-            EntityPlayer player = entity instanceof EntityPlayer ? (EntityPlayer) entity : null;
-            if (player == null) {
-                return 0.0d;
-            }
-            if (Config.DEBUG_SOUND) {
-                ysmu.LOG.info("[YSMU-SOUND] molang play_sound: id='{}' name='{}' vol={} pitch={} model={}",
-                    id, soundName, volume, pitch, modelId);
-            }
-            YSMSoundManager.playSound(player, soundName, modelId, volume, pitch);
-            return 1.0d;
+            if (soundName == null || soundName.trim().isEmpty()) return 0;
+            int mode = args.length >= 3 ? (int) getArg(2) : 0;
+            if (mode < 0 || mode > 7) return 0;
+            float volume = args.length >= 4 ? configuredValue(getArg(3)) : 1f;
+            float pitch = args.length >= 5 ? configuredValue(getArg(4)) : 1f;
+            ResourceLocation modelId = context == null ? MolangFrameContext.getMainModelId() : context.model();
+            if (modelId == null) modelId = MolangPhysicsRuntime.getCurrentModelId();
+            Object manager = context == null ? owner : context.manager((mode & 2) != 0);
+            return MolangSoundPlayback.play(manager, entity, context != null && context.isUI(),
+                id, soundName, modelId, mode, volume, pitch) ? 1 : 0;
         } catch (Exception e) {
             if (Config.DEBUG_SOUND) {
                 ysmu.LOG.warn("[YSMU-SOUND] molang sound function error: {}", e.toString());

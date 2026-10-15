@@ -26,6 +26,7 @@ import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 // Forked from https://github.com/airlift/slice
 // This Unsafe-based implementation exists only to serve the Zstd Java implementation,
 // which also uses Unsafe throughout. For public use, see rip.ysm.zstd.xxhash.XxHash64Hasher
+@SuppressWarnings("removal")
 final class XxHash64
 {
     private static final long PRIME64_1 = 0x9E3779B185EBCA87L;

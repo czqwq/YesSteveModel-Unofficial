@@ -15,6 +15,36 @@ import org.junit.jupiter.api.Test;
 class RoamingProgramTest {
 
     @Test
+    void compilesComputedReadsAndMultiStatementActionsWithTheRealParser() throws Exception {
+        software.bernie.geckolib3.core.molang.MolangParser parser =
+            new software.bernie.geckolib3.core.molang.MolangParser();
+        RoamingProgram.compile(parser, "v.roaming.form_test_a=2;v.roaming.form_test_b=v.roaming.form_test_a*3;")
+            .evaluate();
+        RoamingProgram.Compiled read = RoamingProgram.compile(parser, "v.roaming.form_test_b+1");
+        assertEquals(7d, read.evaluate());
+        RoamingProgram.compile(parser, "v.roaming.form_test_b=9;").evaluate();
+        assertEquals(10d, read.evaluate());
+    }
+
+    @Test
+    void onlyUnambiguousRoamingAssignmentsUseTheRoamingOnlyChannel() throws Exception {
+        software.bernie.geckolib3.core.molang.MolangParser parser =
+            new software.bernie.geckolib3.core.molang.MolangParser();
+        assertTrue(RoamingProgram.compile(parser, "v.roaming.form_test_a=1;v.roaming.form_test_b=0;")
+            .hasOnlyRoamingAssignments());
+        assertFalse(RoamingProgram.compile(parser, "v.other=1;").hasOnlyRoamingAssignments());
+        assertFalse(RoamingProgram.compile(parser, "v.roaming.form_test_a=1;v.other=2;")
+            .hasOnlyRoamingAssignments());
+        assertFalse(RoamingProgram.compile(parser, "v.roamingish.form_test_a=1;")
+            .hasOnlyRoamingAssignments());
+        assertTrue(RoamingProgram.compile(parser, "variable.Roaming.form_test_a=1;")
+            .hasOnlyRoamingAssignments());
+        assertFalse(RoamingProgram.compile(parser, "v.roaming.form_test_a=math.random(0,1);")
+            .hasOnlyRoamingAssignments());
+        assertFalse(RoamingProgram.compile(parser, "v.roaming.form_test_a").hasOnlyRoamingAssignments());
+    }
+
+    @Test
     void readsAPlainVariableName() {
         assertEquals("v.roaming.player_size", RoamingProgram.variableName("v.roaming.player_size"));
         assertEquals("v.roaming.head_size", RoamingProgram.variableName("  v.roaming.head_size  "));

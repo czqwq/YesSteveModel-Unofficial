@@ -52,6 +52,12 @@ public class YSMBinarySerializer {
         }
     }
 
+    /**
+     * The stream this writes is the one {@link YSMBinaryDeserializer}'s two-argument constructor reads - the sync
+     * payload layout - for every {@code writeFooter} value; {@code writeFooter} only controls the trailing footer, not
+     * the animation records. The one-argument constructor is the real {@code .ysm} reader, and a real file has no
+     * {@code anim_speed} / {@code anim_time_update} fields (see {@link #writeAnimationFileContent}).
+     */
     private static void writeModern(YSMByteBuf buf, RawYsmModel model, int format) {
         writeSoundFiles(buf, model.soundFiles, format);
         writeFunctionFiles(buf, model.functionFiles);
@@ -251,6 +257,31 @@ public class YSMBinarySerializer {
                     buf.writeFloat(sfx.timestamp * 20f);
                 }
             }
+
+            // Bedrock's per-animation `anim_speed` / `anim_time_update` (number or MoLang expression).
+            //
+            // **Which layout gets them.** This serializer's output is always read by `YSMBinaryDeserializer`'s
+            // two-argument constructor - `writeFooter` only controls the trailing footer, and the layout of the
+            // animation records is the same either way (the format round-trip tests serialize with
+            // `writeFooter=false` and read with the two-argument constructor). The one-argument constructor is the
+            // real OpenYSM `.ysm` reader, and a real file has no such fields, so they are written here and read only
+            // there. That is what keeps a third-party `.ysm` parseable: it never goes through this writer.
+            //
+            // A payload written by an older build is not a problem either: the OpenYSM channel is refused outright
+            // when the two sides' version strings differ (`C2SVersionCheck17.Handler`, `PROTOCOL_VERSION =
+            // Tags.VERSION`), and a cached payload from another build is not found because the cache name carries
+            // `OPEN_YSM_BAKE_VERSION`, which this change bumps.
+            writeOptionalString(buf, anim.animSpeed);
+            writeOptionalString(buf, anim.animTimeUpdate);
+        }
+    }
+
+    /** {@code 0} for null/empty, else {@code 1} followed by the string - one explicit presence byte per field. */
+    private static void writeOptionalString(YSMByteBuf buf, String value) {
+        boolean present = value != null && !value.isEmpty();
+        buf.writeVarInt(present ? 1 : 0);
+        if (present) {
+            buf.writeString(value);
         }
     }
 

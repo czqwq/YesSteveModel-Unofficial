@@ -17,8 +17,7 @@ import cpw.mods.fml.common.event.FMLServerStartingEvent;
     modid = ysmu.MODID,
     version = Tags.VERSION,
     name = "ysmu",
-    acceptedMinecraftVersions = "[1.7.10]",
-    dependencies = "required-after:geckolib")
+    acceptedMinecraftVersions = "[1.7.10]")
 public class ysmu {
 
     public static final String MODID = "ysmu";

@@ -4,22 +4,83 @@ import javax.annotation.Nullable;
 
 import com.fox.ysmu.model.roaming.ModelRoamingLimits;
 
+import com.eliotlash.mclib.math.Constant;
+import com.eliotlash.mclib.math.Variable;
+import software.bernie.geckolib3.core.molang.MolangException;
+import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.expressions.MolangAssignment;
+import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
+import software.bernie.geckolib3.core.molang.expressions.MolangMultiStatement;
+
 /**
- * Reads the small programs a pack puts in a config form.
+ * Compiles a config form's read and action programs with the actual animation-file MoLang parser.
  * <p>
- * A form's {@code value} (kept in {@code RawYsmModel.ConfigForm.defaultValue}) is the program that reads and writes the
- * setting, and the labels of a {@code radio} form each carry a program that assigns a value. Upstream evaluates them as
- * MoLang against its runtime; YSMU's roaming values live in {@link ClientRoamingStore} rather than in a live MoLang
- * scope, so the programs are read here and the resulting value is written to the store, which is what makes the
- * setting persist and travel to the server.
- * <p>
- * Only the shapes packs actually use are accepted - a plain variable name, or an assignment of a numeric literal to
- * one. Anything else is reported as unusable so the screen can say so once instead of silently doing nothing. See
- * {@code .agent/phase15-roaming-variables.md}, Milestone 5.
+ * The compiled program evaluates only when its owner has established a real entity/model execution scope. Roaming
+ * writes still travel through {@link ClientRoamingStore} to the existing server authority. The legacy name/literal
+ * helpers remain for compatibility; they are not a substitute for executing a complete form program.
  */
 public final class RoamingProgram {
 
     private RoamingProgram() {}
+
+    /**
+     * Compile the complete program, just as upstream AnimationRouletteScreen.java:524-530 does. Evaluation must
+     * happen in the owning entity's live MoLang scope, not against a replacement variable map.
+     */
+    public static Compiled compile(MolangParser parser, String source) throws MolangException {
+        return new Compiled(source, parser.parseExpression(source));
+    }
+
+    public static final class Compiled {
+        private final String source;
+        private final MolangExpression expression;
+
+        private Compiled(String source, MolangExpression expression) {
+            this.source = source;
+            this.expression = expression;
+        }
+
+        public String source() {
+            return this.source;
+        }
+
+        public double evaluate() {
+            return this.expression.get();
+        }
+
+        /**
+         * Only unambiguously side-effect-free RHS values qualify for the local roaming channel. Unknown ASTs and
+         * functions go through the controlled expression broadcast too; never hide their effects as roaming-only.
+         */
+        public boolean hasOnlyRoamingAssignments() {
+            return onlyRoamingAssignments(this.expression);
+        }
+    }
+
+    private static boolean onlyRoamingAssignments(MolangExpression expression) {
+        if (expression instanceof MolangMultiStatement statements) {
+            if (statements.expressions.isEmpty()) {
+                return false;
+            }
+            for (MolangExpression statement : statements.expressions) {
+                if (!onlyRoamingAssignments(statement)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (expression instanceof MolangAssignment assignment) {
+            String target = MolangParser.canonicalVariableName(assignment.variable.getName());
+            // The shared store's admission rule also accepts other v.* values (ModelRoamingLimits.java:39-40).
+            // Admission is not proof of roaming membership: upstream's local-only gate names v.roaming explicitly
+            // (CustomMolangParser.java:19,75-76). Never suppress a non-roaming assignment's expression broadcast.
+            return target.startsWith(ModelRoamingLimits.PREFIX)
+                && target.length() > ModelRoamingLimits.PREFIX.length()
+                && ModelRoamingLimits.isAcceptableName(target)
+                && (assignment.expression instanceof Constant || assignment.expression instanceof Variable);
+        }
+        return false;
+    }
 
     /**
      * The roaming variable a program names, or {@code null} when it is not a usable roaming variable.

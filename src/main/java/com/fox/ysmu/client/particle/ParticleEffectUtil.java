@@ -68,6 +68,28 @@ public final class ParticleEffectUtil {
         VANILLA_FALLBACK.put("dragon_breath", "witchMagic");
         VANILLA_FALLBACK.put("end_rod", "townaura");
         VANILLA_FALLBACK.put("totem_of_undying", "happyVillager");
+        // 1.20 的 `minecraft:dust` 是彩色粉末：颜色由 delta 参数给出，而 1.7.10 的 `reddust` 正好把
+        // delta(r,g,b) 当颜色读（RenderGlobal.doSpawnParticle 的 "reddust" 分支，
+        // build/rfg/minecraft-src/java/net/minecraft/client/renderer/RenderGlobal.java:2151），
+        // 所以参数语义对得上，只差名字——1.7.10 没有 "dust"，不映射就整条静默丢弃。
+        VANILLA_FALLBACK.put("dust", "reddust");
+        // 1.20 的 `minecraft:cherry_leaves`（樱花花瓣）在 1.7.10 没有同名或同形的粒子。这里取
+        // `snowshovel`（白色碎屑、向下飘），是**行为**上最近的一个；颜色（粉 vs 白）只能将就，
+        // 因为 1.7.10 没有可着色的飘落粒子。若要更好看只能走自定义粒子（ParticleBehaviors）那条路。
+        VANILLA_FALLBACK.put("cherry_leaves", "snowshovel");
+    }
+
+    /**
+     * {@link #VANILLA_FALLBACK} 的查表结果：{@code particleName} 在 1.7.10 里对应的内置粒子名，
+     * 表里没有（或名字为 null）返回 {@code null}。
+     *
+     * <p>包内可见的纯访问器：这张表决定"一个高版本粒子名最终生成成什么"，而它的唯一消费者
+     * {@link #resolve} 是 private，所以单测只能通过这里核对表内容（见
+     * {@code ParticleEffectUtilFallbackTest}）。返回 {@code null} 就是 {@code resolve} 里
+     * "保持原样、走原路径"的那一支，所以这个访问器同时钉住了两个方向。
+     */
+    static String fallbackNameFor(String particleName) {
+        return VANILLA_FALLBACK.get(particleName);
     }
 
     /** 当前渲染帧的实体上下文（由 {@code AnimationRegister.setParserValue} 每帧写入），

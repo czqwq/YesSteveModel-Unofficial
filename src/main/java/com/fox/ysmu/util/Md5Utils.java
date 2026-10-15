@@ -2,6 +2,7 @@ package com.fox.ysmu.util;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 public final class Md5Utils {
 
@@ -34,15 +35,18 @@ public final class Md5Utils {
         return newDigest().digest(data);
     }
 
+    /**
+     * 摘要/字节序列的十六进制文本：小写，每字节固定两位。
+     *
+     * <p>用 {@link HexFormat}（Java 17）而不是手写循环，与 upstream 的同一操作一致
+     * （{@code model/domain/Hash256.java:10,99}、{@code model/catalog/content/DefaultAnimationKey.java:43-44}）。
+     * {@code HexFormat.of()} 的默认就是小写、定长，因此输出与替换前的循环逐字相同 —— 这个字符串同时是缓存
+     * 文件名与内容校验口径（{@code network/message/SendModelFile}、{@code model/format/ModelCacheWriter}、
+     * {@code data/EncryptTools}、{@code ServerModelInfo}），不能变。JDK 8 启动器上这些调用由 JVM Downgrader
+     * 改写到它自己的 stub（{@code gradle.properties} 的 {@code enableModernJavaSyntax = jvmDowngrader}）。
+     */
     public static String toHexString(byte[] bytes) {
-        StringBuilder hexString = new StringBuilder();
-        for (byte b : bytes) {
-            String hex = Integer.toHexString(0xFF & b);
-            if (hex.length() == 1) {
-                hexString.append('0');
-            }
-            hexString.append(hex);
-        }
-        return hexString.toString();
+        return HexFormat.of()
+            .formatHex(bytes);
     }
 }

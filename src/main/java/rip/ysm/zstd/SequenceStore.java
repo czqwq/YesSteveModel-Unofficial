@@ -17,6 +17,7 @@ import static rip.ysm.zstd.Constants.SIZE_OF_LONG;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 final class SequenceStore
 {
     public final byte[] literalsBuffer;

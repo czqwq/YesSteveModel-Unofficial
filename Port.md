@@ -47,7 +47,7 @@
 | `rip.ysm.security`、`rip.ysm.algorithms`、`rip.ysm.zstd` | 新增 vendored 包或迁移到 `com.fox.ysmu.vendor` | 作为格式/缓存基础，先单元测试 varint、zstd、hash、加解密，再接入网络。 |
 | `client/ClientModelManager` | `client/ClientModelManager` | 先做新版模型到当前 GeckoLibCache 的桥接；后续再引入 ModelAssembly。 |
 | `client/model/*` | `client/model` | 与当前 `CustomPlayerModel` 并行，不一次性替换。Binary `.ysm` 的 baked geometry 需要单独桥接或移植 OpenYSM mesh renderer。 |
-| `geckolib3/*` | `libs/geckolib-5.09.52.417-dev.jar`（独立 mod `geckolib`） | 引擎已抽成独立 Mod，不在本仓库 vendor；宿主侧通过 `IMolangPhysicsScope` 等接口接入。 |
+| `geckolib3/*` | `src/main/java/{software,com/eliotlash,net/geckominecraft}`（已 vendor 进本仓库，327 个文件） | 引擎源码快照已并入本仓库，不再是 `libs/` 里的独立 Mod；这三棵树是本仓库拥有的第三方兼容代码，引擎改动在本仓库做、保持与缺陷同等最小，并作为快照偏离记入 `PROVENANCE.md`；宿主侧通过 `IMolangPhysicsScope` 等接口接入。 |
 | `capability/*` | `eep/*`、必要时实体 ID 映射 | 玩家模型和收藏用 EEP；载具/投射物可先用客户端映射，成熟后再按实体扩展属性落地。 |
 | `network/message/*` | `network/message/*` | 把现代 payload 编码拆成 1.7.10 `IMessage`；大文件分块、重试和握手状态写成独立类。 |
 | `client/renderer/*`、`client/event/*` | `client/renderer`、`ClientEventHandler`、`mixin` | 玩家主渲染先复用现有取消原版事件方式；第一人称和特殊层按 1.7.10 渲染 API 重写。 |
@@ -119,7 +119,7 @@
 
 - 先补齐当前 `AnimationRegister` 的状态名和 1.7.10 映射：`climb/climbing` 映射到 1.7.10 ladder 行为；双持依赖 Backhand；1.7.10 无对应原版能力的现代状态保持不可触发。
 - 移植 `AnimationControllerFile`、controller state、blend transition、on_entry/on_exit、sound_effects 的数据结构，但先只在玩家主模型路径启用。
-- Molang 运行时随 GeckoLib 独立 Mod 提供：`software.bernie.geckolib3.core.molang` 是引擎在用的旧解析器，`software.bernie.geckolib3.molang` 是 1.20.1 移植的现代引擎。本仓库只保留宿主侧接线，不再 vendor 引擎。
+- Molang 运行时随本仓库内置的引擎提供：`software.bernie.geckolib3.core.molang` 是引擎在用的旧解析器，`software.bernie.geckolib3.molang` 是 1.20.1 移植的现代引擎。这两棵树已 vendor 进本仓库（见 `PROVENANCE.md`），宿主侧仍保留 `com.fox.ysmu` 的接线。
 - 将 OpenYSM 的 query/ysm/ctrl/fn 函数按 1.7.10 能力分级：基础玩家/世界/物品 query 优先，方块标签、附魔等级、相对方块、天气、维度名、输入检测、物理函数后置。
 - 用 `ConditionManager` 继续分类 `hold_*`、`swing_*`、`use_*`、armor 条件动画，新增 `vehicle`、`passenger` 分类时必须有 1.7.10 行为验收。
 
@@ -174,7 +174,7 @@
 
 ## 关键风险与处理
 
-- **GeckoLib 已独立成 Mod，不要在本仓库重新 vendor。** 引擎位于独立仓库（mod id `geckolib`），通过 `libs/geckolib-5.09.52.417-dev.jar` 依赖；本仓库只保留 `com.fox.ysmu` 侧的宿主实现。引擎内部的改动应提交到那个仓库。
+- **GeckoLib 引擎已 vendor 进本仓库，不再是独立 Mod。** 引擎源码在 `src/main/java/{software,com/eliotlash,net/geckominecraft}`（327 个文件，见 `PROVENANCE.md`）；这三棵树是本仓库拥有的第三方兼容代码，引擎改动在本仓库做、保持与缺陷同等最小，并作为快照偏离记入 `PROVENANCE.md` 与相关 `.agent/` ExecPlan。本仓库另外只保留 `com.fox.ysmu` 侧的宿主实现，通过 `IMolangPhysicsScope` 等接口接入引擎。
 - **新版 binary `.ysm` 几何不是简单旧 JSON。** OpenYSM 反序列化后得到 baked face 数据。若不能无损转换为当前 GeoModel，就必须单独移植 OpenYSM mesh renderer 的核心，而不是继续堆转换脚本。
 - **Capabilities 必须重写。** 1.7.10 不存在现代 Capability 生命周期；玩家持久状态用 EEP，客户端临时状态用 manager/map，实体扩展按需求拆分。
 - **Java 17 语法和 Java 9+ API 要分开处理。** Jabel 可以保留部分现代语法，但不能在 JVM 8 上调用不存在的标准库方法。

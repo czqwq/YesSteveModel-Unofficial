@@ -20,6 +20,7 @@ import java.nio.ByteOrder;
 
 import static java.lang.String.format;
 
+@SuppressWarnings("removal")
 final class UnsafeUtil
 {
     public static final Unsafe UNSAFE;

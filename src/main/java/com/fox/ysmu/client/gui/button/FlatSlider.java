@@ -51,11 +51,24 @@ public class FlatSlider extends GuiButton {
         updateDisplayString();
     }
 
+    /**
+     * Clamps against the **sorted** pair, not against {@code min}/{@code max} as declared.
+     * <p>
+     * A pack may declare a reverse range - LaPluma 2.5.3's {@code 自定义动作手臂/左小臂_Rx} is {@code min: 0,
+     * max: -180} - and upstream hands those straight to a slider
+     * ({@code com/elfmcys/ysm/client/gui/AnimationRouletteScreen.java:379}). The old body used
+     * {@code Math.max(min, Math.min(max, raw))}, which for that pair answers {@code 0} for every input, so the knob
+     * moved and the value never did. The interpolation in {@link #applyMouse} and the ratio in
+     * {@link #drawButton} already work for either order (both are expressed as {@code min + ratio * (max - min)}),
+     * so only the bound and the step base had to change. Behaviour for {@code min < max} is identical.
+     */
     private float clamp(float raw) {
-        float bounded = Math.max(this.min, Math.min(this.max, raw));
+        float low = Math.min(this.min, this.max);
+        float high = Math.max(this.min, this.max);
+        float bounded = Math.max(low, Math.min(high, raw));
         if (this.step > 0f) {
-            float steps = Math.round((bounded - this.min) / this.step);
-            bounded = Math.max(this.min, Math.min(this.max, this.min + steps * this.step));
+            float steps = Math.round((bounded - low) / this.step);
+            bounded = Math.max(low, Math.min(high, low + steps * this.step));
         }
         return bounded;
     }

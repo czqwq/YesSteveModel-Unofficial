@@ -6,11 +6,16 @@
   "target": "@env(DEFAULT)",
   "compatibilityLevel": "JAVA_8",
   "mixins": [
-    "MixinEntityArrow"
+    "MixinEntityArrow",
+    "MixinEntityMount"
   ],
   "client": [
     "MixinItemRenderer",
     "MixinEffectRenderer",
-    "client.MixinRenderArrow"
+    "client.MixinRenderArrow",
+    "client.MixinRenderManager",
+    "client.RenderLivingInvoker",
+    "client.RendererLivingEntityInvoker",
+    "MixinMinecraft"
   ]
 }
