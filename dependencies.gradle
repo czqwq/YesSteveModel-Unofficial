@@ -33,7 +33,19 @@ dependencies {
     // `src/main/java/{software,com/eliotlash,net/geckominecraft}` - see `PROVENANCE.md`.)
     compileOnly files("libs/ImageStream--SNAPSHOT.jar")
     testImplementation files("libs/ImageStream--SNAPSHOT.jar")
-    devOnlyNonPublishable files("libs/ImageStream--SNAPSHOT.jar")
+    // Do NOT put the raw jar on the development runtime classpath (`devOnlyNonPublishable files(...)`).
+    // It used to be there and it broke every non-PNG image in dev runs: the jar is Java 17 bytecode
+    // (major 61) and 1.7.10's FML scans every classpath jar for @Mod classes with an ASM that cannot read
+    // it, so `JarDiscoverer` -> `ASMModParser` throws and FML drops the whole container
+    // ("Zip file ImageStream--SNAPSHOT.jar failed to read properly, it will be ignored"), after which
+    // `ModelImageConverter` met `NoClassDefFoundError: rip/ysm/imagestream/jpeg/JpegDecoder` for JPEG,
+    // WebP and AVIF and shipped those images unconverted (owner's `runServer` log, 06:14).
+    //
+    // The classes reach dev runs the same way they reach a released install: inside our own mod artifact.
+    // The block at the end of this file embeds them, and the GTNH convention's downgrader lowers them to
+    // JVM 8 (verified: `rip/ysm/imagestream/jpeg/JpegDecoder.class` in `build/libs/ysmu-*-dev.jar` is
+    // major 52, next to the untouched Java 17 copy in `META-INF/versions/17/`), so the development jar
+    // carries a loadable copy and no separate jar has to sit on the launch classpath.
     // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.6.2")
