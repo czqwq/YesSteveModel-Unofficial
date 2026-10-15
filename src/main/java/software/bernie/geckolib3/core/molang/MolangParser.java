@@ -686,7 +686,6 @@ public class MolangParser extends MathBuilder {
                 @Override
                 public double get() {
                     double l = leftVal.get();
-                    double r = rightVal.get();
                     // Check if the variable was EXPLICITLY set by the user (via GUI/config),
                     // not just default-initialized.  Default-initialized variables are in
                     // PENDING_ROAMING but NOT in EXPLICIT_ROAMING, so they still fall
@@ -696,8 +695,13 @@ public class MolangParser extends MathBuilder {
                     if (lookup != null) {
                         userSet = lookup.isExplicitlySet(leftExpr);
                     }
-                    double result = userSet ? l : (l != 0 ? l : r);
-                    return result;
+                    if (userSet || l != 0) {
+                        return l;
+                    }
+                    // 上游的 `??` 只在左侧为 null 时才访问右侧（ExpressionEvaluatorImpl.java:70-77）；本引擎没有
+                    // null，"未定义"就是 0。以前两侧都先求值，于是 `v.flame_level ?? (v.flame_level = …)`
+                    // 这类"只初始化一次"的写法每帧都会重跑右侧、把变量重写一遍。
+                    return rightVal.get();
                 }
             });
         }

@@ -15,7 +15,9 @@ public class Operator implements IValue {
     @Override
 
     public double get() {
-        return this.operation.calculate(a.get(), b.get());
+        // 上游每个二元运算符读取操作数时都过 ValueConversions.asFloat（NaN→0），见
+        // molang/runtime/ExpressionEvaluatorImpl.java:43-47；本引擎的对应物是 Operation.asDouble。
+        return this.operation.calculate(Operation.asDouble(a.get()), Operation.asDouble(b.get()));
     }
 
     @Override

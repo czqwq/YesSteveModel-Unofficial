@@ -7,8 +7,14 @@ import java.util.Set;
 
 public enum Operation {
 
-    // 操作符
-    ADD("+", 1) {
+    // 优先级取自上游 BinaryExpression.Op 的相对顺序（tmp/YesSteveModel-dev-1.20
+    // .../molang/parser/ast/BinaryExpression.java:116-132，一元负号见 UnaryExpression.java:101-116）：
+    // ASSIGN(1) < NULL_COALESCE(1200) < CONDITIONAL(1400) < OR(1600) < AND(1800) < EQ/NEQ(2000)
+    // < LT/LTE/GT/GTE(2200) < ADD/SUB(2400) < MUL/DIV(2600) < 一元负号(2800) < ARROW(3000)。
+    // 本表数值越大越紧。POW/MOD 是 mclib 有、上游没有的两个运算符，按标准优先级插在 MUL/DIV 一档（MOD）
+    // 与它们之上（POW）。旧的 mclib 原表把所有比较/相等/逻辑挤在同一个值 5（**比算术更紧**），
+    // 于是 `0.8+v<=6?-0.9:0` 被读成 `0.8+(v<=6)`——条件恒真，随包 wine_fox/05_magical 的位移因此永远偏。
+    ADD("+", 7) {
 
         @Override
 
@@ -16,7 +22,7 @@ public enum Operation {
             return a + b;
         }
     },
-    SUB("-", 1) {
+    SUB("-", 7) {
 
         @Override
 
@@ -24,7 +30,7 @@ public enum Operation {
             return a - b;
         }
     },
-    MUL("*", 2) {
+    MUL("*", 8) {
 
         @Override
 
@@ -32,16 +38,17 @@ public enum Operation {
             return a * b;
         }
     },
-    DIV("/", 2) {
+    DIV("/", 8) {
 
         @Override
 
         public double calculate(double a, double b) {
-            /* To avoid any exceptions */
-            return a / (b == 0 ? 1 : b);
+            // 上游：Molang 允许除以零，结果恒为 0（ExpressionEvaluatorImpl.java:50-57
+            // `if (divisor == 0) return 0;`）。旧实现是 `a / (b == 0 ? 1 : b)`，即 `5/0` 得 5。
+            return b == 0 ? 0 : a / b;
         }
     },
-    MOD("%", 2) {
+    MOD("%", 8) {
 
         @Override
 
@@ -49,7 +56,7 @@ public enum Operation {
             return a % b;
         }
     },
-    POW("^", 3) {
+    POW("^", 9) {
 
         @Override
 
@@ -57,23 +64,25 @@ public enum Operation {
             return Math.pow(a, b);
         }
     },
-    AND("&&", 5) {
+    AND("&&", 4) {
 
         @Override
 
         public double calculate(double a, double b) {
-            return a != 0 && b != 0 ? 1 : 0;
+            // 短路本身在 MathBuilder#binary 的惰性值里（上游是 Supplier，Java `&&` 短路）；
+            // 这里只保证"真值判定"与上游 asBoolean 一致。
+            return asBoolean(a) && asBoolean(b) ? 1 : 0;
         }
     },
-    OR("||", 5) {
+    OR("||", 3) {
 
         @Override
 
         public double calculate(double a, double b) {
-            return a != 0 || b != 0 ? 1 : 0;
+            return asBoolean(a) || asBoolean(b) ? 1 : 0;
         }
     },
-    LESS("<", 5) {
+    LESS("<", 6) {
 
         @Override
 
@@ -81,7 +90,7 @@ public enum Operation {
             return a < b ? 1 : 0;
         }
     },
-    LESS_THAN("<=", 5) {
+    LESS_THAN("<=", 6) {
 
         @Override
 
@@ -89,7 +98,7 @@ public enum Operation {
             return a <= b ? 1 : 0;
         }
     },
-    GREATER_THAN(">=", 5) {
+    GREATER_THAN(">=", 6) {
 
         @Override
 
@@ -97,7 +106,7 @@ public enum Operation {
             return a >= b ? 1 : 0;
         }
     },
-    GREATER(">", 5) {
+    GREATER(">", 6) {
 
         @Override
 
@@ -110,7 +119,10 @@ public enum Operation {
         @Override
 
         public double calculate(double a, double b) {
-            return equals(a, b) ? 1 : 0;
+            // 上游数字相等是**精确**比较（ExpressionEvaluatorImpl.java:112-126：两侧都过
+            // ValueConversions.asFloat 之后用 `==`），不是容差比较；旧实现走 Operation.equals 的 1e-5 容差，
+            // 于是 `0.000001==0` 为真。
+            return a == b ? 1 : 0;
         }
     },
     NOT_EQUALS("!=", 5) {
@@ -118,10 +130,10 @@ public enum Operation {
         @Override
 
         public double calculate(double a, double b) {
-            return !equals(a, b) ? 1 : 0;
+            return a != b ? 1 : 0;
         }
     },
-    ASSIGN("=", 5) {
+    ASSIGN("=", 0) {
         @Override
         public double calculate(double a, double b) {
             return b;
@@ -145,7 +157,7 @@ public enum Operation {
      *
      * <p>优先级取全表最高：上游 ARROW 就是最紧的二元运算符，{@code a->b+1} 必须读成 {@code (a->b)+1}。
      */
-    ARROW("->", 6) {
+    ARROW("->", 10) {
         @Override
         public double calculate(double a, double b) {
             // calculate 的契约是"两个 double 进、一个 double 出"，而箭头的语义是副作用（换 subject），所以它永远
@@ -164,7 +176,7 @@ public enum Operation {
      * stayed in the buffer and the result was an empty symbol), the scale channel evaluated to 0 and the model
      * collapsed to a point. Precedence is below every other binary operator so the fallback applies last.
      */
-    NULL_COALESCE("??", 4) {
+    NULL_COALESCE("??", 1) {
         @Override
         public double calculate(double a, double b) {
             return a != 0 ? a : b;
@@ -183,7 +195,7 @@ public enum Operation {
      * operator, which is what a conditional needs; a well-formed {@code a?b:c} is still claimed by
      * {@link MathBuilder#tryTernary} before this operator is ever considered.
      */
-    CONDITIONAL("?", 0) {
+    CONDITIONAL("?", 2) {
         @Override
         public double calculate(double a, double b) {
             return a != 0 ? b : 0;
@@ -213,7 +225,30 @@ public enum Operation {
     }
 
     public static boolean equals(double a, double b) {
-        return Math.abs(a - b) < 0.00001;
+        // 只服务 MolangExpression#isConstant 的"这是不是字面量 0/1"判定。`==` 运算符本身是精确比较
+        // （见 EQUALS 的注释）；这里以前是 1e-5 容差，会让 0.000001 被当成 0。
+        return a == b;
+    }
+
+    /**
+     * 上游 {@code ValueConversions.asDouble(Object)}（molang/runtime/binding/ValueConversions.java:76-91）的
+     * double 精度镜像：{@code NaN} 归 0，其余原样。
+     *
+     * <p>上游在每个"取值边界"都做这件事——二元运算符的操作数、函数实参（{@code Function.ArgumentCollection
+     * .getAsDouble:89-91}）、一元运算与条件（{@code asBoolean}）。本引擎的 {@code IValue} 只有 double，
+     * 所以这里只保留"NaN 归 0"这一条。上游在二元运算符里用的是 {@code asFloat}（:46-61，会先窄化成 float），
+     * 本仓刻意不窄化：这是移植的精度选择（{@code IValue} 就是 double），不是语义差异。
+     */
+    public static double asDouble(double value) {
+        return Double.isNaN(value) ? 0 : value;
+    }
+
+    /**
+     * 上游 {@code ValueConversions.asBoolean(Object)}（:32-44）的 double 镜像：
+     * {@code NaN} → false、0 → false，其余 true。
+     */
+    public static boolean asBoolean(double value) {
+        return !Double.isNaN(value) && value != 0;
     }
 
     /**

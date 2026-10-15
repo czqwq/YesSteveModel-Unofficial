@@ -15,7 +15,8 @@ public class Ternary implements IValue {
     @Override
 
     public double get() {
-        return this.condition.get() != 0 ? this.ifTrue.get() : this.ifFalse.get();
+        // 上游三元只访问被选中的那一支，条件过 asBoolean（ExpressionEvaluatorImpl.java:105-111）。
+        return Operation.asBoolean(this.condition.get()) ? this.ifTrue.get() : this.ifFalse.get();
     }
 
     @Override

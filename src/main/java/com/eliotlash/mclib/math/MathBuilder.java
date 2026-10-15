@@ -417,7 +417,50 @@ public class MathBuilder {
             }
             return host.access(this, left, right);
         }
+        if (operation == Operation.AND || operation == Operation.OR || operation == Operation.CONDITIONAL) {
+            return new LazyCondition(operation, left, right);
+        }
         return new Operator(operation, left, right);
+    }
+
+    /**
+     * {@code &&} / {@code ||} / 无冒号三元 {@code cond?value} 的**惰性**求值。
+     *
+     * <p>上游这三个运算符收的是 Supplier：{@code ExpressionEvaluatorImpl.java:154-159} 的
+     * {@code BooleanOperator.operate(() -> asBoolean(a.visit(…)), () -> asBoolean(b.visit(…)))}，Java 的
+     * {@code &&}/{@code ||} 于是短路；无冒号三元在 {@code :105-111} 里也只在条件为真时访问右侧。
+     * mclib 的 {@link Operator} 先把两侧都求出来再进 {@code calculate}，所以 {@code a&&(v.x=1)} 在 a 为假时
+     * 也会赋值，条件为假的分支照样跑完副作用（取随机数、发粒子、写变量）。
+     */
+    private static final class LazyCondition implements IValue {
+
+        private final Operation operation;
+        private final IValue left;
+        private final IValue right;
+
+        LazyCondition(Operation operation, IValue left, IValue right) {
+            this.operation = operation;
+            this.left = left;
+            this.right = right;
+        }
+
+        @Override
+        public double get() {
+            boolean condition = Operation.asBoolean(this.left.get());
+            if (this.operation == Operation.AND) {
+                return condition && Operation.asBoolean(this.right.get()) ? 1 : 0;
+            }
+            if (this.operation == Operation.OR) {
+                return condition || Operation.asBoolean(this.right.get()) ? 1 : 0;
+            }
+            // CONDITIONAL：cond?value ≡ cond?value:0
+            return condition ? Operation.asDouble(this.right.get()) : 0;
+        }
+
+        @Override
+        public String toString() {
+            return this.left.toString() + " " + this.operation.sign + " " + this.right.toString();
+        }
     }
 
     protected int seekLastOperator(List<Object> symbols) {

@@ -1,6 +1,7 @@
 package com.eliotlash.mclib.math.functions;
 
 import com.eliotlash.mclib.math.IValue;
+import com.eliotlash.mclib.math.Operation;
 import software.bernie.geckolib3.core.molang.MolangStringPool;
 
 public abstract class Function implements IValue {
@@ -28,7 +29,9 @@ public abstract class Function implements IValue {
         if (index < 0 || index >= this.args.length) {
             return 0;
         }
-        return this.args[index].get();
+        // 上游函数实参走 ValueConversions.asDouble（Function.ArgumentCollection#getAsDouble:89-91），
+        // NaN 归 0；mclib 的 getArg 以前直接返回原始值，`math.abs(math.sqrt(-1))` 于是得 NaN 而不是 0。
+        return Operation.asDouble(this.args[index].get());
     }
 
     /**

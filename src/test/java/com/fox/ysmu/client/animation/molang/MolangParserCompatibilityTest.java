@@ -689,6 +689,121 @@ class MolangParserCompatibilityTest {
             "a leading negative literal is a merged token and keeps its meaning");
     }
 
+    /**
+     * The operator table follows upstream's relative order, not mclib's.
+     *
+     * <p>Upstream is a Pratt parser with strictly ordered binary precedences
+     * ({@code molang/parser/ast/BinaryExpression.java:116-132}): OR(1600) &lt; AND(1800) &lt; EQ/NEQ(2000)
+     * &lt; LT/LTE/GT/GTE(2200) &lt; ADD/SUB(2400) &lt; MUL/DIV(2600). mclib's table put every comparison, equality
+     * and logical operator on one level that was <em>tighter</em> than arithmetic, so {@code 1+1>0} read as
+     * {@code 1+(1>0)}. That is not academic: the built-in
+     * {@code wine_fox/05_magical/animations/main.animation.json:2035} writes
+     * {@code "0.8+ysm.food_level<=6?-0.9:0"}, which upstream reads as {@code (0.8+food)<=6} (the offset appears only
+     * while starving) and the old table read as {@code 0.8+(food<=6)} — always true, so that model's Z offset was
+     * applied permanently.
+     */
+    @Test
+    void operatorsFollowUpstreamPrecedence() throws Exception {
+        MolangParser parser = new MolangParser();
+
+        // Arithmetic binds tighter than comparison...
+        assertEquals(1.0D, parser.parseExpression("1+1>0")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("2>1+1")
+            .get(), 0.0D);
+        assertEquals(1.0D, parser.parseExpression("2*2>1")
+            .get(), 0.0D);
+        // ...and than equality, which is in turn looser than comparison: `0==0>1` is `0==(0>1)`.
+        assertEquals(1.0D, parser.parseExpression("2*2==4")
+            .get(), 0.0D);
+        assertEquals(1.0D, parser.parseExpression("0==0>1")
+            .get(), 0.0D);
+        // `&&` binds tighter than `||` (upstream 1800 vs 1600): `0&&1||1` is `(0&&1)||1`.
+        assertEquals(1.0D, parser.parseExpression("0&&1||1")
+            .get(), 0.0D);
+        // The ternary and `??` stay looser than every binary operator.
+        assertEquals(3.0D, parser.parseExpression("1>1+1?2:3")
+            .get(), 0.0D);
+        assertEquals(4.0D, parser.parseExpression("2*2==4?4:5")
+            .get(), 0.0D);
+        // The shipped shape itself, both branches: well fed -> no offset, starving -> -0.9.
+        assertEquals(0.0D, parser.parseExpression("0.8+20<=6?-0.9:0")
+            .get(), 0.0D);
+        assertEquals(-0.9D, parser.parseExpression("0.8+2<=6?-0.9:0")
+            .get(), 0.0D);
+    }
+
+    /**
+     * Upstream's value-conversion boundaries and its lazy operators, which mclib's pure binary table lacked:
+     * {@code asFloat}/{@code asDouble} normalise NaN to 0 ({@code ValueConversions.java:46-61,76-91}),
+     * {@code asBoolean} makes NaN false ({@code :32-44}), {@code &&}/{@code ||} short-circuit because they take
+     * suppliers ({@code ExpressionEvaluatorImpl.java:154-159}), {@code x/0} answers 0 ({@code :50-57}) and
+     * {@code ==} is exact ({@code :112-126}).
+     */
+    @Test
+    void conversionAndLazyOperatorRulesMatchUpstream() throws Exception {
+        MolangParser parser = new MolangParser();
+
+        // `math.sqrt(-1)` is NaN on both sides of the port: upstream's own Sqrt has no guard either
+        // (geckolib3/core/molang/builtin/math/Sqrt.java:9).
+        assertEquals(1.0D, parser.parseExpression("math.sqrt(-1)+1")
+            .get(), 0.0D, "a NaN operand normalises to 0");
+        assertEquals(1.0D, parser.parseExpression("math.sqrt(-1)==0")
+            .get(), 0.0D, "NaN compares as 0");
+        assertEquals(2.0D, parser.parseExpression("math.sqrt(-1)?1:2")
+            .get(), 0.0D, "NaN is false in a condition, so the else branch is taken");
+        assertEquals(1.0D, parser.parseExpression("!math.sqrt(-1)")
+            .get(), 0.0D, "NaN is false, so ! is true");
+        assertEquals(0.0D, parser.parseExpression("math.sqrt(-1)&&1")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("math.abs(math.sqrt(-1))")
+            .get(), 0.0D, "function arguments go through asDouble");
+        // Division by zero answers 0, not the dividend.
+        assertEquals(0.0D, parser.parseExpression("5/0")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("0/0")
+            .get(), 0.0D);
+        // `==` is exact, not a 1e-5 tolerance.
+        assertEquals(0.0D, parser.parseExpression("0.000001==0")
+            .get(), 0.0D);
+        assertEquals(1.0D, parser.parseExpression("0.000001!=0")
+            .get(), 0.0D);
+
+        // The untaken side of `&&` / `||` / `cond?value` must not run - the assignment is the probe.
+        parser.parseExpression("v.zz_lazy_probe=0")
+            .get();
+        assertEquals(0.0D, parser.parseExpression("0&&(v.zz_lazy_probe=1)")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("v.zz_lazy_probe")
+            .get(), 0.0D, "&& must not run the untaken side");
+        assertEquals(1.0D, parser.parseExpression("1||(v.zz_lazy_probe=2)")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("v.zz_lazy_probe")
+            .get(), 0.0D, "|| must not run the untaken side");
+        assertEquals(0.0D, parser.parseExpression("0?(v.zz_lazy_probe=3)")
+            .get(), 0.0D);
+        assertEquals(0.0D, parser.parseExpression("v.zz_lazy_probe")
+            .get(), 0.0D, "cond?value must not run when the condition is false");
+        assertEquals(1.0D, parser.parseExpression("1&&(v.zz_lazy_probe=4)")
+            .get(), 0.0D);
+        assertEquals(4.0D, parser.parseExpression("v.zz_lazy_probe")
+            .get(), 0.0D, "the taken side still runs");
+        // `??` only evaluates its fallback when it has to (upstream:70-77) - the "initialise once" idiom.
+        parser.parseExpression("v.zz_coalesce_lazy=7")
+            .get();
+        assertEquals(
+            7.0D,
+            parser.parseExpression("v.zz_coalesce_lazy??(v.zz_coalesce_lazy=9)")
+                .get(),
+            0.0D);
+        assertEquals(
+            7.0D,
+            parser.parseExpression("v.zz_coalesce_lazy")
+                .get(),
+            0.0D,
+            "?? must not rewrite a variable it did not have to fall back to");
+    }
+
     @Test
     void supportedVectorNamesAreNotReportedAsUnregistered() throws Exception {
         // `MolangInstructionExecutor` reports a function it cannot answer. It must not report one this parser
