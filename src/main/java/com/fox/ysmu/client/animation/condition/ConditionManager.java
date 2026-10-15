@@ -4,6 +4,7 @@ import java.util.Map;
 
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.animation.AnimationDomain;
 import com.google.common.collect.Maps;
 
 public class ConditionManager {
@@ -23,7 +24,16 @@ public class ConditionManager {
     public static Map<ResourceLocation, ConditionalVehicle> VEHICLE = Maps.newHashMap();
     public static Map<ResourceLocation, ConditionalPassenger> PASSENGER = Maps.newHashMap();
 
-    public static void addTest(ResourceLocation id, String name) {
+    /**
+     * Registers one animation name of the model proper with every classifier that may later ask for it.
+     *
+     * @param declaredByModel {@code false} when the name reached the model through the default-animation fallback
+     *                        rather than from one of the model's own files; it is still registered (a default clip is
+     *                        selectable for every model), but it is not reported against this model - the built-in
+     *                        default model's own registration reports it once. See
+     *                        {@link ConditionNameDiagnostics#needsWarning}.
+     */
+    public static void addTest(ResourceLocation id, String name, boolean declaredByModel) {
         SWING.putIfAbsent(id, new ConditionalSwing(true));
         SWING_OFFHAND.putIfAbsent(id, new ConditionalSwing(false));
         USE_MAINHAND.putIfAbsent(id, new ConditionalUse(true)); // true表示主手
@@ -55,11 +65,31 @@ public class ConditionManager {
         conditionalPassenger.addTest(name);
 
         // A-07: a name that is a condition name but has no route through any of the classifiers above would be
-        // dropped silently; report each (model, name) once, with the reason.
-        ConditionNameDiagnostics.warnIfUnclassifiable(id, name);
+        // dropped silently; report each (model, name) once, with the reason. A name the model merely inherited from
+        // the built-in default is not this model's to report - see the parameter's javadoc.
+        ConditionNameDiagnostics.warnIfUnclassifiable(id, name, declaredByModel);
+    }
+
+    /**
+     * The armor classifier the asking animatable's own domain registered, which is the choice upstream makes by
+     * handing the two entities different managers: the player's own controllers read its {@code ConditionManager}
+     * ({@code PlayerModelResources#conditionManager}) and the first-person arm's read its {@code FPArmConditionManager}
+     * ({@code client/animation/predicate/FPArmArmorPredicate.java:36}). The port has one caller
+     * ({@code AnimationManager#findArmorAnimation}) for both families, so the domain decision lives here, keyed by the
+     * same animation-file id the registries are keyed by.
+     *
+     * @param animationFileId the animatable's animation-file id ({@code CustomPlayerEntity#getAnimation})
+     * @return the classifier, or {@code null} when this domain has no table for the model yet
+     */
+    public static ConditionArmor armorFor(ResourceLocation animationFileId) {
+        return AnimationDomain.isFirstPersonId(animationFileId) ? FPArmConditionManager.getArmor(animationFileId)
+            : getArmor(animationFileId);
     }
 
     public static void clear() {
+        // The first-person arm's table belongs to the same models and the same connection, so the two are always
+        // dropped together; a caller clearing one and not the other would leave the arm testing a stale model's names.
+        FPArmConditionManager.clear();
         SWING.clear();
         SWING_OFFHAND.clear();
         USE_MAINHAND.clear();

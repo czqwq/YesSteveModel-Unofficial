@@ -34,10 +34,13 @@ public interface ModelSelectionTarget {
      * The entity id the server granted permission for, so the screen can revoke it when it closes, or
      * {@code -1} when this target needs no grant (the local player editing itself).
      * <p>
-     * NF-01: the revoke is <b>not wired end to end yet</b> — it needs a C2S packet that does not exist (the
-     * packet belongs to {@code network/**}). Until then the server side only drops a grant through
-     * {@code api/ModelGuiApi}'s 5-minute TTL, on logout, or on world unload; {@code PlayerModelScreen}
-     * closes the loop as far as the client can, by consulting this id in {@code onGuiClosed()}.
+     * NF-01: the revoke <b>is wired end to end</b>. {@code PlayerModelScreen.onGuiClosed()} reads this id and sends
+     * {@code RevokeModelGuiGrant} when it is not {@code -1}
+     * ({@code client/gui/PlayerModelScreen.java:512-516}); the packet is serverbound id 98
+     * ({@code network/NetworkHandler.java:88-94,247-252},
+     * {@code network/message/RevokeModelGuiGrant.java:27-68}) and the server drops exactly that sending player's own
+     * grant ({@code api/ModelGuiApi.revokeSelectionGrant}, keyed by player UUID). The five-minute TTL, logout and
+     * world unload remain as the fallbacks for a client that never closed the screen cleanly.
      */
     default int getGrantId() {
         return -1;

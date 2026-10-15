@@ -23,6 +23,7 @@ import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 import static sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET;
 
+@SuppressWarnings("removal")
 public class ZstdInputStream
         extends InputStream
 {

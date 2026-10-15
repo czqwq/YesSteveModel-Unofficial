@@ -34,10 +34,12 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * carries the name, so resolution happens at evaluation time against the frame's model: two packs may define
  * {@code fn.halo_battery_indicator} with different bodies, and the one that belongs to the model being rendered wins.
  * <p>
- * Not ported: OpenYSM also binds some of these scripts to hooks by file name ({@code name@player_ctrl_main.molang})
- * and gives them a {@code ctrl.*} script API. This class only answers {@code fn.} calls; a script that calls an
- * unported function reports once and evaluates to 0. The legacy sync channel carries no function files at all, so on
- * that channel every {@code fn.} call answers 0.
+ * Two ways in, both ported: a body is callable as {@code fn.<name>(...)}, and a file named
+ * {@code name@<hook>.molang} is additionally bound to that hook - the event hooks {@code player_init} /
+ * {@code player_update} / {@code sync} ({@link #fireHook}) and the per-controller hooks
+ * ({@link #scriptForController}). What is still not ported is the {@code ctrl.*} script API such a hook body may
+ * call: an unported function reports once and evaluates to 0. The legacy sync channel carries no function files at
+ * all, so on that channel every {@code fn.} call answers 0.
  */
 @SideOnly(Side.CLIENT)
 public final class PackUserFunctions {

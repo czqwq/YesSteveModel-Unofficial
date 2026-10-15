@@ -24,6 +24,16 @@ public class SpecialPlayerRenderEvent extends Event {
     private final EntityLivingBase entity;
     private final CustomPlayerEntity customPlayer;
     private final ResourceLocation modelId;
+    /**
+     * A texture this render must use instead of the model's own, or {@code null}.
+     * <p>
+     * Mirrors upstream's {@code SpecialPlayerRenderEvent#setTextureLocationOverride}: it is how a listener supplies a
+     * texture that is not one of the pack's - the built-in {@code steve}/{@code alex} models use the player's own
+     * Minecraft skin, and a companion mod may have its own. The renderer and the first-person arm both prefer it over
+     * the model's texture, which is the only place a texture outside the model's own list is allowed.
+     */
+    @Nullable
+    private ResourceLocation textureLocationOverride;
 
     public SpecialPlayerRenderEvent(EntityLivingBase entity, CustomPlayerEntity customPlayer,
         ResourceLocation modelId) {
@@ -53,5 +63,15 @@ public class SpecialPlayerRenderEvent extends Event {
 
     public ResourceLocation getModelId() {
         return modelId;
+    }
+
+    /** The texture this render must use instead of the model's own; see the field's own note. */
+    @Nullable
+    public ResourceLocation getTextureLocationOverride() {
+        return textureLocationOverride;
+    }
+
+    public void setTextureLocationOverride(@Nullable ResourceLocation textureLocationOverride) {
+        this.textureLocationOverride = textureLocationOverride;
     }
 }

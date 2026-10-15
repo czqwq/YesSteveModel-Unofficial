@@ -1,5 +1,13 @@
 # Phase 7: Consume GeckoLib as a separate mod dependency
 
+> **SUPERSEDED (2026-02-20).** The external-engine design this document records was reversed: the GeckoLib 3
+> engine was vendored back into this repository as a one-time source snapshot (327 files under `software/bernie`,
+> `com/eliotlash` and `net/geckominecraft`), `libs/geckolib-5.09.52.417-dev.jar` and its three `dependencies.gradle`
+> declarations were deleted, the engine's `@Mod` was removed, and `ysmu.java` no longer declares
+> `required-after:geckolib`. `PROVENANCE.md` records the snapshot and the ownership rule that replaces this plan's.
+> Everything below is kept as the record of what was done and why at the time; it is not the current design, and its
+> `libs/geckolib-*.jar` workflow no longer exists.
+
 This ExecPlan is a living document and follows `.agent/PLANS.md`.
 
 ## Purpose / Big Picture

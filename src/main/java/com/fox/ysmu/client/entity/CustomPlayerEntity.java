@@ -10,6 +10,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.condition.ConditionArmor;
@@ -75,6 +76,20 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     0,
                     manager.scripted(e -> manager.predicateParallel(e, animationName))));
         }
+        // 具名并行槽位（player.pre_parallel_<非数字后缀>）的备用池：wiki 只定义数字槽位，
+        // 但官方对非数字后缀也发控制器，模型会把整块状态机挂在上面。池子固定 + 运行时路由
+        // （见 OpenYsmPlayerControllerRuntime.resolveControllers），因为 registerControllers
+        // 对每个 animatable 只跑一次，而模型可以随时切换，动态注册会在换模型后失效。
+        // 谓词用 predicateOpenYsmSlot（走状态机），不是 predicateParallel（直接播同名动画）。
+        // 数量由配置 NamedParallelExtraSlots 决定（默认 8，上限见 ControllerUtils）。
+        for (int i = 0; i < Config.NAMED_PARALLEL_EXTRA_SLOTS; i++) {
+            data.addAnimationController(
+                new AnimationController(
+                    this,
+                    String.format("pre_parallel_extra_%d_controller", i),
+                    0,
+                    manager.scripted(manager::predicateOpenYsmSlot)));
+        }
         // B-04: upstream registers `player.vehicle` right after the pre-parallel axis, with a 0.1 tick transition
         // (client/controller/collections/PlayerControllerCollection.java:36).
         data.addAnimationController(
@@ -109,6 +124,25 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         // (PlayerControllerCollection.java:59).
         data.addAnimationController(
             new AnimationController(this, PASSENGER_CONTROLLER, 0.1f, manager.scripted(manager::predicatePassenger)));
+        // 槽位后缀控制器（player.<slot>_<后缀>）的共享备用池（SOURCE CustomPlayerEntity.java:98-110）：
+        // 位置与 SOURCE 一致——所有基槽位之后、cap_controller 之前；池控制器名里没有模型信息，
+        // 由运行时按当前模型路由。构造与具名并行池相同（manager.scripted 包装 + predicateOpenYsmSlot），
+        // 不加 .setAdditiveRotation(true)：SOURCE 的槽位后缀池没有它（只有具名并行池 parallel_extra_* 有，见下）。
+        // 数量由配置 SlotExtraControllers 决定（默认 8，上限见 ControllerUtils）。
+        for (int i = 0; i < Config.SLOT_EXTRA_CONTROLLERS; i++) {
+            data.addAnimationController(
+                new AnimationController(
+                    this,
+                    slotExtraControllerName(i),
+                    0,
+                    manager.scripted(manager::predicateOpenYsmSlot)));
+        }
+        // 轮盘动画（cap 控制器）注册在并行族**之前**（SOURCE CustomPlayerEntity.java:117-118；上游
+        // PlayerControllerCollection.java:64 的 cap 也在 :68 的 parallel 之前）。注册顺序就是应用顺序，
+        // parallel 族的旋转是"相加"（见下），必须在 cap 之后注册才能叠加到 cap 的旋转上；反过来的话
+        // cap 会以覆盖方式写回同一根骨骼，把 parallel 的旋转贡献整条抹掉。
+        data.addAnimationController(
+            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
         for (int i = 0; i < 8; i++) {
             String controllerName = String.format("parallel_%d_controller", i);
             String animationName = String.format("parallel%d", i);
@@ -117,7 +151,22 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     this,
                     controllerName,
                     0,
-                    manager.scripted(e -> manager.predicateParallel(e, animationName))));
+                    manager.scripted(e -> manager.predicateParallel(e, animationName)))
+                    // wiki「并行动画」：parallel 族是特殊混合动画，**旋转相加**而不是覆盖（仅旋转，
+                    // 不含位移/缩放）。见 AnimationController#setAdditiveRotation。
+                    .setAdditiveRotation(true));
+        }
+        // 高优先级并行族的具名槽位，同样的固定池（parallel_* 有旋转叠加语义，
+        // 池控制器走同一条 predicateOpenYsmSlot → tryApplyController 混合路径）。
+        for (int i = 0; i < Config.NAMED_PARALLEL_EXTRA_SLOTS; i++) {
+            data.addAnimationController(
+                new AnimationController(
+                    this,
+                    String.format("parallel_extra_%d_controller", i),
+                    0,
+                    manager.scripted(manager::predicateOpenYsmSlot))
+                    // SOURCE CustomPlayerEntity.java:133 同样给具名并行池打开旋转叠加。
+                    .setAdditiveRotation(true));
         }
         // 为每个盔甲槽位注册控制器，使用1-4的索引值
         for (int slotIndex = 1; slotIndex <= 4; slotIndex++) {
@@ -130,24 +179,66 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     0,
                     manager.scripted(e -> manager.predicateArmor(e, finalSlotIndex))));
         }
-        data.addAnimationController(
-            new AnimationController(this, CAP_CONTROLLER, 0f, manager.scripted(manager::predicateCap)));
         // GUI preview channels, after the cap controller so a hover/focus animation wins for the bones they share.
         data.addAnimationController(
             new AnimationController(this, HOVER_CONTROLLER, 0f, manager.scripted(manager::predicateHover)));
         data.addAnimationController(
             new AnimationController(this, FOCUS_CONTROLLER, 0f, manager.scripted(manager::predicateFocus)));
+        wireControllerListeners(data);
+    }
+
+    /**
+     * Wires the two per-controller listeners every controller of this animatable needs, once its set is complete.
+     * <p>
+     * Upstream gets both from its shared controller class, so any controller family it builds has them; the port's
+     * controller set is assembled by hand at each registration site, so a second family (the first-person arm's
+     * {@code CustomFirstPersonArmEntity#registerControllers}) has to call this too or its clips' timeline instructions
+     * and {@code sound_effects} keyframes would be parsed and then never run.
+     */
+    protected void wireControllerListeners(AnimationData data) {
         data.getAnimationControllers()
             .values()
-            .forEach(
-                controller -> controller
-                    .registerCustomInstructionListener(event -> MolangInstructionExecutor.execute(event.instructions)));
+            .forEach(controller -> {
+                controller.registerPlaybackStoppedListener(com.fox.ysmu.client.audio.MolangSoundPlayback::stopAll);
+                controller.registerCustomInstructionListener(event -> {
+                    try (com.fox.ysmu.client.audio.MolangSoundContext ignored = soundContext(event.getController())) {
+                        // Diagnostic attribution (controller name) rides along so a malformed timeline instruction
+                        // failure names its controller instead of leaving a bare fragment.
+                        MolangInstructionExecutor.execute(event.instructions, event.getController().getName());
+                    }
+                });
+                // Player/NPC world sounds belong to their real entity, not the renderer's shared animatable.
+                // Detached GUI tiles own an independent UI scope; each concurrent holder owns its local token.
+                controller.registerSoundListener(
+                    event -> {
+                        try (com.fox.ysmu.client.audio.MolangSoundContext ignored = soundContext(event.getController())) {
+                            String ctrlName = event.getController().getName();
+                            com.fox.ysmu.client.audio.YSMSoundManager.onSoundKeyframe(
+                                getPlayer(), ctrlName, event.sound, getMainModel());
+                        }
+                    });
+            });
+    }
+
+    /** Detached GUI animatables override the query owner without changing preview predicate routing. */
+    public EntityPlayer getQueryPlayer() { return getPlayer(); }
+
+    private com.fox.ysmu.client.audio.MolangSoundContext soundContext(AnimationController<?> controller) {
+        net.minecraft.entity.Entity entity = getMolangEntity();
+        boolean ui = entity == null || this instanceof CustomGuiPlayerEntity;
+        // World renderer reuses one animatable: the real entity is the stable owner.
+        Object owner = ui ? this : entity == null ? this : entity;
+        return com.fox.ysmu.client.audio.MolangSoundContext.push(owner, ui ? null : entity,
+            getMainModel(), controller.getPlaybackOwnerToken(), ui, controller.allowsEmitting());
     }
 
     public ResourceLocation getMainModel() {
-        if (GeckoLibCache.getInstance()
-            .getGeoModels()
-            .containsKey(this.mainModel)) {
+        // The engine's cache alone is not enough to answer this: it outlives a connection, so a model the previous
+        // server had by this name is still in it. Asking whether *this connection* installed the model is what keeps
+        // the answer agreeing with the predicates the renderer uses - if it disagreed, the renderer would substitute
+        // the built-in default while this method still handed out the foreign id, and the engine would resolve that
+        // id to the previous server's geometry.
+        if (ClientModelManager.isModelPublished(this.mainModel)) {
             return mainModel;
         }
         return CustomPlayerModel.DEFAULT_MAIN_MODEL;
@@ -157,18 +248,61 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
         this.mainModel = mainModel;
     }
 
+    /**
+     * The model this entity was asked for, before any substitution.
+     * <p>
+     * {@link #getMainModel()} deliberately answers with the built-in default while the requested model is not in the
+     * engine's cache, which is right for everything that draws and wrong for anything that has to know *which* model
+     * it is talking about - for example deciding whether that model's textures have been uploaded yet.
+     */
+    public ResourceLocation getRequestedMainModel() {
+        return this.mainModel;
+    }
+
     public ResourceLocation getAnimation() {
-        if (GeckoLibCache.getInstance()
+        ResourceLocation animationFile = getAnimationFileId();
+        if (animationFile != null && GeckoLibCache.getInstance()
             .getAnimations()
-            .containsKey(this.mainModel)) {
-            return mainModel;
+            .containsKey(animationFile)) {
+            return animationFile;
         }
         return CustomPlayerModel.DEFAULT_MAIN_ANIMATION;
     }
 
+    /**
+     * The animation file this animatable reads from, i.e. the domain it belongs to
+     * ({@link com.fox.ysmu.client.animation.AnimationDomain}).
+     * <p>
+     * The model proper is the main domain, which is what every existing render path wants. Upstream splits the
+     * first-person arm out into its own animatable whose animation lookup reads the {@code fp_arm} store
+     * ({@code client/entity/CustomFirstPersonArmEntity.java:90}), which is why that arm is the one override here.
+     */
+    protected ResourceLocation getAnimationFileId() {
+        return this.mainModel;
+    }
+
+    /**
+     * Whether this animatable is one of upstream's <em>humanoid</em> entities, which is the only kind whose per-frame
+     * pre-animation setup fires the two humanoid script hooks - {@code player_init} once per model and
+     * {@code player_update} every frame ({@code client/entity/CustomHumanoidEntity.java:195-218}, ported in
+     * {@code AnimationRegister#setParserValue}).
+     * <p>
+     * Upstream's first-person arm entity is a plain {@code CustomEntity}, not a {@code CustomHumanoidEntity}
+     * ({@code client/entity/CustomFirstPersonArmEntity.java:16}), so its tick publishes the MoLang values without
+     * running those hooks; firing them a second time per frame for the same player would run a pack's
+     * {@code @player_update} body once more than upstream does.
+     */
+    public boolean firesHumanoidHooks() {
+        return true;
+    }
+
     public float getHeightScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        // getMainModel(), not the raw field: while this model is still being built the renderer draws the built-in
+        // default in its place, so the scale must be read for the model that is actually being drawn. The raw field
+        // would only ever answer with the fallback below, which happens to match today and would silently stop
+        // matching the moment the built-in default's scale changes.
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .left()
                 .floatValue();
         }
@@ -176,8 +310,8 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     }
 
     public float getWidthScale() {
-        if (ClientModelManager.SCALE_INFO.containsKey(this.mainModel)) {
-            return ClientModelManager.SCALE_INFO.get(this.mainModel)
+        if (ClientModelManager.SCALE_INFO.containsKey(getMainModel())) {
+            return ClientModelManager.SCALE_INFO.get(getMainModel())
                 .right()
                 .floatValue();
         }
@@ -193,7 +327,24 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
      * order every model had before the flag was honoured.
      */
     public boolean shouldRenderLayersFirst() {
-        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(this.mainModel));
+        return Boolean.TRUE.equals(ClientModelManager.RENDER_LAYERS_FIRST.get(getMainModel()));
+    }
+
+    /**
+     * Whether this model has a vertex drawn translucently, which is the question upstream asks its baked model state
+     * before choosing a render type ({@code GeoModelState#hasTranslucentVertices}, {@code nativeState
+     * .getTranslucentVertexCount() != 0}, {@code geckolib3/geo/animated/GeoModelState.java:73-74}). A translucent
+     * model is drawn with upstream's {@code CustomTranslucentRenderType} - blending and back-face culling - and a
+     * flat decal depends on the culling, because the pack zeroes the uvs of the face it does not want and those faces
+     * are still built.
+     * <p>
+     * Upstream's count is native and cannot be read here, so the port answers with the same input its bake has: the
+     * texture that is about to be bound, sampled at the uvs of the faces the model actually draws (see
+     * {@code ClientModelManager#TRANSLUCENT_TEXTURES}). Defaults to {@code false}, the cutout branch every model had
+     * before this existed.
+     */
+    public boolean hasTranslucentVertices() {
+        return ClientModelManager.TRANSLUCENT_TEXTURES.contains(CustomPlayerModel.textureFor(this));
     }
 
     /** The rendered entity, player or not. */

@@ -23,6 +23,7 @@ import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static rip.ysm.zstd.Util.isPowerOf2;
 import static rip.ysm.zstd.Util.verify;
 
+@SuppressWarnings("removal")
 class Huffman
 {
     public static final int MAX_SYMBOL = 255;

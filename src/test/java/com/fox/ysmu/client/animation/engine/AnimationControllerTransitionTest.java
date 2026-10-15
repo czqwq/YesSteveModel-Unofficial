@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.Test;
@@ -85,7 +85,10 @@ class AnimationControllerTransitionTest {
                     return PlayState.CONTINUE;
                 });
             MolangParser parser = new MolangParser();
-            List<IBone> bones = new ArrayList<>();
+            // process(...) takes the model's bones keyed by name: the reference engine looks the current keyframe's
+            // bone up through that map (findCurrentKeyFrame) instead of scanning a list. An empty map is correct here
+            // - this test drives the state machine, not bone values.
+            Map<String, IBone> bones = new HashMap<>();
             HashMap<String, Pair<IBone, BoneSnapshot>> snapshots = new HashMap<>();
 
             double seek = 100.0D;

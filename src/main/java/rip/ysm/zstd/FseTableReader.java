@@ -19,6 +19,7 @@ import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static rip.ysm.zstd.Util.highestBit;
 import static rip.ysm.zstd.Util.verify;
 
+@SuppressWarnings("removal")
 class FseTableReader
 {
     private final short[] nextSymbol = new short[MAX_SYMBOL + 1];

@@ -1,14 +1,13 @@
 package com.fox.ysmu.network.message;
 
 import java.io.File;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.util.Md5Utils;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.ysmu;
 
@@ -77,7 +76,13 @@ public class SendModelFile implements IMessage {
 
         private void receiveFile(byte[] data) {
             try {
-                String fileName = md5Hex(data).toUpperCase(Locale.US);
+                // The name is the payload's own MD5, upper case, exactly as before. This used to be a private
+                // digest+hex loop; it is now Md5Utils.md5Hex, which has the same per-call MessageDigest (M-07) and
+                // the same lower-case two-digits-per-byte form (HexFormat, upstream's mechanism at
+                // model/domain/Hash256.java:10,99) that toUpperCase below consumes. One operation, one implementation
+                // (AGENTS.md).
+                String fileName = Md5Utils.md5Hex(data)
+                    .toUpperCase(Locale.US);
                 File file = ServerModelManager.CACHE_CLIENT.resolve(fileName)
                     .toFile();
                 FileUtils.writeByteArrayToFile(file, data);
@@ -86,24 +91,6 @@ public class SendModelFile implements IMessage {
             } catch (Exception e) {
                 ysmu.LOG.warn("Failed to save YSM model cache file", e);
             }
-        }
-
-        /**
-         * Own digest instance: {@code Md5Utils} used a shared static {@code MessageDigest} until this round (see
-         * M-07), and the digest must not silently produce a wrong file name here.
-         */
-        private static String md5Hex(byte[] data) throws NoSuchAlgorithmException {
-            MessageDigest digest = MessageDigest.getInstance("MD5");
-            byte[] hash = digest.digest(data);
-            StringBuilder hex = new StringBuilder(hash.length * 2);
-            for (byte b : hash) {
-                int value = b & 0xFF;
-                if (value < 0x10) {
-                    hex.append('0');
-                }
-                hex.append(Integer.toHexString(value));
-            }
-            return hex.toString();
         }
     }
 }

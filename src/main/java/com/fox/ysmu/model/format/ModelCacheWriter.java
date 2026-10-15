@@ -36,8 +36,30 @@ public final class ModelCacheWriter {
      * {@link #isStoredOpenYsmCacheValid} - the signature still matches - and is served to every client whose cache
      * hashes match as well, so a model can stay invisible across reloads and restarts even after the bug that baked
      * it was fixed. Bumping the value changes every hash, which re-bakes the payload and makes the client miss.
+     *
+     * <p>3 -> 4: {@code YSMBinarySerializer.writeAnimationFileContent} now appends Bedrock's per-animation
+     * {@code anim_speed} / {@code anim_time_update} to every animation record of a baked payload. A payload baked
+     * before this change does not carry them and the reader would read the next animation's name as a flag byte, so
+     * every cache written by bake version 3 has to be re-baked rather than served.
+     *
+     * <p>4 -> 5: {@code RawYsmModelAdapter.getExtraAnimationNames} now fills the wheel labels for a pack whose
+     * {@code extra_animation} uses <b>named</b> keys (LaPluma 2.5.3's {@code HI}/{@code WHAT}/{@code Bird}/… and the
+     * {@code #} sub-menus) instead of the {@code extra0..extra7} slots; before it, such a pack produced an empty
+     * array. On the OpenYSM channel the labels are computed by the client from the raw model it just received, so
+     * that half heals itself - but on the <b>legacy</b> channel (and for any model the server bakes, e.g. a flat
+     * folder or a bare-YSGP {@code .ysm}) the {@code ModelData} is baked into the cache file by the server, so a
+     * payload baked by an older build keeps carrying the empty array and the named pack's roulette stays empty no
+     * matter what the client does.
+     *
+     * <p>5 -> 6: {@code RawYsmModelAdapter} now forwards {@code raw.vehicles} as well - the {@code vehicle_<matchId>}
+     * geometry, its {@code vehicle_<matchId>_<file>.png} textures, the {@code vehicle_<matchId>} animation set and the
+     * {@code vehicle_ctrl_<matchId>} controller. A payload baked before this change carries none of those keys, so the
+     * vehicle renderer would find no geometry for a vehicle the pack does declare and fall back to drawing the host
+     * (vanilla boat / minecart / pig / horse) - a payload that looks valid and is simply missing a target kind.
      */
-    static final int OPEN_YSM_BAKE_VERSION = 3;
+    // 6 -> 7: folder timelines honour merge_multiline_expr (upstream default false), and
+    // adapter metadata changes require a re-bake even when the source signature still matches.
+    static final int OPEN_YSM_BAKE_VERSION = 7;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。
@@ -56,6 +78,10 @@ public final class ModelCacheWriter {
     private ModelCacheWriter() {}
 
     static ServerModelInfo write(ModelData data) throws Exception {
+        // Legacy cache identity is the COMPLETE freshly baked container, not the source model hash. The v2 -> v3
+        // model header and dedicated GUI map therefore change its MD5 even when the source pack is unchanged:
+        // reload writes the new file, clients miss the new name, and pruneUnregisteredCaches removes the old file.
+        // PASSWORD stays v2 (same AES key/IV); no key rotation or OpenYSM bake-salt bump is needed for this container.
         byte[] dataBytes = EncryptTools.assembleEncryptModels(data);
         data.setMd5(Md5Utils.md5Hex(dataBytes).toUpperCase(Locale.US));
 
@@ -103,8 +129,13 @@ public final class ModelCacheWriter {
         return new OpenYsmSyncInfo(modelId, cacheFileName, hashes[0], hashes[1], OPEN_YSM_SYNC_FORMAT, false);
     }
 
-    /** M-10:名字 == 内容 MD5 的口径,见 {@link ServerModelInfo#matchesCacheContent(String, byte[])}。 */
-    private static boolean isStoredLegacyCacheValid(File target, String expectedMd5) {
+    /**
+     * M-10:名字 == 内容 MD5 的口径,见 {@link ServerModelInfo#matchesCacheContent(String, byte[])}。
+     * <p>
+     * 包内可见（不是 private）：{@code ModelIndexCache} 判断"索引命中"时调用的就是这一份判定，
+     * 而不是自己再写一遍 —— 两边一旦分叉，索引就会重放一份完整路径不会复用的缓存。
+     */
+    static boolean isStoredLegacyCacheValid(File target, String expectedMd5) {
         if (expectedMd5 == null || !target.isFile()) {
             return false;
         }
@@ -123,7 +154,8 @@ public final class ModelCacheWriter {
         }
     }
 
-    private static boolean isStoredOpenYsmCacheValid(File target, long hash1, long hash2) {
+    /** 包内可见的理由同上：{@code ModelIndexCache} 必须用同一份签名判定，不能各写一份。 */
+    static boolean isStoredOpenYsmCacheValid(File target, long hash1, long hash2) {
         if (!target.isFile()) {
             return false;
         }

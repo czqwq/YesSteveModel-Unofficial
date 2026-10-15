@@ -9,6 +9,7 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
@@ -18,7 +19,6 @@ import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
  * Client-side animation entry point for entities YSMU renders but does not own the animation logic for.
@@ -144,10 +144,23 @@ public final class EntityAnimationApi {
         if (entity == null || clip == null || clip.isEmpty()) {
             return false;
         }
-        AnimationFile file = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animationIdFor(entity));
+        AnimationFile file = animationFileForModel(mainIdFor(entity));
         return file != null && file.animations.containsKey(clip);
+    }
+
+    /**
+     * The animation file a clip is looked up in for this model: the model's own when it has one, the built-in
+     * default otherwise.
+     * <p>
+     * The fallback is not cosmetic. {@code CustomPlayerEntity.getAnimation()} answers with the built-in default
+     * while a model has no animation file of its own, and the engine then plays the default's clips. An answer about
+     * "does this model define clip X" that skipped the same fallback would disagree with what actually plays, which
+     * is exactly what a host mod uses this to decide.
+     */
+    @Nullable
+    static AnimationFile animationFileForModel(@Nullable ResourceLocation mainId) {
+        AnimationFile own = ClientModelManager.animationFileFor(mainId);
+        return own != null ? own : ClientModelManager.animationFileFor(defaultAnimationId());
     }
 
     /**
@@ -178,25 +191,25 @@ public final class EntityAnimationApi {
     }
 
     /**
-     * The animation file YSMU uses for the entity, mirroring {@code CustomPlayerEntity#getAnimation}: the
-     * entity's own model when its animations are loaded, the built-in default otherwise.
+     * The main model id of the entity's model, or {@code null} when this client has no model id for it.
+     * <p>
+     * Only the id: the file it resolves to, and the built-in default that stands in when it resolves to nothing, are
+     * {@link #animationFileForModel}'s business. The model's own id is returned even before its animations have been
+     * built, because {@code ClientModelManager.animationFileFor} builds them on request; answering with the built-in
+     * default instead would make a host mod look for its clips in the wrong file.
      */
-    private static ResourceLocation animationIdFor(EntityLivingBase entity) {
-        ResourceLocation main = null;
+    @Nullable
+    private static ResourceLocation mainIdFor(EntityLivingBase entity) {
         EntityModelData override = NPCData.getData(entity);
         if (override != null) {
-            main = ModelIdUtil.getMainId(override.getModelId());
-        } else if (entity instanceof EntityPlayer player) {
+            return ModelIdUtil.getMainId(override.getModelId());
+        }
+        if (entity instanceof EntityPlayer player) {
             ExtendedModelInfo eep = ExtendedModelInfo.get(player);
             if (eep != null && eep.getModelId() != null) {
-                main = ModelIdUtil.getMainId(eep.getModelId());
+                return ModelIdUtil.getMainId(eep.getModelId());
             }
         }
-        if (main != null && GeckoLibCache.getInstance()
-            .getAnimations()
-            .containsKey(main)) {
-            return main;
-        }
-        return defaultAnimationId();
+        return null;
     }
 }

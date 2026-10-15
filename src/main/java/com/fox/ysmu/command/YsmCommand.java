@@ -9,10 +9,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 
+import javax.annotation.Nullable;
+
 import net.minecraft.command.*;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.event.ClickEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ChatComponentTranslation;
+import net.minecraft.util.ResourceLocation;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.DirectoryFileFilter;
@@ -20,9 +25,71 @@ import org.apache.commons.io.filefilter.FileFileFilter;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.time.StopWatch;
 
+import com.fox.ysmu.Config;
+import com.fox.ysmu.api.ModelAuthorization;
+import com.fox.ysmu.eep.ExtendedAuthModels;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.network.ModelGrantSync;
+import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.network.message.PacketEvalMolang;
+import com.fox.ysmu.network.message.PacketQueryMolangVar;
+import com.fox.ysmu.network.message.PacketResetMolang;
+import com.fox.ysmu.network.message.S2CPlaySound;
+import com.fox.ysmu.network.message.S2CSetDebugOverlay;
+import com.fox.ysmu.network.message.SetModelAndTexture;
+import com.fox.ysmu.network.message.SetWelcomeConfig;
+import com.fox.ysmu.network.message.ShowBufferInfo;
+import com.fox.ysmu.network.message.SyncGamePath;
+import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
+import com.fox.ysmu.util.ModelIdUtil;
+import com.fox.ysmu.ysmu;
+
+import software.bernie.geckolib3.file.AnimationFile;
+import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public class YsmCommand extends CommandBase {
+
+    /** The permission level {@link #processDebug} re-checks per invocation; see its javadoc. */
+    private static final int DEBUG_PERMISSION_LEVEL = 4;
+
+    /**
+     * The subcommands {@code /ysm help} documents, in the order the reference branch prints them
+     * ({@code YsmCommand:173-182}). One list, so the summary lines, the subcommand lookup and the detail keys cannot
+     * drift apart; the reference repeats the same names in three separate {@code equals} chains.
+     * <p>
+     * {@code auth} and {@code model} are not in that reference list: they are upstream's two authorization
+     * subcommands ({@code command/sub/AuthCommand.java} and {@code command/sub/ModelCommand.java}, siblings under
+     * {@code command/RootCommand.java:16-24}), appended after {@code reset}. Both need a summary line here because
+     * {@link #processHelp} walks this array.
+     */
+    private static final String[] HELP_TOPICS = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome",
+        "sync", "reset", "auth", "model", "debug", "ysmclient" };
+
+    /**
+     * The action words of {@code /ysm auth <targets> <action> [model]} - upstream's four literals
+     * ({@code command/sub/AuthCommand.java:32-39}: {@code add}, {@code remove}, {@code all}, {@code clear}).
+     */
+    private static final String[] AUTH_ACTIONS = { "add", "remove", "all", "clear" };
+
+    /**
+     * The action words of {@code /ysm model <action>} that this port dispatches - upstream's literal {@code set}
+     * ({@code command/sub/ModelCommand.java:41}). Upstream's other three model literals are deliberately not ported:
+     * {@code reload} ({@code :36}, the same rebuild as this port's {@code /ysm reload}), {@code errors} ({@code :37},
+     * a scan-error list this port keeps as log lines) and {@code disable} ({@code :38-40}, which sets a
+     * {@code ModelInfoCapability.disabled} flag this port does not carry - nothing would read it, so dispatching it
+     * would be dead state).
+     */
+    private static final String[] MODEL_ACTIONS = { "set" };
+
+    /**
+     * The subcommands exempt from the level-2 re-check inside {@link #processCommand}: every one of them either runs
+     * entirely on the issuing client or is handled before the check ({@code help}). Copied from the reference's
+     * exclusion list ({@code YsmCommand:109-113}).
+     */
+    private static final java.util.Set<String> LEVEL_ZERO_SUBCOMMANDS = new java.util.HashSet<>(
+        Arrays.asList("help", "setgamepath", "welcome", "buffer", "sync"));
 
     @Override
     public String getCommandName() {
@@ -31,7 +98,10 @@ public class YsmCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/ysm reload";
+        // The reference's own usage line (YsmCommand:38), now that every subcommand it lists exists here. The list is
+        // the reference's, not an inventory: /ysm auth and /ysm model are upstream's two authorization subcommands and
+        // are documented by /ysm help (HELP_TOPICS) rather than by rewriting this string.
+        return "/ysm <reload|play|playsound|setgamepath|buffer|welcome|debug|reset|sync|help> [args] (type /ysm help for details)";
     }
 
     @Override
@@ -39,12 +109,1296 @@ public class YsmCommand extends CommandBase {
         return 2;
     }
 
+    /**
+     * Who may reach {@link #processCommand} at all. Ported from the reference's override
+     * ({@code YsmCommand:83-94}) - the mechanism its level-0 subcommands depend on - with one narrowed clause.
+     * <p>
+     * 1.7.10's {@code CommandHandler.executeCommand} asks this once, before dispatch
+     * ({@code CommandHandler.java:53}) and compares the answer against nothing else; the level itself is only ever
+     * consulted inside the inherited {@link CommandBase#canCommandSenderUseCommand(ICommandSender)}. So "help,
+     * setgamepath, welcome, buffer and sync are usable by everyone" cannot be expressed by
+     * {@link #getRequiredPermissionLevel()} - that number is one gate for the whole command, and it stays 2 - but
+     * only by letting those senders in here and denying the rest per subcommand inside {@link #processCommand}
+     * ({@link #LEVEL_ZERO_SUBCOMMANDS}).
+     * <p>
+     * <b>The narrowed clause.</b> The reference returns {@code true} for every sender after a check that cannot
+     * fail - its {@code if (sender instanceof net.minecraft.command.ICommandSender)} tests the parameter's own type
+     * - so a fake or non-player sender that denies level 2 is let through as well. That is the shape
+     * {@code YsmCommandTest.theCommandKeepsItsLevelTwoBaseline} pins against (it asserts a non-player sender that
+     * denies level 2 is refused), and letting a non-player sender through would grant level 0 to senders the
+     * reference's own subcommands then reject anyway. Here the override grants the same reach to exactly the senders
+     * the reference's intent covers - a player (each of setgamepath/welcome/buffer/sync requires one, see
+     * {@code getCommandSenderAsPlayer}-style casts below) or a sender the vanilla gate already allows, which
+     * includes the server console ({@code MinecraftServer.canCommandSenderUseCommand} returns true,
+     * {@code MinecraftServer.java:965-968}). Everything else is refused by the inherited rule, unchanged.
+     */
+    @Override
+    public boolean canCommandSenderUseCommand(ICommandSender sender) {
+        if (super.canCommandSenderUseCommand(sender)) {
+            return true;
+        }
+        return sender instanceof EntityPlayer;
+    }
+
+    /**
+     * Tab completion, ported from the reference branch's {@code YsmCommand:42-72}.
+     * <p>
+     * The reference reaches {@code MinecraftServer.getServer().getConfigurationManager().getAllUsernames()} with no
+     * guard. That call is only safe while a server exists: a dedicated server always has one, but an integrated server
+     * that is still starting - and a unit JVM, which is how {@code YsmCommandTest} drives this method - does not, and
+     * 1.7.10 command completion runs on the server thread. Degrading to "no suggestions" is a null check, not a
+     * behaviour change; the reference's list is returned verbatim whenever a server is present.
+     */
+    @Override
+    public List addTabCompletionOptions(ICommandSender sender, String[] args) {
+        if (args.length == 1) {
+            return getListOfStringsMatchingLastWord(
+                args,
+                "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset", "sync", "auth",
+                "model", "help");
+        }
+        if (args.length == 2) {
+            if ("welcome".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, "on", "off");
+            }
+            if ("debug".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, "query", "overlay", "eval");
+            }
+            if ("model".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, MODEL_ACTIONS);
+            }
+            if ("reset".equalsIgnoreCase(args[0]) || "auth".equalsIgnoreCase(args[0])) {
+                return playerNameSuggestions(args);
+            }
+        }
+        if (args.length == 2 && "setgamepath".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, "<path>");
+        }
+        if (args.length == 3) {
+            if ("setgamepath".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, "[version]");
+            }
+            if ("debug".equalsIgnoreCase(args[0]) && "overlay".equalsIgnoreCase(args[1])) {
+                return getListOfStringsMatchingLastWord(args, "on", "off", "toggle");
+            }
+            if ("auth".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, AUTH_ACTIONS);
+            }
+            // /ysm model set <targets> ...: upstream's targets argument is EntityArgument.players()
+            // (command/sub/ModelCommand.java:42), the same selector-or-name slot /ysm auth completes.
+            if ("model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+                return playerNameSuggestions(args);
+            }
+        }
+        // /ysm auth <targets> add|remove <model>: the same model names the command accepts (upstream suggests its
+        // catalog's model paths here, command/sub/AuthCommand.java:31,34). /ysm model set's model slot is the same
+        // slot (upstream :44, CommandRegistry.ALL_MODELS).
+        if (args.length == 4 && ("auth".equalsIgnoreCase(args[0])
+            && ("add".equalsIgnoreCase(args[2]) || "remove".equalsIgnoreCase(args[2]))
+            || "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1]))) {
+            return getListOfStringsFromIterableMatchingLastWord(args, authModelSuggestions());
+        }
+        // /ysm model set <targets> <model> <texture>: the chosen model's own texture names (upstream suggests its
+        // whole texture registry here, ModelCommand.java:46, CommandRegistry.ALL_TEXTURES; this server keeps textures
+        // per model, see textureNamesOf).
+        if (args.length == 5 && "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+            ResourceLocation modelId = ModelAuthorization.resolveModelArgument(stripOneQuotePair(args[3]));
+            Set<String> names = modelId == null ? null : textureNamesOf(modelId);
+            return names == null ? null : getListOfStringsFromIterableMatchingLastWord(args, textureSuggestions(names));
+        }
+        // /ysm model set <targets> <model> <texture> [ignore_auth]: upstream's BoolArgumentType.bool() slot
+        // (ModelCommand.java:48).
+        if (args.length == 6 && "model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+            return getListOfStringsMatchingLastWord(args, "true", "false");
+        }
+        return null;
+    }
+
+    /**
+     * The player-name suggestions for a selector-or-name slot ({@code /ysm auth <targets>}, {@code /ysm reset <...>},
+     * {@code /ysm model set <targets>}).
+     * <p>
+     * {@code MinecraftServer.getServer()} is only safe while a server exists: a dedicated server always has one, but an
+     * integrated server that is still starting - and a unit JVM, which is how {@code YsmCommandTest} drives this method
+     * - does not, and 1.7.10 command completion runs on the server thread. Degrading to "no suggestions" is a null
+     * check, not a behaviour change; the reference's list is returned verbatim whenever a server is present.
+     */
+    @Nullable
+    private static List playerNameSuggestions(String[] args) {
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            return null;
+        }
+        return getListOfStringsMatchingLastWord(
+            args,
+            server.getConfigurationManager()
+                .getAllUsernames());
+    }
+
+    /**
+     * {@code /ysm <reload|play|playsound|setgamepath|buffer|welcome|debug|reset|sync|help>}: the whole command surface
+     * of the reference branch's {@code YsmCommand} ({@code
+     * tmp/YesSteveModel-Unofficial-perf-previewUI/src/main/java/com/fox/ysmu/command/YsmCommand.java}), which this
+     * method now dispatches in the reference's own branch order.
+     * <p>
+     * <b>Permission, and why the gate is here as well as in the framework.</b> {@code help} is handled before the
+     * check (reference {@code :101-105}), and the subcommands in {@link #LEVEL_ZERO_SUBCOMMANDS} - setgamepath,
+     * welcome, buffer and sync - are exempt from it (reference {@code :109-113}), because each of them only forwards
+     * a request to the issuing player's own client. Everything else - reload, play, playsound, debug, reset, auth and
+     * model - must pass the inherited level-2 gate, re-checked here because
+     * {@link #canCommandSenderUseCommand(ICommandSender)} now lets players through to this point. That re-check is the
+     * reference's mechanism, not an addition: it is what keeps a non-OP player out of {@code /ysm reload} while
+     * {@code /ysm help} still works. {@code /ysm debug} then re-checks level 4 on top of it ({@link #processDebug}),
+     * and {@code auth}/{@code model} are upstream's own {@code requires(hasPermission(source, 2))}
+     * ({@code command/sub/AuthCommand.java:29}, {@code command/sub/ModelCommand.java:35}).
+     */
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
-        if (args.length != 1 || !"reload".equalsIgnoreCase(args[0])) {
+        if (args.length < 1) {
             throw new WrongUsageException(getCommandUsage(sender));
         }
-        processReload(sender);
+        // help is available to everyone, before any permission check (reference :101-105).
+        if ("help".equalsIgnoreCase(args[0])) {
+            processHelp(sender, args);
+            return;
+        }
+        // setgamepath, welcome, buffer and sync are player-facing and client-side only; the rest needs the command's
+        // own level 2 (reference :106-113).
+        if (!LEVEL_ZERO_SUBCOMMANDS.contains(args[0].toLowerCase(Locale.ROOT))
+            && !super.canCommandSenderUseCommand(sender)) {
+            throw new CommandException("commands.generic.permission");
+        }
+        if ("reload".equalsIgnoreCase(args[0])) {
+            processReload(sender);
+        } else if ("play".equalsIgnoreCase(args[0])) {
+            processPlay(sender, args);
+        } else if ("playsound".equalsIgnoreCase(args[0])) {
+            processPlaySound(sender, args.length >= 2 ? joinCommandArguments(args, 1) : "");
+        } else if ("setgamepath".equalsIgnoreCase(args[0])) {
+            processSetGamePath(sender, args);
+        } else if ("buffer".equalsIgnoreCase(args[0])) {
+            processBuffer(sender);
+        } else if ("sync".equalsIgnoreCase(args[0])) {
+            processSync(sender);
+        } else if ("welcome".equalsIgnoreCase(args[0])) {
+            processWelcome(sender, args);
+        } else if ("debug".equalsIgnoreCase(args[0])) {
+            processDebug(sender, args);
+        } else if ("reset".equalsIgnoreCase(args[0])) {
+            processReset(sender, args);
+        } else if ("auth".equalsIgnoreCase(args[0])) {
+            processAuth(sender, args);
+        } else if ("model".equalsIgnoreCase(args[0])) {
+            processModel(sender, args);
+        } else {
+            throw new WrongUsageException(getCommandUsage(sender));
+        }
+    }
+
+    /**
+     * {@code /ysm help [subcommand]} - ported from the reference's {@code processHelp} ({@code :151-189}).
+     * <p>
+     * Without an argument it prints the ten {@code commands.yes_steve_model.help.line.*} summaries in the reference's
+     * order ({@code :172-182}) plus the clickable "turn the welcome guide off" line ({@code :183-188}). With an
+     * argument it prints the topic's {@code .usage} and {@code .desc} lines, or
+     * {@code commands.yes_steve_model.help.unknown} for a word that is not a subcommand ({@code :154-170}).
+     * <p>
+     * Server commands cannot know the client's language, so every line is a translation key - the reference does the
+     * same through {@code ChatComponentTranslation}. All ten topics exist in this tree; {@code ysmclient} is the
+     * client-only {@code CommandYsmClient}.
+     */
+    private void processHelp(ICommandSender sender, String[] args) {
+        if (args.length >= 2) {
+            String sub = args[1].toLowerCase(Locale.ROOT);
+            if (!isKnownHelpTopic(sub)) {
+                sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.help.unknown", sub));
+                return;
+            }
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.help.detail.title", sub));
+            sender.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.help.detail." + sub + ".usage"));
+            sender.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.help.detail." + sub + ".desc"));
+            return;
+        }
+        sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.help.title"));
+        for (String topic : HELP_TOPICS) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.help.line." + topic));
+        }
+        // The welcome-off hint: the whole line runs /ysm welcome off when clicked (reference :183-188).
+        ChatComponentTranslation off = new ChatComponentTranslation("commands.yes_steve_model.help.welcome_off");
+        off.getChatStyle()
+            .setChatClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ysm welcome off"));
+        sender.addChatMessage(off);
+    }
+
+    /**
+     * {@code /ysm playsound [name]} - forwards to the issuer's own client.
+     * <p>
+     * The sound library lives entirely on the client: model sound bytes are only ever decoded there, and playback
+     * goes through this client's {@code SoundSystem}. A dedicated server has no {@code Minecraft} instance at all,
+     * so running the request here would list nothing and play nothing. The server's job is the permission check
+     * ({@link #getRequiredPermissionLevel}) and the forward; the client does the rest, including the reply.
+     * <p>
+     * No name lists what that client has; a name plays it.
+     */
+    private void processPlaySound(ICommandSender sender, String soundName) {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        NetworkHandler.CHANNEL.sendTo(new S2CPlaySound(soundName), player);
+    }
+
+    /**
+     * {@code /ysm play <animation>} - play a named animation of the issuer's model, ported from the reference's
+     * {@code processPlay} ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../command/YsmCommand.java:191-232}).
+     * <p>
+     * The animation state lives in the player's {@link ExtendedModelInfo} EEP, which the server owns: the tick handler
+     * broadcasts a dirty EEP to every tracking client ({@code event/CommonEventHandler.java:257-264}) and the client's
+     * {@code AnimationManager} consumes the replay request ({@code client/animation/AnimationManager.java:208-209}), so
+     * setting it here is the whole feature.
+     * <p>
+     * The existence check runs only on a side that can answer it: {@code GeckoLibCache}'s animation table is filled by
+     * the client while it parses models, so on a dedicated server it is empty. The reference's own comment
+     * ({@code :215-219}) says the same. The check therefore rejects a name only when the table has the model at all
+     * (integrated server / single player) and otherwise leaves the verdict to the client, which skips a missing
+     * animation safely instead of failing.
+     */
+    private void processPlay(ICommandSender sender, String[] args) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        String animName = parsePlayAnimationName(args);
+        if (StringUtils.isBlank(animName)) {
+            sender.addChatMessage(
+                new ChatComponentTranslation("message.yes_steve_model.model.animation_roulette.play", "?"));
+            return;
+        }
+        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
+        if (eep == null) {
+            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.play.no_data"));
+            return;
+        }
+        ResourceLocation modelId = eep.getModelId();
+        if (modelId != null) {
+            ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+            AnimationFile animFile = GeckoLibCache.getInstance()
+                .getAnimations()
+                .get(mainId);
+            if (animFile != null && !animFile.animations.containsKey(animName)) {
+                player.addChatMessage(
+                    new ChatComponentTranslation("commands.yes_steve_model.play.not_found", animName));
+                return;
+            }
+        }
+        eep.playAnimation(animName);
+        player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.play.done", animName));
+    }
+
+    /**
+     * {@code /ysm setgamepath [path] [version]} - push a high-version game directory to the issuer's client, ported
+     * from the reference's {@code processSetGamePath} ({@code :265-306}).
+     * <p>
+     * The path is client-local config, so the server only forwards it; the consumer is the client's
+     * {@code SyncGamePath.Handler}, whose last step is {@code LocalAssetProvider.reset()}
+     * ({@code compat/LocalAssetProvider.java:243}) - without that call the provider would keep the asset index and the
+     * version jar it opened for the previous path and the command would look like a no-op.
+     */
+    private void processSetGamePath(ICommandSender sender, String[] args) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        if (args.length < 2) {
+            // Show the current configuration (reference :271-286).
+            String currentPath = Config.HIGH_VERSION_GAME_PATH;
+            String currentVer = Config.HIGH_VERSION_ASSET_VERSION;
+            if (currentPath == null || currentPath.isEmpty()) {
+                player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.setgamepath.none"));
+            } else {
+                player.addChatMessage(
+                    new ChatComponentTranslation("commands.yes_steve_model.setgamepath.current", currentPath));
+                player.addChatMessage(
+                    new ChatComponentTranslation("commands.yes_steve_model.setgamepath.version", currentVer));
+            }
+            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.setgamepath.usage"));
+            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.setgamepath.example"));
+            return;
+        }
+        String newPath = parseGamePath(args);
+        String newVersion = parseGamePathVersion(args);
+        NetworkHandler.CHANNEL.sendTo(new SyncGamePath(newPath, newVersion), player);
+        if (newPath.isEmpty()) {
+            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.setgamepath.cleared"));
+        } else {
+            player.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.setgamepath.set", newPath));
+            player.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.setgamepath.version", newVersion));
+            player.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.setgamepath.local_notice"));
+        }
+    }
+
+    /**
+     * {@code /ysm buffer} - ask the issuer's client to print its own direct-buffer, mapped-buffer and heap figures,
+     * ported from the reference's {@code processBuffer} ({@code :308-317}).
+     * <p>
+     * The figures come from the client JVM's platform MBeans, which a dedicated server cannot read meaningfully for
+     * the client - hence the round trip rather than a server-side print. The reference calls the shot a "client
+     * screen"; its own handler prints three chat lines and no GUI exists in either tree, so the chat output is what
+     * is ported.
+     */
+    private void processBuffer(ICommandSender sender) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        NetworkHandler.CHANNEL.sendTo(new ShowBufferInfo(), player);
+        player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.buffer.querying"));
+    }
+
+    /**
+     * {@code /ysm welcome [on|off]} - toggle the issuer's welcome-message flag on their own client, ported from the
+     * reference's {@code processWelcome} ({@code :342-356}).
+     * <p>
+     * The flag is per-client config, so the command forwards it. <b>Nothing in this tree reads the flag yet</b>: the
+     * reference's reader is its join-world welcome block
+     * ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../client/ClientEventHandler.java:193}), which this tree
+     * has no equivalent of, and {@code client/} is outside this task's files. The command and its packet are ported;
+     * the visible effect arrives with that reader. Recorded in {@code .agent/phase39-ysm-subcommands.md}.
+     */
+    private void processWelcome(ICommandSender sender, String[] args) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        boolean newValue = parseWelcomeValue(args);
+        NetworkHandler.CHANNEL.sendTo(new SetWelcomeConfig(newValue), player);
+        player.addChatMessage(new ChatComponentTranslation(welcomeMessageKey(newValue)));
+    }
+
+    /**
+     * {@code /ysm sync} - the issuer asks the server for a fresh model-sync round, ported from the reference's
+     * {@code processSync} ({@code :319-340}).
+     * <p>
+     * The rate limit is the server's ({@code OpenYsmModelSyncServer.requestResync}): a player can spam the command and
+     * every round is server uplink. The reference takes no target argument here - it resyncs the issuer - even though
+     * its own help line advertises {@code /ysm sync [player]}; the port follows the code, and the help text in
+     * {@code commands.yes_steve_model.help.detail.sync.*} was corrected to match it (see the note).
+     */
+    private void processSync(ICommandSender sender) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        int result = OpenYsmModelSyncServer.requestResync(player);
+        String key = resyncMessageKey(result);
+        if (result == OpenYsmModelSyncServer.RESYNC_COOLDOWN) {
+            player.addChatMessage(
+                new ChatComponentTranslation(key, OpenYsmModelSyncServer.resyncRemainingSeconds(player.getUniqueID())));
+        } else {
+            player.addChatMessage(new ChatComponentTranslation(key));
+        }
+    }
+
+    /**
+     * Whether {@code /ysm help <sub>} names a topic this command family knows (reference {@code :156-159}). The
+     * reference builds the same set as an {@code equals} chain; here it is {@link #HELP_TOPICS}, so a topic cannot
+     * have a summary line without also having detail keys.
+     */
+    static boolean isKnownHelpTopic(String sub) {
+        for (String topic : HELP_TOPICS) {
+            if (topic.equals(sub)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The animation name of {@code /ysm play}: every argument from index 1 re-joined with single spaces and stripped
+     * of every {@code "} and {@code '} (reference {@code :195-204}, including its {@code replaceAll("[\"']", "")} -
+     * so an internal quote disappears too, not just one surrounding pair).
+     */
+    static String parsePlayAnimationName(String[] args) {
+        StringBuilder name = new StringBuilder();
+        for (int i = 1; i < args.length; i++) {
+            if (name.length() > 0) {
+                name.append(' ');
+            }
+            name.append(args[i]);
+        }
+        return name.toString()
+            .replaceAll("[\"']", "");
+    }
+
+    /**
+     * The path of {@code /ysm setgamepath <path> [version]}: the second argument, with the two spellings of an empty
+     * path ({@code ""} and {@code ''}) normalised to a real empty string so the client clears the setting
+     * (reference {@code :288-294}).
+     */
+    static String parseGamePath(String[] args) {
+        if (args.length < 2) {
+            return "";
+        }
+        String newPath = args[1];
+        if ("\"\"".equals(newPath) || "''".equals(newPath)) {
+            return "";
+        }
+        return newPath;
+    }
+
+    /**
+     * The asset version of {@code /ysm setgamepath <path> [version]}: the third argument, or the currently configured
+     * version when it is absent (reference {@code :289}).
+     */
+    static String parseGamePathVersion(String[] args) {
+        return args.length >= 3 ? args[2] : Config.HIGH_VERSION_ASSET_VERSION;
+    }
+
+    /**
+     * The flag of {@code /ysm welcome [on|off]}: on unless the second argument is one of the three spellings of "off"
+     * (reference {@code :347-352}; a missing argument and any other word - {@code on} included - all mean on).
+     */
+    static boolean parseWelcomeValue(String[] args) {
+        if (args.length >= 2) {
+            String value = args[1];
+            if ("off".equalsIgnoreCase(value) || "0".equals(value) || "false".equalsIgnoreCase(value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The feedback key of {@code /ysm welcome}: the reference's {@code key} ternary ({@code :354-355}). */
+    static String welcomeMessageKey(boolean show) {
+        return show ? "commands.yes_steve_model.welcome.on" : "commands.yes_steve_model.welcome.off";
+    }
+
+    /**
+     * The feedback key of {@code /ysm sync} for a {@code OpenYsmModelSyncServer} answer code - the reference's
+     * four-way if-chain ({@code :329-339}), read without the send so the decision itself is testable.
+     */
+    static String resyncMessageKey(int result) {
+        if (result == OpenYsmModelSyncServer.RESYNC_OK) {
+            return "commands.yes_steve_model.sync.resync.started";
+        }
+        if (result == OpenYsmModelSyncServer.RESYNC_COOLDOWN) {
+            return "commands.yes_steve_model.sync.resync.cooldown";
+        }
+        if (result == OpenYsmModelSyncServer.RESYNC_DISABLED) {
+            return "commands.yes_steve_model.sync.resync.disabled";
+        }
+        return "commands.yes_steve_model.sync.resync.failed";
+    }
+
+    /**
+     * {@code /ysm debug <query|eval|overlay> [args]} - forwards the request to the issuer's own client, ported from
+     * the reference branch's {@code YsmCommand.processDebug} ({@code
+     * tmp/YesSteveModel-Unofficial-perf-previewUI/src/main/java/com/fox/ysmu/command/YsmCommand.java:358-431}).
+     * <p>
+     * All three branches are {@code Side.CLIENT} packet handlers here ({@code NetworkHandler:277-296}), so the
+     * direction is server to client by construction - and it has to be, for the reason the reference states at
+     * {@code :416-418}: Molang variables, the eval result and {@code DebugOverlay} are all per-client state
+     * ({@code MolangParser} is a client singleton and {@code DebugOverlay} touches {@code net.minecraft.client.*} and
+     * LWJGL, neither of which a dedicated server has). The server's job is the permission check and the forward; the
+     * client answers in its own chat.
+     * <p>
+     * <b>Permission.</b> The reference re-checks level {@value #DEBUG_PERMISSION_LEVEL} here rather than relying on the
+     * command's own default level 2, because {@code eval} can call any {@code ysm} function, including the
+     * side-effecting ones ({@code particle}, {@code play_sound}). That gate is kept verbatim, including the vanilla
+     * {@code commands.generic.permission} exception it throws. On a default server ({@code op-permission-level=2}) this
+     * means only players explicitly granted level 4 can use {@code /ysm debug}; a single-player host always can.
+     */
+    private void processDebug(ICommandSender sender, String[] args) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        // 1.7.10 的 EntityPlayerMP.canCommandSenderUseCommand 为双参签名 (permissionLevel, commandName)，
+        // 与 CommandBase 内部的调用方式一致（参考分支 :369 的注释）。
+        if (!player.canCommandSenderUseCommand(DEBUG_PERMISSION_LEVEL, getCommandName())) {
+            throw new CommandException("commands.generic.permission");
+        }
+        if (args.length < 2) {
+            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.debug.usage"));
+            return;
+        }
+        String sub = args[1].toLowerCase(Locale.ROOT);
+        if ("query".equals(sub)) {
+            if (args.length < 3) {
+                player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.debug.query.usage"));
+                return;
+            }
+            NetworkHandler.CHANNEL.sendTo(new PacketQueryMolangVar(parseQueryNames(args)), player);
+        } else if ("eval".equals(sub)) {
+            if (args.length < 3) {
+                player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.debug.eval.usage"));
+                return;
+            }
+            NetworkHandler.CHANNEL.sendTo(new PacketEvalMolang(parseEvalExpression(args)), player);
+        } else if ("overlay".equals(sub)) {
+            // Overlay 是纯客户端状态：服务端只转发切换请求，状态反馈也在客户端输出（服务端不知道结果状态）。
+            // 参考分支 :419-425 的判定原样保留：缺参、或第三个参数不是 on/off（含 "toggle" 与任何无法识别的词）
+            // 都取 MODE_TOGGLE；无法识别的模式不报错、不新增拒绝分支（本仓不复刻参考分支没有的规则）。
+            NetworkHandler.CHANNEL.sendTo(new S2CSetDebugOverlay(parseOverlayMode(args)), player);
+        } else {
+            player.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.debug.unknown", sub));
+        }
+    }
+
+    /**
+     * {@code /ysm reset <player|@a|@p>} - resets the selected players' Molang variable state, ported from the
+     * reference branch's {@code YsmCommand.processReset} ({@code
+     * tmp/YesSteveModel-Unofficial-perf-previewUI/src/main/java/com/fox/ysmu/command/YsmCommand.java:439-461}), with
+     * {@code PacketResetMolang} replaced by this tree's same-named clientbound packet id 27.
+     * <p>
+     * Resetting the issuer's own state is the client command {@code /ysmclient reset} (pure local, no round trip);
+     * this branch exists for the vanilla selectors. <b>Permission:</b> unchanged from the command's own default, level
+     * 2 - only {@code /ysm debug} carries the level-4 re-check, which is the reference's split ({@code :109-113} makes
+     * {@code reset} a default-level branch and {@code :369} gates only {@code debug}).
+     * <p>
+     * The clear itself runs on each target's own client ({@code PacketResetMolang.Handler} calls
+     * {@code MolangReset.resetSelf()}), because the state being cleared - the frame scope, the controller runtime and
+     * the roaming values - lives in that client's process.
+     */
+    private void processReset(ICommandSender sender, String[] args) {
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        if (args.length < 2) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.reset.usage"));
+            return;
+        }
+        EntityPlayerMP[] targets = resolveResetTargets(sender, args[1]);
+        for (EntityPlayerMP target : targets) {
+            NetworkHandler.CHANNEL.sendTo(new PacketResetMolang(), target);
+        }
+        sender.addChatMessage(
+            new ChatComponentTranslation("commands.yes_steve_model.reset.done", targets.length));
+    }
+
+    /**
+     * The target list of {@code /ysm reset <selector>}.
+     * <p>
+     * {@link PlayerSelector#matchPlayers} answers {@code null} for a word that is not a selector at all (it does not
+     * fall back to a name lookup, {@code PlayerSelector.java:164-167}) and an empty array when the selector matches
+     * nobody. The reference collapses both into {@code commands.generic.player.notFound} ({@code :448-454}); both are
+     * kept distinct here only long enough to throw the same exception.
+     */
+    private static EntityPlayerMP[] resolveResetTargets(ICommandSender sender, String selector) {
+        EntityPlayerMP[] targets;
+        try {
+            targets = PlayerSelector.matchPlayers(sender, selector);
+        } catch (Exception e) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        if (targets == null || targets.length == 0) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        return targets;
+    }
+
+    /**
+     * The variable names of {@code /ysm debug query <variable> [variable2 ...]}: one per argument from index 2, each
+     * stripped of one surrounding pair of double quotes (reference {@code :384-391}).
+     */
+    static List<String> parseQueryNames(String[] args) {
+        ArrayList<String> varNames = new ArrayList<>();
+        for (int i = 2; i < args.length; i++) {
+            String name = args[i];
+            if (name.startsWith("\"") && name.endsWith("\"")) {
+                name = name.substring(1, name.length() - 1);
+            }
+            varNames.add(name);
+        }
+        return varNames;
+    }
+
+    /**
+     * The expression of {@code /ysm debug eval <expression>}: every argument from index 2 re-joined with single
+     * spaces (so the caller may leave the spaces unquoted), trimmed, then stripped of one surrounding pair of double
+     * quotes (reference {@code :404-412}).
+     */
+    static String parseEvalExpression(String[] args) {
+        String expression = joinCommandArguments(args, 2).trim();
+        if (expression.length() >= 2 && expression.startsWith("\"") && expression.endsWith("\"")) {
+            expression = expression.substring(1, expression.length() - 1);
+        }
+        return expression;
+    }
+
+    /**
+     * The overlay mode of {@code /ysm debug overlay [on|off|toggle]} - the reference's exact three-way decision
+     * (reference {@code :419-425}). Anything that is neither {@code on} nor {@code off} - a missing argument,
+     * {@code toggle}, or an unrecognised word - is {@link S2CSetDebugOverlay#MODE_TOGGLE}; the reference adds no
+     * rejection branch for a bad mode, so this port does not invent one.
+     */
+    static byte parseOverlayMode(String[] args) {
+        if (args.length >= 3 && "on".equalsIgnoreCase(args[2])) {
+            return S2CSetDebugOverlay.MODE_ON;
+        }
+        if (args.length >= 3 && "off".equalsIgnoreCase(args[2])) {
+            return S2CSetDebugOverlay.MODE_OFF;
+        }
+        return S2CSetDebugOverlay.MODE_TOGGLE;
+    }
+
+    /** Joins {@code args[from..]} with single spaces; the reference's inline loops for eval/playsound. */
+    private static String joinCommandArguments(String[] args, int from) {
+        StringBuilder joined = new StringBuilder();
+        for (int i = from; i < args.length; i++) {
+            if (joined.length() > 0) {
+                joined.append(' ');
+            }
+            joined.append(args[i]);
+        }
+        return joined.toString();
+    }
+
+    /**
+     * {@code /ysm auth <targets> <add|remove> <model>} and {@code /ysm auth <targets> <all|clear>} - the port of
+     * upstream's {@code command/sub/AuthCommand.java:28-102} (registered as a sibling of {@code /ysm model ...} at
+     * {@code command/RootCommand.java:16-24}, permission level 2 at {@code :29}).
+     * <p>
+     * Upstream's four actions map one-to-one: {@code add}/{@code remove} mutate one model in each resolved player's
+     * capability ({@code :53-68}), {@code all} grants every model the catalog knows ({@code :72-81}), {@code clear}
+     * empties the table ({@code :83-102}). {@code remove} and {@code clear} additionally reset a wearer of the
+     * affected model, but by two <em>different</em> tests ({@code :59-64} resets on id equality, {@code :88-97} only
+     * for a {@code SESSION_AUTHORIZED} selection), which {@link #removeAuthModel} and {@link #clearAuthModels}
+     * reproduce separately; {@code all} never resets anything. Both mutations and the resets end in upstream's
+     * {@code SessionProtocolHandler.refreshGrants(player)} ({@code :66}, {@code :78}, {@code :98}), the port's
+     * {@link ModelGrantSync#send(EntityPlayer)}.
+     * <p>
+     * <b>Permission</b> is the command's own level-2 gate, re-checked by {@link #processCommand} for every subcommand
+     * outside {@link #LEVEL_ZERO_SUBCOMMANDS} - exactly upstream's {@code requires(hasPermission(source, 2))}
+     * ({@code AuthCommand.java:29}), and it is why {@code auth} is deliberately <em>not</em> exempted there.
+     * <p>
+     * <b>Feedback is a port addition.</b> Upstream answers nothing on success (it returns
+     * {@code Command.SINGLE_SUCCESS} silently and uses {@code sendFailure} only for an unknown model path,
+     * {@code :48-51}); a silent admin command is hard to use, and every other YSMU subcommand reports what it did, so
+     * each action replies with one line. Both lang values are {@code %s}-only, because
+     * {@code ChatComponentTranslation} refuses other conversions on 1.7.10.
+     */
+    private void processAuth(ICommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.auth.usage"));
+            return;
+        }
+        String action = parseAuthAction(args);
+        if (!isKnownAuthAction(action)) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.auth.usage"));
+            return;
+        }
+        if (("add".equals(action) || "remove".equals(action)) && args.length < 4) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.auth.usage"));
+            return;
+        }
+        // Resolve the targets before touching anything, so a bad selector cannot grant a partial round. (The argument
+        // checks above run first on purpose: a usage error must not need a player to be resolvable.)
+        EntityPlayerMP[] targets = resolveAuthTargets(sender, args[1]);
+        if ("add".equals(action) || "remove".equals(action)) {
+            String modelArgument = parseAuthModelArgument(args);
+            ResourceLocation modelId = ModelAuthorization.resolveModelArgument(modelArgument);
+            if (modelId == null) {
+                // Upstream's own wording for a path the catalog cannot resolve (:49), kept because it is the text an
+                // operator will look up.
+                sender.addChatMessage(
+                    new ChatComponentTranslation(
+                        "commands.yes_steve_model.auth.unknown_model",
+                        modelArgument));
+                return;
+            }
+            for (EntityPlayerMP target : targets) {
+                if ("add".equals(action)) {
+                    addAuthModel(target, modelId);
+                } else {
+                    removeAuthModel(target, modelId);
+                }
+            }
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    authFeedbackKey(action),
+                    modelArgument,
+                    String.valueOf(targets.length)));
+            return;
+        }
+        for (EntityPlayerMP target : targets) {
+            if ("all".equals(action)) {
+                grantAllModels(target);
+            } else {
+                clearAuthModels(target);
+            }
+        }
+        sender.addChatMessage(
+            new ChatComponentTranslation(authFeedbackKey(action), String.valueOf(targets.length)));
+    }
+
+    /**
+     * The action word of {@code /ysm auth <targets> <action> [model]}: the third argument lower-cased, or {@code ""}
+     * when it is missing (there is no default action - upstream requires one of its four literals).
+     */
+    static String parseAuthAction(String[] args) {
+        return args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "";
+    }
+
+    /** Whether an action word is one of {@link #AUTH_ACTIONS}; the command has no "unknown action" fallback. */
+    static boolean isKnownAuthAction(String action) {
+        for (String known : AUTH_ACTIONS) {
+            if (known.equals(action)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The model argument of {@code /ysm auth <targets> add|remove <model>}: every argument from index 3 rejoined with
+     * single spaces (model names contain spaces, and a {@code _name_<hex>} id decodes to one), then stripped of one
+     * surrounding pair of double quotes - the same convention {@link #parseEvalExpression} uses, because 1.7.10's
+     * dispatcher hands quotes through instead of consuming them.
+     */
+    static String parseAuthModelArgument(String[] args) {
+        return stripOneQuotePair(
+            joinCommandArguments(args, 3)
+                .trim());
+    }
+
+    /**
+     * The feedback key of {@code /ysm auth <action>}: {@code commands.yes_steve_model.auth.<action>.done}. Only called
+     * with a word {@link #isKnownAuthAction} accepted, so the key always exists in both lang files.
+     */
+    static String authFeedbackKey(String action) {
+        return "commands.yes_steve_model.auth." + action + ".done";
+    }
+
+    /**
+     * The model names {@code /ysm auth <targets> add|remove} completes to: the display names of every registered model
+     * ({@code ServerModelManager.CACHE_NAME_INFO}, whose keys are internal ids), sorted so the list is stable.
+     * Upstream suggests its catalog's paths instead ({@code AuthCommand.java:31,34} with
+     * {@code CommandRegistry.ALL_MODELS}); the port's catalog is this map.
+     */
+    static List<String> authModelSuggestions() {
+        return authModelSuggestions(CACHE_NAME_INFO.keySet());
+    }
+
+    /** The registry half of {@link #authModelSuggestions()}, split out so it is testable without a server. */
+    static List<String> authModelSuggestions(Set<String> registeredIds) {
+        List<String> names = new ArrayList<>();
+        for (String internalId : registeredIds) {
+            names.add(ModelIdUtil.getModelDisplayName(internalId));
+        }
+        Collections.sort(names);
+        return names;
+    }
+
+    /**
+     * The target list of {@code /ysm auth <targets> ...}.
+     * <p>
+     * Upstream takes {@code EntityArgument.players()}, i.e. a selector <em>or</em> a name
+     * ({@code AuthCommand.java:30,33,36,38}). 1.7.10 splits those: {@link PlayerSelector#matchPlayers} answers only
+     * {@code @}-tokens ({@code PlayerSelector.java:61-167} returns {@code null} for a plain word) while
+     * {@link CommandBase#getPlayer} accepts a name (and a single-player selector). Both paths end in the same refusal
+     * on an unmatched target.
+     * <p>
+     * The server null check is this port's existing degradation, not a behaviour change: {@code getPlayer} and
+     * {@code matchPlayers} both dereference {@code MinecraftServer.getServer()} ({@code CommandBase.java:198}), which
+     * a unit JVM does not have - the same reason {@link #addTabCompletionOptions} already returns "no suggestions"
+     * there.
+     */
+    private static EntityPlayerMP[] resolveAuthTargets(ICommandSender sender, String selector) {
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        if (selector.startsWith("@")) {
+            EntityPlayerMP[] matched;
+            try {
+                matched = PlayerSelector.matchPlayers(sender, selector);
+            } catch (Exception e) {
+                throw new CommandException("commands.generic.player.notFound");
+            }
+            if (matched == null || matched.length == 0) {
+                throw new CommandException("commands.generic.player.notFound");
+            }
+            return matched;
+        }
+        return new EntityPlayerMP[] { getPlayer(sender, selector) };
+    }
+
+    /**
+     * Grants one model to one player ({@code AuthCommand.java:56}) and re-publishes that player's grant set
+     * ({@code :66} {@code SessionProtocolHandler.refreshGrants(player)} - every mutation, including a pure grant,
+     * tells the client).
+     */
+    private static void addAuthModel(EntityPlayerMP target, ResourceLocation modelId) {
+        ExtendedAuthModels auth = ExtendedAuthModels.get(target);
+        if (auth == null) {
+            warnMissingAuthTable(target);
+            return;
+        }
+        auth.addModel(modelId);
+        ModelGrantSync.send(target);
+    }
+
+    /**
+     * Revokes one model, then resets the target when the removed id <em>is</em> their current selection
+     * ({@code AuthCommand.java:58} removes, {@code :60-64} is the test {@code hash.equals(selection.getModelId())
+     * && !selection.ignoresGrantsFor(hash)}, {@code :66} refreshes).
+     * <p>
+     * Note what that test does <b>not</b> consult: the removed model's access policy. Revoking a model that needed no
+     * grant still moves a player who is wearing exactly it back to the default - upstream's observable behaviour, not
+     * a typo, so it is copied ({@link #removeResetsSelection}). The old port collapsed it onto the {@code clear} test,
+     * which silently made revoking a public model a no-op.
+     */
+    private static void removeAuthModel(EntityPlayerMP target, ResourceLocation modelId) {
+        ExtendedAuthModels auth = ExtendedAuthModels.get(target);
+        if (auth == null) {
+            warnMissingAuthTable(target);
+            return;
+        }
+        auth.removeModel(modelId);
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null && removeResetsSelection(info.getModelId(), modelId, info.ignoresGrantsFor(modelId))) {
+            resetToIntrinsicDefault(target, info.getModelId());
+        }
+        ModelGrantSync.send(target);
+    }
+
+    /**
+     * Grants every registered model ({@code AuthCommand.java:73-78} over {@code catalog.models().keySet()}) and
+     * publishes the new set ({@code :78}).
+     */
+    private static void grantAllModels(EntityPlayerMP target) {
+        ExtendedAuthModels auth = ExtendedAuthModels.get(target);
+        if (auth == null) {
+            warnMissingAuthTable(target);
+            return;
+        }
+        auth.setAuthModels(ModelAuthorization.allRegisteredModelIds());
+        ModelGrantSync.send(target);
+    }
+
+    /**
+     * Empties the table ({@code AuthCommand.java:87}), then resets the target only when their current model's root
+     * kind is {@code SESSION_AUTHORIZED} and the selection does not ignore grants ({@code :88-97}, the
+     * {@code accessPolicy() == SESSION_AUTHORIZED} test at {@code :90-93}), and publishes the (now empty) set
+     * ({@code :98}). Clearing a table therefore never resets a player who wears a public model.
+     */
+    private static void clearAuthModels(EntityPlayerMP target) {
+        ExtendedAuthModels auth = ExtendedAuthModels.get(target);
+        if (auth == null) {
+            warnMissingAuthTable(target);
+            return;
+        }
+        auth.clear();
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null) {
+            ResourceLocation current = info.getModelId();
+            if (clearResetsSelection(
+                current,
+                ModelAuthorization.requiresAuth(current),
+                info.ignoresGrantsFor(current))) {
+                resetToIntrinsicDefault(target, current);
+            }
+        }
+        ModelGrantSync.send(target);
+    }
+
+    /**
+     * Upstream's {@code auth remove} reset test ({@code command/sub/AuthCommand.java:60-64}):
+     * {@code hash.equals(selection.getModelId()) && !selection.ignoresGrantsFor(hash)}. There is deliberately no
+     * access test in it - see {@link #removeAuthModel} - and no texture test.
+     */
+    static boolean removeResetsSelection(@Nullable ResourceLocation current, @Nullable ResourceLocation removed,
+        boolean ignoresGrants) {
+        return removed != null && removed.equals(current) && !ignoresGrants;
+    }
+
+    /**
+     * Upstream's {@code auth clear} reset test ({@code AuthCommand.java:90-94}): the current selection's catalog root
+     * kind must be {@code SESSION_AUTHORIZED} ({@code :91-93}) and the selection must not ignore grants
+     * ({@code :94}). The port's root kind half is {@link ModelAuthorization#requiresAuth(ResourceLocation)} - the
+     * effective source is {@code config/ysmu/auth}.
+     */
+    static boolean clearResetsSelection(@Nullable ResourceLocation current, boolean restricted,
+        boolean ignoresGrants) {
+        return current != null && restricted && !ignoresGrants;
+    }
+
+    /**
+     * The third revoke shape: {@code ServerModelSession.setGrants} ({@code
+     * tmp/YesSteveModel-dev-1.20/.../model/session/server/ServerModelSession.java:137-142}) drops the current
+     * selection to the intrinsic default when a re-published grant set no longer allows it and the selection does not
+     * ignore grants. It is reached from {@code SessionProtocolHandler.refreshGrants:374-386} - i.e. from <em>any</em>
+     * grant re-evaluation, not only the two {@code /ysm auth} actions - and {@code commitCatalog} ->
+     * {@code buildAuthority:305-311} applies the same rule when the catalog is committed. This port's counterpart is
+     * {@link #resetSelectionIfUnauthorized}, called for every online player by {@link #processReload}.
+     */
+    static boolean grantReevaluationResetsSelection(@Nullable ResourceLocation current, boolean selectable,
+        boolean ignoresGrants) {
+        return current != null && !selectable && !ignoresGrants;
+    }
+
+    /**
+     * Re-evaluates one player's selection against the live authorization state and resets it when it is no longer
+     * eligible ({@link #grantReevaluationResetsSelection}). Wired from {@link #processReload}: a reload is what
+     * commits the catalog here ({@code ServerModelManager.reloadPacks()}), so it is the moment a model can become
+     * restricted - an operator moved it into {@code config/ysmu/auth} - or lose its winning source.
+     * <p>
+     * Two clauses of upstream's commit-time rule are recorded rather than ported. {@code buildAuthority:305-309}
+     * also resets when the committed catalog no longer <em>has</em> the model ({@code record == null}), which this
+     * port cannot ask: an unknown id answers {@code CatalogAccess.PUBLIC} on purpose so a client-local model
+     * registered by {@code /ysmclient load} stays selectable ({@code api/ModelAuthorization:52-59}), so a model
+     * deleted from disk leaves its wearer on it until they choose another one. The texture clause
+     * ({@code :308} {@code !hasTexture}) <em>is</em> checkable here ({@link #textureNamesOf}), but it is not ported
+     * for the reason batch 2 already recorded for the packet path: the client's own texture ladder falls back when a
+     * selection names a texture the model no longer has ({@code api/ModelAuthorization:60-63}), so a stale texture is
+     * not an authorization failure and resetting a player for it would be a new rule. A model that becomes restricted
+     * does reset, which is what this path exists for.
+     */
+    private static void resetSelectionIfUnauthorized(EntityPlayerMP target) {
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info == null) {
+            return;
+        }
+        ResourceLocation current = info.getModelId();
+        if (!grantReevaluationResetsSelection(
+            current,
+            ModelAuthorization.maySelect(target, current),
+            info.ignoresGrantsFor(current))) {
+            return;
+        }
+        resetToIntrinsicDefault(target, current);
+    }
+
+    /**
+     * Moves {@code current}'s wearer back to the intrinsic default and tells them. The callers' <em>tests</em> are
+     * upstream's three shapes ({@link #removeResetsSelection}, {@link #clearResetsSelection},
+     * {@link #grantReevaluationResetsSelection}); the reset itself is upstream's single
+     * {@code ModelSelectionService.selectDefault} ({@code capability/ModelSelectionService.java:15-31}), which the two
+     * {@code AuthCommand} branches ({@code :62}, {@code :95}) and {@code setGrants} all funnel into.
+     */
+    private static void resetToIntrinsicDefault(EntityPlayerMP target, ResourceLocation current) {
+        ResourceLocation defaultModel = ExtendedModelInfo.defaultModelId();
+        SetModelAndTexture.applySelection(target, defaultModel, ExtendedModelInfo.defaultTextureId(defaultModel));
+        // Upstream clears the forced-selection exception whenever it resets to the intrinsic default: the session's
+        // selectIntrinsicDefault writes ignoreGrants false (ServerModelSession.java:338-341) and its authority refuses
+        // to hold an intrinsic default that ignores grants (:388-391). The EEP's own keep-rule would drop it here
+        // anyway because the model id changes, but the reset must not depend on that coincidence.
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info != null) {
+            info.clearIgnoreGrants();
+        }
+        // Port addition, like the command receipts above: upstream's player learns about the reset only from the
+        // changed model. The message is what makes "my model changed by itself" explainable.
+        target.addChatMessage(
+            new ChatComponentTranslation(
+                "message.yes_steve_model.auth.reset",
+                ModelIdUtil.getModelDisplayName(current)));
+    }
+
+    /**
+     * The table is attached at {@code EntityEvent.EntityConstructing}; a missing one means this build did not attach
+     * it. Refusing to act (and saying so) is right for a command: the alternative - treating it as an empty table -
+     * would make {@code auth clear} look like it worked while the player's saved grants are still on disk.
+     */
+    private static void warnMissingAuthTable(EntityPlayerMP target) {
+        ysmu.LOG.warn(
+            "No authentication table on {}; is ExtendedAuthModels registered from EntityEvent.EntityConstructing?",
+            target.getCommandSenderName());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm model set
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * {@code /ysm model set <targets> <model> <texture> [ignore_auth]} - the port of upstream's
+     * {@code command/sub/ModelCommand.set}: the grammar is {@code command/sub/ModelCommand.java:41-50} (permission 2
+     * at {@code :35}), the body is {@code :55-98}.
+     * <p>
+     * <b>Scope.</b> Upstream's {@code /ysm model} command has four literals; only {@code set} is ported, and the other
+     * three are recorded rather than stubbed (see {@link #MODEL_ACTIONS}).
+     * <p>
+     * <b>A restricted target is skipped, not fatal</b> - upstream's check at {@code :82-88} ends in {@code return}
+     * inside the {@code ifPresent} lambda, so it reports the ungranted player and continues with the rest of the
+     * selector; only a bad model path aborts the command ({@code :60-63}). {@code ignore_auth} is what skips that
+     * refusal, and it is also the value {@link ExtendedModelInfo#setCommandSelection} stores as the forced-selection
+     * exception.
+     * <p>
+     * <b>Feedback is a port addition</b> (upstream {@code sendFailure}s literal English text at {@code :61,72,86} and
+     * answers nothing on success), like the {@code /ysm auth} receipts, and it is only sent when
+     * {@link #reportsModelSetReceipt} is true - i.e. when at least one target actually got the model; the refusal
+     * <em>wording</em> is upstream's. Every key here is {@code %s}-only, because {@code ChatComponentTranslation}
+     * refuses other conversions on 1.7.10.
+     * <p>
+     * <b>One argument the port cannot honour.</b> Upstream's {@code texture} accepts {@code "-"} for the model's own
+     * declared {@code settings.default_texture} ({@code :66-70}). That value is parsed on the client in this port
+     * ({@code ClientModelManager.DECLARED_DEFAULT_TEXTURES}, filled from the payload's {@code ysm_default_texture});
+     * the server keeps only the texture-<em>name</em> set ({@link ServerModelInfo#getTextures()}), so {@code "-"} is
+     * refused with an explanation instead of being guessed at.
+     */
+    private void processModel(ICommandSender sender, String[] args) {
+        if (args.length < 2 || !isKnownModelAction(args[1])) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.model.usage"));
+            return;
+        }
+        // /ysm model set <targets> <model> <texture> [ignore_auth]: upstream's command graph has exactly these nodes,
+        // so a shorter or longer argument list - or a fifth word that is not a boolean - cannot be parsed there either
+        // (brigadier fails to build the tree; BoolArgumentType at :48 only reads true/false). The usage line is this
+        // port's equivalent of "the tree did not match".
+        if (args.length < 5 || args.length > 6 || args.length == 6 && !isBooleanWord(args[5])) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.model.usage"));
+            return;
+        }
+        boolean ignoreAuth = args.length == 6 && Boolean.parseBoolean(args[5]);
+        String modelArgument = stripOneQuotePair(args[3]);
+        String textureArgument = stripOneQuotePair(args[4]);
+
+        ResourceLocation modelId = ModelAuthorization.resolveModelArgument(modelArgument);
+        Set<String> textureNames = modelId == null ? null : textureNamesOf(modelId);
+        if (modelId == null || textureNames == null) {
+            // Upstream's own wording for a path the catalog cannot resolve (ModelCommand.java:61), which is the same
+            // sentence AuthCommand.java:49 uses for the same failure. The registry half is a reload race: the id was
+            // just resolved against CACHE_NAME_INFO's key set.
+            sender.addChatMessage(
+                new ChatComponentTranslation("commands.yes_steve_model.model.set.unknown_model", modelArgument));
+            return;
+        }
+        if (isDeclaredDefaultTextureArgument(textureArgument)) {
+            // Upstream ModelCommand.java:66-70; see the method note for why this port cannot resolve it.
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.texture_dash_unavailable",
+                    modelArgument));
+            return;
+        }
+        if (!isKnownTexture(textureArgument, textureNames)) {
+            // Upstream ModelCommand.java:71-74. The names are the model's own texture list, i.e. the same set the
+            // client registers its texture ids from, so a name accepted here is one the client can bind.
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.unknown_texture",
+                    modelArgument,
+                    textureArgument));
+            return;
+        }
+        ResourceLocation textureId = ModelIdUtil.getSubModelId(modelId, textureArgument);
+
+        // Resolve the targets before touching anything, so a bad selector cannot apply the model to a partial round
+        // (the same order /ysm auth uses; the argument checks above run first on purpose, because a usage error must
+        // not need a player to be resolvable).
+        EntityPlayerMP[] targets = resolveAuthTargets(sender, args[2]);
+        // The access half is per model (upstream :82-83: rootKind().accessPolicy() == SESSION_AUTHORIZED), the grant
+        // half is per target (upstream :84: !auth.containModel(hash)).
+        boolean restricted = ModelAuthorization.requiresAuth(modelId);
+        int applied = 0;
+        for (EntityPlayerMP target : targets) {
+            if (targetRefusesModelSet(ignoreAuth, restricted, ModelAuthorization.maySelect(target, modelId))) {
+                // Upstream :85-87: reported to the command source, and the loop continues with the next target.
+                sender.addChatMessage(
+                    new ChatComponentTranslation(
+                        "commands.yes_steve_model.model.set.not_authorized",
+                        target.getCommandSenderName(),
+                        modelArgument));
+                continue;
+            }
+            if (applyCommandSelection(target, modelId, textureId, ignoreAuth)) {
+                applied++;
+            }
+        }
+        if (reportsModelSetReceipt(applied)) {
+            sender.addChatMessage(
+                new ChatComponentTranslation(
+                    "commands.yes_steve_model.model.set.done",
+                    modelArgument,
+                    String.valueOf(applied)));
+        }
+    }
+
+    /**
+     * Whether {@code /ysm model set} answers with its success receipt: only when at least one target actually got the
+     * model.
+     * <p>
+     * The receipt itself is a port addition (upstream's {@code ModelCommand} answers nothing at all on success - its
+     * only output is the per-target {@code sendFailure} at {@code :85-87} and the argument refusals at
+     * {@code :61,72}), so its rule is the port's own. A run in which every target was refused therefore prints
+     * nothing beyond those refusal lines: an extra "0 player(s)" line would only restate feedback the operator
+     * already has, and printing nothing extra is upstream's own silent shape.
+     */
+    static boolean reportsModelSetReceipt(int appliedTargets) {
+        return appliedTargets > 0;
+    }
+
+    /**
+     * Writes one operator-forced selection and publishes it - the port of upstream's
+     * {@code SessionProtocolHandler.applyCommandSelection} ({@code
+     * tmp/YesSteveModel-dev-1.20/.../network/forge/SessionProtocolHandler.java:343-366}), which stores the selection
+     * with {@code persistence.setCommandSelection(modelId, textureId, ignoreGrants && !intrinsicDefault)}
+     * ({@code :362-363}) and then stops any pending animation request ({@code :364}).
+     * <p>
+     * The port's write/publish funnel for a selection is {@link SetModelAndTexture#applySelection} - it also drops a
+     * stale NPC override and rewrites the vehicle this player owns, which upstream does from its own model-update path
+     * ({@code event/CapabilityEvent.java:198-211}); the forced flag is then the one
+     * {@link ExtendedModelInfo#setCommandSelection} call, so {@code ignoresGrantsFor} reads exactly what the operator
+     * asked for. The trailing grant publication is this port's split channel (upstream publishes the accepted
+     * selection over its session, {@code ControlHandler.applyAcceptedModelSelection}); the packet is the only way the
+     * target's client learns its restricted/granted sets here.
+     *
+     * @return whether the target had a model table to write to; a target without one is skipped, not fatal, the same
+     *         way upstream's {@code ifPresent} chain ({@code ModelCommand.java:80-95}) does nothing at all for it
+     */
+    private static boolean applyCommandSelection(EntityPlayerMP target, ResourceLocation modelId,
+        ResourceLocation textureId, boolean ignoreGrants) {
+        ExtendedModelInfo info = ExtendedModelInfo.get(target);
+        if (info == null) {
+            warnMissingModelInfo(target);
+            return false;
+        }
+        SetModelAndTexture.applySelection(target, modelId, textureId);
+        // Upstream :362-363: {@code ignoreGrants && !intrinsicDefault}. The intrinsic default can never ignore grants
+        // (ServerModelSession.java:388-391 refuses to hold such an authority), and every reset path writes the flag
+        // false for it, so a forced selection of the default model must not leave the exception behind either.
+        info.setCommandSelection(
+            modelId,
+            textureId,
+            ignoreGrants && !modelId.equals(ExtendedModelInfo.defaultModelId()));
+        info.stopAnimation();
+        ModelGrantSync.send(target);
+        return true;
+    }
+
+    /**
+     * Whether one target of {@code /ysm model set} is refused before anything is written - upstream's
+     * {@code ModelCommand.java:82-85}: {@code !ignoreAuth && rootKind().accessPolicy() == SESSION_AUTHORIZED
+     * && !auth.containModel(hash)}. The refusal is reported at {@code :85-87} and only that target is skipped
+     * ({@code return} inside the {@code ifPresent} lambda), so a selector with one ungranted player still applies the
+     * model to the others.
+     *
+     * @param restricted whether the model's access policy is {@code SESSION_AUTHORIZED}
+     *        ({@link ModelAuthorization#requiresAuth(ResourceLocation)})
+     * @param selectable whether this target may select it ({@link ModelAuthorization#maySelect(EntityPlayer,
+     *        ResourceLocation)}: public, or granted). An <em>absent</em> grant table answers {@code true} - the
+     *        documented "this build did not attach the EEP" rule of {@code api/ModelAuthorization.canSelect}, which
+     *        upstream does not have a counterpart for: its {@code ifPresent} chain would do nothing at all for such a
+     *        target instead of applying the model.
+     */
+    static boolean targetRefusesModelSet(boolean ignoreAuth, boolean restricted, boolean selectable) {
+        return !ignoreAuth && restricted && !selectable;
+    }
+
+    /**
+     * Whether an action word is one of {@link #MODEL_ACTIONS}. Upstream's literal set is a four-way command tree
+     * ({@code ModelCommand.java:36-51}); the port dispatches only {@code set} and answers the usage line for the rest.
+     */
+    static boolean isKnownModelAction(String action) {
+        for (String known : MODEL_ACTIONS) {
+            if (known.equalsIgnoreCase(action)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Upstream's {@code "-"} texture spelling ({@code ModelCommand.java:66}: "the model's declared default"), which
+     * this port refuses because the declared default is client-side state; see {@link #processModel}.
+     */
+    static boolean isDeclaredDefaultTextureArgument(String textureArgument) {
+        return "-".equals(textureArgument);
+    }
+
+    /**
+     * Upstream's texture validation ({@code ModelCommand.java:71-74}): the requested texture must be one of the
+     * model's own names.
+     */
+    static boolean isKnownTexture(String textureArgument, Set<String> textureNames) {
+        return textureArgument != null && textureNames != null && textureNames.contains(textureArgument);
+    }
+
+    /** Upstream's {@code BoolArgumentType.bool()} ({@code ModelCommand.java:48}) spells a boolean as true/false only. */
+    static boolean isBooleanWord(String word) {
+        return "true".equalsIgnoreCase(word) || "false".equalsIgnoreCase(word);
+    }
+
+    /**
+     * The texture names one registered model declares, or {@code null} when the registry has no such model.
+     * <p>
+     * The server-side source is {@link ServerModelInfo#getTextures()} - the {@code ModelData.texture} key set of the
+     * baked payload ({@code data/ModelData.java:210}), i.e. the same names the client builds its texture ids from
+     * ({@code client/ClientModelManager.java:1158}). Upstream reads the same list off the loaded model
+     * ({@code ModelCommand.java:68,71}); what this port does <em>not</em> have server-side is the model's declared
+     * <em>default</em> texture, hence the {@code "-"} refusal.
+     */
+    @Nullable
+    private static Set<String> textureNamesOf(ResourceLocation modelId) {
+        ServerModelInfo info = CACHE_NAME_INFO.get(modelId.getResourcePath());
+        return info == null ? null : info.getTextures();
+    }
+
+    /**
+     * The texture slot's completion: the chosen model's own texture names, sorted so the list is stable.
+     * <p>
+     * Upstream suggests its whole texture registry there ({@code ModelCommand.java:46} with
+     * {@code CommandRegistry.ALL_TEXTURES}); this port's server keeps textures per model, so the same slot offers the
+     * names that will actually pass {@link #isKnownTexture}.
+     */
+    static List<String> textureSuggestions(Set<String> textureNames) {
+        List<String> names = new ArrayList<>(textureNames);
+        Collections.sort(names);
+        return names;
+    }
+
+    /**
+     * One argument with one surrounding pair of double quotes removed. 1.7.10's dispatcher splits the command line on
+     * spaces and hands quotes through ({@code CommandHandler.java:38}), so this is how a quoted single argument is
+     * unwrapped; a longer quoted string cannot be spelled in a fixed-position slot at all (use the {@code _name_<hex>}
+     * id for a name containing spaces).
+     */
+    static String stripOneQuotePair(String argument) {
+        if (argument != null && argument.length() >= 2 && argument.startsWith("\"") && argument.endsWith("\"")) {
+            return argument.substring(1, argument.length() - 1);
+        }
+        return argument;
+    }
+
+    /**
+     * The model-info table is attached at {@code EntityEvent.EntityConstructing} like the auth table; a missing one
+     * means this build did not attach it. Upstream's command body would silently do nothing for such a target
+     * ({@code ModelCommand.java:80-95} guards both capabilities); the port logs, like {@link #warnMissingAuthTable}.
+     */
+    private static void warnMissingModelInfo(EntityPlayerMP target) {
+        ysmu.LOG.warn(
+            "No model-info table on {}; is ExtendedModelInfo registered from EntityEvent.EntityConstructing?",
+            target.getCommandSenderName());
+    }
+
+    /**
+     * Re-evaluates every online player's selection after a catalog reload and republishes the authorization state.
+     * <p>
+     * Upstream re-evaluates at commit time: {@code ServerModelSession.commitCatalog} builds the next authority
+     * ({@code :250-268} -> {@code buildAuthority:286-315}), which resets an ineligible selection, and
+     * {@code SessionProtocolHandler.publishCatalog} ({@code :443-469}) applies that per player and sends the new
+     * authority. The port's commit is {@code ServerModelManager.reloadPacks()}, so this runs immediately after it.
+     * <p>
+     * The reset is upstream's third shape ({@link #resetSelectionIfUnauthorized}); the publication is one
+     * {@link ModelGrantSync#sendAll()} because the reload can change the restricted set as well as every player's
+     * eligibility, and it runs after the resets so it carries the settled state. (The per-player
+     * {@code refreshGrants} upstream calls from a grant mutation is {@link ModelGrantSync#send(EntityPlayer)}, used by
+     * the {@code /ysm auth} actions.)
+     */
+    private static void republishAuthorizationAfterReload() {
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.getConfigurationManager() == null) {
+            // A unit JVM, or a server that is still starting; nothing to re-evaluate and nobody to tell.
+            return;
+        }
+        for (EntityPlayerMP target : server.getConfigurationManager().playerEntityList) {
+            resetSelectionIfUnauthorized(target);
+        }
+        ModelGrantSync.sendAll();
     }
 
     private void processReload(ICommandSender sender) {
@@ -52,6 +1406,12 @@ public class YsmCommand extends CommandBase {
         watch.start();
         checkModelFiles(sender, CUSTOM);
         ServerModelManager.reloadPacks();
+
+        // 模型授权随目录一起重算：把模型移进/移出 config/ysmu/auth 或撤销授权后，在线玩家的当前选择可能不再可用，
+        // 且受限集合本身变了。上游在提交目录时做同一件事（ServerModelSession.commitCatalog -> buildAuthority
+        // :286-315 重置不合格的选择，SessionProtocolHandler.publishCatalog :443-469 逐个玩家应用并发新权威），
+        // 本仓的"提交"就是上面的 reloadPacks()。
+        republishAuthorizationAfterReload();
 
         // CUI-02: 广播给全服所有玩家，而不是只广播命令执行者所在维度的玩家。
         // N-02（取舍：保留）：这是 /ysm reload 之后唯一的服务端权威重同步入口 —— 每个玩家恰好调用一次，

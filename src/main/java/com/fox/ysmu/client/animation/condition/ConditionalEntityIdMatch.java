@@ -54,7 +54,7 @@ public abstract class ConditionalEntityIdMatch {
         if (matched == null || !matched.isEntityAlive() || ids.isEmpty()) {
             return EMPTY;
         }
-        String candidate = normalizedId(matched);
+        String candidate = normalizedEntityId(matched);
         if (candidate.isEmpty()) {
             return EMPTY;
         }
@@ -73,9 +73,14 @@ public abstract class ConditionalEntityIdMatch {
      * ({@code ConditionalVehicle.java:60-67}). Turning the local string into the same {@code domain:path} shape is what
      * lets one pack name mean the same thing on both, so the rule is one pure function rather than two inline ones.
      *
+     * <p>
+     * Public because the same rule now answers {@code ctrl.ride(type, '$<id>')} in the animation-file function table
+     * ({@code molang/CtrlRideFunction}), which lives in a sibling package: upstream compares the ride matcher against
+     * the same entity registry name this class does ({@code functions/RideCheck.java:50-59}), so there is one rule.
+     *
      * @return the lower-cased {@code domain:path} form, or an empty string when there is no name to compare
      */
-    static String normalizedId(String registryName) {
+    public static String normalizedId(String registryName) {
         if (registryName == null || registryName.isEmpty()) {
             return EMPTY;
         }
@@ -83,7 +88,12 @@ public abstract class ConditionalEntityIdMatch {
         return lowered.indexOf(':') >= 0 ? lowered : "minecraft:" + lowered;
     }
 
-    private static String normalizedId(Entity entity) {
+    /**
+     * The entity overload of {@link #normalizedId(String)}. Named apart rather than overloaded so that
+     * {@code normalizedId(null)} stays unambiguous for the callers that pass a possibly-null string
+     * ({@code ConditionalEntityIdMatchTest}).
+     */
+    private static String normalizedEntityId(Entity entity) {
         return normalizedId(EntityList.getEntityString(entity));
     }
 }

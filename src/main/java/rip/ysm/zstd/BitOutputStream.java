@@ -17,6 +17,7 @@ import static rip.ysm.zstd.Constants.SIZE_OF_LONG;
 import static rip.ysm.zstd.UnsafeUtil.UNSAFE;
 import static rip.ysm.zstd.Util.checkArgument;
 
+@SuppressWarnings("removal")
 class BitOutputStream
 {
     private static final long[] BIT_MASK = {

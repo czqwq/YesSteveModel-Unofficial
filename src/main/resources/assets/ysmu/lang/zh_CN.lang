@@ -4,14 +4,25 @@ gui.yes_steve_model.pre_page=前一页
 gui.yes_steve_model.next_page=后一页
 gui.yes_steve_model.all_models=所有模型
 gui.yes_steve_model.star_models=收藏模型
+# AUTH 分类按钮的悬浮提示(upstream zh_cn.json:7 "授权模型", 即它 PlayerModelScreen.java:187 按钮的文案).
+gui.yes_steve_model.auth_models=授权模型
 gui.yes_steve_model.config=打开配置界面
 gui.yes_steve_model.download=打开下载界面
 gui.yes_steve_model.search=搜索模型……
 gui.yes_steve_model.model.authors=§2§l▌ §3作者：%s
 gui.yes_steve_model.model.license=§2§l▌ §3协议：%s
+gui.yes_steve_model.model.source.builtin=§2§l▌ §3来源：内置
+gui.yes_steve_model.model.source.server=§2§l▌ §3来源：服务器
+# 受限模型的来源行: upstream 的 Source.AUTH 词条(client/gui/button/CatalogModelTooltipFormatter.java:173-180),
+# 文案 "Authorized"(en_us.json:437 / zh_cn.json:438 的 "授权模型"), 按本仓 builtin/server 的同一格式绘制.
+gui.yes_steve_model.model.source.auth=§2§l▌ §3来源：授权模型
 gui.yes_steve_model.model.texture=选择材质贴图
 gui.yes_steve_model.model.info=打开详情界面
 gui.yes_steve_model.model.info.contact.click_hint=单击复制联系方式
+# 模型详情页的两个链接类型预设;upstream 自己的 key 与文案(zh_cn.json:21-22,它的 ModelInfoScreen
+# LINK_TYPE_PRESET 在 :37-40)。其它自定义类型按原样显示。
+gui.yes_steve_model.url.home=主页
+gui.yes_steve_model.url.donate=赞助
 gui.yes_steve_model.model.star=收藏当前模型
 gui.yes_steve_model.model.return=返回
 gui.yes_steve_model.model.config.title=模型设置
@@ -21,11 +32,41 @@ gui.yes_steve_model.model.config.bad_range=范围无效
 gui.yes_steve_model.model.ground=显示/隐藏地面
 gui.yes_steve_model.model.reset=重置视角
 gui.yes_steve_model.model.stop=停止播放动画
+gui.yes_steve_model.show_model_id_first=优先显示模型 ID
 gui.yes_steve_model.config.disable_self_model=阻止渲染自身玩家模型
 gui.yes_steve_model.config.disable_other_model=阻止渲染其他玩家模型
 gui.yes_steve_model.config.print_animation_roulette_msg=是否显示轮盘动画播放信息
 gui.yes_steve_model.config.disable_self_hands=阻止渲染玩家自身手臂
+# upstream 自己的文案(它的 zh_cn.json),对应 ClientConfig.java:48-52 的两个子实体开关。
+gui.yes_steve_model.config.disable_projectile_model=阻止渲染自定义投掷物模型
+gui.yes_steve_model.config.disable_vehicle_model=阻止渲染自定义载具模型
 gui.yes_steve_model.config.disable_player_render=禁用额外玩家渲染
+gui.yes_steve_model.config.swap_config_sides=交换配置面版和预览框位置
+gui.yes_steve_model.config.gui_enhancements=启用选择界面增强(前景/背景纹理/选择界面动画)
+gui.yes_steve_model.config.render_wearable=渲染其他模组背部模型(背包/直升机/喷气背包)
+gui.yes_steve_model.config.wearable_render_scale=可穿戴模型缩放
+gui.yes_steve_model.config.texture_target_size.0=贴图目标尺寸: 原始分辨率(默认)
+gui.yes_steve_model.config.texture_target_size.256=贴图目标尺寸: 256(显存最省)
+gui.yes_steve_model.config.texture_target_size.512=贴图目标尺寸: 512
+gui.yes_steve_model.config.texture_target_size.1024=贴图目标尺寸: 1024
+gui.yes_steve_model.config.texture_target_size.2048=贴图目标尺寸: 2048(近原分辨率)
+gui.yes_steve_model.config.texture_vram_budget.0=贴图显存预算: 不限(关闭)
+gui.yes_steve_model.config.texture_vram_budget.128=贴图显存预算: 128 MB(紧凑)
+gui.yes_steve_model.config.texture_vram_budget.256=贴图显存预算: 256 MB(默认)
+gui.yes_steve_model.config.texture_vram_budget.512=贴图显存预算: 512 MB
+gui.yes_steve_model.config.texture_vram_budget.1024=贴图显存预算: 1024 MB
+gui.yes_steve_model.config.texture_vram_budget.2048=贴图显存预算: 2048 MB(宽松)
+gui.yes_steve_model.config.page=第 %d 页
+gui.yes_steve_model.config.gui_model_preview_refresh=预览刷新(-1=自动 0=静态 1-4=每N帧)
+gui.yes_steve_model.config.gui_model_preview_refresh.-1=预览刷新: 自动(整页共享预算, 默认)
+gui.yes_steve_model.config.gui_model_preview_refresh.0=预览刷新: 静态(无定时更新)
+gui.yes_steve_model.config.gui_model_preview_refresh.1=预览刷新: 每帧(流畅优先, 高GPU负载)
+gui.yes_steve_model.config.gui_model_preview_refresh.2=预览刷新: 每2帧
+gui.yes_steve_model.config.gui_model_preview_refresh.3=预览刷新: 每3帧
+gui.yes_steve_model.config.gui_model_preview_refresh.4=预览刷新: 每4帧(帧数优先)
+gui.yes_steve_model.config.hide_offhand_defoliage_axe=隐藏位于副手的治愈之斧
+gui.yes_steve_model.config.animation_speed_match=防滑步(步幅匹配)
+gui.yes_steve_model.config.animation_speed_match_base=防滑步基础倍率
 gui.yes_steve_model.disclaimer.text=感谢您使用本模组，请务必仔细阅读相关条款并同意本声明：\n\n\n1.本模组本体的下载使用完全免费。制作组也致力于向使用者提供安全、稳定的优质服务，但对模型保密性不作任何形式的保证。\n\n2.制作组不参与相关联的直接或间接的模型交易，产生的任何交易或纠纷，本制作组不承担任何连带责任。\n\n3.创作者享有所创作模型的版权，同时也承担相应的责任，与本制作组无关。所创作的任何内容也不代表本制作组的观点和看法。
 gui.yes_steve_model.disclaimer.read=我已经阅读并同意本使用条款
 gui.yes_steve_model.disclaimer.close=关闭
@@ -251,6 +292,7 @@ message.yes_steve_model.model.reload.error.no_arm_file=§6§l【§aYSM§6§l】�
 message.yes_steve_model.model.reload.error.no_texture_file=§6§l【§aYSM§6§l】§r'%s'§b 文件夹缺失材质文件！
 message.yes_steve_model.model.reload.error.texture_name=§6§l【§aYSM§6§l】§r'%s'§b 材质名称不正确，必须是§c§n小写英文字符，数字或者下划线
 message.yes_steve_model.model.reload.info=§6§l【§aYSM§6§l】§e所有的模型已经重置，耗时：%sms
+message.yes_steve_model.model.reload.ready=§6§l[§aYSM§6§l] §e服务端模型缓存已就绪(构建耗时 %s ms).
 message.yes_steve_model.model.set.success=§6§l[§aYSM§6§l] §r已将玩家 '%2$s' 的模型设置为 '%1$s'
 message.yes_steve_model.model.animation_roulette.play=§6§l【§aYSM§6§l】§r播放“%s”动画
 message.yes_steve_model.model.debug_animation.true=§6§l[§aYSM§6§l] §r动画调试模式启用
@@ -259,6 +301,12 @@ commands.yes_steve_model.export.success=§6§l[§aYSM§6§l] §e已保存为 §r
 commands.yes_steve_model.export.not_exist=§6§l[§aYSM§6§l] §r'%s' 不存在
 key.yes_steve_model.player_model.desc=打开玩家模型界面
 key.yes_steve_model.animation_roulette.desc=打开轮盘动画
+# 轮盘子菜单的深度上限(upstream 自己的 key;它的 AnimationRouletteScreen 把路径限制在 5 层).
+gui.yes_steve_model.roulette.too_long=轮盘页面菜单过长!
+# 轮盘移动锁定:键位 + 按钮的两种文案(upstream 自己的 key 与文案,zh_cn.json:16-17,407).
+key.yes_steve_model.lock_roulette.desc=锁定轮盘
+gui.yes_steve_model.roulette.lock_on=锁定：开
+gui.yes_steve_model.roulette.lock_off=锁定：关
 key.yes_steve_model.extra_animation.none=无
 key.yes_steve_model.extra_animation.0.desc=播放额外动画 0
 key.yes_steve_model.extra_animation.1.desc=播放额外动画 1
@@ -333,3 +381,199 @@ molang.yes_steve_model.ysm.elytra_rot_z.desc=玩家鞘翅的 Z 旋转角度
 molang.yes_steve_model.ysm.food_level.desc=返回玩家饥饿值
 molang.yes_steve_model.ysm.first_person_mod_hide.desc=当玩家安装 First Person Mod 且需要隐藏玩家头部时为 true，否者为 false
 gui.yes_steve_model.empty_models=暂无可用模型
+# 高版本本地资源(LocalAssetProvider): 配置的高版本游戏目录读不到时的一次性提示。
+# 换行用 {nl} 占位符。
+message.yes_steve_model.asset.invalid_game_path=高版本游戏路径无效: %s
+message.yes_steve_model.asset.not_a_directory=高版本游戏路径不是有效目录: %s
+message.yes_steve_model.asset.asset_version_missing=HighVersionAssetVersion 未设置{nl}可用索引: %s
+message.yes_steve_model.asset.index_not_found=找不到资产索引(HighVersionAssetVersion 可能不对) {nl}可用索引: %s
+message.yes_steve_model.asset.index_parse_failed=资产索引解析失败: %s
+message.yes_steve_model.asset.sounds_json_missing=资产索引缺少 sounds.json(可能不是官方高版本目录)
+message.yes_steve_model.asset.sounds_obj_missing=sounds.json 对象文件不存在
+message.yes_steve_model.asset.sounds_parse_failed=sounds.json 解析失败(可能不是官方高版本目录)
+message.yes_steve_model.asset.init_exception=高版本资源初始化异常: %s
+message.yes_steve_model.asset.jar_not_found=找不到版本 jar(HighVersionJarVersion 可能不对, 高版本粒子纹理将回退)
+message.yes_steve_model.asset.jar_open_failed=打开版本 jar 失败: %s
+message.yes_steve_model.asset.fallback_no_jar=未配置 HighVersionJarVersion, 将回退到 1.7.10 内置粒子
+message.yes_steve_model.asset.fallback_jar_not_open=版本 jar 未打开(HighVersionJarVersion='%s' 可能不对) , 将回退到 1.7.10 内置粒子
+message.yes_steve_model.asset.available_versions=可用版本: %s
+message.yes_steve_model.asset.load_failed=高版本资源加载失败(详见日志)
+message.yes_steve_model.asset.config_hint=(ysmu.cfg 高版本资源配置)
+gui.yes_steve_model.config.idle_asset_eviction=释放闲置模型几何(参考分支的空闲资源回收). 本移植分支尚未验证: 开启后可能释放本分支无法重建的几何, 除刻意与参考分支对比外请保持关闭.
+
+# Molang 调试叠加层 + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, 默认关闭)
+gui.yes_steve_model.debug.title=[Molang Debug]  %s 个变量
+gui.yes_steve_model.debug.search=[搜索]
+gui.yes_steve_model.debug.search_hint=输入...
+gui.yes_steve_model.debug.enter_search=[回车] 搜索
+gui.yes_steve_model.debug.help.scroll=滚动
+gui.yes_steve_model.debug.help.page=翻页
+gui.yes_steve_model.debug.help.close=关闭
+gui.yes_steve_model.debug.name=名称
+gui.yes_steve_model.debug.value=值
+gui.yes_steve_model.debug.search_mode_hint=[搜索模式] 回车=确认  Esc=取消
+gui.yes_steve_model.debug.type.variable=变量
+gui.yes_steve_model.debug.type.ctrl=ctrl
+gui.yes_steve_model.debug.type.ysm=ysm
+gui.yes_steve_model.debug.type.query=query
+gui.yes_steve_model.debug.type.math=math
+message.yes_steve_model.debug.value.true=真
+message.yes_steve_model.debug.value.false=假
+message.yes_steve_model.debug.value.nan=NaN
+message.yes_steve_model.debug.value.pos_inf=+Inf
+message.yes_steve_model.debug.value.neg_inf=-Inf
+message.yes_steve_model.debug.no_match=§e没有匹配的变量.
+message.yes_steve_model.debug.count=§a%s 个变量:
+message.yes_steve_model.debug.item=  §e%s§r = %s
+message.yes_steve_model.debug.single_unknown=§e%s§r = §7<未知>
+message.yes_steve_model.debug.single_value=§e%s§r = %s
+message.yes_steve_model.debug.matching=§a%s 个变量匹配 §e%s§r:
+message.yes_steve_model.debug.eval_usage=§c用法: /ysm debug eval <表达式>
+message.yes_steve_model.debug.eval_result=§a%s§r = %s
+message.yes_steve_model.debug.eval_error=§c求值出错: §f%s§c - %s
+message.yes_steve_model.debug.querying=§a正在查询 %s 个变量...
+message.yes_steve_model.debug.reset_done=§7Molang 变量已重置.
+message.yes_steve_model.debug.overlay_state_on=调试叠加层: §a开
+message.yes_steve_model.debug.overlay_state_off=调试叠加层: §7关
+message.yes_steve_model.debug.toggle_hint=§7游戏内按 %s§7 切换.
+message.yes_steve_model.debug.ysmclient.usage=用法: /ysmclient <load|reset>
+message.yes_steve_model.debug.ysmclient.unknown=未知子命令: %s. 可用: load | reset
+commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §r正在加载本地模型...
+commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §r本地模型: 新增 §e%s§r 个, 跳过 §e%s§r 个(已存在) , 失败 §e%s§r 个
+commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §r未找到本地模型.
+# 模型同步完成报告, 由 Config.SHOW_MODEL_LOAD_CHAT 门控(row 46). 参考分支的原文用 %d; 1.7.10 的
+# ChatComponentTranslation 只认 %s(ChatComponentTranslation.java:121-124 对其它的格式串直接抛异常),
+# 所以数字先格式化好再传, 这里用 %s.
+message.yes_steve_model.sync.complete=§6§l[§aYSM§6§l] §a客户端同步完成, 耗时 %s ms
+message.yes_steve_model.sync.complete_models=§6§l[§aYSM§6§l] §a模型加载完成: 成功 §e%s§a 个, 失败 §e%s§a 个(共 §e%s§a)
+
+# /ysm debug + /ysm reset - 服务端侧只做权限校验与转发, 执行在发起者自己的客户端 (YsmCommand.processDebug / processReset).
+# 服务端控制台也会读到这些文本, 所以保持纯文本、不使用 § 颜色码; 标点按仓库约定用 ASCII + 一个空格.
+commands.yes_steve_model.debug.usage=用法: /ysm debug <query|eval|overlay>
+commands.yes_steve_model.debug.query.usage=用法: /ysm debug query <变量> [变量2 ...]
+commands.yes_steve_model.debug.eval.usage=用法: /ysm debug eval <表达式>  (例如 math.floor(3.7) 或 math.clamp(5,0,2)+1)
+commands.yes_steve_model.debug.unknown=未知的 debug 子命令: %s. 可用: query | eval | overlay
+commands.yes_steve_model.reset.usage=用法: /ysm reset <玩家|@a|@p>  - 重置自己请用 /ysmclient reset.
+commands.yes_steve_model.reset.done=已重置 %s 个玩家的 Molang 变量.
+
+# /ysm help | play | setgamepath | buffer | welcome | sync - 命令面的其余子命令
+# (YsmCommand.processHelp / processPlay / processSetGamePath / processBuffer / processWelcome / processSync).
+# 与上一段同一命令族, 同样保持纯文本: 不使用 § 颜色码, 也不加 [YSM] 前缀, 因为服务端控制台也会读到这些文本.
+# 两个例外都是客户端打印、服务端不打印的文本, 因此沿用其它客户端消息键的前缀与颜色: 末尾的
+# message.yes_steve_model.buffer.* 组(ShowBufferInfo), 以及下面的
+# commands.yes_steve_model.welcome / .sound_hint / .help_hint 三条 - 它们由
+# client/ClientEventHandler.java 的进服欢迎代码在本地玩家聊天栏输出. 命令自己的回执
+# commands.yes_steve_model.welcome.on / .off 仍按纯文本(由服务端输出) . 标点按仓库约定用 ASCII + 一个空格.
+commands.yes_steve_model.play.no_data=无法播放动画: 找不到玩家数据.
+commands.yes_steve_model.play.not_found=当前模型没有动画: %s
+commands.yes_steve_model.play.done=播放: %s
+commands.yes_steve_model.setgamepath.usage=/ysm setgamepath <路径> [版本]
+commands.yes_steve_model.setgamepath.example=示例: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.setgamepath.none=尚未配置游戏路径.
+commands.yes_steve_model.setgamepath.current=当前游戏路径: %s
+commands.yes_steve_model.setgamepath.version=资产版本: %s
+commands.yes_steve_model.setgamepath.set=游戏路径已设为: %s
+commands.yes_steve_model.setgamepath.cleared=游戏路径已清除.
+commands.yes_steve_model.setgamepath.local_notice=更改仅对本地生效. 如需生效请重新连接或重载模型.
+commands.yes_steve_model.buffer.querying=正在查询缓冲信息...
+commands.yes_steve_model.welcome.on=欢迎消息已启用.
+commands.yes_steve_model.welcome.off=欢迎消息已关闭.
+# 进服欢迎文本(客户端侧, 见上面的块注释). %s 是 Tags.VERSION.
+commands.yes_steve_model.welcome=§6§l[§aYSMU§6§l] §r欢迎! 当前正在运行 §eysmu %s§r. 按 Alt+Y 打开模型选择页面
+commands.yes_steve_model.welcome.sound_hint=§6§l[§aYSMU§6§l] §7要启用缺失的音效(如三叉戟, 山羊角), 请使用 §e/ysm setgamepath <路径> [版本]§7 指定高版本 Minecraft 路径.
+commands.yes_steve_model.welcome.help_hint=§7点击 §a§n[点击这里]§r§7 或输入 §e/ysm help§7 查看全部指令.
+commands.yes_steve_model.sync.resync.started=正在从服务器重新同步模型...
+commands.yes_steve_model.sync.resync.cooldown=重新同步冷却中, 请在 %s 秒后重试.
+commands.yes_steve_model.sync.resync.disabled=本服务器已禁用重新同步.
+commands.yes_steve_model.sync.resync.failed=重新同步无法启动(同步协议未开启或尚未就绪).
+commands.yes_steve_model.help.title=指令帮助 - 输入 /ysm help <子命令> 查看详情
+commands.yes_steve_model.help.line.reload=  /ysm reload - 重建服务端模型缓存并重新同步所有玩家 (OP)
+commands.yes_steve_model.help.line.play=  /ysm play <动画名> - 播放当前模型的指定动画 (OP)
+commands.yes_steve_model.help.line.playsound=  /ysm playsound <名称> - 播放缓存的模型音效 (OP)
+commands.yes_steve_model.help.line.buffer=  /ysm buffer - 打印本客户端的缓冲与堆占用 (所有人)
+commands.yes_steve_model.help.line.setgamepath=  /ysm setgamepath <路径> [版本] - 设置本地高版本游戏路径 (所有人)
+commands.yes_steve_model.help.line.welcome=  /ysm welcome <on|off> - 开关进服欢迎消息 (所有人)
+commands.yes_steve_model.help.line.sync=  /ysm sync - 重新同步自己的模型 (所有人)
+commands.yes_steve_model.help.line.reset=  /ysm reset [<玩家|@a|@p>] - 重置 Molang 变量 (OP)
+commands.yes_steve_model.help.line.debug=  /ysm debug <query|overlay|eval> - 调试查询/覆盖层/求值 (ADMIN)
+commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset> - 加载本地模型 / 重置 Molang 变量 (所有人)
+commands.yes_steve_model.help.welcome_off=  点击 [/ysm welcome off] 或手动输入, 可关闭进服欢迎消息
+commands.yes_steve_model.help.unknown=未知子命令: %s. 输入 /ysm help 查看全部指令.
+commands.yes_steve_model.help.detail.title=指令: %s
+commands.yes_steve_model.help.detail.reload.usage=  语法: /ysm reload
+commands.yes_steve_model.help.detail.reload.desc=  重建服务端模型缓存并重新同步所有玩家. 示例: /ysm reload
+commands.yes_steve_model.help.detail.play.usage=  语法: /ysm play <动画名>
+commands.yes_steve_model.help.detail.play.desc=  播放当前模型的指定动画(以服务器为准). 示例: /ysm play wave
+commands.yes_steve_model.help.detail.playsound.usage=  语法: /ysm playsound <名称>
+commands.yes_steve_model.help.detail.playsound.desc=  播放内存中缓存的某个模型音效. 示例: /ysm playsound trident
+commands.yes_steve_model.help.detail.buffer.usage=  语法: /ysm buffer
+commands.yes_steve_model.help.detail.buffer.desc=  打印本客户端的直接缓冲/映射缓冲与堆占用. 示例: /ysm buffer
+commands.yes_steve_model.help.detail.setgamepath.usage=  语法: /ysm setgamepath <路径> [版本]
+commands.yes_steve_model.help.detail.setgamepath.desc=  指定高版本 Minecraft 目录以加载缺失的音效/材质. 仅客户端生效. 示例: /ysm setgamepath C:/Users/x/.minecraft 1.21
+commands.yes_steve_model.help.detail.welcome.usage=  语法: /ysm welcome <on|off>
+commands.yes_steve_model.help.detail.welcome.desc=  开关进服欢迎消息. 示例: /ysm welcome off
+commands.yes_steve_model.help.detail.sync.usage=  语法: /ysm sync
+commands.yes_steve_model.help.detail.sync.desc=  重新同步自己的模型(受 ResyncCooldownSeconds 限频). 示例: /ysm sync
+commands.yes_steve_model.help.detail.reset.usage=  语法: /ysm reset <玩家|@a|@p>
+commands.yes_steve_model.help.detail.reset.desc=  重置其他玩家的 Molang 变量状态(漫游变量, 帧间物理, v.* 残留) 回模型默认值, 无需重载模型. 重置自己请用 /ysmclient reset. 支持原版选择器. 示例: /ysm reset @a
+commands.yes_steve_model.help.detail.debug.usage=  语法: /ysm debug <query|overlay|eval> [args]
+commands.yes_steve_model.help.detail.debug.desc=  调试工具: 查询 Molang 变量, 开关调试覆盖层, 或对 Molang 表达式求值. 示例: /ysm debug query q.is_on_ground, /ysm debug eval math.floor(3.7)
+commands.yes_steve_model.help.detail.ysmclient.usage=  语法: /ysmclient <load|reset>
+commands.yes_steve_model.help.detail.ysmclient.desc=  纯客户端指令, 无需服务端. /ysmclient load 注册本地扫描到的模型(config/ysmu/custom + builtin), 仅自己可见; /ysmclient reset 将你的 Molang 变量重置回模型默认值, 无需重载模型. 示例: /ysmclient load
+
+# ShowBufferInfo (/ysm buffer): 由客户端半段在发起者自己的聊天栏输出, 因此沿用其它客户端消息键的前缀与颜色码.
+message.yes_steve_model.buffer.direct=§6§l[§aYSM§6§l]§r §e直接缓冲§r: 已用 §b%s MB§r (§7%s 个缓冲§r, 容量 §7%s MB§r)
+message.yes_steve_model.buffer.mapped=§6§l[§aYSM§6§l]§r §e映射缓冲§r: §b%s MB§r
+message.yes_steve_model.buffer.heap=§6§l[§aYSM§6§l]§r §e堆内存§r: §b%s MB§r / §b%s MB§r
+message.yes_steve_model.buffer.error=§6§l[§aYSM§6§l]§r §c读取缓冲信息失败: %s
+
+# HUD 纸娃娃渲染(ExtraPlayerConfigScreen + ClientEventHandler 的自拍通道). 参考分支的四条跟随模式与
+# FBO 缓存两条, 逐字照抄; `[M]` / `[C]` 是参考分支自己的按键提示. zh 按仓库约定用 ASCII 冒号.
+gui.yes_steve_model.hud_follow.vanilla=HUD 跟随模式: 原版 [M]
+gui.yes_steve_model.hud_follow.smooth=HUD 跟随模式: 原版 平滑 [M]
+gui.yes_steve_model.hud_follow.ysm=HUD 跟随模式: ysm [M]
+gui.yes_steve_model.hud_follow.ysm_smooth=HUD 跟随模式: ysm 平滑 [M]
+gui.yes_steve_model.hud_cache.on=HUD FBO 缓存: 开 [C]
+gui.yes_steve_model.hud_cache.off=HUD FBO 缓存: 关 [C]
+# SHOW_LOADING_PROGRESS 叠加层(row 45). 本仓知道模型名时 sync_model 后面会接模型名.
+gui.yes_steve_model.sync_model=加载中:
+gui.yes_steve_model.sync_waiting=等待服务器中...
+
+# /ysm auth(模型授权; api/ModelAuthorization). 模型是否受限只看它的生效来源是不是 auth 根(config/ysmu/auth)——
+# 没有开关(上游也没有: auth 根本身就是开关, 空目录等于谁都不受限). 回执是本次移植新增的
+# (上游 AuthCommand 成功时不回话), 两条 message.* 是服务端拒绝/重置玩家选择时玩家看到的内容.
+# 这些键全部由 ChatComponentTranslation 渲染, 所以只许用 `%s`: 1.7.10 对其它转换字符会抛异常
+# (ChatComponentTranslation.java:121-124), 而且是在绘制聊天栏时才抛, 表现为"整行不显示"而不是报错.
+# 参数顺序: add/remove 是 (模型, 人数), all/clear 只有 (人数), 与 command/YsmCommand 的发送点一致.
+commands.yes_steve_model.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
+commands.yes_steve_model.auth.add.done=已把模型 %s 授权给 %s 个玩家.
+commands.yes_steve_model.auth.remove.done=已撤销模型 %s 对 %s 个玩家的授权.
+commands.yes_steve_model.auth.all.done=已把全部已注册模型授权给 %s 个玩家.
+commands.yes_steve_model.auth.clear.done=已清空 %s 个玩家的全部模型授权.
+commands.yes_steve_model.auth.unknown_model=未知或有歧义的模型路径: %s
+message.yes_steve_model.auth.denied=§6§l【§aYSM§6§l】§r §c你没有使用模型 §e%s§r§c 的授权.
+message.yes_steve_model.auth.reset=§6§l【§aYSM§6§l】§r §c你的模型 §e%s§r§c 已被撤销授权, 已重置为服务端默认模型.
+commands.yes_steve_model.help.line.auth=  /ysm auth <玩家|@a|@p> <add|remove|all|clear> [模型] - 管理模型授权 (OP)
+commands.yes_steve_model.help.detail.auth.usage=  用法: /ysm auth <玩家|@a|@p> <add|remove> <模型>  |  /ysm auth <玩家|@a|@p> <all|clear>
+commands.yes_steve_model.help.detail.auth.desc=  管理玩家能选哪些模型. 只有生效来源是 auth 根(config/ysmu/auth)的模型受限, 内置与 custom 模型始终公开. add/remove 授权或撤销单个模型, all 授权全部已注册模型, clear 全部撤销. remove 会重置正在穿被撤销那个模型的玩家, clear 会重置正穿受限模型的玩家; 二者都不动被强制指定的选择. 模型参数写配置目录里的模型名(wine_fox/01_taisho_maid)或 ysmu:<id>. 示例: /ysm auth Notch add default, /ysm auth @a clear
+
+# /ysm model set(上游 command/sub/ModelCommand.set:41-98). 拒绝文案沿用上游(:61,72,86); 成功回执是本次移植新增的,
+# 因为上游成功时不回话. 只许用 `%s`(见 auth 组上方说明). 贴图参数写模型自己声明的贴图名(tab 补全会给出所选模型的
+# 名单; 上游的声明默认贴图写法 "-" 在这里不可用, 见 texture_dash_unavailable). 名字里带空格的模型在这个固定位置参数
+# 里写不出来(1.7.10 按空格切分), 请用它的 _name_<hex> id 写法.
+commands.yes_steve_model.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
+commands.yes_steve_model.model.set.unknown_model=未知或有歧义的模型路径: %s
+commands.yes_steve_model.model.set.unknown_texture=%s 没有名为 %s 的贴图
+commands.yes_steve_model.model.set.not_authorized=%s 没有使用 %s 的授权
+commands.yes_steve_model.model.set.texture_dash_unavailable=模型 %s 的贴图 "-" 需要它自己声明的默认贴图, 而服务端不保存该字段; 请显式写一个贴图名(tab 补全会列出).
+commands.yes_steve_model.model.set.done=已把模型 %s 设置给 %s 个玩家.
+commands.yes_steve_model.help.line.model=  /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false] - 强制指定玩家的模型 (OP)
+commands.yes_steve_model.help.detail.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
+commands.yes_steve_model.help.detail.model.desc=  强制把某个模型(及其某张贴图)指定给其他玩家; 第五个参数 true 表示同时忽略该模型的授权(等同上游的 ignore_auth). 受限且未授权的目标会被逐个报告并跳过, 选择器里其余玩家照常应用. 上游的 /ysm model reload/errors/disable 未移植(重建目录请用 /ysm reload). 示例: /ysm model set Notch default default.png true
+
+# 模型加载失败提示（上游 ModelFailureNotificationAggregator 的三种结果，加上本仓特有的"内置兜底不可用"）。
+# %s 是数量；1.7.10 的聊天键只接受 %s 一种占位符。
+message.yes_steve_model.model.failure.partial=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型有部分资源加载失败, 仍会继续渲染.
+message.yes_steve_model.model.failure.fallback=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型加载失败, 已改用默认模型.
+message.yes_steve_model.model.failure.stopped=§6§l【§aYSM§6§l】§r §e%s§r 个正在使用的模型加载失败, 无法渲染.
+message.yes_steve_model.model.failure.default_unavailable=§6§l【§aYSM§6§l】§r §c内置默认模型不可用, 玩家模型已交回原版渲染. 详情见日志.

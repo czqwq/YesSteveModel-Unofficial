@@ -161,6 +161,25 @@ public final class ClientRoamingStore {
         }
     }
 
+    /**
+     * Forgets one player's values for one model namespace, for a user-requested reset
+     * ({@code MolangReset.resetSelf} → {@code OpenYsmPlayerControllerRuntime#resetUserRoamingVars}): the values drop
+     * back to whatever the model's own {@code ysm.json} declares, which is not held here.
+     * <p>
+     * A change that was recorded locally and not yet reported is dropped too, so the value the user just reset is not
+     * sent to the server afterwards. Note that the server is the authority: a state it re-sends for this namespace
+     * fills the values back in - see the caller for that boundary.
+     */
+    public static void forget(UUID playerId, int modelKey) {
+        if (playerId != null) {
+            Map<Integer, Map<String, Double>> byKey = BY_PLAYER.get(playerId);
+            if (byKey != null) {
+                byKey.remove(modelKey);
+            }
+        }
+        PENDING.remove(modelKey);
+    }
+
     /** Whether a name is one the store accepts: a non-empty {@code v.} name within the length bound. */
     public static boolean isAcceptableName(@Nullable String variableName) {
         return ModelRoamingLimits.isAcceptableName(variableName);

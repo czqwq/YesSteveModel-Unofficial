@@ -74,7 +74,25 @@ public class S2CMolangSync implements IMessage {
                             if (eep == null) {
                                 return;
                             }
-                            PackUserFunctions.fireHook("sync", eep.getModelId(), message.values);
+                            // The renderer reuses one CustomPlayerEntity; the real entity is its stable
+                            // upstream animatable-owner equivalent (CustomPlayerRenderer:253-273).
+                            // A @sync script is evaluated outside any draw (this Runnable runs from the client
+                            // tick's scheduled-task queue), while query.* / ysm.* in the shared table are suppliers
+                            // closed over the entity of the last draw - a vehicle or an arrow, if one was drawn
+                            // after this player. A reader with no entity of its own therefore publishes the entity
+                            // its read is about for the duration of that read: this is the read point's counterpart
+                            // of upstream's "every read carries IContext.entity()"
+                            // (geckolib3/core/molang/context/IContext.java:23-24). See EntityQueryScope for the
+                            // mechanism and for the frame-end half that keeps the table clean between frames.
+                            try (com.fox.ysmu.client.audio.MolangSoundContext sound =
+                                com.fox.ysmu.client.audio.MolangSoundContext.push(entity, entity,
+                                    com.fox.ysmu.util.ModelIdUtil.getMainId(eep.getModelId()), null, false, true);
+                                com.fox.ysmu.client.animation.molang.EntityQueryScope.Publication queries =
+                                    com.fox.ysmu.client.animation.molang.EntityQueryScope.publishForRead(
+                                        software.bernie.geckolib3.resource.GeckoLibCache.getInstance().parser,
+                                        entity)) {
+                                PackUserFunctions.fireHook("sync", eep.getModelId(), message.values);
+                            }
                         } catch (Throwable failure) {
                             ysmu.LOG.warn("YSM molang-sync script failed", failure);
                         }
