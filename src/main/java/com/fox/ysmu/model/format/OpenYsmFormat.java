@@ -196,7 +196,14 @@ public final class OpenYsmFormat {
         }
     }
 
-    private static boolean isOpenYsmBinary(byte[] data) {
+    /**
+     * 是否是 OpenYSM 二进制 {@code .ysm} 容器的开头（BOM + "YSGP"）。
+     * <p>
+     * phase55：上传校验器（{@code model/upload/ModelFileValidator}）也要在解密之前按同一个前缀分流，
+     * 所以这里从 private 提为 public，而不是让校验器复制一份前缀常量。判定本身未变。
+     * </p>
+     */
+    public static boolean isOpenYsmBinary(byte[] data) {
         if (data == null || data.length < OPEN_YSM_PREFIX.length) {
             return false;
         }

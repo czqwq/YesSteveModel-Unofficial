@@ -9,9 +9,14 @@ import cpw.mods.fml.common.network.simpleimpl.MessageContext;
 import io.netty.buffer.ByteBuf;
 
 /**
- * N-09 (deprecated): id 12 is registered but has no sender anywhere in this repository. It belongs to the OpenYSM
- * upload feature, and {@code UploadManager} is an unwired placeholder. The id stays reserved and must NOT be
- * renumbered or reused; do not grow this handler into a real upload path here.
+ * 服务端到客户端（phase55）：一次分片模型上传已经结束，客户端可以离开"处理中"状态。LgeacyYSM 的
+ * {@code CompleteFeedback}（id 12）就是这个用途，本仓此前是"注册但没有发送方"的占位（N-09）。
+ *
+ * <p>发送方：{@code ServerModelUploadManager} 在每次上传终态（成功、内容被拒、写盘失败、权限拒绝、传输被丢弃）
+ * 发送一次。消费方：{@link UploadManager#finishUpload()}——复位上传状态，并让打开着的
+ * {@code ModelManageScreen} 重新拉取列表（它是异步上传，确认后立刻刷新会看不到刚上传的条目）。</p>
+ *
+ * <p>id 12 是线协议的一部分，不重编号、不复用；空载荷形状保持与 Lgeacy 相同。</p>
  */
 public class CompleteFeedback implements IMessage {
 

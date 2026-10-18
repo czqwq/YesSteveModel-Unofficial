@@ -192,6 +192,46 @@ class YsmFoundationTest {
         assertThrows(RuntimeException.class, () -> YsmCrypt.decrypt(tampered, key));
     }
 
+    // ---------------------------------------------------------------------------------------------------------------
+    // phase55: bounded decode overlays used by the /ysm upload validator. The unbounded overloads must keep their
+    // previous behaviour; only the new overloads refuse oversized output (a decompression bomb from network bytes).
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void theBoundedZstdDecodeRefusesAnOutputAboveItsLimit() throws Exception {
+        byte[] raw = fixtureBytes(64 * 1024);
+        byte[] compressed = YsmZstd.compress(raw);
+
+        assertArrayEquals(raw, YsmZstd.decompress(compressed.clone(), Long.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class, () -> YsmZstd.decompress(compressed.clone(), 1024));
+    }
+
+    @Test
+    void theBoundedYsmFileDecodeRefusesAnOutputAboveItsLimit() throws Exception {
+        byte[] raw = fixtureBytes(32 * 1024);
+        byte[] encrypted = YsmCrypt.encryptYsmFile(raw);
+
+        assertArrayEquals(raw, YsmCrypt.decryptYsmFile(encrypted, Long.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class, () -> YsmCrypt.decryptYsmFile(encrypted, 1024));
+    }
+
+    @Test
+    void aDeclaredLengthAboveTheRemainingBytesIsRefusedBeforeAllocation() {
+        // varint(0x40000000) = 1 GiB, declared against an otherwise empty buffer: the old readString/readByteArray
+        // allocated the array first and failed on the read, i.e. network bytes could make the server allocate 1 GiB.
+        io.netty.buffer.ByteBuf buf = Unpooled.buffer();
+        buf.writeByte(0x80);
+        buf.writeByte(0x80);
+        buf.writeByte(0x80);
+        buf.writeByte(0x80);
+        buf.writeByte(0x04);
+
+        try (YSMByteBuf reader = new YSMByteBuf(buf)) {
+            assertThrows(RuntimeException.class, reader::readString);
+            assertThrows(RuntimeException.class, reader::readByteArray);
+        }
+    }
+
     private static byte[] keyBytes(int seed) {
         byte[] key = new byte[56];
         for (int i = 0; i < key.length; i++) {

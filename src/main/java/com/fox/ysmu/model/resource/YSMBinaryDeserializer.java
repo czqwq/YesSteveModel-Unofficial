@@ -555,6 +555,16 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         geo.visibleBoundsWidth = reader.readFloat();
 
         int visibleBoundsOffsetSize = reader.readVarInt();
+        // phase55：这个 varint 来自（解压后的）字节流。旧实现直接分配 new float[声明值]，于是负值抛
+        // NegativeArraySizeException、超大值（如 2^30）会在读到任何数据之前就申请数 GB 内存。每个元素固定
+        // 4 字节，声明数量超过剩余字节数在任何合法流里都不可能成立，先比较再分配。
+        int remainingBytes = reader.getRawBuf()
+            .readableBytes();
+        if (visibleBoundsOffsetSize < 0 || (long) visibleBoundsOffsetSize * 4L > remainingBytes) {
+            throw new RuntimeException(
+                "Invalid visible bounds offset count " + visibleBoundsOffsetSize + " (" + remainingBytes
+                    + " byte(s) left)");
+        }
         geo.visibleBoundsOffset = new float[visibleBoundsOffsetSize];
         for (int i = 0; i < visibleBoundsOffsetSize; i++) {
             geo.visibleBoundsOffset[i] = reader.readFloat();

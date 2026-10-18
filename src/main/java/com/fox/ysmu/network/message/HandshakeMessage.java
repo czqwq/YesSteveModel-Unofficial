@@ -49,6 +49,12 @@ public class HandshakeMessage implements IMessage {
                     return null;
                 }
                 int protocol = message.protocol;
+                // phase55: a matching handshake is the one reliable "this player's client runs YSMU" signal. The
+                // /ysm upload command reads it to tell "the client will respond to the upload request" apart from
+                // "this is a vanilla client, so the local path cannot be read" - without waiting for a timeout.
+                if (protocol == NetworkHandler.NETWORK_PROTOCOL) {
+                    com.fox.ysmu.model.upload.ServerModelUploadManager.markClientHandshake(sender);
+                }
                 // Kick from the server thread; disconnect handling touches connection state, not the Netty pipeline.
                 DeferredWork.server(() -> {
                     if (protocol != NetworkHandler.NETWORK_PROTOCOL) {

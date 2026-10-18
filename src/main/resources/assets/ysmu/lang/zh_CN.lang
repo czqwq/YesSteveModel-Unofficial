@@ -73,6 +73,7 @@ gui.yes_steve_model.disclaimer.close=关闭
 gui.yes_steve_model.open_model_folder.open=打开模型文件夹
 gui.yes_steve_model.open_model_folder.tips=可在打开的目录下§4§l直接放置§r如下两种形式的模型文件：\n\n§2§n文件夹：§r内部应含有模型文件和材质；\n\n§2§nysm 文件：§r该格式为加密文件，无法编辑修改
 gui.yes_steve_model.model_manage.custom=自定义文件
+gui.yes_steve_model.model_manage.auth=授权文件
 gui.yes_steve_model.model_manage.action_info=操作信息
 gui.yes_steve_model.model_manage.upload=上传
 gui.yes_steve_model.model_manage.upload.statue=§6状态：%s
@@ -86,13 +87,18 @@ gui.yes_steve_model.model_manage.cancel=取消
 gui.yes_steve_model.model_manage.selected=§6选择：%s
 gui.yes_steve_model.model_manage.action=§6操作：%s
 gui.yes_steve_model.model_manage.open_file=打开文件选择器
+gui.yes_steve_model.model_manage.browse=浏览...
+gui.yes_steve_model.model_manage.empty=没有条目
 gui.yes_steve_model.model_manage.type.folder=文件夹
 gui.yes_steve_model.model_manage.type.zip=zip
 gui.yes_steve_model.model_manage.type.ysm=ysm
 gui.yes_steve_model.model_manage.file=§6文件：%s
 gui.yes_steve_model.model_manage.file.empty=空
-gui.yes_steve_model.model_manage.error.too_large=§c这个文件太大了，最大只能为32k！
-gui.yes_steve_model.model_manage.error.format_incorrect=§c文件类型不正确，必须为ysm或zip格式！
+gui.yes_steve_model.model_manage.error.too_large=§c这个文件太大了（上限：%s MiB）
+gui.yes_steve_model.model_manage.error.format_incorrect=§c文件类型不正确，必须是 .ysm 文件
+gui.yes_steve_model.model_manage.error.path_empty=§c请先选择一个 .ysm 文件
+gui.yes_steve_model.model_manage.error.read_failed=§c无法读取所选文件
+gui.yes_steve_model.model_manage.error.invalid=§c所选文件不是有效的 .ysm 模型
 gui.yes_steve_model.extra_player_render.tips=拖动绿色方块： 移动人物\n拖动蓝色方块： 缩放人物\n鼠标右键拖动： 旋转人物\nAlt R 键：重置人物\n\n【按下 Esc 键退出配置界面】
 gui.yes_steve_model.texture.button.animation_name=动画名称：%s
 gui.yes_steve_model.texture.button.attacked=被攻击
@@ -570,6 +576,37 @@ commands.yes_steve_model.model.set.done=已把模型 %s 设置给 %s 个玩家.
 commands.yes_steve_model.help.line.model=  /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false] - 强制指定玩家的模型 (OP)
 commands.yes_steve_model.help.detail.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
 commands.yes_steve_model.help.detail.model.desc=  强制把某个模型(及其某张贴图)指定给其他玩家; 第五个参数 true 表示同时忽略该模型的授权(等同上游的 ignore_auth). 受限且未授权的目标会被逐个报告并跳过, 选择器里其余玩家照常应用. 上游的 /ysm model reload/errors/disable 未移植(重建目录请用 /ysm reload). 示例: /ysm model set Notch default default.png true
+commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <路径> - 把一个本地 .ysm 模型文件装进 config/ysmu (OP)
+commands.yes_steve_model.help.line.manage=  /ysm manage - 打开服务端模型管理界面 (ADMIN)
+commands.yes_steve_model.help.detail.upload.usage=  用法: /ysm upload <auth|custom> <路径>
+commands.yes_steve_model.help.detail.upload.desc=  把一个本地 .ysm 模型文件装进 config/ysmu/auth(受限, 需要 /ysm auth 授权)或 config/ysmu/custom. 玩家执行时路径由该玩家自己的客户端读取并上传到服务端; 控制台执行时路径在服务端本机读取. 文件会在两端分别完整校验, 保存为 <名字>.ysm(重名时依次改名 <名字>_1.ysm, <名字>_2.ysm ...), 且不会自动重载 - 需要执行 /ysm reload 才会加载. 需要权限等级 4. 示例: /ysm upload custom F:/model.ysm
+commands.yes_steve_model.help.detail.manage.usage=  用法: /ysm manage
+commands.yes_steve_model.help.detail.manage.desc=  打开服务端模型管理界面: 列出 custom 与 auth 两个根, 管理员可以上传本地 .ysm 文件, 也可以删除/移动(custom↔auth)/重命名条目. 上传与 /ysm upload 走同一套完整模型校验; 删除/移动/重命名只会改动 config/ysmu/{custom,auth} 下的文件, 且绝不覆盖已存在的条目. 不会自动重载 - 需要执行 /ysm reload 才会生效. 需要权限等级 4, 仅玩家可用. 示例: /ysm manage
+
+# /ysm upload(phase55; 本仓新增子命令, 上游没有命令行上传). 每一行都是 ChatComponentTranslation 键, 只允许 `%s`
+# 占位符(1.7.10 对其它格式符在渲染聊天时抛异常). client.* 是上传方客户端自己显示的行; 其余是服务端回执
+# (玩家上传与控制台上传共用). 客户端读文件/校验失败时还会在上传方客户端日志打一条 ERROR([YSMU-UPLOAD]), 这是
+# 所有者的明确要求.
+commands.yes_steve_model.upload.usage=  用法: /ysm upload <auth|custom> <路径> - 安装一个本地 .ysm 模型文件 (OP)
+commands.yes_steve_model.upload.done=§6§l【§aYSM§6§l】§r §a已把模型文件保存为 §e%s§r§a. 执行 §e/ysm reload§r§a 后生效.
+commands.yes_steve_model.upload.invalid=§6§l【§aYSM§6§l】§r §c上传被拒绝: 该文件不是有效的 .ysm 模型 (%s). 详见服务端日志.
+commands.yes_steve_model.upload.read_failed=§6§l【§aYSM§6§l】§r §c上传失败: 无法读取执行侧本机路径 '%s'.
+commands.yes_steve_model.upload.too_large=§6§l【§aYSM§6§l】§r §c上传被拒绝: '%s' 超过 %s MiB 的上传上限.
+commands.yes_steve_model.upload.write_failed=§6§l【§aYSM§6§l】§r §c上传失败: 服务端无法把文件写入 config/ysmu.
+commands.yes_steve_model.upload.rejected=§6§l【§aYSM§6§l】§r §c上传被拒绝: 传输格式不合法.
+commands.yes_steve_model.upload.client_missing=§6§l【§aYSM§6§l】§r §c你的客户端没有完成 YSMU 握手, 无法替服务端读取本地文件. 请在客户端安装 YSMU 后重试.
+commands.yes_steve_model.upload.client.read_failed=§6§l【§aYSM§6§l】§r §c上传失败: 客户端无法读取或校验 '%s'. 详见客户端日志.
+commands.yes_steve_model.upload.client.too_large=§6§l【§aYSM§6§l】§r §c上传失败: '%s' 超过 %s MiB 的上传上限.
+commands.yes_steve_model.upload.client.invalid=§6§l【§aYSM§6§l】§r §c上传失败: '%s' 不是有效的 .ysm 模型 (%s).
+commands.yes_steve_model.upload.client.busy=§6§l【§aYSM§6§l】§r §e已有一个模型上传正在进行, 请等它结束后再试.
+
+# /ysm manage(phase55; LgeacyYSM 模型管理 GUI 的移植). 动作失败以聊天行回执; 成功不回话, 列表刷新即证据.
+# %s 是条目名; 聊天键只允许 %s(1.7.10 的 ChatComponentTranslation 在渲染聊天时对其它的格式符抛异常).
+commands.yes_steve_model.manage.error.not_found=§6§l【§aYSM§6§l】§r §c没有这个模型条目: %s
+commands.yes_steve_model.manage.error.dest_exists=§6§l【§aYSM§6§l】§r §c目标已存在: %s
+commands.yes_steve_model.manage.error.invalid_name=§6§l【§aYSM§6§l】§r §c模型条目名不合法: %s
+commands.yes_steve_model.manage.error.unsupported=§6§l【§aYSM§6§l】§r §c只能管理顶层文件夹与 .ysm 文件: %s
+commands.yes_steve_model.manage.error.io_error=§6§l【§aYSM§6§l】§r §c文件操作失败: %s
 
 # 模型加载失败提示（上游 ModelFailureNotificationAggregator 的三种结果，加上本仓特有的"内置兜底不可用"）。
 # %s 是数量；1.7.10 的聊天键只接受 %s 一种占位符。

@@ -51,7 +51,44 @@ public final class YesModelUtils {
     private static final int AES_IV_LENGTH = 16;
 
     public static Map<String, byte[]> input(File ysmFile) throws IOException {
-        byte[] data = FileUtils.readFileToByteArray(ysmFile);
+        // 默认路径（磁盘上的 .ysm 扫描）不设上限，与加入上限重载之前的行为逐字节一致。
+        return input(FileUtils.readFileToByteArray(ysmFile), ysmFile.toString(), Long.MAX_VALUE, Integer.MAX_VALUE);
+    }
+
+    /**
+     * 从**已经在内存里的** .ysm 容器字节解出条目表，并给解压输出与条目数设上限。
+     * <p>
+     * phase55：网络上传的字节不能直接交给无限解压/无限条目数——deflate 的压缩比没有上界，一个 64 MB 的
+     * 上传可以在服务端解出数 GB。上传校验走这个重载；磁盘扫描仍走 {@link #input(File)}（无限上限），
+     * 所以既有模型库的行为不变。
+     * </p>
+     * <p>单个条目损坏时跳过并继续（与磁盘扫描的容忍一致）；上传校验请用 {@link #inputStrict}。</p>
+     *
+     * @param sourceLabel 只用于日志的来源名（文件路径或"网络上传"）
+     * @param maxDecompressedBytes 所有条目解压后字节数的总预算
+     * @param maxEntries 条目数上限
+     */
+    public static Map<String, byte[]> input(byte[] data, String sourceLabel, long maxDecompressedBytes,
+        int maxEntries) throws IOException {
+        return inputInternal(data, sourceLabel, maxDecompressedBytes, maxEntries, false);
+    }
+
+    /**
+     * 与 {@link #input(byte[], String, long, int)} 相同，但任何条目解码失败（含超出解压预算）都让整份数据失败，
+     * 而不是跳过该条目继续。
+     * <p>
+     * phase55 的防注入要求：lenient 版本对每个损坏条目只跳过，攻击者可以在一份上传里塞上千个解压炸弹条目，
+     * 每个都先解压到预算上限再被丢弃，形成 CPU 放大。上传校验必须"第一个坏条目就整体拒绝"。
+     * 合法的磁盘模型仍走 lenient 路径，行为不变。
+     * </p>
+     */
+    public static Map<String, byte[]> inputStrict(byte[] data, String sourceLabel, long maxDecompressedBytes,
+        int maxEntries) throws IOException {
+        return inputInternal(data, sourceLabel, maxDecompressedBytes, maxEntries, true);
+    }
+
+    private static Map<String, byte[]> inputInternal(byte[] data, String sourceLabel, long maxDecompressedBytes,
+        int maxEntries, boolean strict) throws IOException {
         // M-18：旧实现无条件 bytes2Int(data, 0)/bytes2Int(data, 4)：0~7 字节的损坏/半截文件会抛
         // ArrayIndexOutOfBoundsException，而该异常不被本方法声明、也不被 YsmFormat.cacheAllModels 的
         // catch (IOException) 捕获，会一路冒泡打断 ServerModelManager.reloadPacks()（启动崩溃 / `/ysm reload`
@@ -59,7 +96,7 @@ public final class YesModelUtils {
         if (data.length < CONTAINER_HEADER_SIZE) {
             ysmu.LOG.warn(
                 "Ignoring {} as a YSGP container: only {} byte(s), the {} byte header is incomplete",
-                ysmFile,
+                sourceLabel,
                 data.length,
                 CONTAINER_HEADER_SIZE);
             return Collections.emptyMap();
@@ -81,22 +118,34 @@ public final class YesModelUtils {
 
         Map<String, byte[]> outputs = Maps.newHashMap();
         ByteArrayInputStream tmp = new ByteArrayInputStream(modelFilesData);
+        long remainingBudget = maxDecompressedBytes;
         while (tmp.available() > 0) {
+            if (outputs.size() >= maxEntries) {
+                if (strict) {
+                    throw new IOException("The YSGP container declares more than " + maxEntries + " entries");
+                }
+                ysmu.LOG.warn("Ignoring {}: it declares more than {} entries", sourceLabel, maxEntries);
+                break;
+            }
             int remainingBefore = tmp.available();
             try {
                 Pair<String, byte[]> ysmFileData;
                 if (version == VERSION) {
-                    ysmFileData = ysmToFile(tmp);
+                    ysmFileData = ysmToFile(tmp, remainingBudget);
                 } else {
-                    ysmFileData = ysmToFileNew(tmp);
+                    ysmFileData = ysmToFileNew(tmp, remainingBudget);
                 }
+                remainingBudget -= ysmFileData.right().length;
                 outputs.put(ysmFileData.left(), ysmFileData.right());
             } catch (GeneralSecurityException | DataFormatException | RuntimeException e) {
+                if (strict) {
+                    throw new IOException("A YSGP container entry could not be decoded: " + e, e);
+                }
                 // 单个条目损坏（截断/负长度/解密失败/解压失败）只跳过该条目；必须确认流有进展，
                 // 否则“失败但没消费任何字节”会让这个 while 变成死循环。
                 ysmu.LOG.warn(
                     "Skipping malformed entry in {} ({} byte(s) left to read): {}",
-                    ysmFile,
+                    sourceLabel,
                     remainingBefore,
                     e.toString());
                 if (tmp.available() >= remainingBefore) {
@@ -108,7 +157,7 @@ public final class YesModelUtils {
     }
 
     @NotNull
-    private static Pair<String, byte[]> ysmToFile(ByteArrayInputStream tmp)
+    private static Pair<String, byte[]> ysmToFile(ByteArrayInputStream tmp, long maxDecompressedBytes)
         throws IOException, GeneralSecurityException, DataFormatException {
         String name = readString(tmp);
         int size = readInt(tmp);
@@ -121,13 +170,13 @@ public final class YesModelUtils {
         byte[] fileData = readExact(tmp, size, "encrypted file body");
 
         ByteArrayOutputStream decryptData = AESUtil.decrypt(key, iv, fileData);
-        byte[] rawData = DeflateUtil.decompressBytes(decryptData.toByteArray());
+        byte[] rawData = DeflateUtil.decompressBytes(decryptData.toByteArray(), maxDecompressedBytes);
 
         return Pair.of(name, rawData);
     }
 
     @NotNull
-    private static Pair<String, byte[]> ysmToFileNew(ByteArrayInputStream tmp)
+    private static Pair<String, byte[]> ysmToFileNew(ByteArrayInputStream tmp, long maxDecompressedBytes)
         throws IOException, GeneralSecurityException, DataFormatException {
         String fileName = readBase64String(tmp);
         int fileSize = readInt(tmp);
@@ -144,7 +193,7 @@ public final class YesModelUtils {
             .toByteArray();
         SecretKey key = AESUtil.getKey(decryptSecretKey);
         ByteArrayOutputStream decryptData = AESUtil.decrypt(key, iv, fileData);
-        byte[] rawData = DeflateUtil.decompressBytes(decryptData.toByteArray());
+        byte[] rawData = DeflateUtil.decompressBytes(decryptData.toByteArray(), maxDecompressedBytes);
 
         return Pair.of(fileName, rawData);
     }

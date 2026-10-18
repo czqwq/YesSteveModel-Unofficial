@@ -135,6 +135,9 @@ public class CommonEventHandler {
         if (event.player instanceof EntityPlayerMP) {
             LAST_MOTION_STATES.remove(event.player.getUniqueID());
             OpenYsmModelSyncServer.clear(event.player.getUniqueID());
+            // phase55: the "client runs YSMU" handshake record and any half-received /ysm upload belong to the
+            // session that just ended; a relog has to perform a fresh handshake before it can upload again.
+            com.fox.ysmu.model.upload.ServerModelUploadManager.forgetPlayer(event.player.getUniqueID());
             // The /ysm sync rate limit is per session, not per UUID for the lifetime of the server: the reference
             // drops a player's cooldown from this same logout handler
             // (network/sync/OpenYsmModelSyncServer.java:112-117 is the method, called from its CommonEventHandler), so
@@ -202,6 +205,8 @@ public class CommonEventHandler {
     }
 
     private static int npcPruneTicker;
+    /** phase55: /ysm upload transfers that stopped receiving chunks are dropped after a two-minute TTL. */
+    private static int uploadSweepTicker;
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
@@ -209,7 +214,16 @@ public class CommonEventHandler {
             return;
         }
         MinecraftServer server = MinecraftServer.getServer();
-        if (server == null || ++npcPruneTicker < 1200) {
+        if (server == null) {
+            return;
+        }
+        // phase55: every 200 ticks (10 s) drop upload accumulators whose client stopped sending; the TTL itself is
+        // two minutes, so this only bounds how long a dead accumulator is held.
+        if (++uploadSweepTicker >= 200) {
+            uploadSweepTicker = 0;
+            com.fox.ysmu.model.upload.ServerModelUploadManager.sweepStale(System.currentTimeMillis());
+        }
+        if (++npcPruneTicker < 1200) {
             return;
         }
         npcPruneTicker = 0;

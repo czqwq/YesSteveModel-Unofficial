@@ -703,6 +703,10 @@ public class ClientEventHandler {
      */
     @SubscribeEvent
     public static void onClientDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
+        // phase55: a /ysm upload in flight belongs to the connection that just ended; the background task notices
+        // the missing net handler on its next chunk, and this clears the "uploading" lock right away (the R-02
+        // requirement recorded on client/upload/UploadManager).
+        com.fox.ysmu.client.upload.UploadManager.reset();
         clearClientRuntimeState();
     }
 

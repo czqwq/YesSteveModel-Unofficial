@@ -67,9 +67,20 @@ public final class NetworkHandler {
      * command - FML disconnects that peer on the unknown discriminator, so the handshake has to reject the pair first,
      * exactly as versions 3, 4, 6 and 7 do. Nothing existing is renumbered or reused; 37 is the first free clientbound
      * id above the highest in use (36, {@code S2CExecuteRouletteExpression}).</li>
+     * <li>9: the two {@code /ysm upload} packets of {@code .agent/phase55-model-upload-command.md}, clientbound id 38
+     * ({@code S2CRequestModelUpload}) and serverbound id 102 ({@code C2SUploadModelFile}). A player's client has to
+     * read a local path the server cannot see; both directions are new ids, so an older peer would hit FML's
+     * unknown-discriminator path on an ordinary command (or on the response to it) - the handshake has to reject the
+     * pair rather than let it decode. Nothing existing is renumbered or reused: 38 is above the highest clientbound
+     * id in use (37) and 102 is above the highest serverbound id (101).</li>
+     * <li>10: the {@code /ysm manage} GUI layer of the same phase, ported from LgeacyYSM: clientbound id 10
+     * ({@code RequestServerModelInfo}, reserved-but-unused until now and finally sent), serverbound id 103
+     * ({@code RefreshModelManage}) and 104 ({@code HandleFile}). Id 10 was previously unregistered, so an old peer
+     * cannot decode it, and 103/104 are new; the handshake has to reject the pair. Nothing existing is renumbered or
+     * reused.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 8;
+    public static final int NETWORK_PROTOCOL = 10;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -108,6 +119,19 @@ public final class NetworkHandler {
     // Version 7: full roulette programs use their own self-authorized channel, not ysm.sync.
     // Unknown FML discriminators disconnect old peers, so handshake rejects older protocol versions.
     private static final int SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION = 101;
+    /**
+     * phase55: the {@code /ysm upload} half. A player's client reads the local path and sends the file back in
+     * chunks; see {@link com.fox.ysmu.network.message.C2SUploadModelFile}. Appended above 101; nothing existing is
+     * renumbered. The clientbound request is {@link #CLIENTBOUND_REQUEST_MODEL_UPLOAD}.
+     */
+    private static final int SERVERBOUND_UPLOAD_MODEL_FILE = 102;
+    /**
+     * phase55 (the {@code /ysm manage} GUI): serverbound id 103 asks the server to re-list the two model roots
+     * ({@link com.fox.ysmu.network.message.RefreshModelManage}), and id 104 performs one delete/move/rename
+     * ({@link com.fox.ysmu.network.message.HandleFile}). Both are appended above 102; nothing existing is renumbered.
+     */
+    private static final int SERVERBOUND_REFRESH_MODEL_MANAGE = 103;
+    private static final int SERVERBOUND_HANDLE_FILE = 104;
     private static final int CLIENTBOUND_EXECUTE_ROULETTE_EXPRESSION = 36;
     private static final int SERVERBOUND_ROAMING_CHANGES = 99;
     private static final int CLIENTBOUND_ROAMING_STATE = 20;
@@ -118,16 +142,17 @@ public final class NetworkHandler {
     private static final int CLIENTBOUND_SYNC_MODEL_INFO = 4;
     private static final int CLIENTBOUND_SYNC_STAR_MODELS = 8;
     /**
-     * N-09 (deprecated): id 10 has no sender anywhere in this repository (the model-management GUI it belonged
-     * to was never wired on 1.7.10). The id stays reserved and must NOT be renumbered or reused; the handler is a
-     * documented no-op. Re-wiring it needs a sender plus a client screen, which is a new feature, not a fix.
+     * phase55: id 10 was the N-09 placeholder ("no sender; the model-management GUI was never wired on 1.7.10").
+     * The owner has now asked for that GUI, so it is live again: sent by {@code /ysm manage} and by
+     * {@link com.fox.ysmu.network.message.RefreshModelManage}'s handler, received by
+     * {@code client/gui/ModelManageScreen}. The id is unchanged (ids are never renumbered); only its status changed.
      */
     private static final int CLIENTBOUND_REQUEST_SERVER_MODEL_INFO = 10;
     private static final int CLIENTBOUND_SYNC_PLAYER_MOTION_STATE = 11;
     /**
-     * N-09 (deprecated): id 12 has no sender either; {@code UploadManager} is an unwired placeholder for
-     * OpenYSM's upload feature. Keep the id reserved, do NOT renumber or reuse it, and do not grow the handler
-     * into a real upload path here (see the ExecPlan's Decision Log).
+     * phase55: id 12 finally gets a sender - the server sends it to the uploading player when a chunked model upload
+     * finishes (success or rejection), which is what lets the manage GUI leave its "processing" state and refresh.
+     * Its client handler remains what it always was: {@code UploadManager.finishUpload()}.
      */
     private static final int CLIENTBOUND_COMPLETE_FEEDBACK = 12;
     private static final int CLIENTBOUND_SEND_MODEL_PASSWORD = 13;
@@ -213,6 +238,12 @@ public final class NetworkHandler {
      * client half is {@link com.fox.ysmu.client.ClientModelAccess}.
      */
     private static final int CLIENTBOUND_MODEL_GRANTS = 37;
+    /**
+     * phase55: server to client, "read this local path and upload the file back". Sent by
+     * {@code /ysm upload} for a player sender, whose client owns the path the server cannot read. Appended above the
+     * highest clientbound id in use (37); see {@link #NETWORK_PROTOCOL} version 9 for the protocol bump.
+     */
+    private static final int CLIENTBOUND_REQUEST_MODEL_UPLOAD = 38;
 
     public static void init() {
         registerServerboundMessages();
@@ -277,6 +308,25 @@ public final class NetworkHandler {
             C2SSubmitRouletteExpression.class,
             SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION,
             Side.SERVER);
+        // phase55: one upload chunk. The permission-4 re-check lives in ServerModelUploadManager.acceptChunk, not in
+        // the command, because the command is only one of the two ways to reach this path.
+        CHANNEL.registerMessage(
+            C2SUploadModelFile.Handler.class,
+            C2SUploadModelFile.class,
+            SERVERBOUND_UPLOAD_MODEL_FILE,
+            Side.SERVER);
+        // phase55 (/ysm manage GUI): re-list the model roots / one delete-move-rename. Both re-check permission 4 in
+        // their handlers (a client can send them without going through /ysm manage).
+        CHANNEL.registerMessage(
+            RefreshModelManage.Handler.class,
+            RefreshModelManage.class,
+            SERVERBOUND_REFRESH_MODEL_MANAGE,
+            Side.SERVER);
+        CHANNEL.registerMessage(
+            HandleFile.Handler.class,
+            HandleFile.class,
+            SERVERBOUND_HANDLE_FILE,
+            Side.SERVER);
     }
 
     private static void registerClientboundMessages() {
@@ -310,17 +360,20 @@ public final class NetworkHandler {
             SyncStarModels.class,
             CLIENTBOUND_SYNC_STAR_MODELS,
             Side.CLIENT);
-        // CU-19 (network half): RequestServerModelInfo (id 10) is unregistered here on purpose. It had no sender
-        // anywhere in the repository (its model-management GUI was never wired on 1.7.10) and t29 removed the last
-        // trace on the client (ModelInfoButton). The id constant above stays reserved with its deprecation note:
-        // ids are part of the wire protocol and must never be renumbered or reused.
+        // phase55: the model-manage list (id 10, the CU-19 reserved slot, live again for the /ysm manage GUI). The
+        // handler opens the client's ModelManageScreen on the client thread.
+        CHANNEL.registerMessage(
+            RequestServerModelInfo.Handler.class,
+            RequestServerModelInfo.class,
+            CLIENTBOUND_REQUEST_SERVER_MODEL_INFO,
+            Side.CLIENT);
         CHANNEL.registerMessage(
             SyncPlayerMotionState.Handler.class,
             SyncPlayerMotionState.class,
             CLIENTBOUND_SYNC_PLAYER_MOTION_STATE,
             Side.CLIENT);
-        // N-09 (deprecated, id 12 kept as-is): registered for wire compatibility but never sent - see the id
-        // constant above. UploadManager stays an unwired placeholder.
+        // phase55: id 12 is what resets the model-manage GUI's upload state; the sender is
+        // ServerModelUploadManager (see the id constant above).
         CHANNEL.registerMessage(
             CompleteFeedback.Handler.class,
             CompleteFeedback.class,
@@ -406,6 +459,12 @@ public final class NetworkHandler {
             S2CModelGrants.Handler.class,
             S2CModelGrants.class,
             CLIENTBOUND_MODEL_GRANTS,
+            Side.CLIENT);
+        // phase55: the /ysm upload request. See CLIENTBOUND_REQUEST_MODEL_UPLOAD above.
+        CHANNEL.registerMessage(
+            S2CRequestModelUpload.Handler.class,
+            S2CRequestModelUpload.class,
+            CLIENTBOUND_REQUEST_MODEL_UPLOAD,
             Side.CLIENT);
     }
 
