@@ -473,11 +473,13 @@ class YsmCommandTest {
 
     @Test
     void everyPortedCommandPacketIsClientboundSoTheServerIsTheSender() throws Exception {
-        // Direction, read off each handler rather than assumed: every one of these guards on
-        // `if (ctx.side != Side.CLIENT) return null;` (see the sources cited in the ExecPlan), so only a server can
-        // have sent one - which is why YsmCommand is its sender. The check reads the compiled handler's constant pool:
-        // a class that never mentions the Side enum, or never mentions its CLIENT constant, cannot carry that guard.
-        // Pinned here because reversing a registration's side would silently make these subcommands no-ops.
+        // Direction, read off each handler rather than assumed: these handlers guard on the receiving side, so only
+        // a server can have sent one - which is why YsmCommand is its sender. The check reads the compiled handler's
+        // constant pool. The guard polarity differs: most use `if (ctx.side != Side.CLIENT) return null;`;
+        // RequestServerModelInfo uses the early-return form `if (ctx.side == Side.SERVER) return null;` (it opens a
+        // client GUI, and doing the server check first reads more directly). Both shapes mean the server never acts
+        // on the packet. Pinned here because reversing a registration's side would silently make these subcommands
+        // no-ops.
         for (Class<?> packet : new Class<?>[] { PacketQueryMolangVar.class, PacketEvalMolang.class,
             PacketResetMolang.class, S2CSetDebugOverlay.class, SyncGamePath.class, SetWelcomeConfig.class,
             ShowBufferInfo.class, S2CRequestModelUpload.class, RequestServerModelInfo.class }) {
@@ -496,9 +498,10 @@ class YsmCommandTest {
             assertTrue(
                 pool.contains("cpw/mods/fml/relauncher/Side"),
                 handler + " must still name the Side enum, i.e. still guard on the receiving side");
+            String expectedSide = packet == RequestServerModelInfo.class ? "SERVER" : "CLIENT";
             assertTrue(
-                pool.contains("CLIENT"),
-                handler + " must still reference Side.CLIENT, i.e. still be answered on the client");
+                pool.contains(expectedSide),
+                handler + " must still reference Side." + expectedSide + ", i.e. still guard on that side");
         }
     }
 

@@ -147,8 +147,8 @@ class ModelManageProtocolTest {
             mentions(RefreshModelManage.Handler.class, "SERVER"),
             "RefreshModelManage must guard on Side.SERVER");
         assertTrue(
-            mentions(RequestServerModelInfo.Handler.class, "CLIENT"),
-            "RequestServerModelInfo must guard on Side.CLIENT (it opens a client screen)");
+            mentions(RequestServerModelInfo.Handler.class, "SERVER"),
+            "RequestServerModelInfo must early-return on Side.SERVER (it opens a client screen)");
     }
 
     /**
@@ -156,8 +156,8 @@ class ModelManageProtocolTest {
      * {@code SideTransformer} 拒绝在 SERVER 侧加载 {@code net.minecraft.client.*}。用一个拒绝客户端类的
      * 类加载器重新定义 Handler 并实例化它，模拟"服务端没有客户端类"的环境；若 handler 方法体里又出现客户端
      * 类型（如直接 {@code new ModelManageScreen} 再传给 {@code displayGuiScreen(GuiScreen)}），JVM 校验会去
-     * 加载父类链并在这个测试里失败。客户端代码现在关在 {@code RequestServerModelInfo.openScreen} 的
-     * {@code @SideOnly(CLIENT)} 方法里，服务端侧它会被 SideTransformer 删除。
+     * 加载父类链并在这个测试里失败。客户端代码现在在 {@code ModelManageScreen.openFromPacket} 里，handler
+     * 只经 {@code DeferredWork.client} 调用它。
      */
     @Test
     void theClientboundHandlerStillInstantiatesWhenClientClassesAreUnavailable() throws Exception {
