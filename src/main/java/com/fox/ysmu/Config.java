@@ -141,6 +141,18 @@ public class Config {
      */
     public static boolean ENABLE_OPEN_YSM_SYNC_PROTOCOL = true;
 
+    // Model upload config (phase55: the /ysm upload command is port-specific, upstream has no command-line upload)
+    /**
+     * Largest {@code .ysm} file {@code /ysm upload} accepts, in MiB (1-512, default 64).
+     * <p>
+     * A client checks its local file against this value before sending (so an oversized file is refused without
+     * using bandwidth), and the server checks the declared upload length against it again before allocating the
+     * receive buffer - the client-side value is never trusted. The model validator's decompression budget is derived
+     * from this number, so raising it also raises the memory a single upload may consume while it is validated.
+     * </p>
+     */
+    public static int MAX_MODEL_UPLOAD_MB = 64;
+
     // Local asset config
     /** Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft) */
     public static String HIGH_VERSION_GAME_PATH = "";
@@ -435,6 +447,7 @@ public class Config {
 
         // OpenYSM model sync config values (port-specific: the port's own sync channel switch)
         ENABLE_OPEN_YSM_SYNC_PROTOCOL = syncBoolean("EnableOpenYsmSyncProtocol", "openysm_sync", ENABLE_OPEN_YSM_SYNC_PROTOCOL, "Whether to use the appended OpenYSM hash/cache/chunk sync path before legacy fallback", load);
+        MAX_MODEL_UPLOAD_MB = syncInt("MaxModelUploadMb", "openysm_sync", MAX_MODEL_UPLOAD_MB, "Largest .ysm file /ysm upload accepts, in MiB (1-512). The client checks its local file against this value and the server re-checks the declared upload length before allocating the receive buffer; the validator's decompression budget is derived from it.", 1, 512, load);
 
         // Local asset config values
         HIGH_VERSION_GAME_PATH = syncString("HighVersionGamePath", "local_assets", HIGH_VERSION_GAME_PATH, "Path to a high-version Minecraft game directory (e.g. C:/Users/x/AppData/Roaming/.minecraft). YSMU reads sounds.json and OGG files from here to play high-version sounds that Et-Futurum doesn't cover.", load);

@@ -16,8 +16,16 @@ public class YsmZstd {
      * {@code wash} 抛 {@link IllegalArgumentException}。
      */
     public static byte[] decompress(byte[] rawData) throws IOException {
+        return decompress(rawData, Long.MAX_VALUE);
+    }
+
+    /**
+     * 与 {@link #decompress(byte[])} 相同，但给解压输出设上限（phase55：上传校验的防解压炸弹手段）。
+     * 默认路径（模型缓存/磁盘模型读取）仍用无限上限，只有网络上传的校验走这里。
+     */
+    public static byte[] decompress(byte[] rawData, long maxOutputBytes) throws IOException {
         byte[] data = YsmZstd.wash(rawData == null ? null : rawData.clone());
-        return ZstdUtil.decompress(data);
+        return ZstdUtil.decompress(data, maxOutputBytes);
     }
 
     public static byte[] compress(byte[] rawData) {

@@ -253,6 +253,14 @@ public class YsmCrypt {
     }
 
     public static byte[] decryptYsmFile(byte[] fileData) throws Exception {
+        return decryptYsmFile(fileData, Long.MAX_VALUE);
+    }
+
+    /**
+     * 与 {@link #decryptYsmFile(byte[])} 相同，但给解压输出设上限（phase55：上传校验的防解压炸弹手段）。
+     * 默认路径（磁盘上的 .ysm 扫描）仍用无限上限；只有网络上传的校验传入有限值。
+     */
+    public static byte[] decryptYsmFile(byte[] fileData, long maxDecompressedBytes) throws Exception {
         if (fileData.length < 8 + 24 + 32 + 8) {
             throw new RuntimeException("Invalid YSM file: File too short.");
         }
@@ -294,7 +302,7 @@ public class YsmCrypt {
         int zstdOffset = 2 + n;
         byte[] bytes = Arrays.copyOfRange(xorredData, zstdOffset, xorredData.length);
 
-        return YsmZstd.decompress(bytes);
+        return YsmZstd.decompress(bytes, maxDecompressedBytes);
     }
 
     private static byte[] modifiedChaChaDecrypt(byte[] data, byte[] key, byte[] iv, long seed) throws Exception {

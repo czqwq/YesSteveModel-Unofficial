@@ -25,9 +25,12 @@ import net.minecraft.world.World;
 import org.junit.jupiter.api.Test;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.model.upload.ModelUploadTarget;
 import com.fox.ysmu.network.message.PacketEvalMolang;
 import com.fox.ysmu.network.message.PacketQueryMolangVar;
 import com.fox.ysmu.network.message.PacketResetMolang;
+import com.fox.ysmu.network.message.RequestServerModelInfo;
+import com.fox.ysmu.network.message.S2CRequestModelUpload;
 import com.fox.ysmu.network.message.S2CSetDebugOverlay;
 import com.fox.ysmu.network.message.SetWelcomeConfig;
 import com.fox.ysmu.network.message.ShowBufferInfo;
@@ -355,11 +358,12 @@ class YsmCommandTest {
         List<?> all = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "" });
         // The reference's own list and order (reference YsmCommand:44-45), plus /ysm auth and /ysm model - the two
         // subcommands that do not come from the reference tree but from upstream's RootCommand
-        // (RootCommand.java:16-24) and are therefore offered here too. Every name is asserted individually, not just
-        // counted, so a renamed or dropped subcommand cannot pass as "same size".
-        assertEquals(12, all.size());
+        // (RootCommand.java:16-24) - and /ysm upload plus /ysm manage, this port's own phase55 subcommands. Every
+        // name is asserted individually, not just counted, so a renamed or dropped subcommand cannot pass as
+        // "same size".
+        assertEquals(14, all.size());
         String[] expected = { "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset",
-            "sync", "auth", "model", "help" };
+            "sync", "auth", "model", "upload", "manage", "help" };
         for (String name : expected) {
             assertTrue(all.contains(name), name + " must be offered at argument 1");
         }
@@ -476,7 +480,7 @@ class YsmCommandTest {
         // Pinned here because reversing a registration's side would silently make these subcommands no-ops.
         for (Class<?> packet : new Class<?>[] { PacketQueryMolangVar.class, PacketEvalMolang.class,
             PacketResetMolang.class, S2CSetDebugOverlay.class, SyncGamePath.class, SetWelcomeConfig.class,
-            ShowBufferInfo.class }) {
+            ShowBufferInfo.class, S2CRequestModelUpload.class, RequestServerModelInfo.class }) {
             Class<?> handler = null;
             for (Class<?> nested : packet.getDeclaredClasses()) {
                 if (nested.getSimpleName()
@@ -509,15 +513,16 @@ class YsmCommandTest {
         new YsmCommand().processCommand(sender, new String[] { "help" });
 
         // The title, the summaries in HELP_TOPICS' order (the reference's own order, reference YsmCommand:172-182,
-        // plus /ysm auth and /ysm model after reset), then the clickable welcome-off line (:183-188).
-        assertEquals(14, sender.count());
+        // plus /ysm auth and /ysm model after reset, plus /ysm upload and /ysm manage after model), then the clickable welcome-off
+        // line (:183-188).
+        assertEquals(16, sender.count());
         assertEquals("commands.yes_steve_model.help.title", sender.keyAt(0));
         String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset", "auth",
-            "model", "debug", "ysmclient" };
+            "model", "upload", "manage", "debug", "ysmclient" };
         for (int i = 0; i < topics.length; i++) {
             assertEquals("commands.yes_steve_model.help.line." + topics[i], sender.keyAt(1 + i));
         }
-        assertEquals("commands.yes_steve_model.help.welcome_off", sender.keyAt(13));
+        assertEquals("commands.yes_steve_model.help.welcome_off", sender.keyAt(15));
     }
 
     @Test
@@ -549,7 +554,7 @@ class YsmCommandTest {
     @Test
     void everyAdvertisedTopicHasDetailKeysAndIsMatchedCaseInsensitively() {
         String[] topics = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome", "sync", "reset", "auth",
-            "model", "debug", "ysmclient" };
+            "model", "upload", "manage", "debug", "ysmclient" };
         for (String topic : topics) {
             assertTrue(YsmCommand.isKnownHelpTopic(topic), topic + " must be a known topic");
             RecordingSender sender = new RecordingSender();
@@ -593,8 +598,8 @@ class YsmCommandTest {
         // branch: a denied permission would have been "commands.generic.permission" instead.
         RecordingSender helpSender = new DenyingSender();
         new YsmCommand().processCommand(helpSender, new String[] { "help" });
-        // One line per HELP_TOPICS entry - 12 since /ysm model joined - plus the title and the welcome-off hint.
-        assertEquals(14, helpSender.count(), "help must run for a sender that denies every permission level");
+        // One line per HELP_TOPICS entry - 14 since /ysm manage joined - plus the title and the welcome-off hint.
+        assertEquals(16, helpSender.count(), "help must run for a sender that denies every permission level");
 
         for (String sub : new String[] { "setgamepath", "welcome", "buffer", "sync" }) {
             CommandException exception = assertThrows(
@@ -610,12 +615,13 @@ class YsmCommandTest {
 
     @Test
     void theLevelTwoSubcommandsStillHitTheGateForASenderThatDeniesIt() {
-        // reload/play/playsound/debug/reset/auth/model keep the inherited level-2 rule, re-checked inside processCommand
-        // because canCommandSenderUseCommand now lets players through to it (reference :109-113; /ysm auth's own gate
-        // is upstream's requires(hasPermission(source, 2)), AuthCommand.java:29, and /ysm model's is the same at
-        // ModelCommand.java:35). The refusal also proves that none of them ran: with a denied sender processReload never
-        // touches the model directory.
-        for (String sub : new String[] { "reload", "play", "playsound", "debug", "reset", "auth", "model" }) {
+        // reload/play/playsound/debug/reset/auth/model/upload/manage keep the inherited level-2 rule, re-checked inside
+        // processCommand because canCommandSenderUseCommand now lets players through to it (reference :109-113;
+        // /ysm auth's own gate is upstream's requires(hasPermission(source, 2)), AuthCommand.java:29, and
+        // /ysm model's is the same at ModelCommand.java:35). The refusal also proves that none of them ran: with a
+        // denied sender processReload never touches the model directory.
+        for (String sub : new String[] { "reload", "play", "playsound", "debug", "reset", "auth", "model", "upload",
+            "manage" }) {
             CommandException exception = assertThrows(
                 CommandException.class,
                 () -> new YsmCommand().processCommand(new DenyingSender(), new String[] { sub }));
@@ -747,8 +753,130 @@ class YsmCommandTest {
         assertNull(new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "help", "" }));
     }
 
-    /** The compiled bytes of {@code type}, straight from the test classpath. */
-    private static byte[] readClassBytes(Class<?> type) throws java.io.IOException {
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm upload (phase55)
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /** A sender that passes the command's level-2 baseline but denies the in-body level-4 upload re-check. */
+    private static final class LevelFourDenyingSender extends RecordingSender {
+
+        @Override
+        public boolean canCommandSenderUseCommand(int permissionLevel, String command) {
+            return permissionLevel < 4;
+        }
+    }
+
+    @Test
+    void uploadIsRefusedForASenderThatOnlyHasTheCommandBaseline() {
+        // The whole command is gated at level 2, so /ysm debug and /ysm upload re-check their own level in-body. A
+        // sender that passes level 2 but not level 4 must be refused before anything is read or asked for.
+        CommandException exception = assertThrows(
+            CommandException.class,
+            () -> new YsmCommand()
+                .processCommand(new LevelFourDenyingSender(), new String[] { "upload", "custom", "F:/m.ysm" }));
+
+        assertEquals("commands.generic.permission", exception.getMessage());
+    }
+
+    @Test
+    void uploadWithoutTheTargetDirectoryAnswersWithItsUsage() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "upload" });
+
+        assertEquals(1, sender.count());
+        assertEquals("commands.yes_steve_model.upload.usage", sender.singleKey());
+    }
+
+    @Test
+    void uploadWithAnUnknownTargetDirectoryAnswersWithItsUsage() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "upload", "public", "F:/m.ysm" });
+
+        assertEquals(1, sender.count());
+        assertEquals("commands.yes_steve_model.upload.usage", sender.singleKey());
+    }
+
+    @Test
+    void uploadWithAnEmptyPathAnswersWithItsUsage() {
+        RecordingSender sender = new RecordingSender();
+
+        new YsmCommand().processCommand(sender, new String[] { "upload", "auth", "\"\"" });
+
+        assertEquals(1, sender.count());
+        assertEquals("commands.yes_steve_model.upload.usage", sender.singleKey());
+    }
+
+    @Test
+    void anUploadTargetWordIsAuthOrCustomCaseInsensitively() {
+        assertEquals(ModelUploadTarget.AUTH, YsmCommand.parseUploadTarget(new String[] { "upload", "auth" }));
+        assertEquals(ModelUploadTarget.AUTH, YsmCommand.parseUploadTarget(new String[] { "upload", "AUTH" }));
+        assertEquals(ModelUploadTarget.CUSTOM, YsmCommand.parseUploadTarget(new String[] { "upload", "Custom" }));
+        assertNull(YsmCommand.parseUploadTarget(new String[] { "upload", "builtin" }));
+        assertNull(YsmCommand.parseUploadTarget(new String[] { "upload" }));
+    }
+
+    @Test
+    void anUploadPathIsTheRemainderRejoinedAndUnquoted() {
+        assertEquals("F:/model.ysm", YsmCommand.parseUploadPath(new String[] { "upload", "custom", "F:/model.ysm" }));
+        assertEquals(
+            "/home/my models/a.ysm",
+            YsmCommand.parseUploadPath(new String[] { "upload", "custom", "\"/home/my", "models/a.ysm\"" }),
+            "1.7.10 splits on spaces even inside quotes; the re-join plus one stripped quote pair rebuilds the path");
+        assertEquals(
+            "F:/my model.ysm",
+            YsmCommand.parseUploadPath(new String[] { "upload", "custom", "F:/my", "model.ysm" }));
+        assertEquals("", YsmCommand.parseUploadPath(new String[] { "upload", "custom" }));
+    }
+
+    @Test
+    void tabCompletionOffersTheUploadArguments() {
+        List<?> roots = new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "upload", "" });
+        assertEquals(2, roots.size());
+        assertTrue(roots.contains("auth"));
+        assertTrue(roots.contains("custom"));
+
+        List<?> path = new YsmCommand()
+            .addTabCompletionOptions(new RecordingSender(), new String[] { "upload", "auth", "" });
+        assertEquals(1, path.size());
+        assertEquals("<path>", path.get(0));
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm manage (phase55: the LgeacyYSM model-manage GUI entry point)
+    // ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    void manageRequiresAPlayer() {
+        // Lgeacy's ManageCommand is player-only (getPlayerOrException); a console sender has no GUI to open.
+        RecordingSender sender = new RecordingSender();
+
+        CommandException exception = assertThrows(
+            CommandException.class,
+            () -> new YsmCommand().processCommand(sender, new String[] { "manage" }));
+
+        assertEquals("commands.generic.player.notFound", exception.getMessage());
+        assertEquals(0, sender.count(), "nothing is answered when there is no GUI to open");
+    }
+
+    @Test
+    void manageIsRefusedForASenderThatOnlyHasTheCommandBaseline() {
+        CommandException exception = assertThrows(
+            CommandException.class,
+            () -> new YsmCommand().processCommand(new LevelFourDenyingSender(), new String[] { "manage" }));
+
+        assertEquals("commands.generic.permission", exception.getMessage());
+    }
+
+    @Test
+    void tabCompletionOffersNothingExtraForManage() {
+        assertNull(
+            new YsmCommand().addTabCompletionOptions(new RecordingSender(), new String[] { "manage", "" }),
+            "manage takes no arguments, so it must not invent completions");
+    }
+
+    /** The compiled bytes of {@code type}, straight from the test classpath. */    private static byte[] readClassBytes(Class<?> type) throws java.io.IOException {
         String resource = type.getName()
             .replace('.', '/') + ".class";
         try (java.io.InputStream in = type.getClassLoader()

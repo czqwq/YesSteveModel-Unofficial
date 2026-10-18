@@ -75,6 +75,7 @@ gui.yes_steve_model.disclaimer.close=Close
 gui.yes_steve_model.open_model_folder.open=Open Model Folder
 gui.yes_steve_model.open_model_folder.tips=The following two types of model files can be §4§ldirectly placed§r in the opened directory:\n\n§2§nfolder:§r The folder should contain model files and textures;\n\n§2§nysm file:§r This format is an encrypted file and cannot be edited or modified
 gui.yes_steve_model.model_manage.custom=Custom
+gui.yes_steve_model.model_manage.auth=Auth
 gui.yes_steve_model.model_manage.action_info=Action Info
 gui.yes_steve_model.model_manage.upload=Upload
 gui.yes_steve_model.model_manage.upload.statue=§6Statue: %s
@@ -88,13 +89,18 @@ gui.yes_steve_model.model_manage.cancel=Cancel
 gui.yes_steve_model.model_manage.selected=§6Selected: %s
 gui.yes_steve_model.model_manage.action=§6Action: %s
 gui.yes_steve_model.model_manage.open_file=Open File Chooser
+gui.yes_steve_model.model_manage.browse=Browse...
+gui.yes_steve_model.model_manage.empty=No entries
 gui.yes_steve_model.model_manage.type.folder=Folder
 gui.yes_steve_model.model_manage.type.zip=zip
 gui.yes_steve_model.model_manage.type.ysm=ysm
 gui.yes_steve_model.model_manage.file=§6File: %s
 gui.yes_steve_model.model_manage.file.empty=Empty
-gui.yes_steve_model.model_manage.error.too_large=§cThe file is too large and maximum file size is 32k
-gui.yes_steve_model.model_manage.error.format_incorrect=§cIncorrect file type, must be in zip or ysm format
+gui.yes_steve_model.model_manage.error.too_large=§cThe file is too large (limit: %s MiB)
+gui.yes_steve_model.model_manage.error.format_incorrect=§cIncorrect file type, must be a .ysm file
+gui.yes_steve_model.model_manage.error.path_empty=§cChoose a .ysm file first
+gui.yes_steve_model.model_manage.error.read_failed=§cThe selected file cannot be read
+gui.yes_steve_model.model_manage.error.invalid=§cThe selected file is not a valid .ysm model
 gui.yes_steve_model.extra_player_render.tips=Drag Green Square: Translate\nDrag Blue Square: Scale\nRight Drag: Rotate\nAlt + R: Reset\n\n[Press Esc To Exit]
 gui.yes_steve_model.texture.button.animation_name=Animation Name: %s
 gui.yes_steve_model.texture.button.attacked=Attacked
@@ -577,8 +583,41 @@ commands.yes_steve_model.model.set.not_authorized=%s is not authorized for %s
 commands.yes_steve_model.model.set.texture_dash_unavailable=Texture "-" for %s needs the model's declared default texture, which this server does not keep; pass one of the model's texture names (tab completion lists them).
 commands.yes_steve_model.model.set.done=Set model %s for %s player(s).
 commands.yes_steve_model.help.line.model=  /ysm model set <player|@a|@p> <model> <texture> [true|false] - force a model on players (OP)
+commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <path> - install a local .ysm model file into config/ysmu (OP)
+commands.yes_steve_model.help.line.manage=  /ysm manage - open the server model management screen (ADMIN)
 commands.yes_steve_model.help.detail.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
 commands.yes_steve_model.help.detail.model.desc=  Force a model (and one of its textures) on other players; the fifth word true also ignores the model's authorization, as upstream's ignore_auth does. A restricted target that is not authorized is reported and skipped, the rest of the selector still gets the model. Upstream's /ysm model reload, errors and disable are not ported (use /ysm reload for the catalog rebuild). Example: /ysm model set Notch default default.png true
+commands.yes_steve_model.help.detail.upload.usage=  Usage: /ysm upload <auth|custom> <path>
+commands.yes_steve_model.help.detail.upload.desc=  Install one local .ysm model file into config/ysmu/auth (restricted, needs /ysm auth) or config/ysmu/custom. A player's path is read by that player's own client and uploaded to the server; a console path is read on the server itself. The file is fully validated on both sides, saved as <name>.ysm (renamed <name>_1.ysm, <name>_2.ysm ... if taken) and is NOT reloaded automatically - run /ysm reload to load it. Permission level 4. Example: /ysm upload custom F:/model.ysm
+commands.yes_steve_model.help.detail.manage.usage=  Usage: /ysm manage
+commands.yes_steve_model.help.detail.manage.desc=  Open the server model management screen: the custom and auth roots are listed, and an administrator can upload a local .ysm file, delete, move (custom<->auth) or rename entries. Uploaded files go through the same full model validation as /ysm upload; delete/move/rename only touch files under config/ysmu/{custom,auth} and never overwrite an existing entry. Nothing is reloaded automatically - run /ysm reload to apply changes. Permission level 4, player only. Example: /ysm manage
+
+# /ysm upload (phase55; a port-specific subcommand, upstream has no command-line upload). Every line is a
+# ChatComponentTranslation key, so only `%s` conversions are allowed (1.7.10 throws for any other specifier while the
+# chat is being rendered). The client.* lines are shown by the uploading client itself; the other lines are the
+# server's replies (player upload and console upload share them). Client-side read/validation failures also write an
+# ERROR line to the uploading client's log ([YSMU-UPLOAD]), as the owner asked.
+commands.yes_steve_model.upload.usage=  Usage: /ysm upload <auth|custom> <path> - install a local .ysm model file (OP)
+commands.yes_steve_model.upload.done=§6§l[§aYSM§6§l]§r §aUploaded the model file as §e%s§r§a. Run §e/ysm reload§r§a to load it.
+commands.yes_steve_model.upload.invalid=§6§l[§aYSM§6§l]§r §cUpload rejected: the file is not a valid .ysm model (%s). See the server log for details.
+commands.yes_steve_model.upload.read_failed=§6§l[§aYSM§6§l]§r §cUpload failed: cannot read '%s' on the executing side's local disk.
+commands.yes_steve_model.upload.too_large=§6§l[§aYSM§6§l]§r §cUpload rejected: '%s' is larger than the %s MiB upload limit.
+commands.yes_steve_model.upload.write_failed=§6§l[§aYSM§6§l]§r §cUpload failed: the server could not write the file into config/ysmu.
+commands.yes_steve_model.upload.rejected=§6§l[§aYSM§6§l]§r §cUpload rejected: malformed transfer.
+commands.yes_steve_model.upload.client_missing=§6§l[§aYSM§6§l]§r §cYour client did not complete the YSMU handshake, so it cannot read a local file for the server. Install YSMU on the client and try again.
+commands.yes_steve_model.upload.client.read_failed=§6§l[§aYSM§6§l]§r §cUpload failed: the client could not read or validate '%s'. See the client log for details.
+commands.yes_steve_model.upload.client.too_large=§6§l[§aYSM§6§l]§r §cUpload failed: '%s' is larger than the %s MiB upload limit.
+commands.yes_steve_model.upload.client.invalid=§6§l[§aYSM§6§l]§r §cUpload failed: '%s' is not a valid .ysm model (%s).
+commands.yes_steve_model.upload.client.busy=§6§l[§aYSM§6§l]§r §eAnother model upload is already running; try again when it finishes.
+
+# /ysm manage (phase55; the LgeacyYSM model-management GUI). The action failures are chat lines; success has no
+# receipt - the list refresh is the answer. `%s` is the entry name. All keys are `%s`-only (ChatComponentTranslation
+# on 1.7.10 rejects other conversions while the chat is being rendered).
+commands.yes_steve_model.manage.error.not_found=§6§l[§aYSM§6§l]§r §cNo such model entry: %s
+commands.yes_steve_model.manage.error.dest_exists=§6§l[§aYSM§6§l]§r §cThe destination already exists: %s
+commands.yes_steve_model.manage.error.invalid_name=§6§l[§aYSM§6§l]§r §cInvalid model entry name: %s
+commands.yes_steve_model.manage.error.unsupported=§6§l[§aYSM§6§l]§r §cOnly top-level folders and .ysm files can be managed: %s
+commands.yes_steve_model.manage.error.io_error=§6§l[§aYSM§6§l]§r §cThe file operation failed: %s
 
 # Model failure notices (upstream ModelFailureNotificationAggregator's three outcomes, plus this port's
 # built-in-fallback-unavailable notice). %s is a count; 1.7.10 chat keys accept no other specifier.

@@ -31,11 +31,15 @@ import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.ServerModelInfo;
+import com.fox.ysmu.model.manage.ServerModelManage;
+import com.fox.ysmu.model.upload.ModelUploadTarget;
+import com.fox.ysmu.model.upload.ServerModelUploadManager;
 import com.fox.ysmu.network.ModelGrantSync;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.PacketEvalMolang;
 import com.fox.ysmu.network.message.PacketQueryMolangVar;
 import com.fox.ysmu.network.message.PacketResetMolang;
+import com.fox.ysmu.network.message.RequestServerModelInfo;
 import com.fox.ysmu.network.message.S2CPlaySound;
 import com.fox.ysmu.network.message.S2CSetDebugOverlay;
 import com.fox.ysmu.network.message.SetModelAndTexture;
@@ -55,17 +59,32 @@ public class YsmCommand extends CommandBase {
     private static final int DEBUG_PERMISSION_LEVEL = 4;
 
     /**
+     * The permission level {@code /ysm upload} re-checks per invocation. The command's own gate is level 2 (that is
+     * the whole {@code /ysm} baseline), so a subcommand that must be admin-only re-checks its own level in-body -
+     * exactly the shape {@link #processDebug} uses. The network path re-checks it too
+     * ({@code model/upload/ServerModelUploadManager#acceptChunk}), because the packet can arrive without this command.
+     */
+    private static final int UPLOAD_PERMISSION_LEVEL = 4;
+
+    /**
+     * The permission level {@code /ysm manage} re-checks per invocation. LgeacyYSM's manage command requires level 4
+     * ({@code command/sub/ManageCommand.java:24}) and is player-only; the GUI's own packets re-check level 4 too.
+     */
+    private static final int MANAGE_PERMISSION_LEVEL = 4;
+
+    /**
      * The subcommands {@code /ysm help} documents, in the order the reference branch prints them
      * ({@code YsmCommand:173-182}). One list, so the summary lines, the subcommand lookup and the detail keys cannot
      * drift apart; the reference repeats the same names in three separate {@code equals} chains.
      * <p>
      * {@code auth} and {@code model} are not in that reference list: they are upstream's two authorization
      * subcommands ({@code command/sub/AuthCommand.java} and {@code command/sub/ModelCommand.java}, siblings under
-     * {@code command/RootCommand.java:16-24}), appended after {@code reset}. Both need a summary line here because
-     * {@link #processHelp} walks this array.
+     * {@code command/RootCommand.java:16-24}), appended after {@code reset}. {@code upload} and {@code manage} are
+     * port-specific (phase55: the /ysm upload command and the LgeacyYSM model-manage GUI); each needs a summary line
+     * here because {@link #processHelp} walks this array.
      */
     private static final String[] HELP_TOPICS = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome",
-        "sync", "reset", "auth", "model", "debug", "ysmclient" };
+        "sync", "reset", "auth", "model", "upload", "manage", "debug", "ysmclient" };
 
     /**
      * The action words of {@code /ysm auth <targets> <action> [model]} - upstream's four literals
@@ -155,7 +174,7 @@ public class YsmCommand extends CommandBase {
             return getListOfStringsMatchingLastWord(
                 args,
                 "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset", "sync", "auth",
-                "model", "help");
+                "model", "upload", "manage", "help");
         }
         if (args.length == 2) {
             if ("welcome".equalsIgnoreCase(args[0])) {
@@ -167,6 +186,11 @@ public class YsmCommand extends CommandBase {
             if ("model".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, MODEL_ACTIONS);
             }
+            if ("upload".equalsIgnoreCase(args[0])) {
+                // phase55: /ysm upload <auth|custom> <path>; the two roots are the only target words the command and
+                // the wire enum accept.
+                return getListOfStringsMatchingLastWord(args, "auth", "custom");
+            }
             if ("reset".equalsIgnoreCase(args[0]) || "auth".equalsIgnoreCase(args[0])) {
                 return playerNameSuggestions(args);
             }
@@ -177,6 +201,11 @@ public class YsmCommand extends CommandBase {
         if (args.length == 3) {
             if ("setgamepath".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, "[version]");
+            }
+            if ("upload".equalsIgnoreCase(args[0])) {
+                // phase55: the server cannot complete a client's local paths, so only the placeholder is offered -
+                // the same convention /ysm setgamepath uses for its path slot.
+                return getListOfStringsMatchingLastWord(args, "<path>");
             }
             if ("debug".equalsIgnoreCase(args[0]) && "overlay".equalsIgnoreCase(args[1])) {
                 return getListOfStringsMatchingLastWord(args, "on", "off", "toggle");
@@ -290,6 +319,10 @@ public class YsmCommand extends CommandBase {
             processAuth(sender, args);
         } else if ("model".equalsIgnoreCase(args[0])) {
             processModel(sender, args);
+        } else if ("upload".equalsIgnoreCase(args[0])) {
+            processUpload(sender, args);
+        } else if ("manage".equalsIgnoreCase(args[0])) {
+            processManage(sender);
         } else {
             throw new WrongUsageException(getCommandUsage(sender));
         }
@@ -1373,6 +1406,114 @@ public class YsmCommand extends CommandBase {
         ysmu.LOG.warn(
             "No model-info table on {}; is ExtendedModelInfo registered from EntityEvent.EntityConstructing?",
             target.getCommandSenderName());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm upload (phase55; a port-specific subcommand, upstream has no command-line upload)
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * {@code /ysm upload <auth|custom> <path>} - install one local {@code .ysm} file into
+     * {@code config/ysmu/auth} or {@code config/ysmu/custom}.
+     *
+     * <p><b>Who reads the path.</b> The path belongs to whoever executes the command: a player's client owns it (the
+     * dedicated server cannot read a player's disk), so the command asks that client to read, pre-validate and upload
+     * the bytes ({@code ServerModelUploadManager#requestClientUpload}); a console/command-block sender has no client,
+     * so the server reads its own local path and copies the file into the target directory
+     * ({@code ServerModelUploadManager#installFromServerPath}). Both paths end in the same validator and installer,
+     * so the destination, the validation and the rename-if-taken rules cannot differ between them.</p>
+     *
+     * <p><b>Permission level 4, re-checked here.</b> The whole command is gated at level 2 by the framework and by
+     * {@link #processCommand}; that is not enough for an operation that writes into the server's model catalog, so
+     * this method re-checks level 4 in-body - the same shape {@link #processDebug} uses. The network path checks it
+     * again on every chunk, because a client can send an upload packet without going through this command.</p>
+     *
+     * <p><b>Feedback.</b> A player sender gets one line only when their client cannot read the path (no YSMU
+     * handshake recorded - a vanilla client has no way to answer the request); otherwise the client's upload task
+     * reports its own read/validation failures and the server replies with the final file name once it writes the
+     * file. The reply is a port addition: upstream has no upload command, and every other YSMU subcommand reports
+     * what it did. All keys are {@code %s}-only because {@code ChatComponentTranslation} refuses other conversions
+     * on 1.7.10.</p>
+     *
+     * <p><b>No automatic reload.</b> The file lands on disk and the sender is told to run {@code /ysm reload};
+     * that is the owner's explicit decision (a player-triggered upload must not force a whole-catalog resync).</p>
+     */
+    private void processUpload(ICommandSender sender, String[] args) {
+        if (!sender.canCommandSenderUseCommand(UPLOAD_PERMISSION_LEVEL, getCommandName())) {
+            throw new CommandException("commands.generic.permission");
+        }
+        if (args.length < 3) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.upload.usage"));
+            return;
+        }
+        ModelUploadTarget target = parseUploadTarget(args);
+        if (target == null) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.upload.usage"));
+            return;
+        }
+        String path = parseUploadPath(args);
+        if (path.isEmpty()) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.upload.usage"));
+            return;
+        }
+        if (sender instanceof EntityPlayerMP) {
+            EntityPlayerMP player = (EntityPlayerMP) sender;
+            if (!ServerModelUploadManager.requestClientUpload(player, target, path)) {
+                player.addChatMessage(
+                    new ChatComponentTranslation("commands.yes_steve_model.upload.client_missing"));
+            }
+            return;
+        }
+        ServerModelUploadManager.installFromServerPath(sender, target, path);
+    }
+
+    /**
+     * The target directory of {@code /ysm upload}: the second argument matched case-insensitively against
+     * {@link ModelUploadTarget}'s command words ({@code auth}, {@code custom}), or {@code null}.
+     */
+    static ModelUploadTarget parseUploadTarget(String[] args) {
+        return args.length < 2 ? null : ModelUploadTarget.fromCommandWord(args[1]);
+    }
+
+    /**
+     * The path of {@code /ysm upload <auth|custom> <path>}: every argument from index 2 re-joined with single spaces
+     * (1.7.10 splits the command line on spaces even inside quotes, so this is also how a path with spaces is
+     * reassembled), then one surrounding pair of double quotes stripped - the same convention {@link #parseEvalExpression}
+     * uses.
+     */
+    static String parseUploadPath(String[] args) {
+        return stripOneQuotePair(
+            joinCommandArguments(args, 2)
+                .trim());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // /ysm manage (phase55; the LgeacyYSM model-manage GUI)
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /**
+     * {@code /ysm manage} - open the server model-manage GUI for the issuing player (phase55; a port of
+     * LgeacyYSM's {@code command/sub/ManageCommand.java:24-40} and its {@code RequestServerModelInfo} packet).
+     *
+     * <p>The server lists the top-level entries of {@code config/ysmu/custom} and {@code config/ysmu/auth}
+     * ({@code ServerModelManage.listEntries}) and sends them to the player, whose client opens
+     * {@code ModelManageScreen}. The GUI's own packets (refresh, delete/move/rename, upload) re-check permission
+     * level 4 server-side, so this command is only the entry point, not the security boundary.</p>
+     *
+     * <p><b>Player-only.</b> Lgeacy opens a client GUI, so the sender must have a client: {@code getPlayerOrException}
+     * on its side, {@code commands.generic.player.notFound} here. A console sender has no GUI to open.</p>
+     */
+    private void processManage(ICommandSender sender) {
+        if (!sender.canCommandSenderUseCommand(MANAGE_PERMISSION_LEVEL, getCommandName())) {
+            throw new CommandException("commands.generic.permission");
+        }
+        if (!(sender instanceof EntityPlayerMP)) {
+            throw new CommandException("commands.generic.player.notFound");
+        }
+        EntityPlayerMP player = (EntityPlayerMP) sender;
+        List<RequestServerModelInfo.Info> customModels = ServerModelManage.listEntries(ServerModelManager.CUSTOM);
+        List<RequestServerModelInfo.Info> authModels = ServerModelManage.listEntries(ServerModelManager.AUTH);
+        NetworkHandler.CHANNEL.sendTo(new RequestServerModelInfo(customModels, authModels), player);
     }
 
     /**

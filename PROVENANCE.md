@@ -19,6 +19,24 @@ ImageStream (the JPEG/WebP/AVIF decoder library, `src/main/java/rip/ysm/imagestr
 provenance and licence note are in `NOTICE.md`, and why it is source rather than a jar in
 `.agent/phase54-imagestream-packaging.md`.
 
+**`src/main/java/rip/ysm/{security,algorithms,zstd}` - bounded decode overlays and length-before-allocation guards
+(phase55).** The `/ysm upload` / `/ysm manage` validator has to decode bytes that arrived over the network, so four
+narrow edits were made to the vendored OpenYSM crypto/zstd code; every one is additive and leaves the existing call
+paths byte-for-byte unchanged:
+
+- `algorithms/YsmZstd.decompress(byte[], long maxOutputBytes)` and `zstd/ZstdUtil.decompress(byte[], long)` add an
+  output-size ceiling (frame-declared size compared before allocating; streaming fallback counted while reading).
+  The one-argument overloads delegate to them with `Long.MAX_VALUE`, so the disk/load paths are unchanged.
+- `security/YsmCrypt.decryptYsmFile(byte[], long maxDecompressedBytes)` passes the ceiling through to zstd; the
+  one-argument overload keeps the previous unbounded behaviour.
+- `security/YSMByteBuf.readString()/readByteArray()` compare the varint length against `readableBytes()` **before**
+  allocating. This is an invariant every caller already relies on (a declared length above the remaining bytes is
+  always invalid); without it a decompressed payload could declare a 1 GiB string and make the server allocate it
+  before failing - the "prevent injection" requirement of the upload feature.
+
+The bounded overloads exist for the upload validator only; the ordinary model scan, cache and sync paths still call
+the unbounded methods. Recorded with the feature in `.agent/phase55-model-upload-command.md`.
+
 The `@Mod` annotation and its `preInit` handler were removed from
 `software/bernie/geckolib3/GeckoLib.java`, which stays as a plain class carrying `LOG` and the
 `geoStatsEnabled` switch (17 read sites in 11 engine files, plus `Config.java:294`). That was the only

@@ -97,6 +97,7 @@ public class YSMByteBuf implements AutoCloseable {
     public byte[] readByteArray() {
         int len = readVarInt();
         if (len == 0) return new byte[0];
+        requireAvailable(len, "byte array");
         byte[] bytes = new byte[len];
         buf.readBytes(bytes);
         return bytes;
@@ -105,9 +106,27 @@ public class YSMByteBuf implements AutoCloseable {
     public String readString() {
         int len = readVarInt();
         if (len == 0) return "";
+        requireAvailable(len, "string");
         byte[] bytes = new byte[len];
         buf.readBytes(bytes);
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * phase55：长度前缀先与剩余字节比较，再分配数组。
+     * <p>
+     * 这个类读的是解压后的模型字节流；一段解压后仍可声明 2^30 长度的字符串。旧实现直接
+     * {@code new byte[len]} 再 {@code readBytes}，于是分配先发生、越界异常后发生——上传校验的
+     * "防注入" 要求不允许网络字节先让服务端分配 1 GB 再失败（负长度还会抛
+     * {@code NegativeArraySizeException}）。声明长度大于剩余字节在任何合法流里都不可能成立，所以这是
+     * 一条严格的不变式，不是新增语义。
+     * </p>
+     */
+    private void requireAvailable(int len, String what) {
+        if (len < 0 || len > buf.readableBytes()) {
+            throw new RuntimeException(
+                "Invalid " + what + " length " + len + " (" + buf.readableBytes() + " byte(s) left)");
+        }
     }
 
     public byte[] toArray() {
