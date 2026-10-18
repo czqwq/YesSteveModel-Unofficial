@@ -5,8 +5,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import net.minecraft.client.Minecraft;
-
 import com.fox.ysmu.model.format.Type;
 import com.fox.ysmu.ysmu;
 
@@ -175,20 +173,20 @@ public class RequestServerModelInfo implements IMessage {
 
         @Override
         public IMessage onMessage(RequestServerModelInfo message, MessageContext ctx) {
-            if (ctx.side != Side.CLIENT || message.customModels == null || message.authModels == null) {
+            // 服务端：这个包只用于打开客户端 GUI，服务端直接放行。
+            if (ctx.side == Side.SERVER) {
                 return null;
             }
             try {
-                Minecraft minecraft = Minecraft.getMinecraft();
-                if (minecraft == null) {
-                    return null;
+                if (message.customModels != null && message.authModels != null) {
+                    // packet handler 在 Netty 线程，GUI 由客户端 tick 打开；客户端代码留在 ModelManageScreen 里，
+                    // 服务端实例化本 handler 时不会加载客户端类。
+                    com.fox.ysmu.util.DeferredWork.client(
+                        () -> com.fox.ysmu.client.gui.ModelManageScreen
+                            .openFromPacket(message.customModels, message.authModels));
                 }
-                // 1.7.10 的 packet handler 在 Netty 线程：打开 GUI 必须回客户端线程（本仓既有约定）。
-                minecraft.func_152344_a(
-                    () -> minecraft.displayGuiScreen(
-                        new com.fox.ysmu.client.gui.ModelManageScreen(message.customModels, message.authModels)));
             } catch (Exception e) {
-                ysmu.LOG.warn("Failed to open the YSM model-manage screen", e);
+                ysmu.LOG.warn("Failed to handle YSM server model info request", e);
             }
             return null;
         }

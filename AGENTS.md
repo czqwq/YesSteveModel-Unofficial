@@ -147,6 +147,8 @@ NetworkHandler 中的数据包 id 是线协议的一部分。需要时添加新 
 
 不要在数据包处理器路径上执行重型文件 IO、加密/解密或模型解析。现有代码用 ThreadTools.THREAD_POOL 做后台工作，用 Minecraft.func_152344_a(...) 在客户端模型或纹理注册必须返回客户端线程时。
 
+packet handler 里不要把客户端类当作值来用（`new GuiScreen 子类`、把客户端类型当参数/返回值）。FML 的 `SimpleNetworkWrapper.registerMessage` 会在**两侧**都实例化注册的 handler，而 1.7.10 的 `SideTransformer` 拒绝在 SERVER 侧加载 `net.minecraft.client.*`；JVM 校验"客户端类能否赋给 GuiScreen"之类的代码时会加载父类链，专用服务端会在启动初始化时抛 `Attempted to load class net/minecraft/client/gui/GuiScreen for invalid side SERVER` 并停止加载（phase55 实机）。正确形状：handler 开头 `if (ctx.side == Side.SERVER) return null;` 放行，客户端逻辑放进单独的客户端类的静态入口（只传 List/String 等无客户端类型的参数，实例见 `RequestServerModelInfo.Handler` → `ModelManageScreen.openFromPacket`），handler 只做一次 invokestatic。判断标准不是"两侧都不调用所以没事"：问题出在 handler 类被实例化时的字节码校验。
+
 模型密码必须在缓存模型文件可解密前可用。保持 SendModelPassword 在 RequestLoadModel 之前的关系及 RequestLoadModel 中的重试行为。
 
 OpenYSM 同步缓存由模型自身 sha256 加 ModelCacheWriter.OPEN_YSM_BAKE_VERSION 命名，绝不由载荷字节命名，其签名检查只证明文件属于该哈希。当烘焙载荷含义变化时提升该常量——序列化器、RawYsmModelAdapter 或反序列化器烘焙模型的哪些部分——否则旧构建写入的载荷（例如无几何，在立方体烘焙为面之前）会继续提供给缓存哈希同样匹配的客户端。这就是十个模型跨重载和重启保持不可见，而新烘焙和每个本地测试看起来正确的原因。

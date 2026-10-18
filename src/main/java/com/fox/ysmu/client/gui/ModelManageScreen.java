@@ -10,6 +10,9 @@ import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.resources.I18n;
 
+import cpw.mods.fml.relauncher.Side;
+import cpw.mods.fml.relauncher.SideOnly;
+
 import com.fox.ysmu.client.gui.button.FlatColorButton;
 import com.fox.ysmu.client.gui.button.ModelInfoButton;
 import com.fox.ysmu.client.upload.UploadManager;
@@ -23,29 +26,24 @@ import com.fox.ysmu.network.message.RequestServerModelInfo;
 import com.fox.ysmu.ysmu;
 
 /**
- * 服务端模型管理界面（phase55，LgeacyYSM {@code client/gui/ModelManageScreen.java} 的 1.7.10 移植）。
+ * 服务端模型管理界面（phase55，LgeacyYSM {@code ModelManageScreen} 的 1.7.10 移植）：由 {@code /ysm manage}
+ * 打开，列出 custom/auth 两个根的条目，支持上传、删除、移动（custom↔auth）、重命名。
  *
- * <p>由 {@code /ysm manage}（服务端权限 4、仅玩家）触发：服务端把 {@code config/ysmu/custom} 与
- * {@code config/ysmu/auth} 的顶层条目发来，客户端打开本界面。界面上有 custom/auth 两个页签、13 行列表
- * （{@link ModelInfoButton}，带分页）、四个动作：上传、删除、移动（custom↔auth）、重命名（同根内）。</p>
- *
- * <p>与 Lgeacy 的差异（都在实现处注明）：</p>
- * <ul>
- *   <li><b>选文件</b>：Lgeacy 用 LWJGL3 的 TinyFileDialogs；1.7.10 没有该库，这里用 JDK 自带
- *       {@link java.awt.FileDialog} 在后台线程打开系统原生文件框，同时上传页提供一个可编辑的路径输入框，
- *       两条路都可以拿路径（所有者选择）。</li>
- *   <li><b>上传通道</b>：不发送 Lgeacy 的单包 {@code UploadFile}（1.7.10 载荷上限 32767 字节），而是调用
- *       {@link UploadManager#startUpload} 走本仓的分片 + 完整模型校验通道（所有者选择）。状态显示复用
- *       服务端回执 {@code CompleteFeedback}：上传结束时它调用 {@link #refreshingAfterUpload()} 重新拉列表。</li>
- *   <li><b>动作反馈</b>：删除/移动/重命名的失败会由服务端回一句聊天（Lgeacy 静默吞 IOException）；成功没有
- *       回执，列表刷新即证据。</li>
- *   <li><b>重命名输入框预填</b>当前名字（Lgeacy 是空框），减少误输入。</li>
- * </ul>
- *
- * <p>这个类只做展示与发请求：所有危险操作都在服务端 {@code ServerModelManage} 里做路径安全检查与重名拒绝。
- * 本界面不暂停单人游戏（{@link #doesGuiPauseGame()}），否则上传/刷新期间客户端会冻住单人游戏。</p>
+ * <p>与 Lgeacy 的差异：选文件用 AWT {@link java.awt.FileDialog}（1.7.10 没有 TinyFileDialogs）并保留可手填
+ * 路径；上传走本仓的分片 + 完整校验通道而不是单包 {@code UploadFile}；管理动作失败由服务端回聊天提示；
+ * 重命名输入框预填当前名字。危险操作都在服务端 {@code ServerModelManage} 校验，本界面不暂停单人游戏。</p>
  */
+@SideOnly(Side.CLIENT)
 public class ModelManageScreen extends GuiScreen {
+
+    /** 列表包打开界面的入口；由 {@code RequestServerModelInfo} 的 handler 在客户端 tick 调用。 */
+    public static void openFromPacket(List<RequestServerModelInfo.Info> customModels,
+        List<RequestServerModelInfo.Info> authModels) {
+        Minecraft minecraft = Minecraft.getMinecraft();
+        if (minecraft != null) {
+            minecraft.displayGuiScreen(new ModelManageScreen(customModels, authModels));
+        }
+    }
 
     private static final int MAX_COUNT = 13;
     private static final int PANEL_WIDTH = 420;

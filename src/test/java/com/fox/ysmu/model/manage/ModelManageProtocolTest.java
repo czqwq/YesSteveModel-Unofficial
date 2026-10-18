@@ -151,6 +151,65 @@ class ModelManageProtocolTest {
             "RequestServerModelInfo must guard on Side.CLIENT (it opens a client screen)");
     }
 
+    /**
+     * 专用服务端启动回归：FML 会在两侧 {@code newInstance()} 每个注册的 handler，而 1.7.10 的
+     * {@code SideTransformer} 拒绝在 SERVER 侧加载 {@code net.minecraft.client.*}。用一个拒绝客户端类的
+     * 类加载器重新定义 Handler 并实例化它，模拟"服务端没有客户端类"的环境；若 handler 方法体里又出现客户端
+     * 类型（如直接 {@code new ModelManageScreen} 再传给 {@code displayGuiScreen(GuiScreen)}），JVM 校验会去
+     * 加载父类链并在这个测试里失败。客户端代码现在关在 {@code RequestServerModelInfo.openScreen} 的
+     * {@code @SideOnly(CLIENT)} 方法里，服务端侧它会被 SideTransformer 删除。
+     */
+    @Test
+    void theClientboundHandlerStillInstantiatesWhenClientClassesAreUnavailable() throws Exception {
+        Class<?> handler = new ClientClassBlockingLoader(RequestServerModelInfo.Handler.class.getClassLoader())
+            .defineHandler("com.fox.ysmu.network.message.RequestServerModelInfo$Handler");
+        Object instance = handler.getDeclaredConstructor()
+            .newInstance();
+
+        assertNotNull(instance, "FML's registerMessage must be able to instantiate the handler on a server");
+    }
+
+    /** 拒绝客户端类、自己定义 Handler 的类加载器（模拟专用服务端里不存在 net.minecraft.client 的类路径）。 */
+    private static final class ClientClassBlockingLoader extends ClassLoader {
+
+        private ClientClassBlockingLoader(ClassLoader parent) {
+            super(parent);
+        }
+
+        private Class<?> defineHandler(String name) throws Exception {
+            byte[] bytes = readBytes(name);
+            return defineClass(name, bytes, 0, bytes.length);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded != null) {
+                    return loaded;
+                }
+                if (name.startsWith("net.minecraft.client.") || name.startsWith("com.fox.ysmu.client.")) {
+                    throw new ClassNotFoundException(name + " is not available on a dedicated server");
+                }
+                return super.loadClass(name, resolve);
+            }
+        }
+
+        private byte[] readBytes(String name) throws Exception {
+            String resource = name.replace('.', '/') + ".class";
+            try (java.io.InputStream in = getParent().getResourceAsStream(resource)) {
+                assertNotNull(in, resource + " must be readable from the test classpath");
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buffer = new byte[4096];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                }
+                return out.toByteArray();
+            }
+        }
+    }
+
     private static boolean mentions(Class<?> handler, String sideConstant) throws Exception {
         String pool = classConstantPool(handler);
         return pool.contains("cpw/mods/fml/relauncher/Side") && pool.contains(sideConstant);
