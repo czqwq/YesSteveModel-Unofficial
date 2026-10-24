@@ -22,33 +22,10 @@ dependencies {
     // source under `src/main/java/rip/ysm/imagestream/**` together with its two `META-INF/services/javax.imageio.spi.*`
     // files, the same shape as the GeckoLib engine; its decoders are what let `ModelImageConverter` turn every pack
     // image into PNG. See `PROVENANCE.md`.
-    // Gradle 9 no longer adds the JUnit Platform launcher to the test runtime classpath automatically.
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.6.2")
-    testImplementation("org.junit.jupiter:junit-jupiter-params:5.6.2")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.6.2")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.6.2")
-    // fastutil only reaches the compile classpath transitively through the GTNHLib dev jar,
-    // so the test runtime classpath needs it declared explicitly (mod code uses it at runtime).
-    testImplementation("it.unimi.dsi:fastutil:8.5.18")
-    // Authored concurrent blending now links Quaternionfc even in headless engine tests.
-    // Match compileClasspath's GTNHLib-provided JOML; production keeps the existing GTNHLib runtime owner.
-    testRuntimeOnly("org.joml:joml:1.10.8")
-    // LWJGL 2 (the one `runClient` uses; `runClient25` uses LWJGL 3) is needed by the test runtime classpath for one
-    // reason: `net.minecraft.client.Minecraft`'s class initialisation touches `org.lwjgl.DisplayMode` and catches
-    // `org.lwjgl.LWJGLException` (`Minecraft.java:185`, `:476`), so *linking* the class at all needs the LWJGL 2
-    // types even though nothing initialises a display. Without it, any test that reaches a code path calling
-    // `Minecraft.getMinecraft()` dies with `NoClassDefFoundError: org/lwjgl/LWJGLException` before the call can
-    // return the null the port already degrades on (`CustomTextureManager.MinecraftHost` returns immediately when
-    // there is no client, which is what makes `ModelTextureRegistry`'s budget logic testable at all).
-    testRuntimeOnly("org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209")
     // The vendored engine's Bedrock geometry POJOs (software.bernie.geckolib3.geo.raw.pojo) are
     // Jackson-annotated and import plain `com.fasterxml.jackson.*`; the shadow task relocates them.
     implementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
-
-    test {
-        useJUnitPlatform()
-    }
 }
