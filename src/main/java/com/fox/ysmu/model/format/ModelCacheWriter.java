@@ -59,7 +59,12 @@ public final class ModelCacheWriter {
      */
     // 6 -> 7: folder timelines honour merge_multiline_expr (upstream default false), and
     // adapter metadata changes require a re-bake even when the source signature still matches.
-    static final int OPEN_YSM_BAKE_VERSION = 7;
+    // 7 -> 8: the folder cube bake ({@code YSMFolderDeserializer.CubeBakeTransform}) now applies the cube
+    // rotation in the renderer's order (X then Y then Z, i.e. JOML's {@code Rz * Ry * Rx}); the previous
+    // reverse order placed every multi-axis-rotated cube (hair, clothing, tilted decals) somewhere else in
+    // the baked payload than the legacy channel draws it. Every folder model - including the built-in
+    // default fallback - must be re-baked instead of being served from a cache written by bake version 7.
+    static final int OPEN_YSM_BAKE_VERSION = 8;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。

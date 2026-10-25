@@ -98,6 +98,21 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         try {
             GL11.glEnable(GL12.GL_RESCALE_NORMAL);
             GL11.glDisable(GL11.GL_CULL_FACE);
+            // 原版 1.7.10 手持物品的渲染状态（RenderPlayer.renderEquippedItems:313-414 就是在这些状态
+            // 下调用 ItemRenderer.renderItem 的）：实体渲染期间 alpha test 一直是开着的
+            // （RendererLivingEntity.doRender:163 在每个渲染 pass 前 glEnable(GL_ALPHA_TEST)，
+            // alpha func 是 Minecraft 启动时设的 GL_GREATER/0.1F，Minecraft.java:575-576；
+            // EntityRenderer 在渲染实体前也把它设回 0.1，EntityRenderer.java:1289），混合是关着的
+            // （RendererLivingEntity.java:223；需要混合的物品由 ItemRenderer.renderItem 自己开）。
+            // 本层挂在模型之后（GeoReplacedEntityRenderer#renderLayers），而模型绘制结束时会按 RenderType
+            // 的语义把 alpha test 关掉，所以这里必须自己设回原版基线：否则 2D 物品的透明像素不会被剔除，
+            // 世界里画成一整片方片（透明像素写出贴图 alpha-0 处残留的 RGB），HUD 纸娃娃烘进 FBO 时则写成
+            // alpha 0 的洞、透出天空。dev-1.20.1 的物品层不写这些，因为 1.20 的 ItemInHandRenderer 用
+            // RenderType，每次绘制都自带 alpha 测试状态（见 .agent/phase56-held-item-alpha-state.md）。
+            GlStateManager.enableAlpha();
+            GlStateManager.alphaFunc(GL11.GL_GREATER, 0.1F);
+            GlStateManager.disableBlend();
+            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
             if (!isVanilla) {
                 GL11.glScalef(0.7F, 0.7F, 0.7F);
             }
@@ -112,6 +127,7 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
             if (!isMainHand) {
                 GL11.glFrontFace(GL11.GL_CCW);
             }
+            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
             GL11.glDisable(GL12.GL_RESCALE_NORMAL);
             GL11.glEnable(GL11.GL_CULL_FACE);
             GL11.glPopMatrix();

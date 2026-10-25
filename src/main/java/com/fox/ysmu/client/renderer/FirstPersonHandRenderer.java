@@ -409,12 +409,21 @@ public final class FirstPersonHandRenderer {
     }
 
     /**
-     * Leaves what {@code IGeoRenderer#render} leaves ({@code IGeoRenderer.java:116-118}): no blend, no alpha test, and
-     * culling back on for the vanilla passes that follow this one.
+     * Leaves the 1.7.10 baseline for the vanilla passes that follow this one: no blend, alpha test on, culling on.
+     * <p>
+     * The alpha test half is not cosmetic. The pass this method closes is followed - still inside
+     * {@link #renderFirstPersonItems} - by {@link BackhandCompat#renderOffhand}, which draws the off-hand item through
+     * the vanilla {@code ItemRenderer}. Vanilla's 2D item drawing never enables the alpha test itself; it relies on
+     * the game-wide state ({@code Minecraft.java:575-576}: {@code glEnable(GL_ALPHA_TEST)} with
+     * {@code GL_GREATER/0.1F}, kept on for entity rendering at {@code RendererLivingEntity.java:163}). With the test
+     * disabled, a transparent texel of the item texture is not discarded but written with the RGB the texture happens
+     * to carry under its alpha-0 pixels - the off-hand item reads as a flat sheet instead of its sprite. See
+     * {@code .agent/phase56-held-item-alpha-state.md}.
      */
     private static void restoreCustomArmState() {
         GlStateManager.disableBlend();
-        GlStateManager.disableAlpha();
+        GlStateManager.enableAlpha();
+        GlStateManager.alphaFunc(GL11.GL_GREATER, 0.1F);
         GlStateManager.enableCull();
         // 镜像绕序的复位：见 alignGeckoArmToVanillaBipedArm，与 CustomPlayerItemInHandLayer.java:113 的写法一致。
         GL11.glFrontFace(GL11.GL_CCW);

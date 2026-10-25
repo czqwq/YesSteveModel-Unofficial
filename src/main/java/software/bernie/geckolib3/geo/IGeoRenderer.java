@@ -117,10 +117,19 @@ public interface IGeoRenderer<T> {
 
         renderAfter(model, animatable, partialTicks, red, green, blue, alpha);
         // GlStateManager.disableRescaleNormal();
-        // Restores what this method has always restored. The alpha test is left disabled because the engine never
-        // turned it on before the render type existed, so a cutout draw nets out to no change for anything after it.
+        // Restores the 1.7.10 baseline the vanilla draws after this one expect: no blend, alpha test on, culling on.
+        // The alpha test is part of that baseline rather than of this draw: Minecraft enables it once at startup
+        // (Minecraft.java:575-576, GL_GREATER/0.1F) and vanilla rendering code never turns it on per draw - it relies
+        // on it (RendererLivingEntity.java:163, ItemRenderer.renderItem's 2D path). This method, however, applies the
+        // render type's own state for the draw, so it must put the baseline back afterwards; leaving the test disabled
+        // (as this used to) breaks every vanilla draw that follows a YSM model inside the same frame. The concrete
+        // case is the held-item layer: it is rendered after this method returns
+        // (GeoReplacedEntityRenderer#renderLayers), so the 2D item's alpha-0 texels were not discarded - an opaque
+        // "flat sheet" in the world, and a transparent hole showing the sky when the HUD paper doll bakes the model
+        // into its alpha-only FBO. See .agent/phase56-held-item-alpha-state.md.
         GlStateManager.disableBlend();
-        GlStateManager.disableAlpha();
+        GlStateManager.enableAlpha();
+        GlStateManager.alphaFunc(GL11.GL_GREATER, 0.1F);
         GlStateManager.enableCull();
     }
 

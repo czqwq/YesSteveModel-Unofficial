@@ -1403,6 +1403,17 @@ public class YSMFolderDeserializer implements AutoCloseable {
      * cube 级旋转的烘焙变换，等价于参考实现的
      * {@code T(-pivot/16) * Rz(rot.z) * Ry(-rot.y) * Rx(-rot.x) * T(pivot/16)}(JOML 后乘约定)。
      * 这里用普通 float 数学实现，避免为一个 cube 再引入矩阵库。
+     * <p>
+     * 这个变换必须逐位等价于渲染器从同一份 JSON 走的路径：{@code GeoCube#createFromPojoCube} 只把
+     * pivot/rotation 存进 cube，{@link software.bernie.geckolib3.util.MatrixStack#beginCube} 再按
+     * {@code T(pivot) * Rz * Ry * Rx * T(-pivot)} 把它叠加到骨骼矩阵上；JOML / vecmath 的矩阵乘法都是
+     * "后乘"约定，所以作用到顶点上的实际顺序是 <b>先 X、再 Y、最后 Z</b>。上游参考实现是
+     * {@code GeoBuilder.CubeBuilder#applyTransform -> rotateVector}（X→Y→Z，
+     * {@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/format/parser/GeoBuilder.java:334-347}），
+     * 参考分支是 {@code translate/rotateZ/rotateY/rotateX/translate} 的 JOML 链
+     * （{@code tmp/YesSteveModel-Unofficial-perf-previewUI/src/main/java/com/fox/ysmu/model/resource/YSMFolderDeserializer.java:566-577}）。
+     * 只有单轴旋转的 cube 交换顺序也不变，多轴旋转的 cube（头发、衣饰、斜置的贴片）会明显错位——
+     * 烘焙位置与渲染位置不一致时，走 OpenYSM 二进制通道的文件夹模型就会在与原渲染不同的地方出现几何。
      */
     private static final class CubeBakeTransform {
 
@@ -1447,16 +1458,16 @@ public class YSMFolderDeserializer implements AutoCloseable {
         }
 
         private void rotate(float[] in, float[] out) {
-            float x = in[0] * this.cosZ - in[1] * this.sinZ;
-            float y = in[0] * this.sinZ + in[1] * this.cosZ;
-            float z = in[2];
+            // 先 X、再 Y、最后 Z：这是 T(pivot) * Rz * Ry * Rx * T(-pivot) 作用到顶点上的实际顺序，
+            // 与渲染器（MatrixStack#beginCube）和上游 GeoBuilder#rotateVector 一致。反过来的顺序
+            // （先 Z 再 Y 再 X）对单轴旋转没有区别，但把多轴旋转的 cube（头发/衣饰/斜置贴片）烘到错误位置。
+            float x = in[0];
+            float y = in[1] * this.cosX - in[2] * this.sinX;
+            float z = in[1] * this.sinX + in[2] * this.cosX;
             float rotatedX = x * this.cosY + z * this.sinY;
             z = -x * this.sinY + z * this.cosY;
-            x = rotatedX;
-            float rotatedY = y * this.cosX - z * this.sinX;
-            z = y * this.sinX + z * this.cosX;
-            out[0] = x;
-            out[1] = rotatedY;
+            out[0] = rotatedX * this.cosZ - y * this.sinZ;
+            out[1] = rotatedX * this.sinZ + y * this.cosZ;
             out[2] = z;
         }
     }
