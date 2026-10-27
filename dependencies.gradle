@@ -12,6 +12,7 @@ dependencies {
     runtimeOnlyNonPublishable("com.github.GTNewHorizons:Angelica:2.1.19:dev")
     compileOnly("org.jetbrains:annotations:26.0.2")
     devOnlyNonPublishable("com.github.GTNewHorizons:Backhand:1.8.0:dev")
+    runtimeOnlyNonPublishable rfg.deobf(files("libs/spark.jar"))
     // Baubles-Expanded: 1.7.10 上 Curios 的前身（modid 仍是 "Baubles"；GTNH 2.8.4/2.9.0 随包提供的是
     // BaublesExpanded-2.2.21-GTNH）。这里的版本只影响编译，不构成运行时要求：用到的
     // BaubleExpandedSlots.getIndexesOfAssignedSlotsOfType/getSlotType 在 2.1.5 就已存在，而运行时靠

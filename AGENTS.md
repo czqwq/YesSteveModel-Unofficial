@@ -23,6 +23,8 @@ YSMU 是一个 Minecraft Forge 1.7.10 模组，将 Yes Steve Model/OpenYSM 风�
 已知与上游的差异
 此处移植对同一问题的回答与 tmp/YesSteveModel-dev-1.20 不同的每一处。每处要么已解决（说明方式），要么等待所有者。列在此处不是发明第三种答案的许可：选择上游形态，或记录为何 1.7.10 或移植自身架构无法做到。
 
+使用方法不允许使用全限定方法,而是改为import名。例外: src/main/java/com/fox/ysmu/ysmu的 @SidedProxy必须使用全限定名
+
 Molang 变量名不区分大小写。 上游通过 MolangNames.identifier（api/molang/MolangNames.java:29-35，toLowerCase(Locale.ROOT)）规范化每个标识符。移植现在在一条规则 MolangParser.canonicalVariableName 中做同样的事，由解析器自身的注册表、RemoteAnimationVariables.normalize（网络路径）以及物理作用域的变量表使用。此前，包的 v.roaming.C 按原样存储但查找时小写，因此读作 0，每个 v.roaming.C==0?... 都走第一分支：包自身的设置开关静默失效。已解决——见 .agent/phase18-glow-and-roaming-case.md。
 
 逐骨骼发光、透明度和颜色。 上游将其保存在每骨骼 14 个浮点的属性数组中（geckolib3/model/AnimatedGeoBone.java:9-16，打包于 :201-211），并在其原生渲染器中消费（natives/render/NativeModelState.java:57-66）。移植在 GeoBone 上以相同打包方式携带相同值，并在 MolangParser 中注册相同的三个名称（bone_color、bone_transparency、bone_glow），但用固定功能管线绘制：发光等级 >= 0 时骨骼无光照渲染，因为 1.7.10 没有逐骨骼光照图。等级保留在骨骼上，以便日后可对照上游而非猜测添加亮度映射。因 1.7.10 限制而属移植特有。

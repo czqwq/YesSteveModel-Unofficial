@@ -344,7 +344,9 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
      * before this existed.
      */
     public boolean hasTranslucentVertices() {
-        return ClientModelManager.TRANSLUCENT_TEXTURES.contains(CustomPlayerModel.textureFor(this));
+        // resolvedTexture() instead of a fourth textureFor() per frame: the same value the bind is about to use, and
+        // cached with the model/selection/publication/sync key (R8).
+        return ClientModelManager.TRANSLUCENT_TEXTURES.contains(resolvedTexture());
     }
 
     /** The rendered entity, player or not. */
@@ -450,6 +452,43 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
             this.texture = texture;
         }
     }
+
+    /**
+     * The texture the current draw binds, resolved once per (requested model, selection, publication, sync round).
+     * <p>
+     * Upstream resolves this once per frame into its render data ({@code AnimatableEntity:255-263} sets
+     * {@code data.texture}, and the renderer, the render-type choice and the layer pass all read that field).
+     * This port resolved it from scratch at every use site - the texture bind, the render-type question, the
+     * applied-model record and the translucency question, four times per drawn entity per frame - and each
+     * resolution rebuilt two {@link ResourceLocation}s and scanned the model's texture list twice
+     * ({@link CustomPlayerModel#textureFor}). R8 of .agent/perf-audit-frame-cpu.md.
+     * <p>
+     * The cache key includes the connection's sync generation because a re-sync re-registers a model id with a new
+     * texture list; without it the same selection would keep answering with an id from the previous payload.
+     */
+    public ResourceLocation resolvedTexture() {
+        ResourceLocation requested = getRequestedMainModel();
+        ResourceLocation selected = getTexture();
+        boolean published = ClientModelManager.isModelPublished(requested);
+        long generation = ClientModelManager.currentGeneration();
+        if (textureCacheValue != null && requested == textureCacheRequested && selected == textureCacheSelected
+            && published == textureCachePublished && generation == textureCacheGeneration) {
+            return textureCacheValue;
+        }
+        ResourceLocation resolved = CustomPlayerModel.textureFor(this);
+        textureCacheRequested = requested;
+        textureCacheSelected = selected;
+        textureCachePublished = published;
+        textureCacheGeneration = generation;
+        textureCacheValue = resolved;
+        return resolved;
+    }
+
+    private ResourceLocation textureCacheRequested;
+    private ResourceLocation textureCacheSelected;
+    private boolean textureCachePublished;
+    private long textureCacheGeneration = -1L;
+    private ResourceLocation textureCacheValue;
 
     public String getPreviewAnimation() {
         return previewInfo.getPreview();

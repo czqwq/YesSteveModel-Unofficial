@@ -35,9 +35,17 @@ public final class OpenYsmControllerExpressionEvaluator {
         new java.util.concurrent.ConcurrentHashMap<>();
 
     /** 清理编译表达式缓存（模型重载/资源清空时调用），避免按表达式文本累积的
-     *  解析结果在长时间运行/反复重载后无限增长。 */
+     *  解析结果在长时间运行/反复重载后无限增长。
+     *  <p>
+     *  {@link #LAST_ANIMATION_FINISHED} is cleared here too: both are keyed by expression/controller text
+     *  that belongs to the model catalog being dropped, and neither had any caller until the connection
+     *  teardown was wired (.agent/perf-audit-memory.md R6). Keeping the two lifetimes together is the
+     *  point — a later call site cannot clear one and forget the other. */
     public static void clearCompiledCache() {
         COMPILED_CACHE.clear();
+        LAST_ANIMATION_FINISHED.clear();
+        lastAnyAnimationFinished = FALSE;
+        lastAllAnimationsFinished = FALSE;
     }
 
     /**

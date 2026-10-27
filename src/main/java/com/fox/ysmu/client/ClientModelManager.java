@@ -13,6 +13,7 @@ import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -45,8 +46,13 @@ import com.fox.ysmu.client.animation.condition.ConditionManager;
 import com.fox.ysmu.client.animation.controller.ModDependency;
 import com.fox.ysmu.client.animation.controller.ModDependencyRegistry;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
+import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvaluator;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
+import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.model.CustomPlayerModel;
+import com.fox.ysmu.client.render.AppliedModelRegistry;
+import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.client.texture.CustomTextureManager;
 import com.fox.ysmu.client.texture.ModelTextureRegistry;
@@ -75,6 +81,7 @@ import com.google.gson.JsonObject;
 
 import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.core.builder.Animation;
+import software.bernie.geckolib3.core.manager.AnimationData;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.file.AnimationFile;
@@ -437,26 +444,32 @@ public class ClientModelManager {
     private static final Map<ResourceLocation, String> REGISTERED_MODEL_CONTENT = Maps.newConcurrentMap();
 
     /**
-     * Payloads whose animations have been received but not yet installed, keyed by the model's {@code main} id.
+     * Animation bytes of models whose animations have been received but not yet installed, keyed by the model's
+     * {@code main} id.
      * <p>
      * Animations are the largest part of a payload by a wide margin - across the reference catalog they are about
      * 28.7 MB of JSON against about 13.7 MB of geometry - and they are also the only part nothing needs in order to
      * *list* the models: the selection screen builds its tiles from {@link #MODELS}, its scales from {@link #SCALE_INFO}
      * and its extra-animation wheel from {@link #EXTRA_ANIMATION_NAME}, all of which come from the geometry. So the
-     * payload is parked here at registration and installed by {@link #ensureAnimations} the first time anything asks
-     * the engine for one of that model's animations, which is the moment the model is first drawn or first played.
+     * animation bytes are parked here at registration and installed by {@link #ensureAnimations} the first time
+     * anything asks the engine for one of that model's animations, which is the moment the model is first drawn or
+     * first played.
      * <p>
      * Upstream does the same thing per animation rather than per model: its animation set is one baked file whose
      * individual animations are read and bound on first request ({@code resource/client/AnimationStore.java}).
      * <p>
-     * A model that is never drawn keeps its payload here for the life of the connection, which is the intended
-     * trade: a byte array the client already holds costs a fraction of the object graph the parse would build.
+     * <b>Only the animation map is parked, not the whole {@link ModelData}.</b> The entry used to hold the payload
+     * object, which also carries the geometry JSON and the texture PNGs - bytes the publish path has already consumed
+     * and that nothing can re-read from here. A model that is never drawn then kept its entire payload alive (0.9-2.4
+     * MB for a large pack) for a reason that belongs to the animation half alone. The animation map is what
+     * {@link #registerAnimations} and {@link com.fox.ysmu.client.asset.AssetManager#registerAnim} take, so the split
+     * happens at the parking site. See .agent/perf-audit-memory.md R7.
      * <p>
      * Concurrent, unlike the geometry parking lot: {@link #ensureAnimations} is reachable from
      * {@code EntityAnimationApi}, which a host mod may call from the server thread while the client thread is
      * rendering - on an integrated server those are two different threads in one JVM.
      */
-    private static final Map<ResourceLocation, ModelData> PENDING_ANIMATIONS = Maps.newConcurrentMap();
+    private static final Map<ResourceLocation, Map<String, byte[]>> PENDING_ANIMATIONS = Maps.newConcurrentMap();
 
     /**
      * Payloads whose geometry and textures have been received but not yet built, keyed by both the model id and the
@@ -1458,7 +1471,10 @@ public class ClientModelManager {
             PENDING_ANIMATIONS.remove(mainId);
             return;
         }
-        PENDING_ANIMATIONS.put(mainId, data);
+        // Only the animation half is parked: the geometry and texture bytes in the same payload were consumed by the
+        // publish path and nothing can re-read them from here (see the field's javadoc and R7 of
+        // .agent/perf-audit-memory.md).
+        PENDING_ANIMATIONS.put(mainId, data.getAnimation());
     }
 
     /** Whether this model's animations are still parked; see {@link #PENDING_ANIMATIONS}. */
@@ -1474,7 +1490,7 @@ public class ClientModelManager {
      * already in the cache rather than starting a second install.
      */
     @Nullable
-    static ModelData takePendingAnimations(ResourceLocation mainId) {
+    static Map<String, byte[]> takePendingAnimations(ResourceLocation mainId) {
         return PENDING_ANIMATIONS.remove(mainId);
     }
 
@@ -1548,15 +1564,15 @@ public class ClientModelManager {
             // drawn.
             return;
         }
-        ModelData data = takePendingAnimations(mainId);
-        if (data == null) {
+        Map<String, byte[]> animations = takePendingAnimations(mainId);
+        if (animations == null) {
             // Nothing parked: either this model's animations are already installed, or it declares none of its own
             // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
             keepAnimationsResident(mainId);
             return;
         }
         try {
-            registerAnimations(mainId, data.getAnimation());
+            registerAnimations(mainId, animations);
         } catch (Throwable failure) {
             // Throwable, like the geometry path: an Error from a JSON parse or a table registration would otherwise
             // escape into the engine's animation lookup on the render thread, which catches only Exception. The
@@ -1573,10 +1589,9 @@ public class ClientModelManager {
         // AssetManager.java:81-82). Two gates, the same pair as publishGeo's: the switch, and the port-specific
         // reloadability test documented on hasReloadableClientCache - a payload this port cannot re-read must never
         // be adopted by a cache whose whole job is to evict it. What is cached is the animation map itself, i.e. the
-        // install rule's own input, and not the whole ModelData: the geometry and texture bytes that also ride in
-        // it are dropped at install in this port and must not be kept alive for the rest of the session.
+        // install rule's own input - which is exactly what the parking lot keeps now (see PENDING_ANIMATIONS).
         if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(mainId)) {
-            com.fox.ysmu.client.asset.AssetManager.registerAnim(mainId, data.getAnimation());
+            com.fox.ysmu.client.asset.AssetManager.registerAnim(mainId, animations);
         }
     }
 
@@ -2878,7 +2893,77 @@ public class ClientModelManager {
         // the whole list, so every record goes with it and the next frames draw the built-in default exactly as
         // upstream does during session negotiation. What the *entities* are then re-drawn from is decided by
         // CustomPlayerRenderer#resolveDrawnModel.
-        com.fox.ysmu.client.render.AppliedModelRegistry.clear();
+        AppliedModelRegistry.clear();
+        // R6 of .agent/perf-audit-memory.md: three static expression/script tables were keyed by the catalog being
+        // dropped here and had a clear() with no caller at all. Their entries describe model text (controller
+        // conditions, per-model pack scripts), so they belong to the same lifetime as the model tables above.
+        OpenYsmControllerExpressionEvaluator.clearCompiledCache();
+        MolangScriptRegistry.clear();
+        // The engine's two caches are the last piece: they outlive every table above and are not cleared by anything
+        // else in this method. See releaseEngineCaches.
+        releaseEngineCaches();
+    }
+
+    /**
+     * Releases the animation and geometry object graphs the connection owned from the engine's caches, keeping the
+     * built-in default's (the one model whose assets this client materialises for itself and must never lose).
+     *
+     * <p><b>Why this exists.</b> {@code GeckoLibCache} is the engine's only ownership of parsed geometry and animation
+     * files, and until this method it was never emptied: not on disconnect, not on a new sync round, and not by
+     * {@code clearRuntimeModelCaches} — the only removal path was {@code GeoModelProvider.release}, which is gated on
+     * the off-by-default {@code Config.ENABLE_IDLE_ASSET_EVICTION}. A client that visited several servers therefore
+     * kept every geometry object graph (≈ 1.6 KB per cube, .agent/perf-audit-memory.md §1.1) and every parsed
+     * animation graph (≈ 56 B per keyframe component, §1.2) of every model it had ever drawn.
+     *
+     * <p><b>Upstream's shape.</b> Upstream owns both stores per render target and closes them when the target is
+     * cleaned ({@code model/resource/client/ModelRenderTarget.java:136-143} → {@code AnimationStore.close:162-167},
+     * native model destroyed); the built-in default is a required lease that survives every session
+     * ({@code ClientModelRenderTargetManager.java:620-632} pins it, {@code addRequired}). This method is the same
+     * boundary at this port's owner, which is {@link #clearRuntimeModelCaches}: the model list it is about to drop is
+     * the content these caches were built from.
+     *
+     * <p><b>Order matters.</b> Animation <em>state</em> goes first: every {@code AnimationData} (the shared world
+     * animatable's, the first-person arm's and the GUI previews') holds controller queues and bone snapshots that
+     * reference the parsed {@code KeyFrame} graphs, so dropping only the cache entries would leave those graphs
+     * reachable from live animatables. {@code AnimationData.disposeAll()} is the engine's existing hook for exactly
+     * that; this method is its first caller. The tickers it stops are recreated by
+     * {@code AnimatedGeoModel#setLivingAnimations} on the next draw.
+     *
+     * <p>Client thread only — it writes the engine's plain {@code HashMap}s, which the render path reads. Its only
+     * caller, {@link #clearRuntimeModelCaches}, already runs there.
+     */
+    private static void releaseEngineCaches() {
+        AnimationData.disposeAll();
+        Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
+            .getAnimations();
+        animations.keySet()
+            .removeIf(id -> !isDefaultModelId(id));
+        Map<ResourceLocation, GeoModel> geoModels = GeckoLibCache.getInstance()
+            .getGeoModels();
+        List<GeoModel> released = new ArrayList<>();
+        Iterator<Map.Entry<ResourceLocation, GeoModel>> iterator = geoModels.entrySet()
+            .iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<ResourceLocation, GeoModel> entry = iterator.next();
+            if (isDefaultModelId(entry.getKey())) {
+                continue;
+            }
+            released.add(entry.getValue());
+            iterator.remove();
+        }
+        for (GeoModel model : released) {
+            // The shared model provider keeps a bone registration plus a strong currentModel reference for the
+            // geometry it last drew; without this the removed GeoModel stays reachable from the renderer
+            // (AnimatedGeoModel#onModelReleased, :179-187).
+            CustomPlayerModel.onGeoModelReleased(model);
+        }
+        // The shared world animatable also accumulates one AnimationData per entity it has ever drawn (the factory is
+        // keyed by the renderer's unique id, which is the entity's), and the engine never removes one. They describe
+        // the models being dropped here, so the connection boundary is where the renderer lets them go.
+        CustomPlayerRenderer renderer = ClientProxy.getInstance();
+        if (renderer != null) {
+            renderer.disposeAnimationData();
+        }
     }
 
     /**

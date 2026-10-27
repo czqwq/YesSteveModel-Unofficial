@@ -247,7 +247,7 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         // Upstream records the target when it is installed ({@code EntityModelBinding#installReady}), and that record
         // is what the next frame keeps drawing while a newer selection is still Pending or has Failed. Recording here
         // - the geometry resolved and the texture that goes with it known - is the same moment.
-        AppliedModelRegistry.install(entityObj, location, CustomPlayerModel.textureFor(this.animatable));
+        AppliedModelRegistry.install(entityObj, location, this.animatable.resolvedTexture());
         // A preview may pose the model however its own animation wants; the world must not inherit that pose.
         ModelPoseSnapshot pose = previewRenderDepth > 0 ? ModelPoseSnapshot.capture(geoModel) : null;
         // Bone-transform tracking for the draw (reference branch CustomPlayerRenderer.java:170/192):
@@ -669,5 +669,35 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     @Nullable
     public GeoModel getGeoModel() {
         return geoModel;
+    }
+
+    /**
+     * Lets go of the last geometry this renderer drew when the engine's cache releases it, so a torn-down model is
+     * not kept reachable from the renderer alone. Called from {@code CustomPlayerModel.onGeoModelReleased}, i.e. from
+     * {@code ClientModelManager.releaseEngineCaches}.
+     */
+    public void onGeoModelReleased(GeoModel released) {
+        if (this.geoModel == released) {
+            this.geoModel = null;
+        }
+    }
+
+    /**
+     * Drops the per-entity animation state this renderer accumulated on its shared animatable.
+     * <p>
+     * The world path keys {@code AnimationFactory}'s data map by the rendered entity's unique id
+     * ({@code GeoReplacedEntityRenderer#doRender} passes {@code getUniqueID(entity)}), so every entity this renderer
+     * ever drew leaves one {@code AnimationData} - the fixed controller pool, its bone snapshots, bone animation
+     * queues and per-controller keyframe-location caches - behind. The engine never removes one: {@code
+     * AnimationFactory#dispose} had no production caller. At a connection boundary the data describes models that
+     * are being dropped anyway, so the renderer disposes it together with them (see
+     * {@code ClientModelManager.releaseEngineCaches}). This does not cover an entity leaving mid-session; that needs
+     * a prunable entity-id key and a grace window, recorded in .agent/perf-optimization-round.md.
+     */
+    public void disposeAnimationData() {
+        if (this.animatable != null && this.animatable.getFactory() != null) {
+            this.animatable.getFactory()
+                .dispose();
+        }
     }
 }
