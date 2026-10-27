@@ -257,7 +257,12 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
             }
         }
         entityModelData.headPitch = -headPitch;
-        entityModelData.netHeadYaw = -netHeadYaw;
+        // 与上游一致：净头部偏航写进帧数据前夹到 ±85°（dev-1.20
+        // AnimatableEntity.java:326-327 的 `-Mth.clamp(Mth.wrapDegrees(netHeadYaw), -85, 85)`）。
+        // 骑乘分支的 resolveBodyYaw 已经让 netHeadYaw 落在 ±85 内；非骑乘分支上面只 wrap 不 clamp，
+        // 于是 ysm.head_yaw / query.head_x_rotation 以及 codeAnimation 给 Head 骨骼加的偏航会拿到
+        // >85° 的值（远程玩家查询层自己另有一次 ±85 夹取，只盖住了查询名字，盖不住帧数据本身）。
+        entityModelData.netHeadYaw = -MathHelper.clamp_float(netHeadYaw, -85.0F, 85.0F);
 
         return new AnimationEvent<>(
             eventAnimatable,

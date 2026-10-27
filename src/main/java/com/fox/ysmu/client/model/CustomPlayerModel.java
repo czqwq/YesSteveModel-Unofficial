@@ -187,11 +187,26 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             && preview.getQueryPlayer() != null) {
             // Upstream CustomGuiPlayerEntity owns its query entity, physics and processor. The approved off-model
             // forms use the same shape, not the world owner temporarily posed by an inventory renderer.
+            //
+            // The two head angles are stored with the engine's signs: EntityModelData.headPitch is the negated raw
+            // pitch (up-positive) and netHeadYaw is negated too. Upstream builds them that way
+            // (AnimatableEntity.java:324-327) and this port's engine does the same for every event it builds
+            // (GeoReplacedEntityRenderer#buildAnimationEvent:236-260). This branch exists because the preview draw
+            // hands setLivingAnimations an event with no EntityModelData of its own
+            // (RenderUtil#drawPreviewModel), so the convention is rebuilt here from the raw entity fields.
+            //
+            // Inert today: the preview bracket pins the query player's pitch to zero and both yaw fields to the
+            // same value (RenderUtil#renderModel:512-517), exactly as upstream zeroes its preview entity
+            // (util/RenderUtil.java:360-368), and this branch does not run codeAnimation - so only the MoLang names
+            // read these values and both measurements are 0 whichever sign is used. The negation keeps
+            // query.head_y_rotation / ysm.head_pitch (and the yaw twins) pointing the same way as the world pass if
+            // a preview ever draws a subject whose angles are not pinned.
             EntityModelData previewData = new EntityModelData();
             previewData.isSitting = preview.getQueryPlayer().isRiding();
             previewData.isChild = preview.getQueryPlayer().isChild();
-            previewData.netHeadYaw = preview.getQueryPlayer().rotationYawHead - preview.getQueryPlayer().renderYawOffset;
-            previewData.headPitch = preview.getQueryPlayer().rotationPitch;
+            previewData.netHeadYaw = -(preview.getQueryPlayer().rotationYawHead
+                - preview.getQueryPlayer().renderYawOffset);
+            previewData.headPitch = -preview.getQueryPlayer().rotationPitch;
             AnimationRegister.setParserValue(animationEvent, parser, previewData, preview.getQueryPlayer(), false);
             try {
                 super.setLivingAnimations(animatable, instanceId, animationEvent);

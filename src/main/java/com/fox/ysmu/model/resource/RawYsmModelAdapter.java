@@ -918,7 +918,15 @@ public final class RawYsmModelAdapter {
     private static JsonObject createAnimationJson(RawYsmModel.RawAnimation animation) {
         JsonObject json = new JsonObject();
         if (isFinite(animation.length) && animation.length > 0f) {
-            json.addProperty("animation_length", (double) animation.length);
+            // 长度必须和时间线/声音/粒子 key 落在**同一个十进制精度**上：那些 key 由 {@code timeKey}
+            // 用 {@code Float.toString} 写出（0.0101f → "0.0101"），引擎再 {@code Double.parseDouble(key) * 20}
+            // 得到 tick；这里若直接写 {@code (double) float}，得到的是 0.010099999606609344，×20 后
+            // 比同一时间点小 7.9e-9 tick。引擎回绕时只以 {@code animation_length} 调
+            // {@code processKeyFrameEvents}，其 `tick >= startTick` 于是恒假 —— 写在动画结尾上的时间线事件
+            // 永不执行。实测：{@code misc/4_default_controllers} 的 Hair_Physics（长度 0.0101、结尾事件写
+            // v.HP_x_1）因此把 v.HP_x 从"每帧增量"退化成"绝对角度"，子发束拿到 10 倍值，上下转视角时
+            // 整束头发转圈穿模。二进制通道没有 sourceJson，是唯一走这里的路径。
+            json.addProperty("animation_length", Double.parseDouble(Float.toString(animation.length)));
         }
         putLoopMode(json, animation.loopMode);
         if (animation.blendWeight != null) {
