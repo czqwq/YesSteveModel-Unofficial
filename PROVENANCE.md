@@ -293,6 +293,37 @@ the part of it that is written against this snapshot.
   `MolangParser.ysmFunctionRegistrar`/`explicitVariableLookup` 一致（静态、反向控制、本文件不引用 mod 类），
   由 `AnimationRegister.registerMolangHooks()` 安装。记录见 `.agent/phase50-arrow-expressions.md`。
 
+- **Per-frame draw-path and Molang-table performance edits (2026-10-28 round).** Eight engine files changed
+  for measured-static hot paths, all narrow and behaviour-preserving on their enabled path; the full
+  rationale, upstream references and acceptance notes are in `.agent/perf-optimization-round.md`
+  (audits: `.agent/perf-audit-frame-cpu.md`, `.agent/perf-audit-memory.md`).
+  - `geo/material/MaterialDrawSession.java` - reworked. The segment now classifies faces only when the
+    partitioned result differs from plain fixed-function drawing (a translucent render type, or `all_cutout`
+    force-culling); every other model draws through the plain vertex path, which is equivalent for fully
+    opaque geometry on the cutout render type and is what every model used before this class existed. The
+    enabled path reuses its matrices/arrays/`Face` objects from a small pool (no per-cube/per-quad
+    allocation), sorts only the translucent partition, and carries the lighting state instead of querying
+    `glIsEnabled(GL_LIGHTING)` per face. **Upstream:** the partition tags are baked once
+    (`tmp/YesSteveModel-Native-dev/modules/gfx/src/bake/baked_model.cc:685-734`) and consumed by the native
+    renderer; this port has no native layer, so the Java equivalent is only sound where the partition
+    changes the picture.
+  - `geo/material/MaterialFacing.java` - allocation-free `coefficient(Matrix4f, float[])` /
+    `normal(BakedFace, Matrix3f, boolean, float[])` overloads for the per-cube/per-face calls; the
+    allocating forms remain for other callers.
+  - `geo/IGeoRenderer.java` - the material segment is opened before the per-bone lighting decision and
+    `setLit(false/true)` around emissive bones, so the per-face GL query is gone.
+  - `core/molang/LazyVariable.java` + `core/molang/MolangParser.java` - `setLiteral(double)` slot so
+    `setValue(String, double)` no longer allocates a capturing `() -> value` lambda per call (three per
+    controller per frame). Upstream shape: a stored value on a `Variable`
+    (`.../geckolib3/core/molang/binding/ContextBinding.java:50-90`).
+  - `core/molang/MolangPhysicsRuntime.java` - the bone-tracking key (`modelId + "::" + boneName`) is cached
+    per bone in a `WeakHashMap` instead of being concatenated for every bone every frame, and `clear()`
+    drops the key cache with the capture table. Upstream keys bone data by index
+    (`.../geckolib3/model/AnimatedGeoModel.java:21`).
+  - `core/keyframe/BoneAnimationQueue.java` + `core/controller/AnimationController.java` - a
+    `activeThisTick` flag replaces `List.contains` per animated bone per controller (upstream has no such
+    membership list; `.../geckolib3/core/processor/AnimationProcessor.java:87-128`).
+
 ## Where it came from
 
 - Source repository: `E:\IDEA\Geckolib` (symlinked into this workspace as `tmp/Geckolib`).

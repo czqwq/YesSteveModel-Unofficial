@@ -1540,6 +1540,7 @@ public class AnimationController<T extends IAnimatable> {
     }
 
     private static void recycleQueue(BoneAnimationQueue queue) {
+        queue.activeThisTick = false;
         recycle(queue.rotationXQueue);
         recycle(queue.rotationYQueue);
         recycle(queue.rotationZQueue);
@@ -1574,7 +1575,11 @@ public class AnimationController<T extends IAnimatable> {
     }
 
     private void markActiveBoneAnimationQueue(BoneAnimationQueue boneAnimationQueue) {
-        if (boneAnimationQueue != null && !activeBoneAnimationQueues.contains(boneAnimationQueue)) {
+        // Queue identity is stable across frames, so the membership test is the queue's own flag rather than a
+        // linear scan of every bone marked active (R14 of .agent/perf-audit-frame-cpu.md). The flag is cleared by
+        // discardPendingPoints, which is the only place the list is emptied.
+        if (boneAnimationQueue != null && !boneAnimationQueue.activeThisTick) {
+            boneAnimationQueue.activeThisTick = true;
             activeBoneAnimationQueues.add(boneAnimationQueue);
         }
     }

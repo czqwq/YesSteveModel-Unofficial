@@ -19,6 +19,7 @@ import org.lwjgl.opengl.GL11;
 import software.bernie.example.config.ConfigHandler;
 import software.bernie.geckolib3.GeckoLib;
 import software.bernie.geckolib3.core.util.Color;
+import software.bernie.geckolib3.geo.material.MaterialDrawSession;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
 import software.bernie.geckolib3.geo.render.built.GeoCube;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
@@ -101,8 +102,8 @@ public interface IGeoRenderer<T> {
 
         // builder.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
         tess.startDrawing(GL11.GL_QUADS);// , DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
-        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
-            software.bernie.geckolib3.geo.material.MaterialDrawSession.begin(
+        MaterialDrawSession session =
+            MaterialDrawSession.begin(
                 model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
         try {
             for (GeoBone group : model.topLevelBones) {
@@ -164,8 +165,8 @@ public interface IGeoRenderer<T> {
             MATRIX_STACK.transformBone(bone);
 
             if (isBoneRenderOverriden(animatable, bone)) {
-                if (software.bernie.geckolib3.geo.material.MaterialDrawSession.active() != null) {
-                    software.bernie.geckolib3.geo.material.MaterialDrawSession.active().drain(builder);
+                if (MaterialDrawSession.active() != null) {
+                    MaterialDrawSession.active().drain(builder);
                 }
                 drawOverridenBone(animatable, bone);
                 return;
@@ -190,6 +191,12 @@ public interface IGeoRenderer<T> {
                 float boneGreen = green * bone.getRenderGreen();
                 float boneBlue = blue * bone.getRenderBlue();
                 float boneAlpha = alpha * bone.getRenderAlpha();
+                // The material segment classifies faces for a translucent or force-culled model. Its per-face draw
+                // needs the fixed-function lighting state that applies to this bone, and the material path is the one
+                // place that used to ask GL per face (`glIsEnabled`); carrying it in the segment instead keeps that
+                // state decision where it is already made and removes the per-face query.
+                MaterialDrawSession materialSession =
+                    MaterialDrawSession.active();
                 boolean emissive = bone.getRenderGlow() >= 0;
                 if (emissive) {
                     // The fixed-function pipeline has no per-bone lightmap, so an emissive bone is simply drawn
@@ -197,12 +204,13 @@ public interface IGeoRenderer<T> {
                     // bone_glow at all is that the bone glows, and the level is kept on the bone for a future
                     // brightness mapping rather than being invented here.
                     GlStateManager.disableLighting();
+                    if (materialSession != null) {
+                        materialSession.setLit(false);
+                    }
                 }
 
                 // Per-bone texture override: if this bone specifies a different texture,
                 // bind it before rendering cubes and restore afterwards.
-                software.bernie.geckolib3.geo.material.MaterialDrawSession materialSession =
-                    software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
                 ITextureObject savedSource = materialSession == null ? null : materialSession.source();
                 int savedMaterialTexture = materialSession == null ? -1 : materialSession.texture();
                 int savedTextureId = -1;
@@ -222,6 +230,9 @@ public interface IGeoRenderer<T> {
                 } finally {
                     if (emissive) {
                         GlStateManager.enableLighting();
+                        if (materialSession != null) {
+                            materialSession.setLit(true);
+                        }
                     }
                     if (materialSession != null) materialSession.restoreSource(savedSource, savedMaterialTexture);
                     // Restore binding on failures too; otherwise the next bone can inherit an override.
@@ -332,8 +343,8 @@ public interface IGeoRenderer<T> {
      */
     default void renderBoneCubes(Tessellator builder, GeoBone bone,
         float red, float green, float blue, float alpha) {
-        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
-            software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
+        MaterialDrawSession session =
+            MaterialDrawSession.active();
         if (session != null && session.classified()) {
             for (GeoCube cube : bone.childCubes) renderCube(builder, cube, red, green, blue, alpha);
             return;
@@ -380,8 +391,8 @@ public interface IGeoRenderer<T> {
     default void renderMaterialRoot(T animatable, GeoModel model, GeoBone root, ResourceLocation texture, YsmRenderType type) {
         Tessellator builder = Tessellator.instance;
         builder.startDrawing(GL11.GL_QUADS);
-        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
-            software.bernie.geckolib3.geo.material.MaterialDrawSession.begin(
+        MaterialDrawSession session =
+            MaterialDrawSession.begin(
                 model != null && model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
         try { renderRecursively(builder, animatable, root, 1, 1, 1, 1); }
         finally { session.close(builder); }
@@ -399,8 +410,8 @@ public interface IGeoRenderer<T> {
 
         final javax.vecmath.Matrix4f model = MATRIX_STACK.getCubeModelMatrix();
         final javax.vecmath.Matrix3f normalMatrix = MATRIX_STACK.getCubeNormalMatrix();
-        software.bernie.geckolib3.geo.material.MaterialDrawSession session =
-            software.bernie.geckolib3.geo.material.MaterialDrawSession.active();
+        MaterialDrawSession session =
+            MaterialDrawSession.active();
         if (session != null && session.collect(cube, model, normalMatrix, red, green, blue, alpha)) return;
 
         for (GeoQuad quad : cube.quads) {

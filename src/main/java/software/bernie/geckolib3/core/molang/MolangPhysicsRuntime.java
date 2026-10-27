@@ -3,6 +3,7 @@ package software.bernie.geckolib3.core.molang;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.vecmath.Matrix4f;
@@ -85,6 +86,18 @@ public final class MolangPhysicsRuntime {
      *  枢轴点的世界位置（M×pivot），避免骨骼自身缩放/旋转污染平移列（如一个火把 locator
      *  的 scale [1.25, 2.5, 1.5] 会让平移列 z 虚增约 2 倍）。 */
     private static final Map<String, float[]> CAPTURED_BONE_MATRIX = new java.util.HashMap<>();
+    /**
+     * Per-bone lookup key cache: {@code modelId + "::" + boneName}, the key shape
+     * {@link #CAPTURED_BONE_MATRIX} uses.
+     * <p>
+     * The renderer's sink is called once per bone per frame, and building that string there was one
+     * {@code StringBuilder} + one {@code String} per bone per frame for every drawn entity (R7 of
+     * .agent/perf-audit-frame-cpu.md; 150-526 strings/frame). The key only depends on which model the bone
+     * belongs to, so it is computed once per (bone, model) and reused. Weak keys: a bone belongs to a
+     * {@code GeoModel} that the connection teardown releases, and this table must not keep it alive. GeoBone
+     * does not override equals/hashCode, so a {@link java.util.WeakHashMap} keys on identity as needed.
+     */
+    private static final Map<Object, String> BONE_KEY_CACHE = new WeakHashMap<>();
     private static boolean trackingEnabled = false;
     private static ResourceLocation trackingModelId = null;
     private static float trackScaleX = 1.0F;
@@ -200,6 +213,7 @@ public final class MolangPhysicsRuntime {
         // 追踪矩阵按"模型主 id + 骨名"缓存：资源重载 / 登出后旧模型的矩阵必须一起丢掉，
         // 否则刷新出来的模型首帧会先读到上一个模型的骨骼位置（SOURCE clear() 同样清它）。
         CAPTURED_BONE_MATRIX.clear();
+        BONE_KEY_CACHE.clear();
         // The snapshot and the writer table describe the models that were just dropped, so they go with them.
         lastFrameVariables = java.util.Collections.emptyMap();
         GLOBAL_VAR_OWNER.clear();
@@ -432,7 +446,7 @@ public final class MolangPhysicsRuntime {
         if (!trackingEnabled || trackingModelId == null || bone == null || bone.getName() == null) {
             return;
         }
-        String key = trackingModelId + "::" + bone.getName();
+        String key = trackingKey(bone);
         float[] v = CAPTURED_BONE_MATRIX.get(key);
         if (v == null) {
             v = new float[16];
@@ -454,6 +468,18 @@ public final class MolangPhysicsRuntime {
         v[13] = mat.m31;
         v[14] = mat.m32;
         v[15] = mat.m33;
+    }
+
+    /**
+     * The capture-table key for one bone, computed once per (bone, model). See {@link #BONE_KEY_CACHE}.
+     */
+    private static String trackingKey(GeoBone bone) {
+        String key = BONE_KEY_CACHE.get(bone);
+        if (key == null) {
+            key = trackingModelId + "::" + bone.getName();
+            BONE_KEY_CACHE.put(bone, key);
+        }
+        return key;
     }
 
     /** 骨骼绝对枢轴（模型单位，16 单位 = 1 格；OpenYSM bone_pivot_abs 语义）。
@@ -480,9 +506,16 @@ public final class MolangPhysicsRuntime {
             return matrixResult;
         }
         if (trackingEnabled && trackingModelId != null) {
+            // R7: the key is cached per bone instead of being rebuilt by string concatenation on every query
+            // (and on every bone capture). The table is keyed by bone identity, so this needs a GeoBone - a
+            // VirtualBone has no captured matrix and falls back to the parent-chain recomputation below.
             String boneName = MolangStringPool.get(nameId);
-            float[] m = boneName == null ? null
-                : CAPTURED_BONE_MATRIX.get(trackingModelId + "::" + boneName);
+            float[] m = null;
+            if (boneName != null && bone instanceof GeoBone geoBone) {
+                m = CAPTURED_BONE_MATRIX.get(trackingKey(geoBone));
+            } else if (boneName != null) {
+                m = CAPTURED_BONE_MATRIX.get(trackingModelId + "::" + boneName);
+            }
             if (m != null) {
                 // 枢轴点（blocks，与捕获矩阵同单位）
                 float px = bone.getPivotX() / 16f;

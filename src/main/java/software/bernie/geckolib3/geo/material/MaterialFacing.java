@@ -10,14 +10,23 @@ public final class MaterialFacing {
 
     /** Cofactors of clip-space x/y/w rows; accepts perspective and orthographic transforms. */
     public static float[] coefficient(Matrix4f clip) {
-        float[] x = {clip.m00, clip.m01, clip.m02, clip.m03};
-        float[] y = {clip.m10, clip.m11, clip.m12, clip.m13};
-        float[] w = {clip.m30, clip.m31, clip.m32, clip.m33};
-        return new float[] {
-            determinant(x[1], x[2], x[3], y[1], y[2], y[3], w[1], w[2], w[3]),
-            -determinant(x[0], x[2], x[3], y[0], y[2], y[3], w[0], w[2], w[3]),
-            determinant(x[0], x[1], x[3], y[0], y[1], y[3], w[0], w[1], w[3]),
-            -determinant(x[0], x[1], x[2], y[0], y[1], y[2], w[0], w[1], w[2])};
+        float[] out = new float[4];
+        coefficient(clip, out);
+        return out;
+    }
+
+    /**
+     * Allocation-free form of {@link #coefficient(Matrix4f)}: writes the four cofactors into {@code out}. The
+     * renderer calls this once per cube per frame, so the array is supplied by the caller.
+     */
+    public static void coefficient(Matrix4f clip, float[] out) {
+        float x0 = clip.m00, x1 = clip.m01, x2 = clip.m02, x3 = clip.m03;
+        float y0 = clip.m10, y1 = clip.m11, y2 = clip.m12, y3 = clip.m13;
+        float w0 = clip.m30, w1 = clip.m31, w2 = clip.m32, w3 = clip.m33;
+        out[0] = determinant(x1, x2, x3, y1, y2, y3, w1, w2, w3);
+        out[1] = -determinant(x0, x2, x3, y0, y2, y3, w0, w2, w3);
+        out[2] = determinant(x0, x1, x3, y0, y1, y3, w0, w1, w3);
+        out[3] = -determinant(x0, x1, x2, y0, y1, y2, w0, w1, w2);
     }
 
     private static float determinant(float a, float b, float c, float d, float e, float f,
@@ -95,6 +104,37 @@ public final class MaterialFacing {
         }
         if (backFace) normal.negate();
         return normal;
+    }
+
+    /**
+     * Allocation-free form of {@link #normal(BakedFace, Matrix3f, boolean, boolean)}: writes the transformed normal
+     * into {@code out[0..2]}. The renderer needs one normal per face per frame, so the previous {@code Vector3f} per
+     * face was pure garbage.
+     */
+    public static void normal(BakedFace face, Matrix3f inverseTranspose, boolean backFace, float[] out) {
+        float nx = face.normal(0), ny = face.normal(1), nz = face.normal(2);
+        float x = inverseTranspose.m00 * nx + inverseTranspose.m01 * ny + inverseTranspose.m02 * nz;
+        float y = inverseTranspose.m10 * nx + inverseTranspose.m11 * ny + inverseTranspose.m12 * nz;
+        float z = inverseTranspose.m20 * nx + inverseTranspose.m21 * ny + inverseTranspose.m22 * nz;
+        // `uniformScale` is false on the renderer's path, i.e. the native rule normalises unless the transform is
+        // conformal; the caller cannot cheaply know which it is, and the historical caller passed false here.
+        float lengthSquared = x * x + y * y + z * z;
+        if (lengthSquared > 0 && Float.isFinite(lengthSquared)) {
+            float inverseLength = 1f / (float) Math.sqrt(lengthSquared);
+            x *= inverseLength;
+            y *= inverseLength;
+            z *= inverseLength;
+        } else {
+            x = y = z = 0;
+        }
+        if (backFace) {
+            x = -x;
+            y = -y;
+            z = -z;
+        }
+        out[0] = x;
+        out[1] = y;
+        out[2] = z;
     }
 
     public static float depth(BakedFace face, Matrix4f clip) {

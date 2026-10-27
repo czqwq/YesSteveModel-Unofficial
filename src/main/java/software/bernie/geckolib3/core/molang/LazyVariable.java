@@ -11,10 +11,14 @@ import com.eliotlash.mclib.math.Variable;
 public class LazyVariable extends Variable {
 
     private DoubleSupplier valueSupplier;
+    /** Whether {@link #get()} answers a plain stored number instead of calling {@link #valueSupplier}. */
+    private boolean literal;
+    private double literalValue;
 
     @Deprecated
     public LazyVariable(String name, double value) {
-        this(name, () -> value);
+        super(name, 0);
+        setLiteral(value);
     }
 
     public LazyVariable(String name, DoubleSupplier valueSupplier) {
@@ -26,19 +30,34 @@ public class LazyVariable extends Variable {
         return new LazyVariable(variable.getName(), variable.get());
     }
 
+    /**
+     * Stores a plain number. The per-controller clock writes ({@code query.life_time}, {@code query.anim_time},
+     * {@code query.delta_time}) and the per-frame query publication use this path: the previous implementation
+     * wrapped the value in a capturing {@code () -> value} lambda on every call, which is one allocation per
+     * variable per controller per frame (R13 of .agent/perf-audit-frame-cpu.md). Upstream's shape is a stored
+     * value on a {@code Variable} too (its {@code constValue}/mutable binding), so this is the same mechanism with
+     * this port's lazy table.
+     */
+    public void setLiteral(double value) {
+        this.literal = true;
+        this.literalValue = value;
+        this.valueSupplier = null;
+    }
+
     @Override
 
     public void set(double value) {
-        this.valueSupplier = () -> value;
+        setLiteral(value);
     }
 
     public void set(DoubleSupplier valueSupplier) {
+        this.literal = false;
         this.valueSupplier = valueSupplier;
     }
 
     @Override
 
     public double get() {
-        return this.valueSupplier.getAsDouble();
+        return this.literal ? this.literalValue : this.valueSupplier.getAsDouble();
     }
 }

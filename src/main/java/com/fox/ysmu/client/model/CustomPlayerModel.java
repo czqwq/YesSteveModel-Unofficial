@@ -13,7 +13,9 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientProxy;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
@@ -57,7 +59,8 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     @Override
 
     public ResourceLocation getTextureLocation(Object object) {
-        return object instanceof CustomPlayerEntity customPlayer ? textureFor(customPlayer) : DEFAULT_TEXTURE;
+        // The per-frame cached resolution (upstream's data.texture shape); see CustomPlayerEntity#resolvedTexture.
+        return object instanceof CustomPlayerEntity customPlayer ? customPlayer.resolvedTexture() : DEFAULT_TEXTURE;
     }
 
     /**
@@ -304,8 +307,8 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             return;
         }
         try {
-            com.fox.ysmu.client.renderer.CustomPlayerRenderer renderer =
-                com.fox.ysmu.client.ClientProxy.getInstance();
+            CustomPlayerRenderer renderer =
+                ClientProxy.getInstance();
             if (renderer == null) {
                 return;
             }
@@ -313,6 +316,10 @@ public class CustomPlayerModel extends AnimatedGeoModel {
             if (provider != null) {
                 provider.onModelReleased(model);
             }
+            // The renderer keeps the last geometry it drew for its public getGeoModel()/preview readers; that is a
+            // third strong reference, and leaving it is what would keep one released model alive for the whole
+            // session. See ClientModelManager.releaseEngineCaches.
+            renderer.onGeoModelReleased(model);
         } catch (Throwable ignored) {
             // 未初始化 / 正在关闭：没有需要松手的登记项。
         }

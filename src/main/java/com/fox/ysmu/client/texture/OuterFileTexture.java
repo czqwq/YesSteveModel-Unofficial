@@ -3,7 +3,11 @@ package com.fox.ysmu.client.texture;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
@@ -18,29 +22,34 @@ import net.minecraft.util.ResourceLocation;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.ysmu;
 
-public class OuterFileTexture extends AbstractTexture implements software.bernie.geckolib3.geo.material.MaterialSource {
+import software.bernie.geckolib3.geo.material.BakedFace;
+import software.bernie.geckolib3.geo.material.MaterialBake;
+import software.bernie.geckolib3.geo.material.MaterialSource;
+import software.bernie.geckolib3.geo.render.built.GeoCube;
 
-    private final java.util.Map<Integer, BufferedImage> componentImages = new java.util.LinkedHashMap<>();
-    private final java.util.Map<Integer, byte[]> componentData = new java.util.LinkedHashMap<>();
-    private final java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
-        java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> materialCache = new java.util.IdentityHashMap<>();
-    private final java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
-        java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> forcedMaterialCache = new java.util.IdentityHashMap<>();
+public class OuterFileTexture extends AbstractTexture implements MaterialSource {
+
+    private final Map<Integer, BufferedImage> componentImages = new LinkedHashMap<>();
+    private final Map<Integer, byte[]> componentData = new LinkedHashMap<>();
+    private final Map<GeoCube,
+        List<BakedFace>> materialCache = new IdentityHashMap<>();
+    private final Map<GeoCube,
+        List<BakedFace>> forcedMaterialCache = new IdentityHashMap<>();
     private BufferedImage materialImage;
     private final TextureGpuAccounting accounting = new TextureGpuAccounting(ModelTextureRegistry::onTextureGpuBytesChanged);
 
-    public OuterFileTexture(BufferedImage image, java.util.Map<Integer, BufferedImage> components) {
+    public OuterFileTexture(BufferedImage image, Map<Integer, BufferedImage> components) {
         this(image);
         this.componentImages.putAll(components);
     }
 
-    public OuterFileTexture(byte[] data, java.util.Map<Integer, byte[]> components) {
+    public OuterFileTexture(byte[] data, Map<Integer, byte[]> components) {
         this(data);
         this.componentData.putAll(components);
     }
 
-    public java.util.Map<Integer, PbrComponentTexture> preparePbr(IResourceManager manager) throws IOException {
-        java.util.Map<Integer, PbrComponentTexture> result = new java.util.LinkedHashMap<>();
+    public Map<Integer, PbrComponentTexture> preparePbr(IResourceManager manager) throws IOException {
+        Map<Integer, PbrComponentTexture> result = new LinkedHashMap<>();
         try {
             for (int role = 1; role <= 2; role++) {
                 BufferedImage pixels = componentImages.get(role);
@@ -66,12 +75,19 @@ public class OuterFileTexture extends AbstractTexture implements software.bernie
     public boolean materialAvailable() { return materialImage != null; }
 
     @Override
-    public java.util.List<software.bernie.geckolib3.geo.material.BakedFace> materialFaces(
-        software.bernie.geckolib3.geo.render.built.GeoCube cube, boolean forceCulling) {
-        java.util.Map<software.bernie.geckolib3.geo.render.built.GeoCube,
-            java.util.List<software.bernie.geckolib3.geo.material.BakedFace>> cache = forceCulling ? forcedMaterialCache : materialCache;
-        return cache.computeIfAbsent(cube, key -> software.bernie.geckolib3.geo.material.MaterialBake.bake(
-            key.quads, materialImage, forceCulling));
+    public List<BakedFace> materialFaces(
+        GeoCube cube, boolean forceCulling) {
+        Map<GeoCube,
+            List<BakedFace>> cache = forceCulling ? forcedMaterialCache : materialCache;
+        // Explicit get/put instead of computeIfAbsent: the mapping function captured the key and the flag, so the
+        // lambda was allocated on every call, and this method is called once per cube per frame for a classified
+        // model. The render thread is the only caller.
+        List<BakedFace> baked = cache.get(cube);
+        if (baked == null) {
+            baked = MaterialBake.bake(cube.quads, materialImage, forceCulling);
+            cache.put(cube, baked);
+        }
+        return baked;
     }
 
     @Override

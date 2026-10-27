@@ -2,6 +2,8 @@ package com.fox.ysmu.client.animation.molang;
 
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -10,9 +12,12 @@ import org.apache.commons.lang3.StringUtils;
 import com.eliotlash.mclib.math.IValue;
 import com.fox.ysmu.ysmu;
 
+import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangException;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.expressions.MolangAssignment;
+import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
+import software.bernie.geckolib3.core.molang.expressions.MolangMultiStatement;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
@@ -49,6 +54,37 @@ public final class MolangInstructionExecutor {
     private static final Set<String> LOGGED_TIMELINE = Collections
         .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
+    /**
+     * Timeline instructions already parsed, keyed by the instruction text.
+     * <p>
+     * This is the port's form of what upstream does at bake time: {@code AnimationProtoMapper.java:77-87} parses each
+     * instruction source once into {@code EventKeyFrame<IValue[]>}
+     * ({@code parser.parseExpression(sourceFrame.programs().source(), false)}) and the runtime only evaluates it
+     * ({@code InstructionKeyFrameExecutor.java:18-35}, {@code value.eval(evaluator)}). Here the same split is made on
+     * first execution rather than at load, because the port's instruction keyframes still carry the source string
+     * ({@code JsonAnimationUtils.java:402-412}, {@code EventKeyFrame<String>}).
+     * <p>
+     * Without it every emission re-tokenised and re-parsed the text through mclib: {@code MolangParser.parseExpression}
+     * was 10.0 s of a 71 s client-thread profile (14.2%), 99.5% of it reached from {@link #execute(String, String)}, and
+     * a 12-tile model-selection page spends ~58% of each preview bake there. Instruction text is immutable per
+     * keyframe, so a hit is the normal case and the cost becomes what upstream pays.
+     * <p>
+     * Only instructions whose every statement parsed are stored: an instruction that fails keeps the original
+     * re-parse-and-report path, so a pack whose function table fills in later still starts working, and the failure
+     * diagnostics in {@link #warnExecutionFailure} keep counting per occurrence. Dropped by
+     * {@link #clearParsedInstructions()} when the models those instructions belong to are dropped.
+     */
+    private static final Map<String, PreparedInstruction> PREPARED_INSTRUCTIONS = new ConcurrentHashMap<>();
+
+    /**
+     * How many distinct parsed instructions are kept before the table is dropped wholesale.
+     * <p>
+     * Instructions are bounded by what the loaded packs author (the shipped built-in tree declares 95 distinct
+     * instruction texts across 1777 timeline keyframes; LaPluma2.5.3 declares 72), so the cap only guards a client
+     * that loads many packs without a reload in between.
+     */
+    private static final int MAX_PREPARED_INSTRUCTIONS = 4096;
+
     private MolangInstructionExecutor() {}
 
     /**
@@ -80,12 +116,35 @@ public final class MolangInstructionExecutor {
      * Executes one timeline instruction string. {@code attribution} is a diagnostic label (controller/animation
      * name) carried into the failure line so the log names WHERE a malformed instruction came from, not just the
      * fragment itself.
+     * <p>
+     * The statements are parsed once (see {@link #PREPARED_INSTRUCTIONS}) and only evaluated afterwards, which is the
+     * shape upstream has after its bake step.
      */
     public static void execute(String instructions, String attribution) {
         if (StringUtils.isBlank(instructions)) {
             return;
         }
         MolangParser parser = GeckoLibCache.getInstance().parser;
+        PreparedInstruction prepared = PREPARED_INSTRUCTIONS.get(instructions);
+        if (prepared == null) {
+            prepared = prepare(parser, instructions);
+            if (prepared == null) {
+                // Something in this instruction does not parse. Keep the per-call path: it is the one that reports the
+                // failure, and it retries, so an instruction rejected only because its function table had not been
+                // filled in yet starts working instead of staying broken for the session.
+                executeUncached(parser, instructions, attribution);
+                return;
+            }
+            if (PREPARED_INSTRUCTIONS.size() >= MAX_PREPARED_INSTRUCTIONS) {
+                PREPARED_INSTRUCTIONS.clear();
+            }
+            PREPARED_INSTRUCTIONS.put(instructions, prepared);
+        }
+        executePrepared(prepared, parser, attribution);
+    }
+
+    /** Runs an instruction that could not be prepared in full. Unchanged behaviour, kept as the fallback path. */
+    private static void executeUncached(MolangParser parser, String instructions, String attribution) {
         Iterable<String> statements;
         try {
             statements = MolangParser.splitStatements(instructions);
@@ -115,6 +174,101 @@ public final class MolangInstructionExecutor {
                 warnUnregisteredFunctions(parser, trimmed);
                 warnExecutionFailure(trimmed, e, attribution);
             }
+        }
+    }
+
+    /**
+     * Evaluates an already-parsed instruction: one {@code get()} per statement, no tokenising and no parsing.
+     * <p>
+     * A failure here is a runtime one (a function that throws, a division by a variable that is not set yet), so it is
+     * reported through the same path the uncached form uses, naming the statement text the program was parsed from.
+     */
+    private static void executePrepared(PreparedInstruction prepared, MolangParser parser, String attribution) {
+        for (int i = 0; i < prepared.programs.length; i++) {
+            MolangExpression program = prepared.programs[i];
+            resetStatementLocals(program);
+            try {
+                program.get();
+                noteInstructionExecuted();
+                noteAssignmentOwner(program);
+            } catch (Exception e) {
+                warnUnregisteredFunctions(parser, prepared.statements[i]);
+                warnExecutionFailure(prepared.statements[i], e, attribution);
+            }
+        }
+    }
+
+    /**
+     * Clears the per-statement locals a previous execution left behind, so a reused parse starts from the same state
+     * a fresh parse did.
+     * <p>
+     * A statement that assigns a name which is neither {@code v.*} nor an existing global keeps that name in its own
+     * {@code MolangMultiStatement.locals} map ({@code MolangParser.parseOneLine}, the non-{@code v.} branch). Parsing
+     * per emission gave those a fresh zero-valued {@link LazyVariable} every time; reusing the parse keeps the object,
+     * so the value is zeroed here instead. Nothing else in a parsed statement carries state between evaluations.
+     */
+    private static void resetStatementLocals(MolangExpression program) {
+        if (!(program instanceof MolangMultiStatement multi) || multi.locals.isEmpty()) {
+            return;
+        }
+        for (LazyVariable local : multi.locals.values()) {
+            local.setLiteral(0.0D);
+        }
+    }
+
+    /**
+     * Parses every statement of one instruction, or returns {@code null} when any of them does not parse.
+     * <p>
+     * Statically typed against {@link MolangParser#parseExpression(String)} so an instruction may be cached only when
+     * the whole thing is understood: a partial parse would silently drop the statements that failed instead of
+     * reporting them.
+     */
+    private static PreparedInstruction prepare(MolangParser parser, String instructions) {
+        List<String> statements;
+        try {
+            statements = MolangParser.splitStatements(instructions);
+        } catch (MolangException e) {
+            return null;
+        }
+        java.util.ArrayList<MolangExpression> programs = new java.util.ArrayList<>(statements.size());
+        java.util.ArrayList<String> texts = new java.util.ArrayList<>(statements.size());
+        for (String statement : statements) {
+            String trimmed = statement.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            MolangExpression parsed;
+            try {
+                parsed = parser.parseExpression(trimmed);
+            } catch (Exception | LinkageError e) {
+                return null;
+            }
+            if (parsed == null) {
+                return null;
+            }
+            programs.add(parsed);
+            texts.add(trimmed);
+        }
+        return new PreparedInstruction(programs.toArray(new MolangExpression[0]), texts.toArray(new String[0]));
+    }
+
+    /** Drops the parsed instructions. Called with {@link #clearWarnings()} when the models owning them are dropped. */
+    public static void clearParsedInstructions() {
+        PREPARED_INSTRUCTIONS.clear();
+    }
+
+    /** One instruction, parsed. See {@link #PREPARED_INSTRUCTIONS}. */
+    private static final class PreparedInstruction {
+
+        /** Parsed statements, in author order. */
+        private final MolangExpression[] programs;
+
+        /** The text each program was parsed from, so a runtime failure can name the statement that threw. */
+        private final String[] statements;
+
+        private PreparedInstruction(MolangExpression[] programs, String[] statements) {
+            this.programs = programs;
+            this.statements = statements;
         }
     }
 

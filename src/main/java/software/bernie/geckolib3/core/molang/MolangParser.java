@@ -237,9 +237,19 @@ public class MolangParser extends MathBuilder {
         return super.createFunction(normalizeVariableName(first), args);
     }
 
+    /**
+     * Stores a plain number in the variable. Kept {@code @Deprecated} for call-site signalling only: it used to
+     * delegate to {@link #setValue(String, DoubleSupplier)} with a capturing {@code () -> value} lambda, which made
+     * every one of the per-controller clock writes ({@code query.life_time} / {@code query.anim_time} /
+     * {@code query.delta_time}, three per controller per frame) allocate. The supplier overload is for values that
+     * must not be evaluated unless read; this one is for values the caller already has.
+     */
     @Deprecated
     public void setValue(String name, double value) {
-        setValue(name, () -> value);
+        LazyVariable variable = getVariable(name);
+        if (variable != null) {
+            variable.setLiteral(value);
+        }
     }
 
     public void setValue(String name, DoubleSupplier value) {

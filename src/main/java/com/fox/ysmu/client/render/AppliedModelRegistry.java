@@ -84,15 +84,37 @@ public final class AppliedModelRegistry {
      * upstream installing a loaded target ({@code installReady}). Both arguments are required: a record names a model
      * that can really be drawn and the texture that belongs with it, and either half being missing would only invite a
      * reader to bind something the client may not have.
+     * <p>
+     * <b>Written only when the resolved pair changes.</b> This used to be an unconditional record allocation plus two
+     * {@link ConcurrentHashMap} writes per drawn entity per frame. Upstream's install is an event (a completed load),
+     * not a heartbeat ({@code EntityModelBinding:145-167}), so the steady state - the overwhelmingly common one - now
+     * costs one map read and no allocation. The touch timestamp is still refreshed, but at one-second granularity:
+     * {@link #retainAll} runs once a minute with a multi-second grace, so a finer stamp buys nothing and the write
+     * itself boxes two values (R12 of .agent/perf-audit-frame-cpu.md).
      */
     public static void install(int entityId, @Nullable ResourceLocation mainModelId,
         @Nullable ResourceLocation textureId) {
         if (mainModelId == null || textureId == null) {
             return;
         }
-        APPLIED.put(entityId, new Applied(mainModelId, textureId));
-        TOUCHED.put(entityId, System.currentTimeMillis());
+        Applied previous = APPLIED.get(entityId);
+        // Compare fields before constructing the record: the steady state is "the same model and texture as last
+        // frame", and it must not allocate at all.
+        if (previous == null || !previous.mainModelId()
+            .equals(mainModelId)
+            || !previous.textureId()
+                .equals(textureId)) {
+            APPLIED.put(entityId, new Applied(mainModelId, textureId));
+        }
+        long now = System.currentTimeMillis();
+        Long lastTouched = TOUCHED.get(entityId);
+        if (lastTouched == null || now - lastTouched >= TOUCH_GRANULARITY_MILLIS) {
+            TOUCHED.put(entityId, now);
+        }
     }
+
+    /** Minimum spacing of the touch-timestamp rewrite; far below {@link #retainAll}'s grace. */
+    private static final long TOUCH_GRANULARITY_MILLIS = 1000L;
 
     /** {@link #install(int, ResourceLocation, ResourceLocation)} for an entity instance; a null entity is ignored. */
     public static void install(@Nullable EntityLivingBase entity, @Nullable ResourceLocation mainModelId,
