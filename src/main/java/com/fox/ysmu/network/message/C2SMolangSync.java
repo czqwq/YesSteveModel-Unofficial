@@ -43,7 +43,7 @@ public class C2SMolangSync implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        int count = Math.min(Math.max(buf.readInt(), 0), MAX_VALUES);
+        int count = Math.clamp(buf.readInt(), 0, MAX_VALUES);
         values = new double[count];
         for (int i = 0; i < count; i++) {
             values[i] = buf.readDouble();

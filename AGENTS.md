@@ -20,8 +20,6 @@ YSMU 是一个 Minecraft Forge 1.7.10 模组，将 Yes Steve Model/OpenYSM 风�
 
 绝不添加上游不保存的状态来绕开时序差异。如果值尚不可用，上游形态的答案是：通过拥有它的结构解析（上游在已加载的模型内解析纹理名称），或作为显式覆盖传递，或等待。用侧边集合跟踪“我已经做了什么”并据此门控，已在此处产生过一次已发布的回归：一个纹理 id 集合拒绝了玩家自己的 Minecraft 皮肤用于内置 steve/alex 模型，而上游通过将皮肤作为渲染事件覆盖交给渲染器来绘制。该恢复当时只做了一半，且已按上游补齐：覆盖确实走事件，但判定按 id 末段比 `steve`/`alex`，而内置模型的 id 是相对路径的 hex 编码（`misc/2_steve` → `ysmu:_name_6d6973632f325f7374657665`），因此恒不命中，两个模型一直画包内皮肤；现在按上游 `VanillaPlayerRenderEvent.java:19-22,44-46` 比解码后的整个模型路径（另保留旧安装的裸名 `steve`/`alex`），且监听器只做那一个覆盖赋值。见 .agent/phase43-builtin-skin-and-default-texture.md。
 
-不要复制上游的 bug。 引用行为，而非笔误——例如上游在发布渲染事件之前读取纹理覆盖，因此其自身字段从未看到监听器设置的内容；移植在之后读取。同一规则适用于参考分支（tmp/YesSteveModel-Unofficial-perf-previewUI），所有者长期指令要求逐字复制：它是完成的移植，而非正确的移植，且带有上游没有的缺陷。其中一个已实测——其 com/eliotlash/mclib/math/functions/utility/DieRoll.java:26-28（及 DieRollInteger.java）从不递增掷骰计数器，且乘以 getArg(2) - getArg(2)，即零，因此调用 math.die_roll 的包会挂起客户端线程，而上游自己的 .../geckolib3/core/molang/builtin/math/DieRoll.java:14-30 是正确的。逐字复制会引入该挂起。所以可自由复制参考的结构和注释，但在保留前，对照上游检查每个循环、每个除数和每个提前返回，并记录你拒绝复制的内容。
-
 已知与上游的差异
 此处移植对同一问题的回答与 tmp/YesSteveModel-dev-1.20 不同的每一处。每处要么已解决（说明方式），要么等待所有者。列在此处不是发明第三种答案的许可：选择上游形态，或记录为何 1.7.10 或移植自身架构无法做到。
 
