@@ -5,6 +5,13 @@ import java.lang.reflect.Method;
 
 import com.fox.ysmu.ysmu;
 
+/**
+ * Angelica（1.7.10 的 Iris/光影加载器）在启用 shader pack 时会自己画一遍第一人称手
+ * （{@code HandRenderer#renderSolid} → {@code ItemRenderer.renderItemInFirstPerson}）。本 mod 的手臂由
+ * {@code ClientEventHandler#onRenderHand} 画，所以这里只提供那一个 pass 的识别与取消它之后的收尾。
+ * <p>
+ * 全部走反射：Angelica 是可选的，缺失时每个查询都退化为 {@code false}，事件路径照常工作。
+ */
 public final class AngelicaCompat {
 
     private static boolean initialized;
@@ -14,24 +21,22 @@ public final class AngelicaCompat {
     private static Object handRenderer;
     private static Method isHandRendererActive;
     private static Method isRenderingSolid;
-    private static Method isHandTranslucent;
-    private static Object offHand;
     private static Method resetItemId;
     /**
-     * 该 Angelica/Iris 版本是否真的提供了副手半透明信息（R-03）。
-     * {@code InteractionHand} 枚举与 {@code HandRenderer.isHandTranslucent(InteractionHand)} 在同一次反射查找里
-     * 解析，所以 {@code false} 等价于"该版本的 Iris 没有半透明手部分 pass"，而不是"副手不透明"。
+     * 副手半透明信息是否可问（{@code InteractionHand} 枚举 + {@code HandRenderer.isHandTranslucent(InteractionHand)}
+     * 在同一次反射查找里解析）。{@code false} 表示"这个 Iris 版本答不出副手是否半透明"，不是"副手不透明"。
      */
     private static boolean translucentInfoAvailable;
-    private static boolean offhandInfoWarningLogged;
+    private static Object offHand;
+    private static Method isHandTranslucent;
+    private static boolean offhandProbeWarningLogged;
 
     private AngelicaCompat() {}
 
-    public static boolean usesShaderHandRenderer() {
-        init();
-        return available && isShaderPackInUse();
-    }
-
+    /**
+     * 是否正处于 Angelica/Iris 的 solid hand pass 里（{@code HandRenderer.renderSolid} 调用
+     * {@code renderItemInFirstPerson} 的那一刻）。这个 pass 里画出来的是原版手臂，本 mod 要把它取消掉。
+     */
     public static boolean isRenderingSolidHandPass() {
         init();
         return available
@@ -41,45 +46,42 @@ public final class AngelicaCompat {
     }
 
     /**
-     * Angelica/Iris 版本是否提供了副手半透明信息
-     * ({@code HandRenderer.isHandTranslucent(InteractionHand)})。
+     * 光影打开时，事件路径（{@code ClientEventHandler#onRenderHand}）是否要自己画副手。
      * <p>
-     * R-03：把"数据缺失"与"副手不透明"区分开——两者都会让本类只能给出保守结论，但含义不同。
-     * 数据缺失时该版本只会调用一次 {@code ItemRenderer.renderItemInFirstPerson}，所以在当前（唯一）
-     * pass 渲染副手不可能重复绘制。
+     * 副手在第一人称只有两个可能的绘制点，必须恰好画一次：
+     * <ul>
+     *   <li><b>半透明副手</b>：Angelica 的 translucent hand pass 自己画——它的
+     *   {@code mixins/early/shaders/MixinItemRendererBackhand.java:22-31} 在
+     *   {@code IrisApi#isShaderPackInUse} 且 {@code isRenderingSolid() == isItemTranslucent(itemToRender)} 时取消
+     *   主调用并调 {@code BackhandReflectionCompat.renderOffhand(partialTicks)}。这一笔在 shader pipeline 里，
+     *   所以事件路径不能再画一次。</li>
+     *   <li><b>不透明副手</b>：原本由 solid pass 里 Backhand 的 {@code @Inject(at=@At("RETURN"))} 绘制，而那一整个
+     *   调用被 {@code MixinItemRenderer#ysmu$suppressVanillaHandInShaderPass} 取消了，所以要在事件路径补上。</li>
+     * </ul>
+     * 数据缺失（旧 Angelica 没有 {@code isHandTranslucent(InteractionHand)}）时按"自己画一次"处理并打一条一次性
+     * 日志：宁可多画一次也不要静默地把未知当成"不透明"（R-03）。
      */
-    public static boolean hasOffhandTranslucencyInfo() {
+    public static boolean shouldDrawOffhandInHandEvent() {
         init();
-        return available && translucentInfoAvailable;
-    }
-
-    /**
-     * 当前 Iris hand pass 是否应该渲染副手物品。
-     * <p>
-     * 数据可用时按"副手半透明性是否与本 pass 匹配"判定（与 Iris 的两趟 hand pass 约定一致）；
-     * 数据缺失时退化为"只在当前 pass 渲染一次"，并打一条一次性日志说明 Angelica 版本不支持，
-     * 而不是静默地把未知当成"不透明"（R-03）。
-     */
-    public static boolean shouldRenderOffhandInCurrentHandPass() {
-        init();
-        if (!available) {
+        if (!available || !isShaderPackInUse()) {
             return true;
         }
-        if (!hasOffhandTranslucencyInfo()) {
-            if (!offhandInfoWarningLogged) {
-                offhandInfoWarningLogged = true;
+        if (!translucentInfoAvailable) {
+            if (!offhandProbeWarningLogged) {
+                offhandProbeWarningLogged = true;
                 ysmu.LOG.info(
-                    "Angelica/Iris has no offhand translucency info ({}); rendering the offhand once, in the active hand pass only",
-                    handRenderer == null
-                        ? "no HandRenderer instance"
-                        : "no isHandTranslucent(InteractionHand)");
+                    "Angelica/Iris has no offhand translucency info ({}) — the first-person offhand is drawn by the hand event path; a translucent offhand item may also be drawn by the shader hand pass",
+                    handRenderer == null ? "no HandRenderer instance" : "no isHandTranslucent(InteractionHand)");
             }
             return true;
         }
-        boolean offhandTranslucent = invokeBoolean(handRenderer, isHandTranslucent, offHand);
-        return invokeBoolean(handRenderer, isRenderingSolid) != offhandTranslucent;
+        return !invokeBoolean(handRenderer, isHandTranslucent, offHand);
     }
 
+    /**
+     * 清掉 Iris 的 {@code currentRenderedItem}。取消 {@code renderItemInFirstPerson} 会跳过宿主 RETURN 注入里的
+     * {@code ItemIdManager.resetItemId()}，不清的话这一帧之后的手持物还会带着手部的 item id。
+     */
     public static void resetFirstPersonItemId() {
         init();
         if (resetItemId != null) {
@@ -122,6 +124,7 @@ public final class AngelicaCompat {
                 offHand = null;
                 isHandTranslucent = null;
             }
+            translucentInfoAvailable = handRenderer != null && offHand != null && isHandTranslucent != null;
 
             try {
                 Class<?> itemIdManager = Class.forName("net.coderbot.iris.uniforms.ItemIdManager");
@@ -129,12 +132,9 @@ public final class AngelicaCompat {
             } catch (ReflectiveOperationException | LinkageError ignored) {
                 resetItemId = null;
             }
-            // R-03: record whether this Iris version can answer "is this offhand item translucent" at all.
-            translucentInfoAvailable = handRenderer != null && offHand != null && isHandTranslucent != null;
             available = true;
         } catch (ReflectiveOperationException | LinkageError ignored) {
             available = false;
-            translucentInfoAvailable = false;
         }
     }
 

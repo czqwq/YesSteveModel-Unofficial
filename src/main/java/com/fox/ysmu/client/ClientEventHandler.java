@@ -12,7 +12,6 @@ import com.fox.ysmu.client.gui.ExtraPlayerConfigScreen;
 import com.fox.ysmu.client.gui.OpenModelFolderScreen;
 import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.fox.ysmu.client.gui.PlayerTextureScreen;
-import com.fox.ysmu.client.compat.AngelicaCompat;
 import com.fox.ysmu.client.input.WheelAnimationLock;
 import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.client.render.ModelFailureNotifier;
@@ -429,14 +428,23 @@ public class ClientEventHandler {
         player.prevRotationYawHead = player.rotationYawHead;
     }
 
+    /**
+     * 第一人称手臂<b>唯一</b>的绘制点，光影开或关都走这里。
+     *
+     * <p>Forge 的 {@code RenderHandEvent} 由 {@code EntityRenderer.renderWorld} 发出
+     * （{@code build/rfg/minecraft-src/java/net/minecraft/client/renderer/EntityRenderer.java:1434}），
+     * 位于 Angelica 合成世界之后（它的 {@code iris$endLevelRender} 注入在 {@code dispatchRenderLast} 之前），
+     * 也就是原版画手部叠加层的位置——所以不管光影是否开启，这里画的手都进主帧缓冲、都能看见。</p>
+     *
+     * <p>skin pack 启用时，Angelica 会在它自己的 deferred hand pass 里再画一次原版手臂
+     * （{@code HandRenderer#renderSolid}）。那一笔由 {@code MixinItemRenderer#ysmu$suppressVanillaHandInShaderPass}
+     * 取消——这里不再提前 return，因为 Iris 的 pass 里画不出端口的手臂（详见该 mixin 的 javadoc）。</p>
+     */
     @SubscribeEvent
     public static void onRenderHand(RenderHandEvent event) {
         Minecraft mc = Minecraft.getMinecraft();
         EntityPlayer player = mc.thePlayer;
         ItemRenderer itemRenderer = mc.entityRenderer.itemRenderer;
-        if (AngelicaCompat.usesShaderHandRenderer()) {
-            return;
-        }
         FirstPersonHandRenderer.tryRender(event, mc, player, itemRenderer);
     }
 

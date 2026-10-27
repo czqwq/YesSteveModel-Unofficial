@@ -108,25 +108,18 @@ public final class FirstPersonHandRenderer {
         return true;
     }
 
-    public static boolean tryRenderInActiveFirstPersonPass(Minecraft mc, ItemRenderer itemRenderer, float partialTicks,
-        boolean renderOffhand) {
-        EntityPlayer player = mc == null ? null : mc.thePlayer;
-        CustomHandRenderContext context = getCustomHandRenderContext(mc, player, itemRenderer);
-        if (context == null) {
-            return false;
-        }
-
-        renderFirstPersonItems(
-            mc,
-            player,
-            itemRenderer,
-            context.renderer,
-            context.customPlayer,
-            context.rightArm,
-            context.texture,
-            partialTicks,
-            renderOffhand);
-        return true;
+    /**
+     * Whether this frame's arm is drawn by {@link #tryRender}, i.e. whether the vanilla hand on screen is replaced by
+     * the model's own arm.
+     * <p>
+     * The only caller is the Angelica shader path, whose own pass cannot draw the arm (see
+     * {@code MixinItemRenderer#ysmu$suppressVanillaHandInShaderPass}) and therefore only has to keep the host's
+     * vanilla arm out of the frame. The predicate resolves exactly the context {@link #tryRender} draws with, so the
+     * two can never disagree: {@code false} leaves the vanilla hand alone, {@code true} means the arm is guaranteed
+     * to be drawn by the event path in this same frame.
+     */
+    public static boolean willRenderCustomHand(Minecraft mc, ItemRenderer itemRenderer) {
+        return getCustomHandRenderContext(mc, mc == null ? null : mc.thePlayer, itemRenderer) != null;
     }
 
     public static void render(RenderHandEvent event, Minecraft mc, EntityPlayer player, ItemRenderer itemRenderer,
@@ -155,7 +148,8 @@ public final class FirstPersonHandRenderer {
                     rightArm,
                     texture,
                     partialTicks,
-                    true);
+                    // 副手必须恰好画一次：半透明副手由 Angelica 的 translucent hand pass 画，其余由这里画。
+                    com.fox.ysmu.client.compat.AngelicaCompat.shouldDrawOffhandInHandEvent());
             } finally {
                 entityRenderer.disableLightmap((double) partialTicks);
             }
