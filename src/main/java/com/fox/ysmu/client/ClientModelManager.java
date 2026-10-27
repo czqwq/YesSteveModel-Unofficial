@@ -2859,6 +2859,9 @@ public class ClientModelManager {
         MolangPhysicsRuntime.clear();
         MolangInstructionExecutor.clearWarnings();
         MolangInstructionExecutor.clearTimelineLog();
+        // The parsed timeline instructions belong to the animations of the models being dropped, so they go with
+        // them (they are keyed by instruction text, which a reload may well change under the same spelling).
+        MolangInstructionExecutor.clearParsedInstructions();
         // The projectile index belongs to the models being dropped, and so does the per-projectile state those models
         // were driving.
         PROJECTILE_MODEL_IDS.clear();
