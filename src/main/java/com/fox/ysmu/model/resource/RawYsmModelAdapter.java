@@ -310,12 +310,17 @@ public final class RawYsmModelAdapter {
         }
         putAnimationControllers(animations, raw);
 
-        // The pack's GUI presentation images: its ysm.json's gui_background / gui_foreground, already read and
-        // normalised to PNG by the parser (YSMFolderDeserializer.loadGuiImage:240-251 passes the ids
+        // The pack's GUI presentation images: its ysm.json's gui_background / gui_foreground, read into
+        // RawYsmModel.RawImage by both parsers (YSMFolderDeserializer.loadGuiImage:240-251 passes the ids
         // "gui_foreground" / "gui_background" into RawYsmModel.RawImage.name). Upstream reads the same two paths into
         // the model's settings as presentation image blobs (format/parser/ModelInfoBuilder.java:57-64) and its catalog
         // card requests them per model (client/gui/button/CatalogModelCardState.java:238-246); the port has no
         // manifest, so they travel beside the payload in ModelData#getGuiImages and the selection tile draws them.
+        //
+        // They are normalised to PNG here, like the model textures above: the folder parser already did it
+        // (YSMFolderDeserializer.parseImage:1091-1104), but a binary .ysm keeps the pack's own image format and
+        // upstream normalises those while mapping the model for the client (YSMClientMapper.buildExtraTextures:634-644
+        // calls its toPng over exactly these background images).
         //
         // Deliberately NOT the two maps next door: `textures` is the model's texture *list* - ServerModelInfo is
         // built from its key set (ModelData's constructor) and the selection screen offers it as selectable skins, so
@@ -326,7 +331,7 @@ public final class RawYsmModelAdapter {
             if (image == null || image.data == null || StringUtils.isBlank(image.name)) {
                 continue;
             }
-            guiImages.put(image.name, image.data);
+            guiImages.put(image.name, toLegacyImageData(image));
         }
 
         // The model's metadata links travel beside the wheel declarations for the same reason they do: this bridge is
@@ -420,13 +425,33 @@ public final class RawYsmModelAdapter {
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: PNG format, OK");
             return true;
         }
-        // 参考在成功分支内打印 "RGBA format, OK"。这里不能把最后那句 return 改写成 if/return true
-        // （纯诊断改动不得改其它语句），所以条件原样重复一次，只多出一条被门控的日志语句。
-        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE
-            && texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture)) {
-            ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: RGBA format, OK");
+        if (texture.imageFormat == RGBA_FORMAT) {
+            boolean ok = canConvertRgba(texture);
+            if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE && ok) {
+                ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: RGBA format, OK");
+            }
+            return ok;
         }
-        return texture.imageFormat == RGBA_FORMAT && canConvertRgba(texture);
+        // BMP/JPEG/WebP/AVIF: getLegacyTextureData decodes them through ModelImageConverter and re-encodes PNG,
+        // exactly as upstream normalises model images on its server->client mapping (YSMClientMapper.toPng:63-109,
+        // called by buildParsedBundle:113-135). A folder model is normalised earlier, while it is parsed
+        // (YSMFolderDeserializer.parseTexture:360-372), but a binary .ysm keeps the pack's own image bytes and
+        // format - so without this branch a format-26 pack whose only player texture is WebP parses completely and
+        // is then rejected as "cannot be bridged to legacy ModelData" (Endfield_Rossi_v1.1.ysm).
+        boolean convertible = isConvertibleImageFormat(texture.imageFormat);
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+            ysmu.LOG.info("[YSMU-MODEL]   hasLegacyTextureData: format {} normalisable to PNG={}", texture.imageFormat, convertible);
+        }
+        return convertible;
+    }
+
+    /**
+     * The image formats {@link ModelImageConverter} decodes and re-encodes as PNG, i.e. everything the model
+     * formats can carry besides PNG itself: 1=BMP, 3=JPEG, 4=WEBP, 5=AVIF. Raw RGBA is {@link #RGBA_FORMAT} and is
+     * converted by the branch next to it.
+     */
+    private static boolean isConvertibleImageFormat(int imageFormat) {
+        return imageFormat == 1 || imageFormat == 3 || imageFormat == 4 || imageFormat == 5;
     }
 
     private static Map<Integer, byte[]> pbrComponents(RawYsmModel.RawTexture texture) {
@@ -454,7 +479,23 @@ public final class RawYsmModelAdapter {
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: RGBA->PNG ({}x{})", texture.width, texture.height);
             return convertRgbaToPng(texture.data, texture.width, texture.height);
         }
-        return null;
+        if (!isConvertibleImageFormat(texture.imageFormat)) {
+            return null;
+        }
+        // A binary .ysm keeps the pack's own image format; the client texture path (and ModelData itself) carries
+        // PNG only. This is the port of upstream's YSMClientMapper.toPng, which decodes BMP/JPEG/WebP/AVIF with the
+        // ImageStream decoders and re-encodes PNG while mapping a model for the client (:63-109; the main textures
+        // at :113-128, sub-textures at :117-125, sub-entity textures at :592-597/:623-628). ModelImageConverter is
+        // the 1.7.10 port of that step and passes PNG through untouched/keeps undecodable bytes, so a failure here
+        // means "this texture cannot be shipped" and the caller skips it (existing behaviour for unknown formats).
+        ModelImageConverter.Result converted = ModelImageConverter.toPng(texture.data, textureName(texture));
+        if (!converted.isPng()) {
+            return null;
+        }
+        if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_PARSE) {
+            ysmu.LOG.info("[YSMU-MODEL]   getLegacyTextureData: format {} -> PNG ({} bytes)", texture.imageFormat, converted.data.length);
+        }
+        return converted.data;
     }
 
     private static boolean canConvertRgba(RawYsmModel.RawTexture texture) {
@@ -481,6 +522,24 @@ public final class RawYsmModelAdapter {
             ysmu.LOG.warn("Failed to convert OpenYSM RGBA texture to PNG", e);
         }
         return null;
+    }
+
+    /**
+     * The bytes of a GUI presentation image to ship: PNG whenever the image can be decoded, the original bytes
+     * otherwise - exactly {@link ModelImageConverter#toPng}'s contract.
+     * <p>
+     * A folder model's images are already normalised while the folder is parsed
+     * ({@code YSMFolderDeserializer.parseImage:1091-1104}), so this is mostly a pass-through for them; a binary
+     * {@code .ysm} keeps the pack's own image format, and upstream normalises those while mapping the model for the
+     * client ({@code YSMClientMapper.buildExtraTextures:634-644} calls its {@code toPng} over the same
+     * {@code backgroundImages}). Without it a binary model whose background is WebP would hand the client's PNG-only
+     * texture path a WebP payload.
+     */
+    private static byte[] toLegacyImageData(RawYsmModel.RawImage image) {
+        if (image == null || image.data == null) {
+            return null;
+        }
+        return ModelImageConverter.toPng(image.data, StringUtils.defaultIfBlank(image.name, "gui_image")).data;
     }
 
     private static byte[] toGeometryJson(RawYsmModel raw, RawYsmModel.RawGeometry geometry, boolean includeModelInfo)
