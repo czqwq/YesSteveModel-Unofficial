@@ -457,7 +457,11 @@ public final class OpenYsmModelSyncClient {
                 ysmu.LOG.warn("OpenYSM synced model {} is not bridgeable to legacy ModelData", context.modelId);
                 return false;
             }
-            ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, context.modelId);
+            // structured=true: this payload is the binary form, so its geometry is handed to the client as engine
+            // POJOs instead of being flattened to pretty-printed JSON and parsed back (see
+            // RawYsmModelAdapter.toLegacyModelData's three-argument overload). The legacy container and the folder
+            // reader keep the two-argument call, because their payload really is JSON.
+            ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, context.modelId, true);
             // The information screen's author avatars are part of this payload; hand them over together with the
             // model so the screen has them as soon as the model itself is selectable.
             ResourceLocation modelId = new ResourceLocation(ysmu.MODID, context.modelId);
@@ -485,7 +489,11 @@ public final class OpenYsmModelSyncClient {
                     if (generation != ClientModelManager.currentGeneration()) {
                         return;
                     }
-                    ClientModelManager.registerAll(data);
+                    // The server-derived hash pair is this payload's content identity: a hash of the model itself
+                    // plus the bake version. It replaces the whole-payload MD5 this funnel used to compute on the
+                    // client thread, and it keys the client's baked-geometry cache.
+                    ClientModelManager.registerAll(
+                        data, "o:" + Long.toHexString(context.hash1) + ":" + Long.toHexString(context.hash2));
                     ClientModelMetadataRegistry.acceptStructuredAuthors(modelId, authors);
                     // Record the encrypted client cache file this payload was parsed from (relative to
                     // CACHE_CLIENT), so the model's sound bytes stay reachable after `raw` is gone:

@@ -1,10 +1,14 @@
 package com.eliotlash.mclib.math.functions;
 
+import java.io.Serializable;
+
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.Operation;
 import software.bernie.geckolib3.core.molang.MolangStringPool;
 
-public abstract class Function implements IValue {
+public abstract class Function implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     protected IValue[] args;
     protected String name;

@@ -23,9 +23,6 @@ import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
 
-import software.bernie.geckolib3.geo.raw.pojo.Converter;
-import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
-
 public final class FolderFormat {
 
     private FolderFormat() {}
@@ -178,12 +175,35 @@ public final class FolderFormat {
 
         if (MAIN_MODEL_FILE_NAME.equals(fileName) || ARM_MODEL_FILE_NAME.equals(fileName)) {
             String modelJson = FileUtils.readFileToString(filePath.toFile(), StandardCharsets.UTF_8);
-            RawGeoModel rawModel = Converter.fromJsonString(modelJson);
-            // 直接返回JSON字符串的字节数组，而不是尝试序列化RawGeoModel对象
+            // Only refuse a file that is not a geometry object at all; the JSON itself is what gets cached.
+            // This used to run Converter.fromJsonString and throw the parsed model away, which built the whole
+            // Bundle of POJOs for every geometry of every changed folder on the server's scan. The client still
+            // parses the real JSON with Converter when it builds the model, and /ysm upload still runs the full
+            // ModelFileValidator, so no gate downstream loses its answer here.
+            if (!isGeometryObject(modelJson)) {
+                throw new IOException("Invalid geometry JSON " + filePath);
+            }
             return modelJson.getBytes(StandardCharsets.UTF_8);
         }
 
         return FileUtils.readFileToByteArray(filePath.toFile());
+    }
+
+    /**
+     * Whether the text is at least a JSON object declaring {@code minecraft:geometry}.
+     * <p>
+     * Deliberately a tree check, not a POJO bind: callers only need "is this a geometry file", and the cheap answer
+     * keeps the scan from building an object graph it immediately discards.
+     */
+    private static boolean isGeometryObject(String modelJson) {
+        try {
+            com.google.gson.JsonElement element = new com.google.gson.JsonParser().parse(modelJson);
+            return element != null && element.isJsonObject()
+                && element.getAsJsonObject()
+                    .has("minecraft:geometry");
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static boolean isNotBlankFile(File file) {

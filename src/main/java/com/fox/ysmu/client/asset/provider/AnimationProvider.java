@@ -10,6 +10,7 @@ import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationDomain;
 import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
 import com.fox.ysmu.client.asset.AssetProvider;
+import com.fox.ysmu.client.model.AnimationPayload;
 import com.fox.ysmu.client.asset.ReleaseMode;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -46,7 +47,7 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  *       第一人称手臂绑的是 {@code arm} id —— 只摘 main 会把手臂那份留在缓存里，这一侧的释放就白做。</li>
  * </ol>
  */
-public final class AnimationProvider implements AssetProvider<ResourceLocation, Map<String, byte[]>> {
+public final class AnimationProvider implements AssetProvider<ResourceLocation, AnimationPayload> {
 
     /**
      * 后台线程：从一个模型在加密客户端缓存里的 payload 里取出它的动画文件字节。
@@ -57,7 +58,7 @@ public final class AnimationProvider implements AssetProvider<ResourceLocation, 
      */
     @Override
     @Nullable
-    public Map<String, byte[]> load(ResourceLocation mainId) {
+    public AnimationPayload load(ResourceLocation mainId) {
         // 本仓只认 OpenYSM 加密缓存（legacy 通道的「模型 → 缓存文件」关联记在 network/**，
         // 见 ClientModelManager.hasReloadableClientCache 的说明），与 ClientModelManager 的采纳门
         // 是同一个事实，所以这里不需要再判一次。
@@ -65,17 +66,17 @@ public final class AnimationProvider implements AssetProvider<ResourceLocation, 
         if (data == null) {
             return null;
         }
-        Map<String, byte[]> animations = data.getAnimation();
-        return animations == null || animations.isEmpty() ? null : animations;
+        AnimationPayload animations = AnimationPayload.of(data);
+        return animations.isEmpty() ? null : animations;
     }
 
     @Override
-    public void apply(ResourceLocation mainId, Map<String, byte[]> animations) {
+    public void apply(ResourceLocation mainId, AnimationPayload animations) {
         ClientModelManager.reinstallAnimations(mainId, animations);
     }
 
     @Override
-    public void release(ResourceLocation mainId, Map<String, byte[]> animations, ReleaseMode mode) {
+    public void release(ResourceLocation mainId, AnimationPayload animations, ReleaseMode mode) {
         if (mode == ReleaseMode.GPU_ONLY) {
             // 动画没有「只丢 GPU 那一半」的说法：堆对象就是全部。
             return;
@@ -103,7 +104,7 @@ public final class AnimationProvider implements AssetProvider<ResourceLocation, 
     }
 
     @Override
-    public long weight(ResourceLocation mainId, Map<String, byte[]> animations) {
+    public long weight(ResourceLocation mainId, AnimationPayload animations) {
         if (animations == null) {
             return 0;
         }
@@ -111,9 +112,16 @@ public final class AnimationProvider implements AssetProvider<ResourceLocation, 
         // 原始 JSON 字节，直接按字节数算更准。只在容量上限启用时才被调用（当前 MAX_WEIGHT = 0，
         // 见 AssetCache.evict），所以这点遍历不影响空闲扫描。
         long total = 0L;
-        for (byte[] bytes : animations.values()) {
+        for (byte[] bytes : animations.files().values()) {
             if (bytes != null) {
                 total += bytes.length;
+            }
+        }
+        // Structures are the binary channel's form; account them by their declared animation count so a payload that
+        // only carries structures does not weigh nothing.
+        for (com.fox.ysmu.model.resource.pojo.RawYsmModel.RawAnimationFile file : animations.structures().values()) {
+            if (file != null) {
+                total += file.animations.size() * 1024L;
             }
         }
         return total;

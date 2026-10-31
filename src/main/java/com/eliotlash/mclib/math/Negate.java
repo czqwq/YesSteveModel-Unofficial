@@ -1,6 +1,10 @@
 package com.eliotlash.mclib.math;
 
-public class Negate implements IValue {
+import java.io.Serializable;
+
+public class Negate implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     public IValue value;
 

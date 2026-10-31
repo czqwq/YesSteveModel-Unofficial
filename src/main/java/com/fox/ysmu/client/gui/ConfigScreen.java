@@ -79,6 +79,9 @@ public class ConfigScreen extends GuiScreen {
                 "gui.yes_steve_model.config.animation_speed_match_base",
                 0.25, 4.0, 0.05, Config.ANIMATION_SPEED_MATCH_BASE,
                 v -> Config.ANIMATION_SPEED_MATCH_BASE = v));
+            // 磁盘几何烘焙缓存：移植特有，默认关（实测比重新烘焙慢，见 Config#ENABLE_BAKED_GEOMETRY_CACHE）。
+            addCheckbox(18, x + 5, y + 25 + i++ * 22, "baked_geometry_cache", Config.ENABLE_BAKED_GEOMETRY_CACHE);
+            addCheckbox(19, x + 5, y + 25 + i++ * 22, "baked_animation_cache", Config.ENABLE_BAKED_ANIMATION_CACHE);
         }
     }
 
@@ -99,7 +102,7 @@ public class ConfigScreen extends GuiScreen {
             case 1: case 2: case 3: case 4: case 5: case 6: case 8: case 16: case 17:
                 actionPage0(button);
                 break;
-            case 7: case 9: case 11: case 12: case 13: case 14:
+            case 7: case 9: case 11: case 12: case 13: case 14: case 18: case 19:
                 actionPage1(button);
                 break;
         }
@@ -168,6 +171,14 @@ public class ConfigScreen extends GuiScreen {
                 break;
             case 14:
                 Config.ANIMATION_SPEED_MATCH = !Config.ANIMATION_SPEED_MATCH;
+                ((ConfigCheckBox) button).doPress();
+                break;
+            case 18:
+                Config.ENABLE_BAKED_GEOMETRY_CACHE = !Config.ENABLE_BAKED_GEOMETRY_CACHE;
+                ((ConfigCheckBox) button).doPress();
+                break;
+            case 19:
+                Config.ENABLE_BAKED_ANIMATION_CACHE = !Config.ENABLE_BAKED_ANIMATION_CACHE;
                 ((ConfigCheckBox) button).doPress();
                 break;
             case 11:

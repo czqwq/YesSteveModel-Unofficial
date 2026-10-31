@@ -10,7 +10,14 @@ import com.eliotlash.mclib.math.Variable;
  */
 public class LazyVariable extends Variable {
 
-    private DoubleSupplier valueSupplier;
+    /**
+     * YSMU: {@code transient}, because it is a capturing lambda and lambdas are not serialisable. Timeline-local
+     * variables live in {@code MolangMultiStatement.locals} and are therefore part of a parsed animation graph; a
+     * deserialised copy answers its stored literal (or 0) instead of throwing, which is the only sane answer for an
+     * object whose supplier belonged to a parser that no longer exists. Nothing changes at runtime - serialisation of
+     * this graph failed outright before, so no live object ever travelled through it.
+     */
+    private transient DoubleSupplier valueSupplier;
     /** Whether {@link #get()} answers a plain stored number instead of calling {@link #valueSupplier}. */
     private boolean literal;
     private double literalValue;
@@ -58,6 +65,10 @@ public class LazyVariable extends Variable {
     @Override
 
     public double get() {
-        return this.literal ? this.literalValue : this.valueSupplier.getAsDouble();
+        if (this.literal) {
+            return this.literalValue;
+        }
+        // A deserialised variable has no supplier (see the field's comment); answer the stored value rather than NPE.
+        return this.valueSupplier == null ? 0 : this.valueSupplier.getAsDouble();
     }
 }

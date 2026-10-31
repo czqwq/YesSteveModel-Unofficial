@@ -1,7 +1,7 @@
 dependencies {
     elytraModpackVersion {
         // 在这配置的gtnh版本 用于自动拉取依赖版本
-        gtnhVersion = "2.9.0-beta-3"
+        gtnhVersion = "2.9.0"
         // 是否不缓存拉取的依赖清单文件
         manifestNoCache = false
         // 是否自动为输出的jar添加 `gtnhVersion` 后缀
@@ -29,4 +29,5 @@ dependencies {
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
+    compileOnly("it.unimi.dsi:fastutil:8.5.18")
 }

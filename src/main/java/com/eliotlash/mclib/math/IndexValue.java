@@ -1,5 +1,7 @@
 package com.eliotlash.mclib.math;
 
+import java.io.Serializable;
+
 import java.util.List;
 
 import org.apache.logging.log4j.Logger;
@@ -18,7 +20,9 @@ import software.bernie.geckolib3.GeckoLib;
  * Only {@code args} is indexed here. Molang has no other array in this runtime, so an unknown name answers 0 and is
  * reported once instead of silently pretending to work.
  */
-public class IndexValue implements IValue {
+public class IndexValue implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     private static final Logger LOG = GeckoLib.LOG;
     private static final java.util.Set<String> WARNED_NAMES = java.util.concurrent.ConcurrentHashMap.newKeySet();

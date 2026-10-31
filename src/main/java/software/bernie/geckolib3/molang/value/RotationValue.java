@@ -1,8 +1,12 @@
 package software.bernie.geckolib3.molang.value;
 
+import java.io.Serializable;
+
 import software.bernie.geckolib3.molang.runtime.ExpressionEvaluator;
 
-public class RotationValue implements IValue {
+public class RotationValue implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
     private final IValue value;
     private final boolean flip;
 

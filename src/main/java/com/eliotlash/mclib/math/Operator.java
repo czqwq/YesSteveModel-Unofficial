@@ -1,6 +1,10 @@
 package com.eliotlash.mclib.math;
 
-public class Operator implements IValue {
+import java.io.Serializable;
+
+public class Operator implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     public Operation operation;
     public IValue a;

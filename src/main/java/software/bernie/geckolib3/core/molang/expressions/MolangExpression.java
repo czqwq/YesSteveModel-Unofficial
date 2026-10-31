@@ -1,5 +1,7 @@
 package software.bernie.geckolib3.core.molang.expressions;
 
+import java.io.Serializable;
+
 import com.eliotlash.mclib.math.Constant;
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.Operation;
@@ -8,9 +10,19 @@ import com.google.gson.JsonPrimitive;
 
 import software.bernie.geckolib3.core.molang.MolangParser;
 
-public abstract class MolangExpression implements IValue {
+public abstract class MolangExpression implements IValue, Serializable {
 
-    public MolangParser context;
+    private static final long serialVersionUID = 42L;
+
+    /**
+     * The parser that built this expression.
+     * <p>
+     * YSMU: {@code transient}. Nothing reads it back - the whole engine only assigns it in this constructor - and a
+     * {@code MolangParser} is live parser state (variable tables, registered functions) that must never be serialised
+     * into a cache file. Marking it transient is what lets the parsed animation graph round-trip through Java
+     * serialisation; see {@code .agent/plan-bake-cache-and-structured-bridge.md}.
+     */
+    public transient MolangParser context;
 
     public MolangExpression(MolangParser context) {
         this.context = context;

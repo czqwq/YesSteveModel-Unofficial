@@ -408,6 +408,8 @@ message.yes_steve_model.asset.available_versions=Available versions: %s
 message.yes_steve_model.asset.load_failed=High-version asset loading failed (see log)
 message.yes_steve_model.asset.config_hint=(ysmu.cfg high-version asset config)
 gui.yes_steve_model.config.idle_asset_eviction=Release idle model geometry (reference-branch idle asset eviction). NOT YET VALIDATED IN THIS PORT: enabling it may release geometry this port cannot rebuild; leave it off unless you are deliberately comparing against the reference branch.
+gui.yes_steve_model.config.baked_geometry_cache=Reuse baked geometry from the content-addressed disk cache. DEFAULT OFF: measured slower than rebuilding in this port (build 0-7 ms vs cache read 1-52 ms plus digest), so it only pays off for a future, more expensive bake.
+gui.yes_steve_model.config.baked_animation_cache=Reuse parsed animation sets from the content-addressed disk cache. DEFAULT OFF: measured slower than rebuilding in this port (build 6-57 ms vs cache read 30-79 ms).
 
 # Molang debug overlay + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, off by default)
 gui.yes_steve_model.debug.title=[Molang Debug]  %s vars

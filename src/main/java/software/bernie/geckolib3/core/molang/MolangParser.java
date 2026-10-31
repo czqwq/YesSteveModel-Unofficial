@@ -477,14 +477,7 @@ public class MolangParser extends MathBuilder {
         } else {
             falseValue = falseBody == null ? parseOneLine(whenFalse, currentStatement) : scopeValue(falseBody);
         }
-        return new MolangValue(this, new IValue() {
-
-            @Override
-            public double get() {
-                // 只执行被选中的那一支：upstream ExpressionEvaluatorImpl.java:393-399
-                return conditionValue.get() != 0 ? trueValue.get() : falseValue.get();
-            }
-        });
+        return new MolangValue(this, new ConditionalSelect(conditionValue, trueValue, falseValue));
     }
 
     /**
@@ -692,28 +685,7 @@ public class MolangParser extends MathBuilder {
             String rightExpr = expression.substring(ncIdx + 2).trim();
             MolangExpression leftVal = parseOneLine(leftExpr, currentStatement);
             MolangExpression rightVal = parseOneLine(rightExpr, currentStatement);
-            return new MolangValue(this, new com.eliotlash.mclib.math.IValue() {
-                @Override
-                public double get() {
-                    double l = leftVal.get();
-                    // Check if the variable was EXPLICITLY set by the user (via GUI/config),
-                    // not just default-initialized.  Default-initialized variables are in
-                    // PENDING_ROAMING but NOT in EXPLICIT_ROAMING, so they still fall
-                    // through to the default when their value is 0.
-                    boolean userSet = false;
-                    ExplicitVariableLookup lookup = explicitVariableLookup;
-                    if (lookup != null) {
-                        userSet = lookup.isExplicitlySet(leftExpr);
-                    }
-                    if (userSet || l != 0) {
-                        return l;
-                    }
-                    // 上游的 `??` 只在左侧为 null 时才访问右侧（ExpressionEvaluatorImpl.java:70-77）；本引擎没有
-                    // null，"未定义"就是 0。以前两侧都先求值，于是 `v.flame_level ?? (v.flame_level = …)`
-                    // 这类"只初始化一次"的写法每帧都会重跑右侧、把变量重写一遍。
-                    return rightVal.get();
-                }
-            });
+            return new MolangValue(this, new NullCoalesce(leftVal, rightVal, leftExpr, explicitVariableLookup));
         }
 
         try {
@@ -1073,4 +1045,65 @@ public class MolangParser extends MathBuilder {
         }
         return -1;
     }
-}
+
+    /**
+     * `cond ? {...} : {...}`: only the selected branch runs.
+     * <p>
+     * YSMU: a named class rather than an anonymous {@code IValue}, because the parsed animation graph is written to
+     * the client's animation cache with Java serialisation and an anonymous class neither carries a name nor
+     * implements {@link java.io.Serializable}. Same semantics, same lazy evaluation
+     * (upstream {@code ExpressionEvaluatorImpl.java:393-399}).
+     */
+    private static final class ConditionalSelect implements java.io.Serializable, IValue {
+
+        private static final long serialVersionUID = 42L;
+        private final MolangExpression condition;
+        private final MolangExpression whenTrue;
+        private final MolangExpression whenFalse;
+
+        private ConditionalSelect(MolangExpression condition, MolangExpression whenTrue,
+            MolangExpression whenFalse) {
+            this.condition = condition;
+            this.whenTrue = whenTrue;
+            this.whenFalse = whenFalse;
+        }
+
+        @Override
+        public double get() {
+            return this.condition.get() != 0 ? this.whenTrue.get() : this.whenFalse.get();
+        }
+    }
+
+    /**
+     * The {@code a ?? b} wrapper, named for the same reason as {@link ConditionalSelect}.
+     * <p>
+     * The explicit-variable lookup is live parser/runtime state (it answers "did the GUI set this roaming variable
+     * to 0 on purpose") and is therefore {@code transient}: a deserialised expression answers {@code userSet = false}
+     * and falls back to the plain {@code l != 0} rule, which is this engine's answer when no lookup is installed.
+     */
+    private static final class NullCoalesce implements java.io.Serializable, IValue {
+
+        private static final long serialVersionUID = 42L;
+        private final MolangExpression left;
+        private final MolangExpression right;
+        private final String leftExpression;
+        private transient ExplicitVariableLookup lookup;
+
+        private NullCoalesce(MolangExpression left, MolangExpression right, String leftExpression,
+            ExplicitVariableLookup lookup) {
+            this.left = left;
+            this.right = right;
+            this.leftExpression = leftExpression;
+            this.lookup = lookup;
+        }
+
+        @Override
+        public double get() {
+            double value = this.left.get();
+            ExplicitVariableLookup current = this.lookup;
+            if (current != null && current.isExplicitlySet(this.leftExpression)) {
+                return value;
+            }
+            return value != 0 ? value : this.right.get();
+        }
+    }}

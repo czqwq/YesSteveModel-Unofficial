@@ -1,8 +1,12 @@
 package software.bernie.geckolib3.core;
 
+import java.io.Serializable;
+
 import com.eliotlash.mclib.math.IValue;
 
-public class ConstantValue implements IValue {
+public class ConstantValue implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     private final double value;
 

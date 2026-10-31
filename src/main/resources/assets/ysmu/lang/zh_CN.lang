@@ -406,6 +406,8 @@ message.yes_steve_model.asset.available_versions=可用版本: %s
 message.yes_steve_model.asset.load_failed=高版本资源加载失败(详见日志)
 message.yes_steve_model.asset.config_hint=(ysmu.cfg 高版本资源配置)
 gui.yes_steve_model.config.idle_asset_eviction=释放闲置模型几何(参考分支的空闲资源回收). 本移植分支尚未验证: 开启后可能释放本分支无法重建的几何, 除刻意与参考分支对比外请保持关闭.
+gui.yes_steve_model.config.baked_geometry_cache=复用磁盘上的内容寻址几何烘焙缓存. 默认关闭: 本移植实测比重新烘焙更慢(烘焙 0-7 ms, 读缓存 1-52 ms 另加输入摘要), 只有将来烘焙重新变贵时才划算.
+gui.yes_steve_model.config.baked_animation_cache=复用磁盘上的内容寻址动画缓存. 默认关闭: 本移植实测比重新构建更慢(构建 6-57 ms, 读缓存 30-79 ms).
 
 # Molang 调试叠加层 + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, 默认关闭)
 gui.yes_steve_model.debug.title=[Molang Debug]  %s 个变量

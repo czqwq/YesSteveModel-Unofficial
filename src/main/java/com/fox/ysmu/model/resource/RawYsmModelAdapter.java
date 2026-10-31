@@ -31,6 +31,16 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 
+import software.bernie.geckolib3.geo.raw.pojo.Bone;
+import software.bernie.geckolib3.geo.raw.pojo.ExtraInfo;
+import software.bernie.geckolib3.geo.raw.pojo.FormatVersion;
+import software.bernie.geckolib3.geo.raw.pojo.MinecraftGeometry;
+import software.bernie.geckolib3.geo.raw.pojo.ModelProperties;
+import software.bernie.geckolib3.geo.raw.pojo.PolyMesh;
+import software.bernie.geckolib3.geo.raw.pojo.PolysEnum;
+import software.bernie.geckolib3.geo.raw.pojo.PolysUnion;
+import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
+
 public final class RawYsmModelAdapter {
 
     private static final byte[] EMPTY_ANIMATION = "{\"animations\":{}}".getBytes(StandardCharsets.UTF_8);
@@ -110,13 +120,34 @@ public final class RawYsmModelAdapter {
     }
 
     public static ModelData toLegacyModelData(RawYsmModel raw, String modelId) throws IOException {
+        return toLegacyModelData(raw, modelId, false);
+    }
+
+    /**
+     * Bridges a parsed model into the client payload, optionally keeping the binary channel's structured geometry
+     * instead of flattening it to JSON and parsing it back.
+     * <p>
+     * The OpenYSM binary payload already carries bones/cubes/faces ({@code RawYsmModel}), and re-emitting them as
+     * pretty-printed JSON only to have {@code Converter.fromJsonString} parse them again is the single largest cost
+     * on the client's model-loading path (16.4 MB of JSON for a 933-bone pack). With {@code structured} on,
+     * every sub-model that has no {@code sourceJson} (i.e. everything on the binary channel) is built straight into
+     * engine POJOs and parked in {@link ModelData#getPreParsedGeometry()}; sub-models that DO have a {@code sourceJson}
+     * (folder models, the built-in default, and the legacy container) keep their JSON bytes untouched, because that
+     * text also carries fields this port's folder bake does not reproduce (see the note in {@code createGeometryPojo}).
+     * <p>
+     * Callers that write a container ({@code EncryptTools}, {@code OpenYsmFormat}) or that need bytes for any other
+     * reason keep using the two-argument overload.
+     */
+    public static ModelData toLegacyModelData(RawYsmModel raw, String modelId, boolean structured)
+        throws IOException {
         if (!isBridgeable(raw)) {
             throw new IOException("RawYsmModel cannot be bridged to legacy ModelData");
         }
 
         Map<String, byte[]> model = new LinkedHashMap<>();
-        model.put("main", toGeometryJson(raw, raw.mainEntity.mainModel, true));
-        model.put("arm", toGeometryJson(raw, raw.mainEntity.armModel, false));
+        Map<String, RawGeoModel> preParsed = new LinkedHashMap<>();
+        putGeometry(model, preParsed, raw, raw.mainEntity.mainModel, "main", true, structured);
+        putGeometry(model, preParsed, raw, raw.mainEntity.armModel, "arm", false, structured);
 
         // Projectile sub-entity geometry (a pack's files.projectiles entry, e.g. #arrow). The key is
         // "projectile_<matchId>" and ClientModelManager turns it back into the sub-model id
@@ -128,7 +159,8 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 try {
-                    model.put("projectile_" + matchId, toGeometryJson(raw, sub.model, false));
+                    putGeometry(model, preParsed, raw, sub.model, "projectile_" + matchId, false,
+                        structured);
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to convert projectile geometry {} for model {}", matchId, modelId, e);
                 }
@@ -150,7 +182,7 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 try {
-                    model.put("vehicle_" + matchId, toGeometryJson(raw, sub.model, false));
+                    putGeometry(model, preParsed, raw, sub.model, "vehicle_" + matchId, false, structured);
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to convert vehicle geometry {} for model {}", matchId, modelId, e);
                 }
@@ -245,12 +277,14 @@ public final class RawYsmModelAdapter {
         }
 
         Map<String, byte[]> animations = new LinkedHashMap<>();
-        putAnimation(animations, raw, "main", MAIN_ANIMATION_FILE_NAME);
-        putAnimation(animations, raw, "arm", ARM_ANIMATION_FILE_NAME);
-        putAnimation(animations, raw, "extra", EXTRA_ANIMATION_FILE_NAME);
+        Map<String, RawYsmModel.RawAnimationFile> preParsedAnimations = new LinkedHashMap<>();
+        putAnimation(animations, preParsedAnimations, raw, "main", MAIN_ANIMATION_FILE_NAME, structured);
+        putAnimation(animations, preParsedAnimations, raw, "arm", ARM_ANIMATION_FILE_NAME, structured);
+        putAnimation(animations, preParsedAnimations, raw, "extra", EXTRA_ANIMATION_FILE_NAME, structured);
         for (Map.Entry<String, RawYsmModel.RawAnimationFile> entry : raw.mainEntity.animationFiles.entrySet()) {
-            if (!animations.containsKey(entry.getKey())) {
-                putAnimationFile(animations, entry.getKey(), entry.getValue());
+            if (!animations.containsKey(entry.getKey())
+                && !preParsedAnimations.containsKey(entry.getKey())) {
+                putAnimationFile(animations, preParsedAnimations, entry.getKey(), entry.getValue(), structured);
             }
         }
         // Projectile animations and controllers. Both are complete data on a sub-entity
@@ -269,7 +303,8 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
-                    putAnimationFile(animations, "projectile_" + matchId, animationFile);
+                    putAnimationFile(animations, preParsedAnimations, "projectile_" + matchId, animationFile,
+                        structured);
                 }
                 for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
                     if (controllerFile == null) {
@@ -294,7 +329,8 @@ public final class RawYsmModelAdapter {
             }
             for (String matchId : matchIdsOf(sub)) {
                 for (RawYsmModel.RawAnimationFile animationFile : sub.animationFiles.values()) {
-                    putAnimationFile(animations, "vehicle_" + matchId, animationFile);
+                    putAnimationFile(animations, preParsedAnimations, "vehicle_" + matchId, animationFile,
+                        structured);
                 }
                 for (RawYsmModel.RawAnimationControllerFile controllerFile : sub.animationControllerFiles) {
                     if (controllerFile == null) {
@@ -364,12 +400,36 @@ public final class RawYsmModelAdapter {
                 languageFiles.put(entry.getKey(), new LinkedHashMap<>(file.data));
             }
         }
-        return new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
+        ModelData data = new ModelData(modelId, Type.FOLDER, model, textures, animations, guiImages,
             com.fox.ysmu.data.WheelDeclarations.from(raw.properties), components,
             raw.metadata == null ? null : raw.metadata.links,
             raw.properties == null ? null : raw.properties.previewAnimation,
             raw.properties != null && raw.properties.disablePreviewRotation,
             languageFiles);
+        if (!preParsed.isEmpty()) {
+            data.setPreParsedGeometry(preParsed);
+        }
+        if (!preParsedAnimations.isEmpty()) {
+            data.setPreParsedAnimations(preParsedAnimations);
+        }
+        return data;
+    }
+
+    /**
+     * Writes one sub-model either as JSON bytes or as engine POJOs, depending on where it came from.
+     * <p>
+     * The choice is per geometry, not per payload: a folder model has a {@code sourceJson} for each file and keeps
+     * it, a binary payload has none for any of them. See
+     * {@link #toLegacyModelData(RawYsmModel, String, boolean)}.
+     */
+    private static void putGeometry(Map<String, byte[]> bytes, Map<String, RawGeoModel> pojos, RawYsmModel raw,
+        RawYsmModel.RawGeometry geometry, String key, boolean includeModelInfo, boolean structured)
+        throws IOException {
+        if (structured && geometry.sourceJson == null) {
+            pojos.put(key, createGeometryPojo(raw, geometry, includeModelInfo));
+        } else {
+            bytes.put(key, toGeometryJson(raw, geometry, includeModelInfo));
+        }
     }
 
     /**
@@ -656,8 +716,175 @@ public final class RawYsmModelAdapter {
         return mesh;
     }
 
-    private static JsonObject getOrCreateDescription(JsonObject root) {
-        JsonObject geometry = getOrCreateGeometry(root);
+    // ---------------------------------------------------------------------------------------------------------
+    // Direct construction of the engine POJOs (the OpenYSM binary channel's alternative to "JSON then parse")
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * The direct-construction twin of {@link #createGeometryJson}: the same values in the same units, handed to the
+     * engine as POJOs instead of as text. Used only for sub-models that have no {@code sourceJson}, i.e. everything
+     * the binary payload carries.
+     * <p>
+     * The two sign conventions are not obvious and are copied verbatim from the JSON writer above:
+     * {@code pivot} is written as {@code (-x, +y, +z)} and {@code rotation} as
+     * {@code (-toDegrees(x), -toDegrees(y), +toDegrees(z))}, because {@code GeoBuilder.constructBone} negates the
+     * pivot's X and the rotation's X/Y and then converts back to radians. Writing the raw values here would mirror
+     * every model.
+     * <p>
+     * Deliberately not used for folder models: their own JSON is kept verbatim, because the folder bake drops fields
+     * this builder does not reproduce ({@code uv_rotation}, {@code locators}, {@code never_render},
+     * {@code texture_meshes}, {@code material_instance} - see {@code YSMFolderDeserializer.parseCube/bakeFace}), and
+     * re-emitting those models through POJOs would silently lose them.
+     */
+    private static RawGeoModel createGeometryPojo(RawYsmModel raw, RawYsmModel.RawGeometry geometry,
+        boolean includeModelInfo) {
+        RawGeoModel root = new RawGeoModel();
+        root.setFormatVersion(FormatVersion.VERSION_1_12_0);
+
+        MinecraftGeometry model = new MinecraftGeometry();
+        model.setProperties(createModelPropertiesPojo(raw, geometry, includeModelInfo));
+
+        Bone[] bones = new Bone[geometry.bones.size()];
+        for (int index = 0; index < geometry.bones.size(); index++) {
+            bones[index] = createBonePojo(geometry.bones.get(index));
+        }
+        model.setBones(bones);
+
+        root.setMinecraftGeometry(new MinecraftGeometry[] { model });
+        return root;
+    }
+
+    private static ModelProperties createModelPropertiesPojo(RawYsmModel raw, RawYsmModel.RawGeometry geometry,
+        boolean includeModelInfo) {
+        ModelProperties properties = new ModelProperties();
+        properties.setIdentifier(StringUtils.defaultIfBlank(geometry.identifier, "geometry.ysmu.generated"));
+        properties.setTextureWidth((double) defaultPositive(geometry.textureWidth, 64f));
+        properties.setTextureHeight((double) defaultPositive(geometry.textureHeight, 64f));
+        if (geometry.visibleBoundsWidth > 0f) {
+            properties.setVisibleBoundsWidth((double) geometry.visibleBoundsWidth);
+        }
+        if (geometry.visibleBoundsHeight > 0f) {
+            properties.setVisibleBoundsHeight((double) geometry.visibleBoundsHeight);
+        }
+        if (geometry.visibleBoundsOffset != null && geometry.visibleBoundsOffset.length > 0) {
+            double[] offset = new double[geometry.visibleBoundsOffset.length];
+            for (int index = 0; index < offset.length; index++) {
+                offset[index] = geometry.visibleBoundsOffset[index];
+            }
+            properties.setVisibleBoundsOffset(offset);
+        }
+        // Written for every geometry (main, arm, projectile, vehicle), like the JSON writer does at :556.
+        properties.setForceCulling(raw.properties.allCutout);
+        if (includeModelInfo) {
+            properties.setHeightScale((double) raw.properties.heightScale);
+            properties.setWidthScale((double) raw.properties.widthScale);
+            properties.setRenderLayersFirst(raw.properties.renderLayersFirst);
+            if (raw.properties.defaultTexture != null && !raw.properties.defaultTexture.isEmpty()) {
+                properties.setDefaultTexture(raw.properties.defaultTexture);
+            }
+            properties.setExtraInfo(createExtraInfoPojo(raw));
+        }
+        return properties;
+    }
+
+    private static ExtraInfo createExtraInfoPojo(RawYsmModel raw) {
+        ExtraInfo info = new ExtraInfo();
+        info.setName(raw.metadata.name);
+        info.setTips(raw.metadata.tips);
+        String[] extraAnimationNames = getExtraAnimationNames(raw);
+        if (extraAnimationNames.length > 0) {
+            info.setExtraAnimationNames(extraAnimationNames);
+        }
+        List<String> authors = new ArrayList<>();
+        for (RawYsmModel.RawMetadata.Author author : raw.metadata.authors) {
+            if (StringUtils.isBlank(author.name)) {
+                continue;
+            }
+            if (StringUtils.isBlank(author.role)) {
+                authors.add(author.name);
+            } else {
+                authors.add(author.name + " (" + author.role + ")");
+            }
+        }
+        if (!authors.isEmpty()) {
+            info.setAuthors(authors.toArray(new String[0]));
+        }
+        // Left at the class default ("All Rights Reserved") when the pack declares nothing, which is exactly what
+        // Jackson leaves there when the JSON omits the key.
+        String license = StringUtils.defaultIfBlank(raw.metadata.licenseType, raw.metadata.licenseDescription);
+        if (StringUtils.isNotBlank(license)) {
+            info.setLicense(license);
+        }
+        return info;
+    }
+
+    private static Bone createBonePojo(RawYsmModel.RawBone rawBone) {
+        Bone bone = new Bone();
+        bone.setName(StringUtils.defaultIfBlank(rawBone.name, "bone"));
+        if (StringUtils.isNotBlank(rawBone.parentName)) {
+            bone.setParent(rawBone.parentName);
+        }
+        float pivotX = getVectorValue(rawBone.pivot, 0);
+        float pivotY = getVectorValue(rawBone.pivot, 1);
+        float pivotZ = getVectorValue(rawBone.pivot, 2);
+        bone.setPivot(new double[] { (double) -pivotX, (double) pivotY, (double) pivotZ });
+
+        float rotationX = getVectorValue(rawBone.rotation, 0);
+        float rotationY = getVectorValue(rawBone.rotation, 1);
+        float rotationZ = getVectorValue(rawBone.rotation, 2);
+        bone.setRotation(
+            new double[] { -Math.toDegrees(rotationX), -Math.toDegrees(rotationY), Math.toDegrees(rotationZ) });
+
+        PolyMesh mesh = createPolyMeshPojo(rawBone);
+        if (mesh != null) {
+            bone.setPolyMesh(mesh);
+        }
+        return bone;
+    }
+
+    private static PolyMesh createPolyMeshPojo(RawYsmModel.RawBone rawBone) {
+        int quadCount = 0;
+        for (RawYsmModel.RawCube rawCube : rawBone.cubes) {
+            quadCount += rawCube.faces.size();
+        }
+        if (quadCount == 0) {
+            return null;
+        }
+        int vertexCount = quadCount * 4;
+        double[] positions = new double[vertexCount * 3];
+        double[] normals = new double[vertexCount * 3];
+        double[] uvs = new double[vertexCount * 2];
+        int positionIndex = 0;
+        int uvIndex = 0;
+        for (RawYsmModel.RawCube rawCube : rawBone.cubes) {
+            for (RawYsmModel.RawFace face : rawCube.faces) {
+                for (int vertex = 0; vertex < 4; vertex++) {
+                    float[] position = face.positions[vertex];
+                    positions[positionIndex++] = (double) getVectorValue(position, 0);
+                    positions[positionIndex++] = (double) getVectorValue(position, 1);
+                    positions[positionIndex++] = (double) getVectorValue(position, 2);
+
+                    normals[positionIndex - 3] = (double) getVectorValue(face.normal, 0);
+                    normals[positionIndex - 2] = (double) getVectorValue(face.normal, 1);
+                    normals[positionIndex - 1] = (double) getVectorValue(face.normal, 2);
+
+                    uvs[uvIndex++] = (double) face.u[vertex];
+                    uvs[uvIndex++] = (double) face.v[vertex];
+                }
+            }
+        }
+        PolyMesh mesh = new PolyMesh();
+        mesh.setNormalizedUvs(Boolean.TRUE);
+        PolysUnion polys = new PolysUnion();
+        polys.enumValue = PolysEnum.QUAD_LIST;
+        mesh.setPolys(polys);
+        mesh.setPositions(positions);
+        mesh.setNormals(normals);
+        mesh.setUvs(uvs);
+        return mesh;
+    }
+
+    private static JsonObject getOrCreateDescription(JsonObject root) {        JsonObject geometry = getOrCreateGeometry(root);
         JsonObject description;
         if (geometry.has("description") && geometry.get("description").isJsonObject()) {
             description = geometry.getAsJsonObject("description");
@@ -918,16 +1145,18 @@ public final class RawYsmModelAdapter {
         return StringUtils.defaultIfBlank(texture.sourceFileName, texture.name);
     }
 
-    private static void putAnimation(Map<String, byte[]> animations, RawYsmModel raw, String key, String defaultFileName)
-        throws IOException {
-        if (putAnimationFile(animations, key, raw.mainEntity.animationFiles.get(key))) {
+    private static void putAnimation(Map<String, byte[]> animations,
+        Map<String, RawYsmModel.RawAnimationFile> preParsed, RawYsmModel raw, String key, String defaultFileName,
+        boolean structuredMode) throws IOException {
+        if (putAnimationFile(animations, preParsed, key, raw.mainEntity.animationFiles.get(key), structuredMode)) {
             return;
         }
         animations.put(key, readDefaultAnimation(defaultFileName));
     }
 
-    private static boolean putAnimationFile(Map<String, byte[]> animations, String key,
-        RawYsmModel.RawAnimationFile animationFile) throws IOException {
+    private static boolean putAnimationFile(Map<String, byte[]> animations,
+        Map<String, RawYsmModel.RawAnimationFile> preParsed, String key,
+        RawYsmModel.RawAnimationFile animationFile, boolean structuredMode) throws IOException {
         if (animationFile == null) {
             return false;
         }
@@ -954,7 +1183,13 @@ public final class RawYsmModelAdapter {
             return true;
         }
         if (!animationFile.animations.isEmpty()) {
-            animations.put(key, createAnimationJson(animationFile));
+            if (structuredMode) {
+                // The binary channel: the client builds the engine Animation objects straight from these structures
+                // (RawAnimationBuilder), so no JSON text is produced here at all.
+                preParsed.put(key, animationFile);
+            } else {
+                animations.put(key, createAnimationJson(animationFile));
+            }
             return true;
         }
         return false;

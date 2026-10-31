@@ -314,6 +314,27 @@ public class Config {
      */
     public static boolean ENABLE_IDLE_ASSET_EVICTION = false;
 
+    /**
+     * 是否允许客户端复用磁盘上的内容寻址几何烘焙缓存（{@code client/model/BakedGeometryCache}）。
+     * <p>
+     * <b>默认关闭</b>，因为本移植实测它是负收益：OpenYSM 通道不再"结构→JSON→结构"之后（见
+     * {@code RawYsmModelAdapter.toLegacyModelData(..., structured)}），一个 sub-model 的烘焙只要 0–7 ms，
+     * 而从磁盘读回同一份几何要 1–52 ms，另加 0–20 ms 的输入摘要——引擎对象图的 Java 序列化往返比它替代掉的
+     * {@code GeoBuilder} 一遍还慢。机制保留是因为它是内容寻址的、正确的，并且当烘焙重新变贵时（例如后续的
+     * 动画产物缓存，或更大的几何路径）可能再次划算；打开后缓存写入/命中日志可在 {@code latest.log} 里看到
+     * {@code YSM bake cache hit}。
+     */
+    public static boolean ENABLE_BAKED_GEOMETRY_CACHE = false;
+
+    /**
+     * 是否允许客户端复用磁盘上的内容寻址**动画**缓存（{@code client/model/BakedAnimationCache}）。
+     * <p>
+     * <b>默认关闭</b>，与几何缓存同因：实测（三个真实模型包）把整份动画集写成缓存再读回要 30–79 ms，
+     * 而从结构直接构建只要 6–57 ms——引擎 AST 的 Java 反序列化比重新解析表达式更慢。机制保留以便
+     * 将来烘焙重新变贵时可直接启用；打开后日志出现 {@code YSM animation cache hit}。
+     */
+    public static boolean ENABLE_BAKED_ANIMATION_CACHE = false;
+
     // Model sync config
     /**
      * 动画控制脚本（{@code @player_ctrl_<槽位>.molang}）是否每帧真正执行。
@@ -507,6 +528,10 @@ public class Config {
         // Port-specific switch, default OFF: the reference branch has no such switch and always runs the
         // eviction (reference AssetManager.java:73-94). See Config#ENABLE_IDLE_ASSET_EVICTION.
         ENABLE_IDLE_ASSET_EVICTION = syncBoolean("EnableIdleAssetEviction", "ysm_sync", ENABLE_IDLE_ASSET_EVICTION, "Release idle model geometry from GeckoLibCache and reload it from the encrypted client cache on next use (reference branch behaviour). DEFAULT OFF AND NOT YET VALIDATED IN THIS PORT: enabling it can evict geometry the port cannot rebuild (see .agent/phase32-asset-eviction-subsystem.md). Off = the AssetManager subsystem does nothing at all.", load);
+        // Port-specific switch, default OFF: the cache is correct but measured slower than rebuilding (see
+        // Config#ENABLE_BAKED_GEOMETRY_CACHE).
+        ENABLE_BAKED_GEOMETRY_CACHE = syncBoolean("EnableBakedGeometryCache", "model_cache", ENABLE_BAKED_GEOMETRY_CACHE, "Reuse baked geometry from the content-addressed disk cache instead of rebuilding it. DEFAULT OFF: measured slower than rebuilding in this port (build 0-7 ms vs cache read 1-52 ms plus 0-20 ms digest), so it only pays off for a future, more expensive bake.", load);
+        ENABLE_BAKED_ANIMATION_CACHE = syncBoolean("EnableBakedAnimationCache", "model_cache", ENABLE_BAKED_ANIMATION_CACHE, "Reuse parsed animation sets from the content-addressed disk cache instead of rebuilding them. DEFAULT OFF: measured slower than rebuilding in this port (build 6-57 ms vs cache read 30-79 ms), so it only pays off for a future, more expensive bake.", load);
         HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
         HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
         // `AnimationTransitionTicks` (the reference branch's name) is deliberately absent: this port keeps

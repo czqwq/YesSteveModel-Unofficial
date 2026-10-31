@@ -432,7 +432,9 @@ public class MathBuilder {
      * mclib 的 {@link Operator} 先把两侧都求出来再进 {@code calculate}，所以 {@code a&&(v.x=1)} 在 a 为假时
      * 也会赋值，条件为假的分支照样跑完副作用（取随机数、发粒子、写变量）。
      */
-    private static final class LazyCondition implements IValue {
+    private static final class LazyCondition implements java.io.Serializable, IValue {
+
+        private static final long serialVersionUID = 42L;
 
         private final Operation operation;
         private final IValue left;

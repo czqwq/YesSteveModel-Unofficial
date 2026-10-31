@@ -50,6 +50,9 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvalu
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.model.AnimationPayload;
+import com.fox.ysmu.client.model.BakedAnimationCache;
+import com.fox.ysmu.client.model.BakedGeometryCache;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.render.AppliedModelRegistry;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
@@ -458,18 +461,19 @@ public class ClientModelManager {
      * Upstream does the same thing per animation rather than per model: its animation set is one baked file whose
      * individual animations are read and bound on first request ({@code resource/client/AnimationStore.java}).
      * <p>
-     * <b>Only the animation map is parked, not the whole {@link ModelData}.</b> The entry used to hold the payload
+     * <b>Only the animation half is parked, not the whole {@link ModelData}.</b> The entry used to hold the payload
      * object, which also carries the geometry JSON and the texture PNGs - bytes the publish path has already consumed
      * and that nothing can re-read from here. A model that is never drawn then kept its entire payload alive (0.9-2.4
-     * MB for a large pack) for a reason that belongs to the animation half alone. The animation map is what
+     * MB for a large pack) for a reason that belongs to the animation half alone. The animation half is what
      * {@link #registerAnimations} and {@link com.fox.ysmu.client.asset.AssetManager#registerAnim} take, so the split
-     * happens at the parking site. See .agent/perf-audit-memory.md R7.
+     * happens at the parking site; {@link AnimationPayload} carries it because the binary channel's half is structures
+     * rather than JSON bytes. See .agent/perf-audit-memory.md R7.
      * <p>
      * Concurrent, unlike the geometry parking lot: {@link #ensureAnimations} is reachable from
      * {@code EntityAnimationApi}, which a host mod may call from the server thread while the client thread is
      * rendering - on an integrated server those are two different threads in one JVM.
      */
-    private static final Map<ResourceLocation, Map<String, byte[]>> PENDING_ANIMATIONS = Maps.newConcurrentMap();
+    private static final Map<ResourceLocation, AnimationPayload> PENDING_ANIMATIONS = Maps.newConcurrentMap();
 
     /**
      * Payloads whose geometry and textures have been received but not yet built, keyed by both the model id and the
@@ -574,7 +578,24 @@ public class ClientModelManager {
     private static final AtomicBoolean SYNC_RETRY_QUEUED = new AtomicBoolean();
 
     public static void registerAll(ModelData data) {
-        registerAll(data, false);
+        registerAll(data, null, false);
+    }
+
+    /**
+     * Takes a synced payload together with the content identity the delivering channel knows for it.
+     * <p>
+     * The identity replaces the whole-payload MD5 this method used to compute on the client thread for duplicate
+     * detection, and it is also the key the client's baked-geometry cache uses. Both channels already know it: the
+     * OpenYSM binary channel gets {@code hash1/hash2} from the server (a content hash of the model plus the bake
+     * version), the legacy encrypted-cache channel has the cache file's MD5 name. A channel that has none passes
+     * {@code null} and this method falls back to hashing the payload, exactly as before.
+     */
+    public static void registerAll(ModelData data, @Nullable String identity) {
+        registerAll(data, identity, false);
+    }
+
+    public static void registerAll(ModelData data, boolean eager) {
+        registerAll(data, null, eager);
     }
 
     /**
@@ -589,11 +610,17 @@ public class ClientModelManager {
      * With {@code eager} true the payload is installed before returning. Only the built-in default model uses that,
      * because it is the substitute every not-yet-built model falls back to.
      */
-    public static void registerAll(ModelData data, boolean eager) {
+    public static void registerAll(ModelData data, @Nullable String identity, boolean eager) {
         ResourceLocation modelId = getModelId(data);
+        if (identity != null) {
+            data.setBakeIdentity(identity);
+        }
         // N-02: the legacy channel and the OpenYSM channel both end here, and a second registration of identical
         // content rebuilds every GeoModel and re-uploads every texture for no gain.
-        String signature = contentSignature(data);
+        String signature = data.getBakeIdentity();
+        if (signature == null) {
+            signature = contentSignature(data);
+        }
         if (signature != null && signature.equals(REGISTERED_MODEL_CONTENT.get(modelId))) {
             ysmu.LOG.info("YSM client skipping model {}: identical content is already registered", modelId);
             return;
@@ -601,12 +628,11 @@ public class ClientModelManager {
         ysmu.LOG.info(
             "YSM client registering model {}: geometry={}, textures={}, animations={}",
             modelId,
-            data.getModel()
-                .keySet(),
+            geometryKeys(data),
             data.getTexture()
                 .keySet(),
-            data.getAnimation()
-                .keySet());
+            AnimationPayload.of(data)
+                .keys());
         // The texture *list* is the model index the selection screen builds its tiles from, so it stays here; only
         // the uploads are deferred.
         indexTextures(modelId, data.getTexture());
@@ -713,8 +739,7 @@ public class ClientModelManager {
                 RENDER_LAYERS_FIRST.remove(id);
                 DECLARED_DEFAULT_TEXTURES.remove(id);
             }
-            if (data.getModel()
-                .isEmpty()) {
+            if (geometryKeys(data).isEmpty()) {
                 // Nothing to build, but the markers above are still dropped: this payload is the newest statement
                 // about these ids, and a stale refusal or publish must not outlive it. Any payload parked here
                 // belongs to those older bytes, so it goes too - leaving it would let a later frame build and
@@ -759,9 +784,8 @@ public class ClientModelManager {
     private static void installNowChecked(ModelData data) {
         ResourceLocation modelId = getModelId(data);
         List<BuiltGeo> built = new ArrayList<>();
-        for (Map.Entry<String, byte[]> entry : data.getModel()
-            .entrySet()) {
-            built.add(buildGeo(ModelIdUtil.getSubModelId(modelId, entry.getKey()), entry.getValue()));
+        for (String key : geometryKeys(data)) {
+            built.add(buildGeometry(modelId, data, key));
         }
         // Same rule as the on-demand path: a model counts as ready only when its main geometry exists, because that
         // is the file the player renderer looks up. Marking an arm-only build ready would advertise a model that
@@ -949,9 +973,8 @@ public class ClientModelManager {
     private static void buildModel(ResourceLocation modelId, ModelData data, long generation) {
         try {
             List<BuiltGeo> built = new ArrayList<>();
-            for (Map.Entry<String, byte[]> entry : data.getModel()
-                .entrySet()) {
-                built.add(buildGeo(ModelIdUtil.getSubModelId(modelId, entry.getKey()), entry.getValue()));
+            for (String key : geometryKeys(data)) {
+                built.add(buildGeometry(modelId, data, key));
             }
             // Decode the textures here too, on the loader thread. Reading a PNG header, checking the limits against a
             // decompression bomb and decoding the image are all CPU work; only the upload that follows is a GL call,
@@ -1464,8 +1487,8 @@ public class ClientModelManager {
                 .getAnimations()
                 .remove(AnimationDomain.animationFileId(modelId, domain));
         }
-        if (data.getAnimation()
-            .isEmpty()) {
+        AnimationPayload payload = AnimationPayload.of(data);
+        if (payload.isEmpty()) {
             // This payload declares no animations of its own, so the model is meant to fall back to the built-in
             // default animations; dropping anything parked under the id is what makes that fallback reachable.
             PENDING_ANIMATIONS.remove(mainId);
@@ -1474,7 +1497,7 @@ public class ClientModelManager {
         // Only the animation half is parked: the geometry and texture bytes in the same payload were consumed by the
         // publish path and nothing can re-read them from here (see the field's javadoc and R7 of
         // .agent/perf-audit-memory.md).
-        PENDING_ANIMATIONS.put(mainId, data.getAnimation());
+        PENDING_ANIMATIONS.put(mainId, payload);
     }
 
     /** Whether this model's animations are still parked; see {@link #PENDING_ANIMATIONS}. */
@@ -1490,7 +1513,7 @@ public class ClientModelManager {
      * already in the cache rather than starting a second install.
      */
     @Nullable
-    static Map<String, byte[]> takePendingAnimations(ResourceLocation mainId) {
+    static AnimationPayload takePendingAnimations(ResourceLocation mainId) {
         return PENDING_ANIMATIONS.remove(mainId);
     }
 
@@ -1564,7 +1587,7 @@ public class ClientModelManager {
             // drawn.
             return;
         }
-        Map<String, byte[]> animations = takePendingAnimations(mainId);
+        AnimationPayload animations = takePendingAnimations(mainId);
         if (animations == null) {
             // Nothing parked: either this model's animations are already installed, or it declares none of its own
             // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
@@ -1648,9 +1671,10 @@ public class ClientModelManager {
      * so the reload replays the rule with the animation map the provider just re-read. See
      * {@code .agent/phase40-eviction-members.md}.
      *
-     * @param animations the payload's animation file map, exactly as {@link ModelData#getAnimation()} returns it
+     * @param animations the payload's animation half, exactly as {@link com.fox.ysmu.client.model.AnimationPayload#of}
+     *                   builds it from a {@link ModelData}
      */
-    public static void reinstallAnimations(@Nullable ResourceLocation mainId, @Nullable Map<String, byte[]> animations) {
+    public static void reinstallAnimations(@Nullable ResourceLocation mainId, @Nullable AnimationPayload animations) {
         if (mainId == null || animations == null || animations.isEmpty()) {
             return;
         }
@@ -1712,14 +1736,21 @@ public class ClientModelManager {
         @Nullable
         private final ExtraInfo extraInfo;
 
-        private BuiltGeo(ResourceLocation id, GeoModel model, RawGeometryTree tree) {
+        /**
+         * Derives the published side tables from the built model's own properties.
+         * <p>
+         * {@code GeoBuilder} carries the source {@code ModelProperties} onto the {@code GeoModel} it returns
+         * ({@code GeoBuilder.java:44}), so a model read back from the baked-geometry cache has everything these
+         * fields need without a second copy being stored next to it.
+         */
+        private BuiltGeo(ResourceLocation id, GeoModel model) {
             this.id = id;
             this.model = model;
-            this.heightScale = tree.properties.getHeightScale();
-            this.widthScale = tree.properties.getWidthScale();
-            this.renderLayersFirst = Boolean.TRUE.equals(tree.properties.getRenderLayersFirst());
-            this.declaredDefaultTexture = declaredDefaultTexture(id, tree.properties.getDefaultTexture());
-            this.extraInfo = tree.properties.getExtraInfo();
+            this.heightScale = model.properties.getHeightScale();
+            this.widthScale = model.properties.getWidthScale();
+            this.renderLayersFirst = Boolean.TRUE.equals(model.properties.getRenderLayersFirst());
+            this.declaredDefaultTexture = declaredDefaultTexture(id, model.properties.getDefaultTexture());
+            this.extraInfo = model.properties.getExtraInfo();
         }
 
         /**
@@ -1778,7 +1809,23 @@ public class ClientModelManager {
             // 直接从字节数组解析JSON，而不是尝试反序列化对象
             String modelJson = new String(data, StandardCharsets.UTF_8);
             RawGeoModel rawModel = Converter.fromJsonString(modelJson);
+            return buildGeo(id, rawModel);
+        } catch (Exception e) {
+            ysmu.LOG.warn("Failed to register geometry " + id, e);
+            return null;
+        }
+    }
 
+    /**
+     * Parses and bakes one geometry file from an already-parsed engine POJO.
+     * <p>
+     * Same body as the byte overload below the parse: the byte form exists only because a payload may still carry
+     * JSON (folder models, the legacy encrypted container, the built-in default). The OpenYSM binary channel hands the
+     * POJO straight in, which is what removes the "structure -> pretty JSON -> Gson" round trip from the load path.
+     */
+    @Nullable
+    private static BuiltGeo buildGeo(ResourceLocation id, RawGeoModel rawModel) {
+        try {
             // MON-01: whether this port attempts a layout is the engine's decision, not a second table kept here.
             // The previous local whitelist is what made every 1.8.0/1.10.0 model disappear.
             FormatVersion formatVersion = rawModel.getFormatVersion();
@@ -1789,11 +1836,93 @@ public class ClientModelManager {
             RawGeometryTree rawGeometryTree = RawGeometryTree.parseHierarchy(rawModel);
             GeoModel geoModel = GeoBuilder.getGeoBuilder(id.getResourceDomain())
                 .constructGeoModel(rawGeometryTree);
-            return new BuiltGeo(id, geoModel, rawGeometryTree);
+            return new BuiltGeo(id, geoModel);
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to register geometry " + id, e);
             return null;
         }
+    }
+
+    /**
+     * The sub-model keys of one payload, JSON bytes and pre-parsed POJOs merged in payload order.
+     * <p>
+     * A payload uses one form for all of its geometry files - the binary channel carries no bytes at all and the
+     * folder/legacy channels carry no POJOs - but the two-overload build path stays tolerant of a mix, because that
+     * keeps the invariant local to this method instead of in every caller.
+     */
+    private static List<String> geometryKeys(ModelData data) {
+        List<String> keys = new ArrayList<>(data.getModel()
+            .keySet());
+        for (String key : data.getPreParsedGeometry()
+            .keySet()) {
+            if (!keys.contains(key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
+    /** Builds one sub-model from whichever form the payload carries; see {@link #geometryKeys(ModelData)}. */
+    @Nullable
+    private static BuiltGeo buildGeometry(ResourceLocation modelId, ModelData data, String key) {
+        ResourceLocation subModelId = ModelIdUtil.getSubModelId(modelId, key);
+        String identity = data.getBakeIdentity();
+        // The digest is only worth computing when the cache is on; it walks the same arrays the bake will.
+        boolean caching = identity != null && BakedGeometryCache.isEnabled();
+        RawGeoModel preParsed = data.getPreParsedGeometry()
+            .get(key);
+        if (preParsed != null) {
+            String digest = caching ? BakedGeometryCache.geometryDigest(preParsed) : null;
+            BuiltGeo cached = cachedGeometry(subModelId, identity, key, digest);
+            if (cached != null) {
+                return cached;
+            }
+            BuiltGeo built = buildGeo(subModelId, preParsed);
+            rememberGeometry(identity, key, digest, built);
+            return built;
+        }
+        byte[] bytes = data.getModel()
+            .get(key);
+        if (bytes == null) {
+            return null;
+        }
+        String digest = caching ? BakedGeometryCache.bytesDigest(bytes) : null;
+        BuiltGeo cached = cachedGeometry(subModelId, identity, key, digest);
+        if (cached != null) {
+            return cached;
+        }
+        BuiltGeo built = buildGeo(subModelId, bytes);
+        rememberGeometry(identity, key, digest, built);
+        return built;
+    }
+
+    /**
+     * A previously baked geometry for exactly these bytes, or {@code null} when the cache has no usable entry.
+     * <p>
+     * The hit is logged because it is the visible difference this cache makes: the model still appears in the same
+     * frame it would have anyway, only without the bake that used to run first.
+     */
+    @Nullable
+    private static BuiltGeo cachedGeometry(ResourceLocation subModelId, @Nullable String identity, String key,
+        @Nullable String digest) {
+        if (identity == null || digest == null) {
+            return null;
+        }
+        GeoModel cached = BakedGeometryCache.load(identity, key, digest);
+        if (cached == null) {
+            return null;
+        }
+        ysmu.LOG.info("YSM bake cache hit {}", subModelId);
+        return new BuiltGeo(subModelId, cached);
+    }
+
+    /** Writes a finished bake to the disk cache; a failed or skipped write never affects this session's geometry. */
+    private static void rememberGeometry(@Nullable String identity, String key, @Nullable String digest,
+        @Nullable BuiltGeo built) {
+        if (identity == null || digest == null || built == null) {
+            return;
+        }
+        BakedGeometryCache.store(identity, key, digest, built.model);
     }
 
     /** Installs one baked geometry file; client thread only. */
@@ -1886,8 +2015,7 @@ public class ClientModelManager {
      */
     private static void indexProjectiles(ResourceLocation modelId, ModelData data) {
         List<String> matchIds = new ArrayList<>();
-        for (String key : data.getModel()
-            .keySet()) {
+        for (String key : geometryKeys(data)) {
             if (key.startsWith(PROJECTILE_KEY_PREFIX)) {
                 String matchId = key.substring(PROJECTILE_KEY_PREFIX.length());
                 if (!matchId.isEmpty()) {
@@ -1936,8 +2064,7 @@ public class ClientModelManager {
      */
     private static void indexVehicles(ResourceLocation modelId, ModelData data) {
         List<String> matchIds = new ArrayList<>();
-        for (String key : data.getModel()
-            .keySet()) {
+        for (String key : geometryKeys(data)) {
             if (key.startsWith(VEHICLE_KEY_PREFIX)) {
                 String matchId = key.substring(VEHICLE_KEY_PREFIX.length());
                 if (!matchId.isEmpty()) {
@@ -2061,7 +2188,7 @@ public class ClientModelManager {
         ModelTextureRegistry.register(id, decoded != null ? new OuterFileTexture(decoded) : new OuterFileTexture(data));
     }
 
-    private static void registerAnimations(ResourceLocation id, Map<String, byte[]> mapData) {
+    private static void registerAnimations(ResourceLocation id, AnimationPayload payload) {
         Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
             .getAnimations();
         // A model's animation sets are split into *domains*, which is upstream's shape: the `fp_arm` set is the
@@ -2089,13 +2216,23 @@ public class ClientModelManager {
         ResourceLocation baseId = ModelIdUtil.getParentModelId(id);
         Map<ResourceLocation, byte[]> projectileControllerFiles = new LinkedHashMap<>();
         Map<ResourceLocation, byte[]> vehicleControllerFiles = new LinkedHashMap<>();
-        for (Map.Entry<String, byte[]> entry : mapData.entrySet()) {
+        MolangParser parser = GeckoLibCache.getInstance().parser;
+        for (String key : payload.keys()) {
+            // The binary channel carries this file as structures; the client builds the engine objects directly
+            // (RawAnimationBuilder) instead of re-emitting and re-parsing the JSON text it used to produce.
+            RawYsmModel.RawAnimationFile structured = payload.structured(key);
+            if (structured != null) {
+                registerStructuredAnimationFile(id, baseId, key, structured, payload.identity(), parser,
+                    filesByDomain, animations, animToModIds);
+                continue;
+            }
+            byte[] entryBytes = payload.bytes(key);
             // The controller prefix is tested first: `projectile_ctrl_arrow` also starts with `projectile_`.
-            if (entry.getKey()
+            if (key
                 .startsWith(PROJECTILE_CONTROLLER_KEY_PREFIX)) {
-                String matchId = entry.getKey()
+                String matchId = key
                     .substring(PROJECTILE_CONTROLLER_KEY_PREFIX.length());
-                byte[] bytes = entry.getValue();
+                byte[] bytes = entryBytes;
                 if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
                     continue;
                 }
@@ -2107,11 +2244,11 @@ public class ClientModelManager {
                 animations.computeIfAbsent(projectileId, ignored -> new AnimationFile());
                 continue;
             }
-            if (entry.getKey()
+            if (key
                 .startsWith(PROJECTILE_KEY_PREFIX)) {
-                String matchId = entry.getKey()
+                String matchId = key
                     .substring(PROJECTILE_KEY_PREFIX.length());
-                byte[] bytes = entry.getValue();
+                byte[] bytes = entryBytes;
                 if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
                     continue;
                 }
@@ -2124,11 +2261,11 @@ public class ClientModelManager {
             // and its player set can both define a clip name (`water`, `forward`, ...), and merging them would let one
             // overwrite the other for whichever is drawn second. Each vehicle gets its own AnimationFile under its own
             // sub-model id. The controller prefix is tested first: `vehicle_ctrl_<match>` also starts with `vehicle_`.
-            if (entry.getKey()
+            if (key
                 .startsWith(VEHICLE_CONTROLLER_KEY_PREFIX)) {
-                String matchId = entry.getKey()
+                String matchId = key
                     .substring(VEHICLE_CONTROLLER_KEY_PREFIX.length());
-                byte[] bytes = entry.getValue();
+                byte[] bytes = entryBytes;
                 if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
                     continue;
                 }
@@ -2137,11 +2274,11 @@ public class ClientModelManager {
                 animations.computeIfAbsent(vehicleId, ignored -> new AnimationFile());
                 continue;
             }
-            if (entry.getKey()
+            if (key
                 .startsWith(VEHICLE_KEY_PREFIX)) {
-                String matchId = entry.getKey()
+                String matchId = key
                     .substring(VEHICLE_KEY_PREFIX.length());
-                byte[] bytes = entry.getValue();
+                byte[] bytes = entryBytes;
                 if (matchId.isEmpty() || bytes == null || bytes.length == 0) {
                     continue;
                 }
@@ -2156,11 +2293,11 @@ public class ClientModelManager {
             // controller file?" and feeds the animation conversion. The previous shape parsed every file whose name
             // was not a controller name twice, because a probe parsed it to look for `animation_controllers` and the
             // conversion then parsed the same text again - 28.7 MB of JSON parsed twice over the reference catalog.
-            if (YsmControllerResources.isControllerResource(entry.getKey())) {
-                controllerFiles.put(entry.getKey(), entry.getValue());
+            if (YsmControllerResources.isControllerResource(key)) {
+                controllerFiles.put(key, entryBytes);
                 continue;
             }
-            byte[] bytes = entry.getValue();
+            byte[] bytes = entryBytes;
             if (bytes == null || bytes.length == 0) {
                 continue;
             }
@@ -2171,7 +2308,7 @@ public class ClientModelManager {
             } catch (Exception e) {
                 ysmu.LOG.warn(
                     "Failed to parse animation file {} for model {}: {}: {}",
-                    entry.getKey(),
+                    key,
                     id,
                     e.getClass()
                         .getSimpleName(),
@@ -2182,7 +2319,7 @@ public class ClientModelManager {
                 continue;
             }
             if (jsonObject.has("animation_controllers")) {
-                controllerFiles.put(entry.getKey(), bytes);
+                controllerFiles.put(key, bytes);
                 continue;
             }
             // 逐动画扫描关键帧 Molang 表达式里对可选模组控制变量（如 ctrl.tac_hold_gun）的引用：
@@ -2204,9 +2341,8 @@ public class ClientModelManager {
                     }
                 }
             }
-            mergeAnimationFile(
-                filesByDomain.get(AnimationDomain.ofAnimationSet(entry.getKey())),
-                animationFileFromJson(jsonObject));
+            AnimationFile parsedFile = cachedAnimationFile(payload.identity(), key, entryBytes, jsonObject);
+            mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), parsedFile);
         }
         // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
         // (`defaultAnimations.fallback(domain)`, ModelRenderTargetLoader.java:375-379): a name the model defines
@@ -2328,10 +2464,115 @@ public class ClientModelManager {
             filesByDomain.get(AnimationDomain.MAIN).animations.size());
     }
 
-    /** The built-in default model's animations for one domain; see {@link AnimationDomain}. */
+    /**
+     * Installs one animation file that arrived as structures instead of JSON text - the OpenYSM binary channel.
+     *
+     * <p>
+     * Same routing as the byte branch of {@link #registerAnimations}: a sub-entity's set stays under its own id (a
+     * pack's arrow set and its player set both define {@code parallel0}, so merging would let one overwrite the other),
+     * everything else merges into its {@link AnimationDomain}. The mod-dependency scan that runs off the animation text
+     * on the JSON side runs off {@link com.fox.ysmu.client.animation.RawAnimationBuilder#modScanText} here - the same
+     * expression strings, without the JSON punctuation that no dependency pattern can name.
+     */
+    /**
+     * Parses one animation set from JSON bytes, reusing a cached parse when one exists.
+     * <p>
+     * The digest is taken over the exact bytes being parsed, so the cache cannot answer for a different payload.
+     */
+    private static AnimationFile cachedAnimationFile(@Nullable String identity, String key, byte[] bytes,
+        JsonObject jsonObject) {
+        boolean caching = identity != null && BakedAnimationCache.isEnabled();
+        String digest = caching ? com.fox.ysmu.util.Md5Utils.md5Hex(bytes) : null;
+        if (digest != null) {
+            AnimationFile cached = BakedAnimationCache.load(identity, key, digest);
+            if (cached != null) {
+                ysmu.LOG.info("YSM animation cache hit {} ({} animations)", key, cached.animations.size());
+                return cached;
+            }
+        }
+        AnimationFile parsed = animationFileFromJson(jsonObject);
+        if (digest != null) {
+            BakedAnimationCache.store(identity, key, digest, parsed);
+        }
+        return parsed;
+    }
+    private static void registerStructuredAnimationFile(ResourceLocation id, ResourceLocation baseId, String key,
+        RawYsmModel.RawAnimationFile file, @Nullable String identity, MolangParser parser,
+        Map<String, AnimationFile> filesByDomain, Map<ResourceLocation, AnimationFile> animations,
+        Map<String, Set<String>> animToModIds) {
+        String digest = identity != null && BakedAnimationCache.isEnabled()
+            ? com.fox.ysmu.client.animation.RawAnimationBuilder.structureDigest(file) : null;
+        AnimationFile built = digest == null ? null : BakedAnimationCache.load(identity, key, digest);
+        if (built != null) {
+            ysmu.LOG.info("YSM animation cache hit {} of model {}", key, id);
+        } else {
+            try {
+                built = com.fox.ysmu.client.animation.RawAnimationBuilder.toAnimationFile(file, parser);
+            } catch (Throwable failure) {
+                // Same containment as the JSON branch: one unbuildable file costs that file, not the model's
+                // animations.
+                ysmu.LOG.warn("Failed to build animation file {} for model {}", key, id, failure);
+                return;
+            }
+            if (digest != null) {
+                BakedAnimationCache.store(identity, key, digest, built);
+            }
+        }
+        if (key.startsWith(PROJECTILE_KEY_PREFIX)) {
+            String matchId = key.substring(PROJECTILE_KEY_PREFIX.length());
+            if (matchId.isEmpty()) {
+                return;
+            }
+            ResourceLocation projectileId = ModelIdUtil.getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
+            animations.put(projectileId, built);
+            return;
+        }
+        if (key.startsWith(VEHICLE_KEY_PREFIX)) {
+            String matchId = key.substring(VEHICLE_KEY_PREFIX.length());
+            if (matchId.isEmpty()) {
+                return;
+            }
+            ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
+            animations.put(vehicleId, built);
+            return;
+        }
+        for (Map.Entry<String, RawYsmModel.RawAnimation> animationEntry : file.animations.entrySet()) {
+            RawYsmModel.RawAnimation animation = animationEntry.getValue();
+            if (animation == null) {
+                continue;
+            }
+            String scanText = com.fox.ysmu.client.animation.RawAnimationBuilder.modScanText(animation);
+            for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                if (dependency.matches(scanText)) {
+                    animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                        .add(dependency.getModId());
+                }
+            }
+        }
+        mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), built);
+    }
+
+    /**
+     * The built-in default model's animations for one domain; see {@link AnimationDomain}.
+     * <p>
+     * The authoritative copy is the one <em>installed</em> under the default model's own animation id, so a model
+     * registered after the built-in default (which is every synced model: the default is loaded eagerly at client
+     * start) inherits the fallback from the same objects the engine plays. Before that registration has happened, the
+     * static fields below are empty, which is also the right answer: there is no default to inherit from yet.
+     * <p>
+     * Reading the installed copy is what removes the duplicate parse this method used to cause: {@code loadDefaultModel}
+     * parsed every default animation file once into these fields and then {@code registerAll} parsed the same bytes
+     * again to install them (129 ms on the client thread for the built-in pack).
+     */
     private static AnimationFile defaultAnimationFile(String domain) {
-        return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE
-            : DEFAULT_ANIMATION_FILE;
+        ResourceLocation defaultMainId = ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, "default"));
+        AnimationFile installed = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(AnimationDomain.animationFileId(defaultMainId, domain));
+        if (installed != null) {
+            return installed;
+        }
+        return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE : DEFAULT_ANIMATION_FILE;
     }
 
     /** One projectile's animation file, parsed and never merged into the player's namespace. */
@@ -2349,11 +2590,6 @@ public class ClientModelManager {
                 Objects.requireNonNullElse(e.getMessage(), ""));
             return new AnimationFile();
         }
-    }
-
-    private static AnimationFile getAnimationFile(String file) {
-        JsonObject jsonObject = GsonHelper.fromJson(ysmu.GSON, file, JsonObject.class);
-        return jsonObject == null ? new AnimationFile() : animationFileFromJson(jsonObject);
     }
 
     /**
@@ -2457,16 +2693,14 @@ public class ClientModelManager {
             }
         }
         if (data != null) {
-            data.getAnimation()
-                .forEach((name, bytes) -> {
-                    AnimationFile animationFile = getAnimationFile(new String(bytes, StandardCharsets.UTF_8));
-                    // Domain-split like any other model's payload: the default model's own `fp_arm` set is the
-                    // first-person fallback, not one more main-domain set. See {@link AnimationDomain}.
-                    mergeAnimationFile(defaultAnimationFile(AnimationDomain.ofAnimationSet(name)), animationFile);
-                });
             // Eager: this is the substitute every not-yet-built model is drawn with, so it has to exist before any
-            // other model asks for it.
-            ClientModelManager.registerAll(data, true);
+            // other model asks for it. The identity is a constant: the content is the jar's own built-in default, so
+            // it cannot change without a mod update - which the baked-cache ABI tag already includes.
+            //
+            // The per-domain fallback tables are NOT filled here any more: registerAll -> registerAnimations installs
+            // these very files into the engine cache, and defaultAnimationFile reads them from there. Parsing them
+            // here as well only parsed the same bytes twice (see defaultAnimationFile).
+            ClientModelManager.registerAll(data, "b:default", true);
         } else {
             ysmu.LOG.warn("Failed to load default model from any format");
         }
@@ -2751,7 +2985,14 @@ public class ClientModelManager {
             return null;
         }
         try {
-            return RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId);
+            ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, raw.modelId, true);
+            // Give the reload the same content identity the original registration used, so an evicted-then-reloaded
+            // geometry can come back from the baked cache instead of being rebuilt from the payload.
+            String cachePath = CACHED_MODEL_MD5.get(mainModelId);
+            if (cachePath != null) {
+                data.setBakeIdentity("l:" + cachePath);
+            }
+            return data;
         } catch (Exception e) {
             ysmu.LOG.warn("Failed to bridge cached model data for {}: {}", mainModelId, e.getMessage());
             return null;
@@ -2792,12 +3033,15 @@ public class ClientModelManager {
         }
         Map<String, byte[]> modelBytes = data.getModel();
         if (modelBytes == null || modelBytes.isEmpty()) {
-            return null;
+            if (data.getPreParsedGeometry()
+                .isEmpty()) {
+                return null;
+            }
         }
-        for (Map.Entry<String, byte[]> entry : modelBytes.entrySet()) {
-            ResourceLocation subId = ModelIdUtil.getSubModelId(baseId, entry.getKey());
+        for (String key : geometryKeys(data)) {
+            ResourceLocation subId = ModelIdUtil.getSubModelId(baseId, key);
             if (geoId.equals(subId)) {
-                BuiltGeo built = buildGeo(subId, entry.getValue());
+                BuiltGeo built = buildGeometry(baseId, data, key);
                 return built == null ? null : built.model;
             }
         }

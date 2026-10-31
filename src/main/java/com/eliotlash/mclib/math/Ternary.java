@@ -1,6 +1,10 @@
 package com.eliotlash.mclib.math;
 
-public class Ternary implements IValue {
+import java.io.Serializable;
+
+public class Ternary implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     public IValue condition;
     public IValue ifTrue;

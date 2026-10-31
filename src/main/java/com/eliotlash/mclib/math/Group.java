@@ -1,6 +1,10 @@
 package com.eliotlash.mclib.math;
 
-public class Group implements IValue {
+import java.io.Serializable;
+
+public class Group implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     private IValue value;
 

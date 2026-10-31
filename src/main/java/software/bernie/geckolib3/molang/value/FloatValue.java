@@ -1,8 +1,12 @@
 package software.bernie.geckolib3.molang.value;
 
+import java.io.Serializable;
+
 import software.bernie.geckolib3.molang.runtime.ExpressionEvaluator;
 
-public class FloatValue implements IValue {
+public class FloatValue implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
     public static final FloatValue ONE = new FloatValue(1);
     public static final FloatValue ZERO = new FloatValue(0);
 

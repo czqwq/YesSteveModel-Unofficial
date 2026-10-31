@@ -12,6 +12,7 @@ import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.asset.provider.AnimationProvider;
 import com.fox.ysmu.client.asset.provider.GeoModelProvider;
+import com.fox.ysmu.client.model.AnimationPayload;
 
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 
@@ -86,7 +87,7 @@ public final class AssetManager {
      * 也是本仓在「已同步未安装」期间本来就会持有的那一份（{@code PENDING_ANIMATIONS} 的 javadoc：
      * 它比解析出来的对象图小得多）。
      */
-    private static final AssetCache<ResourceLocation, Map<String, byte[]>> ANIM = new AssetCache<>(
+    private static final AssetCache<ResourceLocation, AnimationPayload> ANIM = new AssetCache<>(
         new AnimationProvider(),
         FAILED_RETRY_MS);
 
@@ -127,7 +128,7 @@ public final class AssetManager {
     }
 
     /** 获取动画资源句柄（key 为该模型的 mainId）。调用点必须判 {@link #isEnabled()}。 */
-    public static AssetHandle<ResourceLocation, Map<String, byte[]>> anim(ResourceLocation mainId) {
+    public static AssetHandle<ResourceLocation, AnimationPayload> anim(ResourceLocation mainId) {
         return new AssetHandle<>(ANIM, mainId);
     }
 
@@ -146,7 +147,7 @@ public final class AssetManager {
      * 登记即「采纳」：{@link #tick} 之后可以回收它，而 {@link ClientModelManager} 的 seam 会按
      * {@link #managesAnimations} 决定是否重新加载。
      */
-    public static void registerAnim(ResourceLocation mainId, Map<String, byte[]> animations) {
+    public static void registerAnim(ResourceLocation mainId, AnimationPayload animations) {
         if (!isEnabled() || mainId == null || animations == null) {
             return;
         }

@@ -48,6 +48,52 @@ the part of it that is written against this snapshot.
 
 ## Deviations recorded against this snapshot
 
+- **Java-serialisation support for the parsed animation graph (17 files), groundwork for an animation cache.** The
+  snapshot's `Animation.copy` (`core/builder/Animation.java:57-75`) round-trips an `Animation` through
+  `ObjectOutputStream`, but it has never worked: the graph is full of types without `Serializable`, so the method's
+  `catch (Exception)` silently returns the original animation. Adding the interface is behaviour-neutral - nothing
+  calls `Animation.copy` today, and no live object travelled through this path before - and it is the prerequisite for
+  caching a parsed animation file instead of re-parsing 60-100 ms of Molang per model. Measured with
+  `tmp/_analysis/probe-bake/AnimCacheProbe` on the built-in packs: `Endfield_Rossi` main animation set parses in 98 ms,
+  serialises in 31 ms and deserialises in 33 ms (round trip byte-stable); its whole model is 210 ms of parse versus
+  85 ms of deserialise. Files touched, all additive:
+  - `com/eliotlash/mclib/math/{Constant,Group,IndexValue,Negate,Negative,Operator,Ternary,Variable}.java` and
+    `functions/Function.java` - `implements Serializable` plus `serialVersionUID = 42L`. Every `math.*` function
+    subclass inherits it from `Function`, whose only state is its argument array and name.
+  - `com/eliotlash/mclib/math/MathBuilder.java` - the private `LazyCondition` value (short-circuit `&&`/`||`/ternary)
+    is part of a parsed expression, so it carries the interface too.
+  - `software/bernie/geckolib3/core/ConstantValue.java`, `molang/value/{FloatValue,MolangValue,RotationValue}.java`
+    - engine-side `IValue` implementations, same treatment.
+  - `core/molang/expressions/MolangExpression.java` - implements the interface and its `MolangParser context` field is
+    now `transient`: the field is only ever assigned (never read anywhere in the engine) and a parser is live state
+    (variable tables, registered functions) that must not be serialised.
+  - `core/molang/LazyVariable.java` - its `DoubleSupplier` is a capturing lambda and therefore not serialisable, so
+    the field is `transient` and `get()` answers the stored literal (or 0) instead of throwing when it is absent. This
+    only affects a deserialised copy; no runtime instance ever loses its supplier.
+  - `core/molang/MolangParser.java` - the two anonymous `IValue` wrappers it installs into a parsed expression
+    (`cond ? {...} : {...}` at `:480` and the `a ?? b` wrapper at `:695`) became the named, `Serializable` nested
+    classes `ConditionalSelect` and `NullCoalesce`. An anonymous class cannot be written to the animation cache at all
+    (`NotSerializableException: MolangParser$2`), and the built-in default model uses both. Their semantics are
+    unchanged; `NullCoalesce`'s explicit-variable lookup is live parser state and is therefore `transient`, so a
+    deserialised `?? ` answers the plain `l != 0` rule (the engine's answer when no lookup is installed).
+
+- **Serialisation support for the client's baked-geometry cache (two files).** The port's content-addressed geometry
+  cache (`com.fox.ysmu.client.model.BakedGeometryCache`, see
+  `.agent/plan-bake-cache-and-structured-bridge.md`) writes a built `GeoModel` with `ObjectOutputStream`, and two
+  snapshot types could not be written as-is. Both changes are additive and change no rendering or parse behaviour.
+  - **`software/bernie/geckolib3/geo/raw/pojo/ExtraInfo.java` - now `implements Serializable` (`serialVersionUID =
+    42L`).** It is reachable from `ModelProperties.extraInfo`, hence from `GeoModel.properties`, and was the only type
+    in that graph without the interface: a model that declares `extra_info` - every YSM pack does - failed with
+    `NotSerializableException: ExtraInfo`. The snapshot writes `Serializable` on every other geo pojo
+    (`ModelProperties`, `GeoModel`, `GeoBone`, `GeoCube`, `GeoQuad`, `GeoVertex`), so this is the missing member of an
+    existing family rather than a new mechanism.
+  - **`software/bernie/geckolib3/geo/render/built/GeoQuad.java` - `direction` is `transient` and written as an
+    ordinal by a new `writeObject`/`readObject` pair.** 1.7.10's `net.minecraft.util.EnumFacing` is a plain enum
+    without `Serializable`, so the default serialisation of this field threw. `normal`/`normalVector` stay serialised:
+    `net.geckominecraft.util.math.Vec3i` is this engine's own `Serializable` class and `javax.vecmath.Vector3f`
+    implements `Serializable` too. The ordinal is stable for as long as a cache file can be read at all, because the
+    cache ABI tag embeds the mod version (see the class' own comment).
+
 - **The immutable render context, ported into six engine files.** A GUI preview must present one stable pose for a
   whole frame; upstream gets that from its `RenderContext`'s `immutable` bit
   (`tmp/YesSteveModel-dev-1.20 .../geckolib3/geo/RenderContext.java:9-21`), resolved through the animatable's

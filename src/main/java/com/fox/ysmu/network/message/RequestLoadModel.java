@@ -218,7 +218,10 @@ public class RequestLoadModel implements IMessage {
                         if (generation != ClientModelManager.currentGeneration()) {
                             return;
                         }
-                        ClientModelManager.registerAll(data);
+                        // The cache file's own MD5 name IS this payload's content identity: it is content-addressed,
+                        // so it can replace the whole-payload hash this funnel would otherwise compute, and it keys
+                        // the client's baked-geometry cache.
+                        ClientModelManager.registerAll(data, "l:" + fileName);
                     });
             } else {
                 ysmu.LOG.warn("Failed to decrypt YSM model cache file {}", fileName);

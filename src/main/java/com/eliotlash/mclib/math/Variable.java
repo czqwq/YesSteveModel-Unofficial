@@ -1,6 +1,10 @@
 package com.eliotlash.mclib.math;
 
-public class Variable implements IValue {
+import java.io.Serializable;
+
+public class Variable implements IValue, Serializable {
+
+    private static final long serialVersionUID = 42L;
 
     private String name;
     private double value;

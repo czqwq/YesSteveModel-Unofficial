@@ -8,6 +8,9 @@ import javax.annotation.Nullable;
 
 import com.fox.ysmu.model.format.ServerModelInfo;
 import com.fox.ysmu.model.format.Type;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+
+import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
 
 public final class ModelData {
 
@@ -226,6 +229,28 @@ public final class ModelData {
         return animation;
     }
 
+    /**
+     * Animation files this payload already carries as structures instead of JSON text, keyed like
+     * {@link #getAnimation()} ({@code main}, {@code arm}, {@code extra}, {@code projectile_<matchId>}, ...), or empty
+     * when the payload only carries JSON bytes.
+     * <p>
+     * Same split as {@link #getPreParsedGeometry()}: the OpenYSM binary channel has bones/channels/keyframes by
+     * construction, and the client's {@code RawAnimationBuilder} turns them into engine {@code Animation} objects
+     * directly. A payload that really is JSON (folder model, built-in default, legacy container) keeps its bytes.
+     * <p>
+     * Deliberately not part of any container or cache encoding: serialising the payload still writes exactly the
+     * animation JSON it always wrote.
+     */
+    private Map<String, RawYsmModel.RawAnimationFile> preParsedAnimations = Collections.emptyMap();
+
+    public Map<String, RawYsmModel.RawAnimationFile> getPreParsedAnimations() {
+        return preParsedAnimations;
+    }
+
+    public void setPreParsedAnimations(Map<String, RawYsmModel.RawAnimationFile> preParsedAnimations) {
+        this.preParsedAnimations = preParsedAnimations == null ? Collections.emptyMap() : preParsedAnimations;
+    }
+
     /** The model's GUI presentation images (see the field); empty when it declares none. */
     public Map<String, byte[]> getGuiImages() {
         return guiImages;
@@ -270,6 +295,55 @@ public final class ModelData {
 
     public void setMd5(String md5) {
         this.info.setMd5(md5);
+    }
+
+    /**
+     * The content identity of this payload, as the channel that delivered it knows it, or {@code null} when the
+     * channel has none.
+     * <p>
+     * It exists for two consumers that both need "is this the same bytes as last time" without hashing the payload:
+     * the duplicate check in {@code ClientModelManager.registerAll} (which used to MD5 every byte on the client
+     * thread, 11-38 ms per model) and the client's baked-geometry cache key. The channels fill it as follows: the
+     * OpenYSM binary channel uses the server-derived {@code hash1/hash2} pair (already a content hash of the model
+     * plus the bake version), the legacy encrypted-cache channel uses the cache file's MD5 name, and the built-in
+     * default model uses a constant because its content is the jar's own.
+     * <p>
+     * It is deliberately <b>not</b> part of any encrypted container: it identifies a payload that already arrived, and
+     * a receiving client computes its own from the transport it used.
+     */
+    private String bakeIdentity;
+
+    public String getBakeIdentity() {
+        return bakeIdentity;
+    }
+
+    public void setBakeIdentity(String bakeIdentity) {
+        this.bakeIdentity = bakeIdentity;
+    }
+
+    /**
+     * Geometry this payload already parsed into engine POJOs, keyed like {@link #getModel()} ({@code main},
+     * {@code arm}, {@code projectile_<matchId>}, {@code vehicle_<matchId>}), or empty when the payload only carries
+     * JSON bytes.
+     * <p>
+     * The OpenYSM binary channel has structured geometry (bones/cubes/faces) by construction, and this port used to
+     * re-emit it as pretty-printed JSON and immediately parse it back with Gson. When the client asks the adapter for
+     * a structured payload ({@code toLegacyModelData(..., true)}), the sub-models that have no {@code sourceJson} come
+     * back here instead of as bytes, and {@code ClientModelManager} builds the engine model from them directly. A
+     * payload read from a folder (or from the legacy encrypted container, which is JSON by design) keeps its bytes in
+     * {@link #getModel()} and leaves this map empty.
+     * <p>
+     * Deliberately not part of any container or cache encoding: it is a process-local shortcut, so serialising the
+     * payload still writes exactly the JSON bytes it always wrote.
+     */
+    private Map<String, RawGeoModel> preParsedGeometry = Collections.emptyMap();
+
+    public Map<String, RawGeoModel> getPreParsedGeometry() {
+        return preParsedGeometry;
+    }
+
+    public void setPreParsedGeometry(Map<String, RawGeoModel> preParsedGeometry) {
+        this.preParsedGeometry = preParsedGeometry == null ? Collections.emptyMap() : preParsedGeometry;
     }
 
     public ServerModelInfo getInfo() {
