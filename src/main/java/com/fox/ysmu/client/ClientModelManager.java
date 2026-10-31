@@ -52,6 +52,7 @@ import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.model.AnimationPayload;
 import com.fox.ysmu.client.model.BakedAnimationCache;
+import com.fox.ysmu.client.model.PreparedAnimations;
 import com.fox.ysmu.client.model.BakedGeometryCache;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.render.AppliedModelRegistry;
@@ -474,6 +475,15 @@ public class ClientModelManager {
      * rendering - on an integrated server those are two different threads in one JVM.
      */
     private static final Map<ResourceLocation, AnimationPayload> PENDING_ANIMATIONS = Maps.newConcurrentMap();
+    /**
+     * Animation sets already built on the loader thread, waiting for the client thread to install them.
+     * <p>
+     * Same shape as {@code COMPLETED_BUILDS} for geometry: {@link #deferAnimations} parks the payload and schedules the
+     * build, and {@link #ensureAnimations} - which runs on the client thread the first time a model is drawn - installs
+     * the finished files instead of paying for the parse itself. A bundle whose payload is no longer the parked one is
+     * discarded (see {@link PreparedAnimations}).
+     */
+    private static final Map<ResourceLocation, PreparedAnimations> PREPARED_ANIMATIONS = Maps.newConcurrentMap();
 
     /**
      * Payloads whose geometry and textures have been received but not yet built, keyed by both the model id and the
@@ -1492,12 +1502,21 @@ public class ClientModelManager {
             // This payload declares no animations of its own, so the model is meant to fall back to the built-in
             // default animations; dropping anything parked under the id is what makes that fallback reachable.
             PENDING_ANIMATIONS.remove(mainId);
+            PREPARED_ANIMATIONS.remove(mainId);
             return;
         }
         // Only the animation half is parked: the geometry and texture bytes in the same payload were consumed by the
         // publish path and nothing can re-read them from here (see the field's javadoc and R7 of
         // .agent/perf-audit-memory.md).
         PENDING_ANIMATIONS.put(mainId, payload);
+        // Build the animation sets now, on the loader thread, so the first draw does not pay for it.
+        PREPARED_ANIMATIONS.remove(mainId);
+        try {
+            modelLoader().submit(() -> prepareAnimations(mainId, payload));
+        } catch (RuntimeException failure) {
+            // Preparation is an optimisation: without it the client thread builds on demand, exactly as before.
+            ysmu.LOG.warn("YSM client could not schedule animation preparation for {}", mainId, failure);
+        }
     }
 
     /** Whether this model's animations are still parked; see {@link #PENDING_ANIMATIONS}. */
@@ -1588,6 +1607,14 @@ public class ClientModelManager {
             return;
         }
         AnimationPayload animations = takePendingAnimations(mainId);
+        PreparedAnimations prepared = null;
+        if (animations != null) {
+            prepared = PREPARED_ANIMATIONS.remove(mainId);
+            if (prepared != null && prepared.payload() != animations) {
+                // Built from a payload that has since been replaced; installing it would show the older bytes.
+                prepared = null;
+            }
+        }
         if (animations == null) {
             // Nothing parked: either this model's animations are already installed, or it declares none of its own
             // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
@@ -1595,7 +1622,7 @@ public class ClientModelManager {
             return;
         }
         try {
-            registerAnimations(mainId, animations);
+            registerAnimations(mainId, animations, prepared);
         } catch (Throwable failure) {
             // Throwable, like the geometry path: an Error from a JSON parse or a table registration would otherwise
             // escape into the engine's animation lookup on the render thread, which catches only Exception. The
@@ -2189,6 +2216,19 @@ public class ClientModelManager {
     }
 
     private static void registerAnimations(ResourceLocation id, AnimationPayload payload) {
+        registerAnimations(id, payload, null);
+    }
+
+    /**
+     * Installs one payload's animations, reusing the loader thread's {@link PreparedAnimations} when they are available.
+     *
+     * <p>
+     * Everything here writes client-thread state - the engine's animation cache, the condition tables, the controller
+     * registry - so it stays on the client thread; only the pure parsing/building moved off it. A key the bundle does
+     * not cover (a controller file, or a payload parked without preparation) is built inline as before.
+     */
+    private static void registerAnimations(ResourceLocation id, AnimationPayload payload,
+        @Nullable PreparedAnimations prepared) {
         Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
             .getAnimations();
         // A model's animation sets are split into *domains*, which is upstream's shape: the `fp_arm` set is the
@@ -2223,7 +2263,7 @@ public class ClientModelManager {
             RawYsmModel.RawAnimationFile structured = payload.structured(key);
             if (structured != null) {
                 registerStructuredAnimationFile(id, baseId, key, structured, payload.identity(), parser,
-                    filesByDomain, animations, animToModIds);
+                    filesByDomain, animations, animToModIds, prepared);
                 continue;
             }
             byte[] entryBytes = payload.bytes(key);
@@ -2254,7 +2294,8 @@ public class ClientModelManager {
                 }
                 ResourceLocation projectileId = ModelIdUtil
                     .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
-                animations.put(projectileId, projectileAnimationFile(bytes, projectileId));
+                AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
+                animations.put(projectileId, preparedFile != null ? preparedFile : projectileAnimationFile(bytes, projectileId));
                 continue;
             }
             // The vehicle family, same two branches and same reason as the projectile ones above: a pack's boat set
@@ -2286,7 +2327,8 @@ public class ClientModelManager {
                 // Same parser as the projectile branch: it is "one sub-entity's own animation file, never merged into
                 // the player's namespace", which is exactly what a vehicle needs too. Only its name and its log line
                 // say projectile.
-                animations.put(vehicleId, projectileAnimationFile(bytes, vehicleId));
+                AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
+                animations.put(vehicleId, preparedFile != null ? preparedFile : projectileAnimationFile(bytes, vehicleId));
                 continue;
             }
             // Each file's bytes are decoded and parsed exactly once: that one JsonObject both answers "is this a
@@ -2328,20 +2370,31 @@ public class ClientModelManager {
             // 引用 ctrl.tac_，逐文件标记会把 pre_parallel0-7/表情/衣服全部误标为 tacz 依赖，
             // 于是 tacz 未加载时 pre_parallel_0 控制器被整体跳过（衣服/表情永不播放）。
             // (reference branch ClientModelManager.java:1073-1115)
-            for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
-                JsonElement animationJsonElement = animationEntry.getValue();
-                if (animationJsonElement == null || !animationJsonElement.isJsonObject()) {
-                    continue;
-                }
-                String animationJson = animationJsonElement.toString();
-                for (ModDependency dependency : ModDependencyRegistry.getAll()) {
-                    if (dependency.matches(animationJson)) {
-                        animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
-                            .add(dependency.getModId());
+            if (prepared == null) {
+                for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
+                    JsonElement animationJsonElement = animationEntry.getValue();
+                    if (animationJsonElement == null || !animationJsonElement.isJsonObject()) {
+                        continue;
+                    }
+                    String animationJson = animationJsonElement.toString();
+                    for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                        if (dependency.matches(animationJson)) {
+                            animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                                .add(dependency.getModId());
+                        }
                     }
                 }
+            } else {
+                // The loader thread already scanned this file; reuse its answer instead of re-reading the JSON text.
+                for (Map.Entry<String, Set<String>> modEntry : prepared.modsForFile(key)
+                    .entrySet()) {
+                    animToModIds.computeIfAbsent(modEntry.getKey(), ignored -> new LinkedHashSet<>())
+                        .addAll(modEntry.getValue());
+                }
             }
-            AnimationFile parsedFile = cachedAnimationFile(payload.identity(), key, entryBytes, jsonObject);
+            AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
+            AnimationFile parsedFile = preparedFile != null ? preparedFile
+                : cachedAnimationFile(payload.identity(), key, entryBytes, jsonObject);
             mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), parsedFile);
         }
         // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
@@ -2479,6 +2532,108 @@ public class ClientModelManager {
      * <p>
      * The digest is taken over the exact bytes being parsed, so the cache cannot answer for a different payload.
      */
+    /**
+     * Builds every animation set of one parked payload on the loader thread.
+     * <p>
+     * Pure CPU only: no engine cache writes, no condition/controller registration - those stay in
+     * {@link #registerAnimations} on the client thread. The result is what makes the first draw of a model cheap.
+     */
+    private static void prepareAnimations(ResourceLocation mainId, AnimationPayload payload) {
+        try {
+            MolangParser parser = GeckoLibCache.getInstance().parser;
+            Map<String, AnimationFile> files = new LinkedHashMap<>();
+            Map<String, Map<String, Set<String>>> mods = new LinkedHashMap<>();
+            for (String key : payload.keys()) {
+                if (YsmControllerResources.isControllerResource(key)) {
+                    continue;
+                }
+                RawYsmModel.RawAnimationFile structured = payload.structured(key);
+                if (structured != null) {
+                    files.put(key, buildStructuredAnimationFile(payload.identity(), key, structured, parser));
+                    Map<String, Set<String>> perAnimation = new LinkedHashMap<>();
+                    scanStructuredModIds(structured, perAnimation);
+                    if (!perAnimation.isEmpty()) {
+                        mods.put(key, perAnimation);
+                    }
+                    continue;
+                }
+                byte[] bytes = payload.bytes(key);
+                if (bytes == null || bytes.length == 0) {
+                    continue;
+                }
+                JsonObject jsonObject;
+                try {
+                    jsonObject = GsonHelper
+                        .fromJson(ysmu.GSON, new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
+                } catch (Exception malformed) {
+                    continue;
+                }
+                if (jsonObject == null || jsonObject.has("animation_controllers")) {
+                    continue;
+                }
+                files.put(key, cachedAnimationFile(payload.identity(), key, bytes, jsonObject));
+                Map<String, Set<String>> perAnimation = new LinkedHashMap<>();
+                for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
+                    JsonElement element = animationEntry.getValue();
+                    if (element == null || !element.isJsonObject()) {
+                        continue;
+                    }
+                    String animationJson = element.toString();
+                    for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                        if (dependency.matches(animationJson)) {
+                            perAnimation.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                                .add(dependency.getModId());
+                        }
+                    }
+                }
+                if (!perAnimation.isEmpty()) {
+                    mods.put(key, perAnimation);
+                }
+            }
+            if (PENDING_ANIMATIONS.get(mainId) != payload) {
+                // The payload was installed (or replaced) while this build ran; the client thread has already built
+                // what it needs and keeping this bundle would only hold a second copy of the graph.
+                return;
+            }
+            PREPARED_ANIMATIONS.put(mainId, new PreparedAnimations(payload, files, mods));
+        } catch (Throwable failure) {
+            // Preparation is an optimisation: the client thread still builds on demand.
+            ysmu.LOG.warn("YSM client could not prepare animations for {}; building them on demand", mainId, failure);
+        }
+    }
+
+    /** Fills "animation name -> optional mod ids" from structures, matching the JSON-text scan the install path uses. */
+    private static void scanStructuredModIds(RawYsmModel.RawAnimationFile file, Map<String, Set<String>> into) {
+        for (Map.Entry<String, RawYsmModel.RawAnimation> animationEntry : file.animations.entrySet()) {
+            RawYsmModel.RawAnimation animation = animationEntry.getValue();
+            if (animation == null) {
+                continue;
+            }
+            String scanText = com.fox.ysmu.client.animation.RawAnimationBuilder.modScanText(animation);
+            for (ModDependency dependency : ModDependencyRegistry.getAll()) {
+                if (dependency.matches(scanText)) {
+                    into.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
+                        .add(dependency.getModId());
+                }
+            }
+        }
+    }
+
+    /** Builds one structured animation set, reusing a cached parse when the cache is enabled. */
+    private static AnimationFile buildStructuredAnimationFile(@Nullable String identity, String key,
+        RawYsmModel.RawAnimationFile file, MolangParser parser) {
+        String digest = identity != null && BakedAnimationCache.isEnabled()
+            ? com.fox.ysmu.client.animation.RawAnimationBuilder.structureDigest(file) : null;
+        AnimationFile built = digest == null ? null : BakedAnimationCache.load(identity, key, digest);
+        if (built != null) {
+            return built;
+        }
+        built = com.fox.ysmu.client.animation.RawAnimationBuilder.toAnimationFile(file, parser);
+        if (digest != null) {
+            BakedAnimationCache.store(identity, key, digest, built);
+        }
+        return built;
+    }
     private static AnimationFile cachedAnimationFile(@Nullable String identity, String key, byte[] bytes,
         JsonObject jsonObject) {
         boolean caching = identity != null && BakedAnimationCache.isEnabled();
@@ -2499,23 +2654,16 @@ public class ClientModelManager {
     private static void registerStructuredAnimationFile(ResourceLocation id, ResourceLocation baseId, String key,
         RawYsmModel.RawAnimationFile file, @Nullable String identity, MolangParser parser,
         Map<String, AnimationFile> filesByDomain, Map<ResourceLocation, AnimationFile> animations,
-        Map<String, Set<String>> animToModIds) {
-        String digest = identity != null && BakedAnimationCache.isEnabled()
-            ? com.fox.ysmu.client.animation.RawAnimationBuilder.structureDigest(file) : null;
-        AnimationFile built = digest == null ? null : BakedAnimationCache.load(identity, key, digest);
-        if (built != null) {
-            ysmu.LOG.info("YSM animation cache hit {} of model {}", key, id);
-        } else {
+        Map<String, Set<String>> animToModIds, @Nullable PreparedAnimations prepared) {
+        AnimationFile built = prepared == null ? null : prepared.file(key);
+        if (built == null) {
             try {
-                built = com.fox.ysmu.client.animation.RawAnimationBuilder.toAnimationFile(file, parser);
+                built = buildStructuredAnimationFile(identity, key, file, parser);
             } catch (Throwable failure) {
                 // Same containment as the JSON branch: one unbuildable file costs that file, not the model's
                 // animations.
                 ysmu.LOG.warn("Failed to build animation file {} for model {}", key, id, failure);
                 return;
-            }
-            if (digest != null) {
-                BakedAnimationCache.store(identity, key, digest, built);
             }
         }
         if (key.startsWith(PROJECTILE_KEY_PREFIX)) {
@@ -2536,17 +2684,19 @@ public class ClientModelManager {
             animations.put(vehicleId, built);
             return;
         }
-        for (Map.Entry<String, RawYsmModel.RawAnimation> animationEntry : file.animations.entrySet()) {
-            RawYsmModel.RawAnimation animation = animationEntry.getValue();
-            if (animation == null) {
-                continue;
+        if (prepared != null) {
+            for (Map.Entry<String, Set<String>> modEntry : prepared.modsForFile(key)
+                .entrySet()) {
+                animToModIds.computeIfAbsent(modEntry.getKey(), ignored -> new LinkedHashSet<>())
+                    .addAll(modEntry.getValue());
             }
-            String scanText = com.fox.ysmu.client.animation.RawAnimationBuilder.modScanText(animation);
-            for (ModDependency dependency : ModDependencyRegistry.getAll()) {
-                if (dependency.matches(scanText)) {
-                    animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
-                        .add(dependency.getModId());
-                }
+        } else {
+            // Scan into the caller's map (the helper above builds into a scratch map for the preparation path).
+            java.util.Map<String, Set<String>> scanned = new LinkedHashMap<>();
+            scanStructuredModIds(file, scanned);
+            for (Map.Entry<String, Set<String>> modEntry : scanned.entrySet()) {
+                animToModIds.computeIfAbsent(modEntry.getKey(), ignored -> new LinkedHashSet<>())
+                    .addAll(modEntry.getValue());
             }
         }
         mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), built);
@@ -3067,6 +3217,7 @@ public class ClientModelManager {
             EXTRA_INFO.clear();
             EXTRA_ANIMATION_NAME.clear();
             PENDING_ANIMATIONS.clear();
+            PREPARED_ANIMATIONS.clear();
             PENDING_GEOMETRY.clear();
             COMPLETED_BUILDS.clear();
             GEOMETRY_REQUESTED.clear();
@@ -3267,6 +3418,7 @@ public class ClientModelManager {
         synchronized (GEOMETRY_STATE_LOCK) {
             PENDING_GEOMETRY.clear();
             PENDING_ANIMATIONS.clear();
+            PREPARED_ANIMATIONS.clear();
             GEOMETRY_REQUESTED.clear();
             GEOMETRY_READY.clear();
             GEOMETRY_FAILED.clear();

@@ -50,7 +50,15 @@ import software.bernie.geckolib3.core.molang.functions.SinDegrees;
  */
 public class MolangParser extends MathBuilder {
 
-    public static final Map<String, LazyVariable> VARIABLES = new Object2ObjectOpenHashMap<>();
+    /**
+     * Every MoLang name this engine knows, shared by all parsers.
+     * <p>
+     * YSMU: a {@link java.util.concurrent.ConcurrentHashMap} because this table is written during *parsing*
+     * ({@code getVariable}'s {@code computeIfAbsent} creates the variable on first sight) and parsing happens on more
+     * than one thread: the client thread builds animations on demand and the model loader now pre-builds them, while
+     * the per-frame controller paths read entries here without any lock. A plain fastutil map made that a data race.
+     */
+    public static final Map<String, LazyVariable> VARIABLES = new java.util.concurrent.ConcurrentHashMap<>();
     public static final MolangExpression ZERO = new MolangValue(null, new Constant(0));
     public static final MolangExpression ONE = new MolangValue(null, new Constant(1));
     public static final String RETURN = "return ";

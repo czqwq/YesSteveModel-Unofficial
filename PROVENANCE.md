@@ -70,6 +70,11 @@ the part of it that is written against this snapshot.
   - `core/molang/LazyVariable.java` - its `DoubleSupplier` is a capturing lambda and therefore not serialisable, so
     the field is `transient` and `get()` answers the stored literal (or 0) instead of throwing when it is absent. This
     only affects a deserialised copy; no runtime instance ever loses its supplier.
+  - `core/molang/MolangParser.java` - `VARIABLES`, the shared MoLang name table, is now a
+    `java.util.concurrent.ConcurrentHashMap` instead of a fastutil `Object2ObjectOpenHashMap`. The table is written
+    during *parsing* (`getVariable`'s `computeIfAbsent` creates a variable on first sight), and parsing now happens on
+    two threads: the client thread builds animations on demand and the model loader pre-builds them. The per-frame
+    controller paths read entries here without a lock, so the plain map was a data race.
   - `core/molang/MolangParser.java` - the two anonymous `IValue` wrappers it installs into a parsed expression
     (`cond ? {...} : {...}` at `:480` and the `a ?? b` wrapper at `:695`) became the named, `Serializable` nested
     classes `ConditionalSelect` and `NullCoalesce`. An anonymous class cannot be written to the animation cache at all
