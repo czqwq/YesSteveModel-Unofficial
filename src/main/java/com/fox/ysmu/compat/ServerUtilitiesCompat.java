@@ -1,5 +1,6 @@
 package com.fox.ysmu.compat;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -11,6 +12,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.util.ChatComponentText;
+import net.minecraft.util.ChatComponentTranslation;
+import net.minecraft.util.EnumChatFormatting;
+import net.minecraft.util.IChatComponent;
 
 import com.fox.ysmu.util.ModAvailability;
 import com.fox.ysmu.ysmu;
@@ -89,13 +94,37 @@ import com.fox.ysmu.ysmu;
  * refresh/delete/move/rename → {@code MANAGE}）：rank 显式 ALLOW 时跳过原版 4 级复检，DEFAULT（未安装或无 rank
  * 条目）时行为与原版逐字节一致。{@code debug} 没有服务端数据包复检。</p>
  *
- * <p><b>rank GUI 可见性（另一处记录）</b>：本类注册的节点带非空描述，所以会出现在
+ * <p><b>rank GUI 可见性</b>：本类注册的节点带非空描述，所以会出现在
  * {@code getRegisteredNodes()}、{@code /dump permissions} 以及 {@code /ranks set_permission} 的补全里
  * （{@code Ranks.getPermissionNodes()} 只对“等级与该前缀默认等级相同且描述为空”的节点做隐藏过滤，
- * {@code Ranks.java:522-558}）。但 {@code command.*} 节点被 rank GUI 的通用列表跳过
- * （{@code MessageRanks.java:120}），GUI 的命令组只枚举真实命令对象（{@code CommandUtils.java:182-213}），
- * 所以逐子节点授权要靠 {@code /ranks set_permission}（有补全）或直接写 ranks.txt；在 GUI 里可以把根节点
- * {@code command.ysmu.ysm} 置 true，一次授出全部子命令（见上面的继承方向）。</p>
+ * {@code Ranks.java:522-558}）。但这两条通道都不够：{@code command.*} 被 rank GUI 的通用权限列表整段跳过
+ * （{@code net/MessageRanks.java:120}），而 GUI 的命令组只枚举真实命令对象
+ * （{@code CommandUtils.getPermissionCommands():182-213}），{@code /ysm} 是手工分派的一个 {@code CommandBase}，
+ * 子命令不是命令对象 —— 所以 15 个节点原先在 GUI 里一个都看不到。ServerUtilities 也没有公开的“往命令组追加节点”
+ * 钩子（{@code ServerUtilitiesPermissions.earlyPermissions} 只喂 {@code registerNode}，结局一样是被 {@code :120}
+ * 跳过），因此本仓用 {@code mixin/MixinMessageRanks} 注入 {@code MessageRanks#writeData} 的 HEAD，把
+ * {@link Subcommand} 的 15 行追加进 {@code MessageRanks.commandPermissions}
+ * （{@code net/MessageRanks.java:52}，即 {@code :138-156} 组出来、{@code GuiEditRank} 的黄色“加命令”按钮用的那个
+ * {@code ConfigGroup}）。每条都带：节点名（{@code ConfigValueInstance} 的 id，也就是写入 rank 的那个字符串）、
+ * 说明（{@link Subcommand#description()}，鼠标悬停显示）与默认等级（{@code ConfigBoolean(默认等级 == ALL)}，
+ * 与 ServerUtilities 给真实命令用的写法逐字相同，{@code MessageRanks.java:142-143}）。于是管理员在
+ * {@code /ranks} → 选 rank → 黄色“加命令”里勾 {@code command.ysmu.ysm.manage} 就能授出 {@code /ysm manage}，
+ * 不用再手打节点名；改动由 GUI 原有的收尾路径写回（{@code MessageRankModify:59-63} →
+ * {@code Rank.setPermission(node, value)} → {@code Ranks.save()}），执行端读的仍是同一批节点名，所以 GUI 与
+ * {@code /ranks set_permission} / ranks.txt 三条路等价。未装 ServerUtilities（或它改了 GUI 类形状）时
+ * {@link #appendRankGuiCommandNodes()} 是空操作/只告警一次，机制见 {@code MixinMessageRanks} 的类注释。
+ * 在 GUI 里把根节点 {@code command.ysmu.ysm} 置 true 仍会按点号父级继承开放整族（见上面的继承方向）。</p>
+ *
+ * <p><b>版本基准</b>：本文所有 ServerUtilities 的 {@code file:line} 都按两处核对过 —— 本仓参考快照
+ * {@code tmp/ServerUtilities-master}，与 GTNH 2.9.0 清单钉住的 <b>ServerUtilities 2.4.22</b>
+ * （{@code build/elytra_conventions/2.9.0.json}；源码取自 gradle 缓存里的
+ * {@code ServerUtilities-2.4.22-sources.jar}）。本文引用到的 13 个类（{@code MessageRanks}、{@code ConfigGroup}、
+ * {@code ConfigValueInstance}、{@code ConfigBoolean}、{@code StringUtils}、{@code CommandUtils}、
+ * {@code MessageBase}、{@code GuiEditRank}、{@code GuiAddPermission}、{@code MessageRankModify}、{@code Rank}、
+ * {@code ICommandWithPermission} 等）在两版之间<b>字节相同</b>（SHA-256 比对），所以行号对两边都成立。
+ * GUI 追加的反射句柄在 {@link RankGui} 里独立解析，一处缺失不会波及
+ * {@link #permissionResult(EntityPlayerMP, Subcommand)} 的命令判定。开发环境里 ServerUtilities 只是运行期依赖
+ * （不在 compileClasspath 上），本文的所有访问因此都是字符串类名 + 反射，编译期从不引用 {@code serverutils.*}。</p>
  */
 public final class ServerUtilitiesCompat {
 
@@ -150,6 +179,16 @@ public final class ServerUtilitiesCompat {
      */
     private static volatile @Nullable Api api;
 
+    /**
+     * {@link #rankGui()} 是否已尝试解析（与 {@link #api} 分开：GUI 形状变了不该连累命令判定）。
+     */
+    private static volatile boolean rankGuiResolved;
+
+    /**
+     * rank GUI 追加句柄；ServerUtilities 缺席、没有那个 GUI 类或形状不同时为 null。
+     */
+    private static volatile @Nullable RankGui rankGui;
+
     private ServerUtilitiesCompat() {
     }
 
@@ -199,6 +238,102 @@ public final class ServerUtilitiesCompat {
                     registered,
                     ROOT_NODE);
             }
+        }
+    }
+
+    /**
+     * 把 {@link Subcommand} 的 15 行追加进 ServerUtilities rank GUI 的“命令”权限组，让管理员在 GUI 里点选
+     * {@code command.ysmu.ysm.<sub>}（见类注释“rank GUI 可见性”）。
+     *
+     * <p><b>调用点</b>：唯一调用者是 {@code mixin/MixinMessageRanks}，注入在
+     * {@code serverutils.net.MessageRanks#writeData(DataOut)} 的 HEAD（{@code net/MessageRanks.java:165-170}）。
+     * 选择那个位置的理由写在 mixin 的类注释里：它是 GUI 数据包唯一的序列化入口，且只在服务器一侧执行。</p>
+     *
+     * <p><b>幂等</b>：{@code MessageRanks.commandPermissions} 是 {@code private static} 且只构建一次
+     * （{@code :138} 的 {@code if (commandPermissions == null)}），所以每次 GUI 数据包写出去都会再次进这个方法。
+     * 已存在的节点用 {@code ConfigGroup.hasValue(String)}（{@code lib/config/ConfigGroup.java:186-188}）跳过，
+     * 重复调用不会产生第二条条目。整个动作在 {@link #LOCK} 下进行：{@code writeData} 在 Netty 线程上跑
+     * （{@code lib/net/MessageBase.java:15-17} 的 {@code toBytes} → {@code writeData}），两个 rank 数据包同时
+     * 序列化时不能让 {@code ConfigGroup.values} 被并发写。</p>
+     *
+     * <p><b>失败即降级</b>：ServerUtilities 缺席、{@link RankGui} 解析失败或那个静态字段还不存在（例如 GUI
+     * 还没被打开过，字段仍是 null）时直接返回；任何反射异常只告警一次。命令判定
+     * （{@link #permissionResult(EntityPlayerMP, Subcommand)}）与本方法无依赖关系。</p>
+     */
+    public static void appendRankGuiCommandNodes() {
+        if (!isLoaded()) {
+            return;
+        }
+        RankGui gui = rankGui();
+        if (gui == null) {
+            return;
+        }
+        synchronized (LOCK) {
+            try {
+                Object group = gui.commandGroup.get(null);
+                if (group == null) {
+                    // GUI 还没请求过（组是按需构建的），或 ServerUtilities 换掉了那个字段的用途。
+                    return;
+                }
+                for (Subcommand subcommand : Subcommand.values()) {
+                    if (Boolean.TRUE.equals(gui.hasValue.invoke(group, subcommand.node()))) {
+                        continue;
+                    }
+                    // 与 MessageRanks:142-153 给真实命令的写法逐字对应：值/默认值都是"默认等级 == ALL"的布尔，
+                    // id 用 FLAG_ID_PERIOD_DEFAULTS（否则 4 参重载会把节点名里的 '.' 换成 '_'）。
+                    Object value = gui.booleanValue.newInstance(subcommand.defaultLevel() == DefaultLevel.ALL);
+                    Object entry = gui.add.invoke(
+                        group,
+                        subcommand.node(),
+                        value,
+                        value,
+                        gui.periodDefaultsFlag);
+                    gui.setDisplayName.invoke(entry, new ChatComponentTranslation(subcommand.node()));
+                    gui.setInfo.invoke(entry, rankGuiInfo(subcommand));
+                }
+            } catch (Throwable t) {
+                warnOnce("rankgui", "could not add the /ysm subcommand nodes to the ServerUtilities rank GUI: " + t);
+            }
+        }
+    }
+
+    /**
+     * rank GUI 里那一条的悬停说明，与 {@code MessageRanks:144-151} 给真实命令的写法同形：第一行是蓝色的
+     * {@code [模组名]}，第二行是说明。{@code GuiAddPermission.PermissionsEntry#addMouseOverText} 按 {@code \n}
+     * 拆行显示（{@code client/gui/ranks/GuiAddPermission.java:68-77}）。
+     */
+    private static IChatComponent rankGuiInfo(Subcommand subcommand) {
+        return new ChatComponentText(
+            EnumChatFormatting.BLUE + "[" + ysmu.MODID + "]\n" + subcommand.description());
+    }
+
+    /**
+     * 解析（一次）rank GUI 追加用的反射句柄。整组一起成功才算成功：缺一个句柄就整体为 null 并告警一次，
+     * 这样 {@link #appendRankGuiCommandNodes()} 只需要判一次 null，也不存在"半可用"的状态。
+     */
+    @Nullable
+    private static RankGui rankGui() {
+        if (rankGuiResolved) {
+            return rankGui;
+        }
+        synchronized (LOCK) {
+            if (rankGuiResolved) {
+                return rankGui;
+            }
+            try {
+                rankGui = new RankGui();
+            } catch (Throwable t) {
+                warnOnce(
+                    "rankgui-api",
+                    "ServerUtilities is installed but its rank GUI classes could not be reflected ("
+                        + t.getClass()
+                            .getSimpleName()
+                        + "); the /ysm subcommand nodes stay invisible in the rank GUI "
+                        + "(they still work via /ranks set_permission and ranks.txt)");
+            } finally {
+                rankGuiResolved = true;
+            }
+            return rankGui;
         }
     }
 
@@ -539,6 +674,65 @@ public final class ServerUtilitiesCompat {
             this.permissionResult = permissionResult;
             this.playerArgument = permissionResult != null
                 && permissionResult.getParameterTypes()[0].isAssignableFrom(EntityPlayerMP.class);
+        }
+    }
+
+    /**
+     * rank GUI 追加所需的反射句柄，全部按 {@code tmp/ServerUtilities-master}（1.7.10）的形状解析：
+     *
+     * <ul>
+     * <li>{@code serverutils.net.MessageRanks#commandPermissions} —— GUI 的“命令”权限组，{@code :52} 的
+     * {@code private static ConfigGroup}（所以要走 {@code getDeclaredField} + {@code setAccessible}）。</li>
+     * <li>{@code serverutils.lib.config.ConfigGroup#hasValue(String)}（{@code :186-188}）—— 幂等判定。</li>
+     * <li>{@code ConfigGroup#add(String, ConfigValue, ConfigValue, int)}（{@code :135-144}）—— 4 参重载，
+     * 只有它能保留节点名里的 {@code '.'}（3 参重载用 {@code FLAG_ID_DEFAULTS}，会把点号换成下划线，
+     * {@code StringUtils.java:40-42,129-145}）。泛型擦除后的参数类型是 {@code ConfigValue}，所以句柄用
+     * {@code ConfigValue} 取，而不是 {@code ConfigBoolean}。</li>
+     * <li>{@code ConfigBoolean(boolean)}（{@code :50}）—— 值/默认值，与 {@code MessageRanks:143} 同一构造。</li>
+     * <li>{@code ConfigValueInstance#setDisplayName(IChatComponent)} / {@code #setInfo(IChatComponent)}
+     * （{@code :85-99}）—— 显示名与悬停说明，两者都会被序列化送到客户端（{@code :159-174}）。</li>
+     * <li>{@code StringUtils.FLAG_ID_PERIOD_DEFAULTS}（{@code :41-42}）—— 取不到时用 0（{@code getID(id, 0)} 不做
+     * 任何规范化，{@code :100-105}；我们的节点名本来就只有小写字母、数字与点）。</li>
+     * </ul>
+     *
+     * <p>这一组与 {@link Api} 分开解析：GUI 换了形状只该让 GUI 入口消失，不该让命令判定回落到原版等级。</p>
+     */
+    private static final class RankGui {
+
+        private final Field commandGroup;
+        private final Method hasValue;
+        private final Method add;
+        private final Constructor<?> booleanValue;
+        private final Method setDisplayName;
+        private final Method setInfo;
+        private final int periodDefaultsFlag;
+
+        private RankGui() throws ReflectiveOperationException {
+            Class<?> configGroup = Class.forName("serverutils.lib.config.ConfigGroup");
+            Class<?> configValue = Class.forName("serverutils.lib.config.ConfigValue");
+            Class<?> configInstance = Class.forName("serverutils.lib.config.ConfigValueInstance");
+
+            this.commandGroup = Class.forName("serverutils.net.MessageRanks").getDeclaredField("commandPermissions");
+            this.commandGroup.setAccessible(true);
+            this.hasValue = configGroup.getMethod("hasValue", String.class);
+            this.add = configGroup.getMethod("add", String.class, configValue, configValue, int.class);
+            this.booleanValue = Class.forName("serverutils.lib.config.ConfigBoolean").getConstructor(boolean.class);
+            this.setDisplayName = configInstance.getMethod("setDisplayName", IChatComponent.class);
+            this.setInfo = configInstance.getMethod("setInfo", IChatComponent.class);
+            this.periodDefaultsFlag = resolvePeriodDefaultsFlag();
+        }
+
+        /**
+         * {@code StringUtils.FLAG_ID_PERIOD_DEFAULTS} 的数值；取不到时返回 0（见类注释最后一条）。
+         */
+        private static int resolvePeriodDefaultsFlag() {
+            try {
+                return Class.forName("serverutils.lib.util.StringUtils")
+                    .getField("FLAG_ID_PERIOD_DEFAULTS")
+                    .getInt(null);
+            } catch (Throwable t) {
+                return 0;
+            }
         }
     }
 }

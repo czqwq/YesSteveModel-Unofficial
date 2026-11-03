@@ -136,18 +136,35 @@ public class C2SRoamingChanges implements IMessage {
         public IMessage onMessage(C2SRoamingChanges message, MessageContext ctx) {
             try {
                 EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-                if (sender == null || message == null || message.changes.isEmpty()) {
+                if (sender == null || message == null) {
                     return null;
                 }
                 // The save data is a plain map and the handler runs on the Netty thread, so the write is queued for
                 // the server thread rather than racing the tick that serializes it.
                 final int modelKey = message.modelKey;
+                if (message.changes.isEmpty()) {
+                    // 移植特有的语义（phase64）：**空增量 = "请把这个 key 的权威值发给我"**。服务器是权威，而进世界、
+                    // 换模型之后没有任何东西会主动把已保存的 roaming 值推给客户端（登录只挂 EEP，换模型只写选择），
+                    // 于是重连/换模型后模型会用包内默认值渲染，直到玩家动一下控件。客户端在 (世界, 当前模型) 变化时
+                    // 发这一条，服务端只回显、不写任何东西，因此不需要新包也不需要提升协议号。
+                    DeferredWork.server(() -> resend(sender, modelKey));
+                    return null;
+                }
                 final Map<String, Double> changes = new HashMap<>(message.changes);
                 DeferredWork.server(() -> apply(sender, modelKey, changes));
             } catch (Exception e) {
                 ysmu.LOG.warn("Ignoring malformed YSM roaming-change packet", e);
             }
             return null;
+        }
+
+        /** 空增量请求的回执：只把该 key 的权威映射回显给发送者与所有跟踪他的客户端（见 {@link #onMessage}）。 */
+        private void resend(EntityPlayerMP sender, int modelKey) {
+            try {
+                S2CRoamingState.broadcast(sender, modelKey);
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to resend the YSM roaming state", e);
+            }
         }
 
         private void apply(EntityPlayerMP sender, int modelKey, Map<String, Double> changes) {

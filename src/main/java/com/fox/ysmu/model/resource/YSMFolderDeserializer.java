@@ -286,9 +286,13 @@ public class YSMFolderDeserializer implements AutoCloseable {
                     form.title = getStr(formObj, "title", "");
                     form.description = getStr(formObj, "description", "");
                     form.defaultValue = getStr(formObj, "value", "");
-                    form.step = (float) getDouble(formObj, "step", 0d);
+                    // 上游的 ConfigForms POJO 用字段初值给缺省（tmp/YesSteveModel-dev-1.20/.../
+                    // format/parser/pojo/manifest/settings/ConfigForms.java:10-12：step=1、min=0、max=100），
+                    // Gson 只在字段缺失时保留初值。这里此前默认 0/0/0，会让没写这三个键的第三方包得到
+                    // 步长 0、上下界 0 的滑块（无法拖动）。
+                    form.step = (float) getDouble(formObj, "step", 1d);
                     form.min = (float) getDouble(formObj, "min", 0d);
-                    form.max = (float) getDouble(formObj, "max", 0d);
+                    form.max = (float) getDouble(formObj, "max", 100d);
                     if (hasObject(formObj, "labels")) {
                         copyStringMap(formObj.getAsJsonObject("labels"), form.labels);
                     }

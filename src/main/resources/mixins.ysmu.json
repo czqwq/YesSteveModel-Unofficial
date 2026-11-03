@@ -7,7 +7,8 @@
   "compatibilityLevel": "JAVA_8",
   "mixins": [
     "MixinEntityArrow",
-    "MixinEntityMount"
+    "MixinEntityMount",
+    "MixinMessageRanks"
   ],
   "client": [
     "MixinItemRenderer",

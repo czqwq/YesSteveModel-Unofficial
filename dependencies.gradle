@@ -13,21 +13,20 @@ dependencies {
     compileOnly("org.jetbrains:annotations:26.0.2")
     devOnlyNonPublishable("com.github.GTNewHorizons:Backhand:1.8.0:dev")
     runtimeOnlyNonPublishable rfg.deobf(files("libs/spark.jar"))
-    // Baubles-Expanded: 1.7.10 上 Curios 的前身（modid 仍是 "Baubles"；GTNH 2.8.4/2.9.0 随包提供的是
-    // BaublesExpanded-2.2.21-GTNH）。这里的版本只影响编译，不构成运行时要求：用到的
-    // BaubleExpandedSlots.getIndexesOfAssignedSlotsOfType/getSlotType 在 2.1.5 就已存在，而运行时靠
-    // "类在不在"的能力探测 + 失败回退适配任意版本（缺失时 BaublesCompat 优雅降级）。
+    // ServerUtilities：开发运行时依赖（非发布），让 dev 环境下能验证 SU 权限节点/rank GUI 的接线；正式产物不带它，代码侧仍靠反射。
+    runtimeOnlyNonPublishable(gtnhDev("ServerUtilities"))
+    // Baubles-Expanded（1.7.10 上 Curios 的前身，modid 仍是 "Baubles"）：仅编译用，版本只需覆盖已用的 slot 查询 API，运行时按"类在不在"探测并优雅降级。
     devOnlyNonPublishable("com.github.GTNewHorizons:Baubles-Expanded:2.2.21-GTNH:dev")
     devOnlyNonPublishable("com.github.GTNewHorizons:GTNHLib:0.6.40:dev")
-    // ImageStream (upstream's `minecraftLibrary("com.github.OpenYSM:ImageStream:-SNAPSHOT")` + jarJar) is vendored as
-    // source under `src/main/java/rip/ysm/imagestream/**` together with its two `META-INF/services/javax.imageio.spi.*`
-    // files, the same shape as the GeckoLib engine; its decoders are what let `ModelImageConverter` turn every pack
-    // image into PNG. See `PROVENANCE.md`.
-    // The vendored engine's Bedrock geometry POJOs (software.bernie.geckolib3.geo.raw.pojo) are
-    // Jackson-annotated and import plain `com.fasterxml.jackson.*`; the shadow task relocates them.
+    // ImageStream 已按源码 vendor（rip/ysm/imagestream/** + META-INF/services），与内置 GeckoLib 引擎同形，见 PROVENANCE.md；Jackson 供内核几何 POJO 使用并由 shadow 重定位。
     implementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     compileOnly("it.unimi.dsi:fastutil:8.5.18")
+}
+
+@SuppressWarnings('GrMethodMayBeStatic')
+String gtnhDev(String name, String classifier = "dev") {
+    return elytraModpackVersion.gtnh(name, classifier)
 }

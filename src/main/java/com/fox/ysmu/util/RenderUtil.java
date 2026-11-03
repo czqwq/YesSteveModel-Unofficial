@@ -690,8 +690,13 @@ public final class RenderUtil {
      * <p>
      * Throttled to one line a second so it can be left on while looking at a screen. Set to {@code false}, or delete
      * this field with {@link #diagnosePreviewPose}, once the movement is identified.
+     * <p>
+     * <b>Off since phase64.</b> The periodic preview jitter it was written for turned out to be the roaming MoLang
+     * scope being rebuilt on every preview frame (see the AGENTS.md entry "包假设 roaming 变量活过单帧"), so the
+     * diagnostic has done its job; leaving it {@code true} only logs one line a second from every preview tile,
+     * including the model-settings panel. Flip it back to {@code true} when diagnosing again.
      */
-    private static final boolean DIAGNOSE_PREVIEW_POSE = true;
+    private static final boolean DIAGNOSE_PREVIEW_POSE = false;
 
     private static long lastPreviewPoseLogAt;
 

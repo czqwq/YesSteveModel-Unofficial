@@ -32,14 +32,30 @@ public final class ModelFormExecution {
     public static boolean submit(EntityPlayer owner, ResourceLocation modelId, String source,
         Consumer<Double> result, BooleanSupplier stillCurrent) {
         try {
-            RoamingProgram.Compiled program = RoamingProgram.compile(GeckoLibCache.getInstance().parser, source);
-            PENDING.add(new Request(owner, modelId, program, result, stillCurrent));
-            return true;
+            return submit(owner, modelId, RoamingProgram.compile(GeckoLibCache.getInstance().parser, source), result,
+                stillCurrent);
         } catch (Exception failure) {
             // Upstream AnimationRouletteScreen.java:524-530 reports a parse error and does not run the program.
             ysmu.LOG.warn("Failed to parse model form Molang '{}': {}", source, failure.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Queues an already-compiled program.
+     * <p>
+     * The settings panel keeps one compiled read program per form widget, and its per-draw refresh used to hand the
+     * same source text back to the parser sixty times a second per visible form. Compiling once and queueing the
+     * result is the same program - the parser is still the animation-file parser
+     * ({@code AnimationRouletteScreen.java:524-530}) - without the repeated parse.
+     */
+    public static boolean submit(EntityPlayer owner, ResourceLocation modelId, RoamingProgram.Compiled program,
+        Consumer<Double> result, BooleanSupplier stillCurrent) {
+        if (program == null) {
+            return false;
+        }
+        PENDING.add(new Request(owner, modelId, program, result, stillCurrent));
+        return true;
     }
 
     /** Called after both the entity query bindings and the real physics scope have been established. */

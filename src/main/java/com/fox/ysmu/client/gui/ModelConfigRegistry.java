@@ -206,8 +206,11 @@ public final class ModelConfigRegistry {
 
     /**
      * The first button whose settings should be shown, or a button with an empty form list when there is nothing to
-     * show. Kept for the callers that only ever open one panel ({@code PlayerModelScreen}'s settings icon); the
-     * settings screen itself uses {@link #settingsButtonsFor} so every button is reachable.
+     * show.
+     * <p>
+     * The settings screen itself enumerates every button with {@link #settingsButtonsFor}; this single-panel accessor
+     * is kept for a caller that only ever wants to open one panel (the model-selection screen's settings icon uses
+     * {@link #hasSettings} plus the screen's default selection instead).
      */
     public static RawYsmModel.ExtraAnimationButton settingsButtonFor(@Nullable ResourceLocation modelId) {
         List<RawYsmModel.ExtraAnimationButton> panels = settingsButtonsFor(modelId);

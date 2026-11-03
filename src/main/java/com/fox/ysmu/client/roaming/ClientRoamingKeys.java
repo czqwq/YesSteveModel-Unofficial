@@ -54,6 +54,19 @@ public final class ClientRoamingKeys {
         return known != null ? known : ModelRoamingKey.of(null, modelId.toString());
     }
 
+    /**
+     * Whether a model's roaming key is already known from its sync payload.
+     * <p>
+     * {@link #keyFor} answers for every id by deriving the fallback namespace, which is right for a caller that only
+     * needs a bucket for values that are already present. A caller that is about to talk to the server must not use
+     * that fallback for a model whose payload has not arrived yet: the fallback is derived from the id while every
+     * value the server holds for the model was written under the hash-derived key, so the request would name a
+     * namespace nothing has ever written.
+     */
+    public static boolean isKnown(@Nullable ResourceLocation modelId) {
+        return modelId != null && KEYS.containsKey(modelId);
+    }
+
     /** Drops every remembered key, for a resource reload or a server change. */
     public static void clear() {
         KEYS.clear();
