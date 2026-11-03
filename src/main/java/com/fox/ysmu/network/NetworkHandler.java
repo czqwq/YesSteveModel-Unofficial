@@ -78,9 +78,18 @@ public final class NetworkHandler {
      * ({@code RefreshModelManage}) and 104 ({@code HandleFile}). Id 10 was previously unregistered, so an old peer
      * cannot decode it, and 103/104 are new; the handshake has to reject the pair. Nothing existing is renumbered or
      * reused.</li>
+     * <li>11: <b>layout change</b> of an existing packet - clientbound id 11 ({@code SyncPlayerMotionState}) gained,
+     * after {@code playerId}/{@code flags}, a saturating unsigned-byte {@code foodLevel} and an int
+     * {@code experienceLevel}. 1.7.10 only sends food/experience to the player themself
+     * ({@code S06PacketUpdateHealth} / {@code S1FPacketSetExperience}), so a remote player's {@code ysm.food_level}
+     * and {@code query.player_level} were reading the client-side defaults (20 / 0); the packet is the port's channel
+     * for the two facts upstream carries on its state tracker
+     * ({@code capability/ServerDrivenPlayerPropertiesTracker.java:59-78,151-183}). The id is unchanged, but a peer
+     * that decoded the old length would read the appended bytes as the next packet's fields, so the handshake has to
+     * reject the pair. Nothing existing is renumbered or reused.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 10;
+    public static final int NETWORK_PROTOCOL = 11;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -148,6 +157,11 @@ public final class NetworkHandler {
      * {@code client/gui/ModelManageScreen}. The id is unchanged (ids are never renumbered); only its status changed.
      */
     private static final int CLIENTBOUND_REQUEST_SERVER_MODEL_INFO = 10;
+    /**
+     * Per-player state 1.7.10 does not sync to other players: on-ground/flying flags, and (since
+     * {@link #NETWORK_PROTOCOL} 11) the food level and experience level. Layout and fallbacks are documented on
+     * {@link com.fox.ysmu.network.message.SyncPlayerMotionState}; the id is unchanged, only the payload grew.
+     */
     private static final int CLIENTBOUND_SYNC_PLAYER_MOTION_STATE = 11;
     /**
      * phase55: id 12 finally gets a sender - the server sends it to the uploading player when a chunked model upload

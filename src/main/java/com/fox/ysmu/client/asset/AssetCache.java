@@ -222,6 +222,11 @@ public final class AssetCache<K, V> {
      */
     public void clearExcept(java.util.function.Predicate<K> keep) {
         generation.incrementAndGet();
+        // The once-per-session load reports describe the entries being dropped here, so they are dropped with them:
+        // otherwise a key that was loaded on a previous connection stays silent about its next load, and the two sets
+        // keep one string/id per model of every server this client has visited for the life of the process.
+        loadedReported.clear();
+        nullReported.clear();
         for (Map.Entry<K, Entry<V>> me : entries.entrySet()) {
             Entry<V> e = me.getValue();
             if (e.getState() == State.READY) {

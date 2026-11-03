@@ -112,21 +112,29 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                 Minecraft.getMinecraft().renderEngine.bindTexture(getEntityTexture(entity));
                 Color renderColor = getRenderColor(entity, partialTicks);
                 boolean layersFirst = shouldRenderLayersFirst(animatable);
-                if (layersFirst) {
-                    renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
-                        renderColor);
-                }
+                // Upstream computes bodyVisible here and hands it to getRenderType:
+                //   var bodyVisible = this.isBodyVisible(entity) && !entity.isInvisibleTo(mc.player);
+                //   var renderType = getRenderType(texture, bodyVisible, glowing, translucent);
+                //   if (renderType != null) { ... draw model and layers ... }
+                // (com/elfmcys/ysm/geckolib3/geo/GeoReplacedEntityRenderer.java:86-128). 1.7.10's
+                // RendererLivingEntity#isBodyVisible(Entity) is simply !entity.isInvisible(), and this engine's
+                // getRenderType answers null for visible=false ("return glowing ? outline : null"; 1.7.10 has no
+                // outline pass, so the glowing branch does not exist here). Moving the layers inside the gate is
+                // part of the same shape: upstream draws held items/head/elytra only when the model itself draws,
+                // whereas the port used to draw them for an invisible entity whose model had just been skipped.
+                boolean bodyVisible = !entity.isInvisible()
+                    && !entity.isInvisibleToPlayer(Minecraft.getMinecraft().thePlayer);
+                YsmRenderType renderType = getRenderType(
+                    getEntityTexture(entity),
+                    bodyVisible,
+                    false,
+                    hasTranslucentVertices(animatable));
+                if (renderType != null) {
+                    if (layersFirst) {
+                        renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
+                            renderColor);
+                    }
 
-                if (!entity.isInvisibleToPlayer(Minecraft.getMinecraft().thePlayer)) {
-                    // Upstream asks for the render type here and hands it to the draw
-                    // (com/elfmcys/ysm/geckolib3/geo/GeoReplacedEntityRenderer.java:88-90). 1.7.10 has no
-                    // shouldEntityAppearGlowing, so the glowing flag is always false. The translucency question goes
-                    // to the animatable, which is the host that owns this model's textures.
-                    YsmRenderType renderType = getRenderType(
-                        getEntityTexture(entity),
-                        true,
-                        false,
-                        hasTranslucentVertices(animatable));
                     render(
                         model,
                         entity,
@@ -136,11 +144,12 @@ public abstract class GeoReplacedEntityRenderer<T extends IAnimatable> extends R
                         (float) renderColor.getGreen() / 255f,
                         (float) renderColor.getBlue() / 255f,
                         (float) renderColor.getAlpha() / 255);
-                }
 
-                if (!layersFirst) {
-                    renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
-                        renderColor);
+                    if (!layersFirst) {
+                        renderLayers(model, entity, limbSwing, limbSwingAmount, partialTicks, f7, netHeadYaw, headPitch,
+                            renderColor);
+                    }
+                    RenderHurtColor.render(this, model, entity, entity, partialTicks);
                 }
                 if (entity instanceof EntityLiving) {
                     Entity leashHolder = ((EntityLiving) entity).getLeashedToEntity();

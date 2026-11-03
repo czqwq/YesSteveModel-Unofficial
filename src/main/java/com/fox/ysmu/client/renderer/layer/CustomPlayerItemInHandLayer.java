@@ -28,6 +28,7 @@ import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.util.RenderUtils;
 import xonin.backhand.compat.IOffhandRenderOptOut;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -35,6 +36,14 @@ import java.util.Objects;
 @Optional.Interface(iface = "xonin.backhand.compat.IOffhandRenderOptOut", modid = "backhand")
 public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatable> extends GeoLayerRenderer<T>
     implements IOffhandRenderOptOut {
+
+    /**
+     * Upstream's humanoid hand locator groups ({@code client/model/locator/PlayerLocator.java:14-15}); a numbered bone
+     * ({@code LeftHandLocator2}) belongs to the same group. {@code LeftHandLocator} is the off hand and
+     * {@code RightHandLocator} the main hand, exactly as upstream names them.
+     */
+    private static final String LEFT_HAND_LOCATOR = "LeftHandLocator";
+    private static final String RIGHT_HAND_LOCATOR = "RightHandLocator";
 
     private final ItemRenderer itemRenderer;
 
@@ -71,11 +80,48 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
             GlStateManager.pushMatrix();
             // R-04：矩阵栈与 pop 必须成对——物品渲染抛异常时也要回滚，否则后续整帧的渲染状态会错乱。
             try {
-                renderArmWithItem(entity, mainHandItem, geoModel.rightHandBones, true, isVanilla);
-                renderArmWithItem(entity, offhandItem, geoModel.leftHandBones, false, isVanilla);
+                renderArmWithItemAtLocatorGroup(entity, mainHandItem, geoModel, RIGHT_HAND_LOCATOR,
+                    geoModel.rightHandBones, true, isVanilla);
+                renderArmWithItemAtLocatorGroup(entity, offhandItem, geoModel, LEFT_HAND_LOCATOR,
+                    geoModel.leftHandBones, false, isVanilla);
             } finally {
                 GlStateManager.popMatrix();
             }
+        }
+    }
+
+    /**
+     * Draws {@code stack} once at <b>every</b> locator of one hand group - upstream's item-in-hand layer draws the
+     * held stack at each member of the group rather than at one bone: its
+     * {@code data.modelState.visitLocatorGroup(PlayerLocator.rightHand/leftHand, ...)} callback runs once per locator
+     * ({@code tmp/YesSteveModel-dev-1.20/.../client/renderer/layer/CustomPlayerItemInHandLayer.java:31-77}, the
+     * per-locator draw at {@code :61-78}). A pack expresses a second pair of hands by numbering the locator
+     * ({@code LeftHandLocator2}/{@code RightHandLocator2}); the group rule strips the trailing digits
+     * ({@code GeoLocatorType#getByBoneName:33-47}), so taking only the exact-named chain left the second pair empty.
+     * <p>
+     * Each locator needs the whole root-to-locator transform chain. The single-locator case keeps the prebuilt
+     * exact-name chain ({@link GeoModel#leftHandBones}/{@link GeoModel#rightHandBones}) so the common model allocates
+     * nothing per frame; a model with several locators resolves each chain through
+     * {@code IGeoRenderer#getPathFromRoot}. An empty group falls back to that same chain, so a geometry built by
+     * another {@code IGeoBuilder} behaves exactly as before.
+     *
+     * @param locatorGroup group base name without the numeric suffix; {@code LeftHandLocator} is the off hand and
+     *                     {@code RightHandLocator} the main hand, matching upstream's {@code PlayerLocator}
+     */
+    protected void renderArmWithItemAtLocatorGroup(EntityLivingBase entity, ItemStack stack, GeoModel geoModel,
+        String locatorGroup, List<GeoBone> fallbackChain, boolean isMainHand, boolean isVanilla) {
+        if (stack == null || stack.getItem() == null) {
+            return;
+        }
+        List<GeoBone> locators = geoModel.locatorGroup(locatorGroup);
+        if (locators.isEmpty() || (locators.size() == 1 && !fallbackChain.isEmpty())) {
+            // No group at all, or the single member is the exact-named locator GeoBuilder already chained.
+            renderArmWithItem(entity, stack, fallbackChain, isMainHand, isVanilla);
+            return;
+        }
+        for (GeoBone locator : locators) {
+            renderArmWithItem(entity, stack, Arrays.asList(entityRenderer.getPathFromRoot(locator)), isMainHand,
+                isVanilla);
         }
     }
 

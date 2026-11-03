@@ -38,7 +38,14 @@ public class RevokeModelGuiGrant implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        this.entityId = buf.readInt();
+        // N-10: a decode-time exception would be a disconnect; a truncated payload becomes an id the handler's own
+        // non-negative guard rejects.
+        try {
+            this.entityId = buf.readInt();
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM model-grant revoke: {}", e.toString());
+            this.entityId = -1;
+        }
     }
 
     @Override

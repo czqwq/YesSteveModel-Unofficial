@@ -16,7 +16,6 @@ import net.minecraft.client.renderer.EntityRenderer;
 import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.OpenGlHelper;
 import net.minecraft.client.renderer.RenderHelper;
-import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.MathHelper;
@@ -449,14 +448,6 @@ public final class FirstPersonHandRenderer {
         // （translucent）才不会把该看见的正面剔掉、只留远侧内壁。复位见 restoreCustomArmState。
         GL11.glFrontFace(GL11.GL_CW);
         GL11.glRotatef(GECKO_ARM_ROLL_DEGREES, 0.0F, 1.0F, 0.0F);
-    }
-
-    private static void renderRightArmBone(CustomPlayerRenderer renderer, GeoBone rightArm,
-        CustomPlayerEntity customPlayer) {
-        Tessellator tessellator = Tessellator.instance;
-        tessellator.startDrawing(GL11.GL_QUADS);
-        renderer.renderRecursively(tessellator, customPlayer, rightArm, 1.0F, 1.0F, 1.0F, 1.0F);
-        tessellator.draw();
     }
 
     private static Optional<GeoBone> findRightArmBone(GeoModel geoModel) {

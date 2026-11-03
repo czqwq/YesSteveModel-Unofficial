@@ -14,6 +14,7 @@ import net.minecraft.util.MathHelper;
 import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.client.animation.AnimationRegister;
+import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
@@ -1588,6 +1589,15 @@ public final class OpenYsmControllerExpressionEvaluator {
             if ("hurt_time".equals(name)) {
                 return player.hurtTime;
             }
+            if ("player_level".equals(name)) {
+                // 1.7.10 sends S1FPacketSetExperience only to the player themself, so a remote player's
+                // experienceLevel never changes on this client; packet 11 carries it. A player this client has no
+                // packet for falls back to the entity value, which is what this chain answered before (and what the
+                // keyframe path's published default holds), so an old server keeps the previous behaviour. The local
+                // player is unchanged.
+                return RemotePlayerMotionStates.isRemotePlayer(player)
+                    ? RemotePlayerMotionStates.experienceLevel(player) : player.experienceLevel;
+            }
             // A-1: `query.time_of_day` is the fraction of a day in [0,1) and `query.time_stamp` is the raw world
             // time; upstream binds exactly those two (geckolib3/core/molang/builtin/QueryBinding.java:61-62) and
             // normalizes the first with `((float)(timestamp + 6000L) / 24000) % 1`
@@ -1748,7 +1758,12 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return player.hurtTime;
             }
             if ("food_level".equals(name)) {
-                return player.getFoodStats().getFoodLevel();
+                // Remote player: packet 11 carries the server's FoodStats value (1.7.10 only sends S06PacketUpdateHealth
+                // to the player themself), so read the synced copy; the local player keeps its own FoodStats. No packet
+                // yet -> RemotePlayerMotionStates falls back to the entity value, which is the pre-sync behaviour.
+                return RemotePlayerMotionStates.isRemotePlayer(player) ? RemotePlayerMotionStates.foodLevel(player)
+                    : player.getFoodStats()
+                        .getFoodLevel();
             }
             // Do not answer FALSE for a `ysm.*` name this chain does not list. `AnimationRegister` publishes far more
             // of them than are enumerated above - `has_helmet`, `has_chest_plate`, `has_leggings`, `has_boots`,
@@ -2012,7 +2027,7 @@ public final class OpenYsmControllerExpressionEvaluator {
 
         /**
          * A-2: the airborne predicate behind {@code query.is_jumping} and {@code ctrl.jump}, delegating to
-         * {@link com.fox.ysmu.client.animation.AnimationRegister#isPlayerJumping}.
+         * {@link com.fox.ysmu.client.animation.AnimationRegister#isPlayerJumping(net.minecraft.entity.player.EntityPlayer)}.
          *
          * <p><b>Removed: {@code && motionYState(0.0d) != 0}.</b> The keyframe path deleted that term with a written
          * record of the defect it caused ({@code AnimationRegister#isPlayerJumping}'s javadoc: {@code motionY} is

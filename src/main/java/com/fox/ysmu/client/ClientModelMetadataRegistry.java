@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -16,11 +17,12 @@ import javax.imageio.ImageIO;
 import javax.imageio.stream.ImageInputStream;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.client.resources.Language;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.texture.CustomTextureManager;
 import com.fox.ysmu.client.texture.OuterFileTexture;
+import com.fox.ysmu.client.texture.TextureHolder;
 import com.fox.ysmu.model.resource.YSMFolderDeserializer;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.ysmu;
@@ -102,10 +104,39 @@ public final class ClientModelMetadataRegistry {
     }
 
     private static final Map<ResourceLocation, Metadata> METADATA = Maps.newConcurrentMap();
+    /**
+     * The published author-avatar textures, keyed by the id they are published under, with the holder that keeps each
+     * registration alive.
+     * <p>
+     * They are registered through {@link CustomTextureManager}, not straight into the platform's texture map, so that
+     * {@link #clear()} can release them: 1.7.10's {@code TextureManager.mapTextureObjects} holds the texture object -
+     * and with it the decoded {@code BufferedImage} - for the rest of the session, so dropping the {@code ResourceLocation}
+     * from the metadata alone frees neither the GL texture nor the heap. Upstream gives its author avatars the same
+     * owner: its model-information screen registers each one with {@code CustomTextureManager} and releases them when
+     * the page closes ({@code client/gui/ModelInfoScreen.java:157-159} and {@code :173}). This registry uploads eagerly
+     * when the model is registered rather than when the screen opens, so its release point is {@link #clear()}, the
+     * boundary the metadata itself is dropped at.
+     * <p>
+     * The holder is kept as a field of {@link AvatarTexture} for the reason given on {@code GuiImageTexture} in
+     * {@code ClientModelManager}: dropping it is what arms {@code CustomTextureManager}'s delayed release.
+     */
+    private static final Map<ResourceLocation, AvatarTexture> AVATARS = new LinkedHashMap<>();
     /** Avatar formats already reported as undecodable, so one warning covers every avatar of that format. */
     private static final Set<Integer> WARNED_AVATAR_FORMATS = Collections
         .newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
     private static volatile int version;
+
+    /** One published author-avatar texture; see {@link #AVATARS}. */
+    private static final class AvatarTexture {
+
+        private final OuterFileTexture texture;
+        private final TextureHolder holder;
+
+        private AvatarTexture(OuterFileTexture texture, TextureHolder holder) {
+            this.texture = texture;
+            this.holder = holder;
+        }
+    }
 
     private ClientModelMetadataRegistry() {}
 
@@ -157,6 +188,20 @@ public final class ClientModelMetadataRegistry {
         }
         if (structured.isEmpty()) {
             return;
+        }
+        // The authors being replaced own the previously published avatar textures. Release only the ones the new list
+        // does not reuse: an author at the same index keeps its id, and uploadAvatar has already replaced the
+        // registration published under that id, so releasing the id here would release the *new* texture.
+        Set<ResourceLocation> reused = new HashSet<>();
+        for (Author author : structured) {
+            if (author.avatar != null) {
+                reused.add(author.avatar);
+            }
+        }
+        for (Author previous : metadata.authors) {
+            if (previous.avatar != null && !reused.contains(previous.avatar)) {
+                releaseAvatar(previous.avatar);
+            }
         }
         metadata.authors.clear();
         metadata.authors.addAll(structured);
@@ -247,6 +292,13 @@ public final class ClientModelMetadataRegistry {
     }
 
     public static void clear() {
+        // Release the avatars before dropping the metadata that names them: the platform's texture map keeps every
+        // registered texture reachable, so a dropped ResourceLocation releases neither the GL texture nor the decoded
+        // image. See AVATARS.
+        for (AvatarTexture avatar : AVATARS.values()) {
+            CustomTextureManager.release(avatar.texture);
+        }
+        AVATARS.clear();
         METADATA.clear();
         version++;
     }
@@ -278,16 +330,34 @@ public final class ClientModelMetadataRegistry {
             "avatar/" + Integer.toHexString(modelId.getResourcePath()
                 .hashCode()) + "/" + index);
         try {
-            TextureManager textureManager = Minecraft.getMinecraft()
-                .getTextureManager();
-            // Idempotent, like ClientModelManager.registerTexture: loadTexture alone would leak the previous GL
-            // texture when the same model is registered twice.
-            textureManager.deleteTexture(id);
-            textureManager.loadTexture(id, new OuterFileTexture(image.data));
+            // A re-registration of the same model replaces the avatar; release the previous registration first so its
+            // GL texture and decoded image do not stay reachable from the platform's texture map (see AVATARS).
+            releaseAvatar(id);
+            // Registered through the mod's own texture manager rather than straight into the platform's map, which is
+            // what gives the avatar an owner whose release frees both the GL copy and the platform's strong reference
+            // to the decoded image. Upstream registers its author avatars the same way
+            // (client/gui/ModelInfoScreen.java:157-159) and releases them on page close (:173); this registry uploads
+            // eagerly at registration instead, so clear() is its release point.
+            OuterFileTexture texture = new OuterFileTexture(image.data);
+            AVATARS.put(id, new AvatarTexture(texture, CustomTextureManager.register(texture, id)));
             return id;
         } catch (RuntimeException e) {
             ysmu.LOG.warn("Failed to upload author avatar {} of model {}", index, modelId, e);
             return null;
+        }
+    }
+
+    /**
+     * Starts the delayed release of one published avatar and forgets it; a {@code null} or never-published id is a
+     * no-op. Client thread only, like the rest of this registry.
+     */
+    private static void releaseAvatar(@Nullable ResourceLocation id) {
+        if (id == null) {
+            return;
+        }
+        AvatarTexture avatar = AVATARS.remove(id);
+        if (avatar != null) {
+            CustomTextureManager.release(avatar.texture);
         }
     }
 

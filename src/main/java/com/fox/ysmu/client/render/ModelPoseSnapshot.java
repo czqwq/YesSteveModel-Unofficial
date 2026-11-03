@@ -1,7 +1,7 @@
 package com.fox.ysmu.client.render;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 
 import javax.annotation.Nullable;
 
@@ -25,14 +25,39 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * <p>
  * Upstream keeps the two apart with a dedicated {@code CustomGuiPlayerEntity}. This port renders both through one
  * model, so a preview render has to leave the pose as it found it.
+ *
+ * <h3>Why the storage is reused</h3>
+ * <p>This bracket runs once per preview draw, i.e. up to hundreds of times a second while the model-selection screen is
+ * open (one capture per tile bake, and the tile rate is the whole point of {@code PreviewRefreshPolicy}), so the
+ * previous implementation - one {@code BonePose} object per bone plus the list holding them - was pure garbage at
+ * exactly the rate the screen was tuned to: 344 bones of {@code wine_fox/05_magical} meant ~19 KB of short-lived
+ * objects per bake. The values are nine floats per bone, so they are stored in one growable {@code float[]} here and
+ * the instance itself comes from a small pool; a steady-state capture allocates nothing. The pool is a render-thread
+ * structure (every caller is a draw path, and {@code capture}/{@code restore} bracket a single draw), so it needs no
+ * locking.
+ * <p>
+ * The bones are held only for the duration of the bracket: {@link #restore()} writes the values back, drops every
+ * bone reference and only then returns the snapshot to the pool, so a pooled snapshot cannot keep geometry alive after
+ * the resource framework releases it.
  */
 public final class ModelPoseSnapshot {
 
-    private final List<BonePose> bones;
+    /** position X/Y/Z, rotation X/Y/Z, scale X/Y/Z - {@link software.bernie.geckolib3.core.processor.IBone}'s transform. */
+    private static final int STRIDE = 9;
 
-    private ModelPoseSnapshot(List<BonePose> bones) {
-        this.bones = bones;
-    }
+    /** Maximum number of nested open snapshots kept for reuse; a preview inside a draw is the deepest nesting. */
+    private static final int MAX_POOLED = 4;
+
+    /** Reused snapshots, render thread only; see the class javadoc. */
+    private static final ArrayDeque<ModelPoseSnapshot> POOL = new ArrayDeque<>();
+
+    /** Bones captured, in pre-order; references are dropped again by {@link #restore()}. */
+    private GeoBone[] bones = new GeoBone[0];
+    /** Captured transforms, {@link #STRIDE} floats per bone; grown with {@link #bones}. */
+    private float[] pose = new float[0];
+    private int count;
+
+    private ModelPoseSnapshot() {}
 
     /** Captures the model registered under {@code modelId} (main or plain id), or {@code null} when it is not loaded. */
     @Nullable
@@ -47,64 +72,73 @@ public final class ModelPoseSnapshot {
     }
 
     public static ModelPoseSnapshot capture(GeoModel model) {
-        List<BonePose> poses = new ArrayList<>();
+        ModelPoseSnapshot snapshot = POOL.poll();
+        if (snapshot == null) {
+            snapshot = new ModelPoseSnapshot();
+        }
+        int index = 0;
         for (GeoBone bone : model.topLevelBones) {
-            collect(bone, poses);
+            index = snapshot.collect(bone, index);
         }
-        return new ModelPoseSnapshot(poses);
+        snapshot.count = index;
+        return snapshot;
     }
 
-    /** Puts every captured bone back exactly where it was. */
-    public void restore() {
-        for (BonePose pose : this.bones) {
-            pose.restore();
+    /** Appends {@code bone} and its subtree to the arrays, growing them when the model has more bones than before. */
+    private int collect(GeoBone bone, int index) {
+        if (index == this.bones.length) {
+            this.bones = Arrays.copyOf(this.bones, Math.max(16, index * 2));
+            this.pose = Arrays.copyOf(this.pose, this.bones.length * STRIDE);
         }
-    }
-
-    private static void collect(GeoBone bone, List<BonePose> poses) {
-        poses.add(new BonePose(bone));
+        this.bones[index] = bone;
+        int value = index * STRIDE;
+        this.pose[value] = bone.getPositionX();
+        this.pose[value + 1] = bone.getPositionY();
+        this.pose[value + 2] = bone.getPositionZ();
+        this.pose[value + 3] = bone.getRotationX();
+        this.pose[value + 4] = bone.getRotationY();
+        this.pose[value + 5] = bone.getRotationZ();
+        this.pose[value + 6] = bone.getScaleX();
+        this.pose[value + 7] = bone.getScaleY();
+        this.pose[value + 8] = bone.getScaleZ();
+        index++;
         for (GeoBone child : bone.childBones) {
-            collect(child, poses);
+            index = collect(child, index);
         }
+        return index;
     }
 
-    /** One bone's animated transform. */
-    private static final class BonePose {
-
-        private final GeoBone bone;
-        private final float positionX;
-        private final float positionY;
-        private final float positionZ;
-        private final float rotationX;
-        private final float rotationY;
-        private final float rotationZ;
-        private final float scaleX;
-        private final float scaleY;
-        private final float scaleZ;
-
-        private BonePose(GeoBone bone) {
-            this.bone = bone;
-            this.positionX = bone.getPositionX();
-            this.positionY = bone.getPositionY();
-            this.positionZ = bone.getPositionZ();
-            this.rotationX = bone.getRotationX();
-            this.rotationY = bone.getRotationY();
-            this.rotationZ = bone.getRotationZ();
-            this.scaleX = bone.getScaleX();
-            this.scaleY = bone.getScaleY();
-            this.scaleZ = bone.getScaleZ();
+    /**
+     * Puts every captured bone back exactly where it was, then returns this snapshot to the pool.
+     * <p>
+     * A second call is a no-op (the capture is consumed by the first), which keeps a doubled {@code finally} from
+     * putting the same instance into the pool twice.
+     */
+    public void restore() {
+        int n = this.count;
+        if (n == 0) {
+            return;
         }
-
-        private void restore() {
-            this.bone.setPositionX(this.positionX);
-            this.bone.setPositionY(this.positionY);
-            this.bone.setPositionZ(this.positionZ);
-            this.bone.setRotationX(this.rotationX);
-            this.bone.setRotationY(this.rotationY);
-            this.bone.setRotationZ(this.rotationZ);
-            this.bone.setScaleX(this.scaleX);
-            this.bone.setScaleY(this.scaleY);
-            this.bone.setScaleZ(this.scaleZ);
+        this.count = 0;
+        GeoBone[] bones = this.bones;
+        float[] pose = this.pose;
+        int value = 0;
+        for (int i = 0; i < n; i++) {
+            GeoBone bone = bones[i];
+            bone.setPositionX(pose[value++]);
+            bone.setPositionY(pose[value++]);
+            bone.setPositionZ(pose[value++]);
+            bone.setRotationX(pose[value++]);
+            bone.setRotationY(pose[value++]);
+            bone.setRotationZ(pose[value++]);
+            bone.setScaleX(pose[value++]);
+            bone.setScaleY(pose[value++]);
+            bone.setScaleZ(pose[value++]);
+        }
+        // The pooled instance must not pin the geometry it was taken from.
+        Arrays.fill(bones, 0, n, null);
+        if (POOL.size() < MAX_POOLED) {
+            POOL.push(this);
         }
     }
 }

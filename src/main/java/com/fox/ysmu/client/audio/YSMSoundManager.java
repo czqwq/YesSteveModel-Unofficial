@@ -82,6 +82,27 @@ public final class YSMSoundManager {
         previewRendering = value;
     }
 
+    /**
+     * The configured model-sound volume multiplier: {@link Config#SOUND_VOLUME} percent / 100, clamped to 0..1.
+     * <p>
+     * Upstream applies the same multiplier inside every custom sound instance
+     * ({@code MinecraftSoundInstance.java:25}: {@code configuredVolume * ClientConfig.SOUND_VOLUME / 100}), i.e. on top
+     * of the vanilla sound category; this is the port's single source for it, because 1.7.10 plays model sounds
+     * through several backends (vanilla {@code PositionedSoundRecord}, {@code MovingSound} and the direct paulscode
+     * sources) and all of them have to agree. A broken/NaN config value degrades to silence rather than to a NaN
+     * volume (a NaN volume makes OpenAL drop the source silently, which would be indistinguishable from a bug).
+     */
+    static float volumeScale() {
+        double percent = Config.SOUND_VOLUME;
+        if (Double.isNaN(percent) || percent <= 0.0d) {
+            return 0.0f;
+        }
+        if (percent >= 100.0d) {
+            return 1.0f;
+        }
+        return (float) (percent / 100.0d);
+    }
+
     private YSMSoundManager() {}
 
     // ── Public API ────────────────────────────────────────
@@ -251,7 +272,7 @@ public final class YSMSoundManager {
         if (soundExistsInHandler(soundName)) {
             net.minecraft.entity.Entity source = sourceOwner(owner);
             if (source != null) handler.playSound(new PositionedSoundRecord(new ResourceLocation(soundName),
-                volume, pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
+                volume * volumeScale(), pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
             foundAny = true;
         }
 
@@ -263,7 +284,7 @@ public final class YSMSoundManager {
             }
             net.minecraft.entity.Entity source = sourceOwner(owner);
             if (source != null) handler.playSound(new PositionedSoundRecord(translated,
-                volume, pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
+                volume * volumeScale(), pitch, (float) source.posX, (float) source.posY, (float) source.posZ));
             foundAny = true;
         }
 
@@ -691,6 +712,10 @@ public final class YSMSoundManager {
         stopAll();
         SOUND_SOURCES.clear();
         SOUND_FILES.clear();
+        // 防抖表以 model::owner::controller::sound 为键，平时只由 stopController/clearOwnerSlot 按 owner 清理；
+        // 不在这里清空的话，本会话播放过的每个模型都会按「控制器 + 音效」留下一批条目直到进程结束。
+        // clear() 是断线/世界卸载/模型列表重置的共同出口，正是丢弃它们的时机。
+        SOUND_KEYFRAME_LAST_TIME.clear();
         sndSystem = null;
         sndSystemSearched = false;
         sndManagerField = null;
@@ -971,7 +996,7 @@ public final class YSMSoundManager {
             }
             // Set pitch/volume before play (Minecraft's order)
             try { ss.getClass().getMethod("setPitch", String.class, float.class).invoke(ss, srcName, pitch); } catch (NoSuchMethodException ignored) {}
-            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume); } catch (NoSuchMethodException ignored) {}
+            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume * volumeScale()); } catch (NoSuchMethodException ignored) {}
             ss.getClass().getMethod("play", String.class).invoke(ss, srcName);
             // 追踪音源（对齐内存字节版），使停止路径能覆盖本地资产音效。
             if (soundName != null) activeSourcesOf(ownerSlot).put(soundName, srcName);
@@ -1033,7 +1058,7 @@ public final class YSMSoundManager {
             }
             // Set pitch/volume before play (Minecraft's order)
             try { ss.getClass().getMethod("setPitch", String.class, float.class).invoke(ss, srcName, pitch); } catch (NoSuchMethodException ignored) {}
-            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume); } catch (NoSuchMethodException ignored) {}
+            try { ss.getClass().getMethod("setVolume", String.class, float.class).invoke(ss, srcName, volume * volumeScale()); } catch (NoSuchMethodException ignored) {}
             ss.getClass().getMethod("play", String.class).invoke(ss, srcName);
             activeSourcesOf(ownerSlot).put(soundName, srcName);
             if (Config.DEBUG_SOUND) ysmu.LOG.info("[YSMU-SOUND] playing in-memory '{}' as {}", soundName, srcName);

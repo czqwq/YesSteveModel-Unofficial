@@ -15,6 +15,7 @@ import org.apache.commons.io.FileUtils;
 import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.data.ModelData;
+import com.fox.ysmu.model.resource.LegacyInfo;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.util.YesModelUtils;
 import com.fox.ysmu.ysmu;
@@ -102,7 +103,12 @@ public final class YsmFormat {
     @NotNull
     private static ModelData getModelData(Map<String, byte[]> data, String modelId) throws IOException {
         Map<String, byte[]> model = Maps.newHashMap();
-        model.put("main", getBytes(data, MAIN_MODEL_FILE_NAME));
+        byte[] mainModel = getBytes(data, MAIN_MODEL_FILE_NAME);
+        // An old file-list container may carry info.json next to main.json/arm.json; upstream reads it as the legacy
+        // model's manifest (format/parser/LegacyManifestBuilder.java:18,72-93). Fold it into the geometry's
+        // `ysm_extra_info` block, the carrier the client already reads (see model/resource/LegacyInfo); a container
+        // without the entry keeps its geometry bytes untouched.
+        model.put("main", LegacyInfo.mergeIntoGeometry(mainModel, LegacyInfo.parse(data.get(LegacyInfo.FILE_NAME))));
         model.put("arm", getBytes(data, ARM_MODEL_FILE_NAME));
 
         Map<String, byte[]> texture = Maps.newHashMap();

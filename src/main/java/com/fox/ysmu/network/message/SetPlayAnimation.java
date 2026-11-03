@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
@@ -72,14 +73,20 @@ public class SetPlayAnimation implements IMessage {
     @Override
     public void fromBytes(ByteBuf buf) {
         // N-10: a malformed payload must not throw - FMLProxyPacket turns a throwing decoder into a disconnect. A
-        // UTF-8 string is at least its 2-byte varint length, so a shorter buffer cannot hold one.
+        // UTF-8 string is at least its varint length prefix, so a shorter buffer cannot hold one; a length prefix
+        // that promises more bytes than the buffer holds is caught and dropped the same way.
         if (buf.readableBytes() < 2) {
             ysmu.LOG.warn("Ignoring malformed YSM play-animation packet: readableBytes={}", buf.readableBytes());
             this.animationName = "";
             return;
         }
-        String name = ByteBufUtils.readUTF8String(buf);
-        this.animationName = name == null ? "" : name;
+        try {
+            String name = ByteBufUtils.readUTF8String(buf);
+            this.animationName = name == null ? "" : name;
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM play-animation packet: {}", e.toString());
+            this.animationName = "";
+        }
     }
 
     @Override
@@ -121,30 +128,45 @@ public class SetPlayAnimation implements IMessage {
                 if (sender == null) {
                     return null;
                 }
+                String name = message.animationName;
+                // The write is a mutation of the player's EEP, which the server tick reads and broadcasts and the
+                // save path serialises; the handler runs on the Netty thread, so hand the write to the server
+                // thread the way the neighbouring EEP writers do (SetModelAndTexture / C2SRoamingChanges).
+                DeferredWork.server(() -> apply(sender, name));
+            } catch (Exception e) {
+                ysmu.LOG.warn("Ignoring malformed YSM play-animation packet", e);
+            }
+            return null;
+        }
+
+        /** Server thread: validate the request against the sender's current model and record it. */
+        private static void apply(EntityPlayerMP sender, String name) {
+            try {
+                if (sender.isDead || sender.worldObj == null) {
+                    return;
+                }
                 ExtendedModelInfo modelIdEEP = ExtendedModelInfo.get(sender);
                 if (modelIdEEP == null) {
-                    return null;
+                    return;
                 }
-                String name = message.animationName;
                 if (STOP.equals(name)) {
                     modelIdEEP.stopAnimation();
-                    return null;
+                    return;
                 }
                 if (!isPlausibleAnimationName(name)) {
                     if (!name.isEmpty()) {
                         ysmu.LOG.warn("Ignoring YSM play-animation request with an unusable name (length={})", name.length());
                     }
-                    return null;
+                    return;
                 }
                 if (!modelDeclaresAnimation(modelIdEEP, name)) {
                     ysmu.LOG.info("Ignoring YSM play-animation request for '{}': the model does not declare it", name);
-                    return null;
+                    return;
                 }
                 modelIdEEP.playAnimation(name);
             } catch (Exception e) {
                 ysmu.LOG.warn("Ignoring malformed YSM play-animation packet", e);
             }
-            return null;
         }
 
         /**

@@ -132,7 +132,15 @@ public final class PreviewRefreshPolicy {
         visibleThisFrame++;
     }
 
-    /** 实测一次烘焙的耗时,供预算换算。 */
+    /** 实测一次烘焙的耗时,供预算换算。
+     *
+     *  <p><b>计入的成本范围</b>:从该格 FBO 的 {@code glClear} 开始,到模型绘制结束为止 —— 也就是"这一次刷新真正
+     *  贵在哪里"。格路径的清除是传进 {@code RenderUtil.renderEntityInInventory} 的回调,天然落在计时区间内
+     *  ({@code ModelButton#bakePreviewIfDue});HUD 纸娃娃也把计时起点挪到了清除之前({@link HudPreviewCache}),
+     *  两处口径因此一致 —— 在那之前 HUD 侧漏掉了整屏颜色+深度清除,预算会高估可用余量。</p>
+     *
+     *  <p><b>不计入</b>(都在调用方的计时区间之外,也不是本策略能限频的东西):FBO 的 bind/unbind、每帧每格的
+     *  贴回 blit、FBO 本身的显存占用。所以 {@link #OVERHEAD_MS_PER_FRAME} 守的是"烘焙 CPU",不是这一页的总开销。</p> */
     public static void noteBake(float costMs) {
         if (!(costMs > 0.0F) || Float.isInfinite(costMs)) {
             return;

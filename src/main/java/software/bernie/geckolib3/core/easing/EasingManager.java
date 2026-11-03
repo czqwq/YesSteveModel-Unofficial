@@ -187,7 +187,7 @@ public class EasingManager {
      * P0=-0.5, P1=0, P2=1, P3=1.5 to produce a smooth S-curve from 0 to 1:
      * q(t) = 0.75*t + 0.75*t^2 - 0.5*t^3
      */
-    static double catmullRom(double n) {
+    public static double catmullRom(double n) {
         return 0.75 * n + 0.75 * n * n - 0.5 * n * n * n;
     }
 

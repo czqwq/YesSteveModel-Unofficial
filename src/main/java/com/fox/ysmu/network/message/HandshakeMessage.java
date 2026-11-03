@@ -30,7 +30,14 @@ public class HandshakeMessage implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        this.protocol = buf.readInt();
+        // N-10: a decode-time exception is turned into a disconnect by FMLProxyPacket.processPacket, so a truncated
+        // handshake becomes a sentinel version that fails the comparison below instead.
+        try {
+            this.protocol = buf.readInt();
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM network handshake: {}", e.toString());
+            this.protocol = -1;
+        }
     }
 
     @Override

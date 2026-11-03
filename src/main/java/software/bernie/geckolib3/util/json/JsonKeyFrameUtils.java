@@ -74,7 +74,7 @@ public class JsonKeyFrameUtils {
                 .isJsonObject() && hasEasingType(keyframe.getValue())) {
                 EasingType easingType = getEasingType(keyframe.getValue());
                 if (hasEasingArgs(keyframe.getValue())) {
-                    List<IValue> easingArgs = getEasingArgs(keyframe.getValue());
+                    List<Double> easingArgs = getEasingArgs(keyframe.getValue(), parser);
                     xKeyFrame = new KeyFrame(
                         AnimationUtils.convertSecondsToTicks(animationTimeDifference),
                         i == 0 ? currentXValue : previousXValue,
@@ -168,6 +168,22 @@ public class JsonKeyFrameUtils {
             .has("easingArgs");
     }
 
+    /**
+     * Reads a keyframe's easing mode.
+     *
+     * <p>Upstream's answer, copied: {@code EasingType.fromJson}
+     * ({@code tmp/YesSteveModel-dev-1.20 .../geckolib3/core/keyframe/bone/EasingType.java:11-27}) recognises
+     * exactly two spellings, {@code linear} and {@code catmullrom}, and maps <b>everything else to LINEAR</b>.</p>
+     *
+     * <p>This method used to spell the value as an {@link EasingType} constant and {@code throw} when that
+     * failed - and a throw here aborts the whole animation's assembly, so one unexpected word in one keyframe
+     * cost the entire clip. {@code "step"} is the concrete case: this engine has an {@code EasingType.Step}, but
+     * upstream has no such mode and a pack that writes it would be interpolated linearly by upstream. It is
+     * therefore mapped to LINEAR here too, deliberately, together with every other spelling this engine has an
+     * enum constant for - those constants remain reachable from the Java API
+     * ({@code new AnimationController(..., EasingType, ...)}), they are just not a JSON vocabulary. The
+     * alternatives are documented per enum constant in {@link EasingType}.</p>
+     */
     private static EasingType getEasingType(JsonElement element) {
         final String easingString;
         if (element.getAsJsonObject()
@@ -178,22 +194,75 @@ public class JsonKeyFrameUtils {
         else easingString = element.getAsJsonObject()
             .get("lerp_mode")
             .getAsString();
-        try {
-            final String uppercaseEasingString = Character.toUpperCase(easingString.charAt(0))
-                + easingString.substring(1);
-            EasingType easing = EasingType.valueOf(uppercaseEasingString);
-            return easing;
-        } catch (Exception e) {
-            System.err.println("[GeckoLib] " + "Unknown easing type: {}" + easingString);
-            throw new RuntimeException(e);
+        if ("linear".equalsIgnoreCase(easingString)) {
+            return EasingType.Linear;
+        }
+        if ("catmullrom".equalsIgnoreCase(easingString)) {
+            return EasingType.Catmullrom;
+        }
+        warnUnknownEasingType(easingString);
+        return EasingType.Linear;
+    }
+
+    /** Distinct spellings already reported; a broken pack must not print one warning per keyframe. */
+    private static final java.util.Set<String> REPORTED_EASING_TYPES = java.util.concurrent.ConcurrentHashMap
+        .newKeySet();
+
+    private static void warnUnknownEasingType(String easingString) {
+        if (REPORTED_EASING_TYPES.add(easingString)) {
+            System.err.println(
+                "[GeckoLib] Unknown easing type '" + easingString + "', interpolating linearly (as upstream does)");
         }
     }
 
-    private static List<IValue> getEasingArgs(JsonElement element) {
-        JsonObject asJsonObject = element.getAsJsonObject();
-        JsonElement easingArgs = asJsonObject.get("easingArgs");
-        JsonArray asJsonArray = easingArgs.getAsJsonArray();
-        return JsonAnimationUtils.convertJsonArrayToList(asJsonArray);
+    /**
+     * Reads {@code easingArgs} as the {@code List<Double>} that {@link KeyFrame#easingArgs} declares and that
+     * {@code EasingManager.ease} consumes as {@code Double}.
+     *
+     * <p>It used to answer {@code JsonAnimationUtils.convertJsonArrayToList}'s raw {@code Gson}-built
+     * {@code ArrayList} while declaring {@code List<IValue>}: numeric entries were {@code Double}, but a string
+     * entry stayed a {@code String}, and {@code EasingManager.ease}'s {@code easingArgs.get(0)} assigns straight
+     * into a {@code Double} - i.e. any pack writing a non-numeric argument threw {@code ClassCastException} at
+     * animation-evaluation time, every frame. Easing arguments are numeric by definition (they are the step
+     * count / overshoot factor / bounciness of the curve), so each entry is converted here, once, at parse time;
+     * a text entry is evaluated as a Molang expression exactly once, which is the only timing consistent with the
+     * {@code List<Double>} contract the evaluator has.</p>
+     */
+    private static List<Double> getEasingArgs(JsonElement element, MolangParser parser) {
+        JsonElement easingArgs = element.getAsJsonObject()
+            .get("easingArgs");
+        if (easingArgs == null || !easingArgs.isJsonArray()) {
+            return java.util.Collections.emptyList();
+        }
+        JsonArray array = easingArgs.getAsJsonArray();
+        List<Double> args = new ArrayList<>(array.size());
+        for (JsonElement arg : array) {
+            args.add(easingArgValue(parser, arg));
+        }
+        return args;
+    }
+
+    private static double easingArgValue(MolangParser parser, JsonElement arg) {
+        if (arg == null || arg.isJsonNull()) {
+            return 0;
+        }
+        if (arg.isJsonPrimitive()) {
+            if (arg.getAsJsonPrimitive()
+                .isBoolean()) {
+                return arg.getAsBoolean() ? 1 : 0;
+            }
+            if (arg.getAsJsonPrimitive()
+                .isNumber()) {
+                return arg.getAsDouble();
+            }
+            try {
+                return parser.parseExpression(arg.getAsString())
+                    .get();
+            } catch (Exception unparsable) {
+                return 0;
+            }
+        }
+        return 0;
     }
 
     /**

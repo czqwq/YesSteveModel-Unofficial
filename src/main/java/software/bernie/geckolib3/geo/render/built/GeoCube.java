@@ -54,12 +54,18 @@ public class GeoCube implements Serializable {
         double[] normals = mesh.getNormals();
         int quadCount = Math.min(positions.length / 12, uvs.length / 8);
         GeoQuad[] quads = new GeoQuad[quadCount];
-        float textureWidth = properties == null || properties.getTextureWidth() == null ? 64F
-            : properties.getTextureWidth()
-                .floatValue();
-        float textureHeight = properties == null || properties.getTextureHeight() == null ? 64F
-            : properties.getTextureHeight()
-                .floatValue();
+        // A declared texture size of 0 means "not declared", exactly as upstream's bake treats it
+        // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:118-119: `textureWidth != 0 ? textureWidth : 64f`).
+        // Dividing by a declared 0 would produce infinite UVs instead of the 64-texel default every other missing-size
+        // path in this engine uses.
+        float textureWidth = properties == null || properties.getTextureWidth() == null
+            || properties.getTextureWidth() == 0D ? 64F
+                : properties.getTextureWidth()
+                    .floatValue();
+        float textureHeight = properties == null || properties.getTextureHeight() == null
+            || properties.getTextureHeight() == 0D ? 64F
+                : properties.getTextureHeight()
+                    .floatValue();
         boolean normalizedUvs = mesh.getNormalizedUvs() != null && mesh.getNormalizedUvs();
 
         for (int quadIndex = 0; quadIndex < quadCount; quadIndex++) {
@@ -121,13 +127,17 @@ public class GeoCube implements Serializable {
         }
 
         // A missing description means no declared texture size. The poly-mesh path in this same class already
-        // defaults to 64F for exactly this case; match that instead of dereferencing null.
-        float textureHeight = properties == null || properties.getTextureHeight() == null ? 64F
-            : properties.getTextureHeight()
-                .floatValue();
-        float textureWidth = properties == null || properties.getTextureWidth() == null ? 64F
-            : properties.getTextureWidth()
-                .floatValue();
+        // defaults to 64F for exactly this case; match that instead of dereferencing null. A declared 0 is a missing
+        // declaration too, which is upstream's own rule for the same field
+        // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:118-119).
+        float textureHeight = properties == null || properties.getTextureHeight() == null
+            || properties.getTextureHeight() == 0D ? 64F
+                : properties.getTextureHeight()
+                    .floatValue();
+        float textureWidth = properties == null || properties.getTextureWidth() == null
+            || properties.getTextureWidth() == 0D ? 64F
+                : properties.getTextureWidth()
+                    .floatValue();
 
         // Use absolute size so vertex math works correctly for negative-size cubes.
         // Also adjust origin to the true minimum corner.
@@ -234,12 +244,19 @@ public class GeoCube implements Serializable {
         GeoQuad quadDown;
 
         if (!isBoxUV) {
-            FaceUv west = faces == null ? null : faces.getWest();
-            FaceUv east = faces == null ? null : faces.getEast();
-            FaceUv north = faces == null ? null : faces.getNorth();
-            FaceUv south = faces == null ? null : faces.getSouth();
-            FaceUv up = faces == null ? null : faces.getUp();
-            FaceUv down = faces == null ? null : faces.getDown();
+            // Upstream's bake skips a face whose uv data is missing rather than treating the cube as broken:
+            // `if (face == null || face.uv == null || face.uvSize == null || face.uv.length < 2 || face.uvSize.length < 2) return;`
+            // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:186-193). These arrays are dereferenced by
+            // GeoQuad, so a pack that declares only the face object (or a short array) used to fail the whole model.
+            // The uv_rotation declaration is parsed but never applied: FaceUv#getRotationEnum answers NONE on purpose
+            // (upstream leaves the field unimplemented and native has no such concept), which also keeps this legacy
+            // cube channel identical to the baked/OpenYSM channel for the same pack.
+            FaceUv west = usableFace(faces == null ? null : faces.getWest());
+            FaceUv east = usableFace(faces == null ? null : faces.getEast());
+            FaceUv north = usableFace(faces == null ? null : faces.getNorth());
+            FaceUv south = usableFace(faces == null ? null : faces.getSouth());
+            FaceUv up = usableFace(faces == null ? null : faces.getUp());
+            FaceUv down = usableFace(faces == null ? null : faces.getDown());
             // Pass in vertices starting from the top right corner, then going
             // counter-clockwise
             quadWest = west == null ? null
@@ -436,17 +453,27 @@ public class GeoCube implements Serializable {
                 textureHeight,
                 cubeIn.getMirror(),
                 EnumFacing.UP);
+            // Upstream's box-UV down face is wound {p1, p5, p6, p2} with a negative v extent in BOTH layouts
+            // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:175, :182). This path had the order
+            // reversed with a positive extent in the unmirrored case; the UV mapping is identical either way, but
+            // the winding is not - BakedFace#windingSign (native baked_model.cc:275-300) would call the face
+            // back-facing and the CUTOUT culling partition would drop it when the cube is seen from below.
             quadDown = new GeoQuad(
-                new GeoVertex[] { P2, P6, P5, P1 },
-                new double[] { UV[0] + UVSize.z + UVSize.x, UV[1] },
-                new double[] { UVSize.x, UVSize.z },
+                new GeoVertex[] { P1, P5, P6, P2 },
+                new double[] { UV[0] + UVSize.z + UVSize.x, UV[1] + UVSize.z },
+                new double[] { UVSize.x, -UVSize.z },
                 0,
                 textureWidth,
                 textureHeight,
                 cubeIn.getMirror(),
                 EnumFacing.DOWN);
 
-            if (cubeIn.getMirror() == Boolean.TRUE) {
+            // The face's own `mirror` decides its uv layout and normal (GeoQuad's mirrorIn), while the *layout*
+            // switch is the bone's or the cube's mirror - upstream's `mirroredLayout = boneMirror || cube.mirror`
+            // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:120, applied to box UV at `:169`).
+            // This branch only tested the cube's own flag, so a box-UV cube under a mirrored bone kept the
+            // unmirrored east/west vertex order where the renderer (and upstream) swap it.
+            if (cubeIn.getMirror() == Boolean.TRUE || mirror == Boolean.TRUE) {
                 quadWest = new GeoQuad(
                     new GeoVertex[] { P7, P8, P6, P5 },
                     new double[] { UV[0] + UVSize.z + UVSize.x, UV[1] + UVSize.z },
@@ -518,5 +545,24 @@ public class GeoCube implements Serializable {
 
     private static void storeCubeHasNegSize(GeoCube cube, boolean hasNegSize) {
         cube.hasNegSize = hasNegSize;
+    }
+
+    /**
+     * Answers the face when it carries usable uv data, {@code null} otherwise.
+     * <p>
+     * Upstream's bake has exactly this guard before it builds a quad
+     * ({@code tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:186-193}); without it, a face that omits
+     * {@code uv_size} - or carries a short array - reached {@link GeoQuad} and failed the whole model's build.
+     */
+    private static FaceUv usableFace(FaceUv face) {
+        if (face == null) {
+            return null;
+        }
+        double[] uv = face.getUv();
+        double[] uvSize = face.getUvSize();
+        if (uv == null || uv.length < 2 || uvSize == null || uvSize.length < 2) {
+            return null;
+        }
+        return face;
     }
 }

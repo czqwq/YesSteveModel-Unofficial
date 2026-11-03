@@ -76,10 +76,28 @@ public class FaceUv {
         this.uvRotation = value;
     }
 
+    /**
+     * The rotation this engine applies to the face: always {@link Rotation#NONE}.
+     * <p>
+     * {@code uv_rotation} is still parsed and readable through {@link #getUvRotation()}, but it is deliberately not
+     * applied. The upstream 1.20 client leaves the field commented out as unimplemented
+     * ({@code tmp/YesSteveModel-dev-1.20/.../format/parser/pojo/model/FaceUv.java:10-15}, "暂未实现"), and its native
+     * renderer ({@code tmp/YesSteveModel-Native-dev}) has no such concept: the bake consumes only the UV coordinates
+     * a pack already declares, so the same pack draws unrotated on the reference client. Applying it here made the
+     * legacy cube channel (this class' only consumer is {@link software.bernie.geckolib3.geo.render.built.GeoCube})
+     * disagree with the baked/OpenYSM channel - which drops the field
+     * ({@code com/fox/ysmu/model/resource/RawYsmModelAdapter:734-737}) - and with the reference client for exactly
+     * the packs that declare it. All UV rotation is therefore treated as 0 by the geometry builder; the value and
+     * the enum stay so a caller that wants to inspect the declaration can.
+     */
     public Rotation getRotationEnum() {
-        return Rotation.fromValue(this.uvRotation == null ? 0 : this.uvRotation);
+        return Rotation.NONE;
     }
 
+    /**
+     * Pure value mapper, kept with the parsed data. The renderer does not consume its result - see
+     * {@link #getRotationEnum()}.
+     */
     public enum Rotation {
 
         NONE,
@@ -101,6 +119,10 @@ public class FaceUv {
             }
         }
 
+        /**
+         * Kept for completeness of the parsed data; {@link #getRotationEnum()} never returns anything but
+         * {@link #NONE}, so the geometry builder always takes its default (unrotated) branch.
+         */
         public float[] rotateUvs(float u, float v, float u2, float v2) {
             switch (this) {
                 case CLOCKWISE_90:

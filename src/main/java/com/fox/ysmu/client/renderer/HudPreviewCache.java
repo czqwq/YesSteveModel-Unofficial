@@ -343,6 +343,33 @@ public class HudPreviewCache {
     }
 
     /**
+     * Release the off-screen FBO and forget what was baked into it.
+     * <p>
+     * Nothing else frees this cache's {@link FboCache}: the instance is a client-wide static
+     * ({@code ClientEventHandler#hudPreviewCache}), so without this call its colour texture and depth renderbuffer -
+     * one full-size framebuffer, {@code 2 * w * h * 4} bytes, i.e. ~16.6 MB at 1920x1080 and ~66 MB at 3840x2160 -
+     * stayed allocated for the rest of the process after disconnecting, and while the cache was switched off.
+     * <p>
+     * <b>Client thread only</b> (it deletes GL objects); the connection-level caller
+     * ({@code ClientEventHandler#clearClientRuntimeState}) runs on the Netty/server thread and therefore queues this
+     * onto the client thread, the same way it handles the preview pose cache.
+     * <p>
+     * Resets the state that describes the deleted texture so the next bake re-derives all of it: {@code needsUpdate}
+     * makes the next frame bake, and the measured cost is cleared so the rate policy re-seeds from a fresh sample
+     * instead of sizing itself from a bake that no longer exists in the same form.
+     */
+    public void delete() {
+        fboCache.delete();
+        needsUpdate = true;
+        framesSinceBake = 0;
+        refreshAccumMs = 0.0D;
+        prevDrawnModel = null;
+        prevScreenW = 0;
+        prevScreenH = 0;
+        smoothRenderCostMs = 0.0F;
+    }
+
+    /**
      * Render the HUD player preview — either re-renders the model to the
      * off-screen FBO (cache miss) or draws the cached FBO texture (cache hit).
      * <p>
@@ -360,8 +387,14 @@ public class HudPreviewCache {
         // HudFollowState.update itself (RenderUtil#consumePolledFollowOrUpdate), so pollHudDisplayBodyYaw is not
         // needed here — and calling it as well would be the double advance that method's own HUD_SMOOTH_DUP_DT
         // guard exists to tolerate.
+        //
+        // The FBO is released here rather than kept warm for a later re-enable: while the cache is off nothing binds
+        // it, so holding it is holding a full-size framebuffer for a texture no frame reads. It is idempotent
+        // (delete() null-checks), and the switch going back on re-creates it through checkAndResize, which returns
+        // true for a null FBO and therefore bakes the frame it comes back on.
         if (!Config.GUI_HUD_PREVIEW_CACHE) {
             stats.cacheEnabled = false;
+            delete();
             RenderUtil.renderPlayerEntity(player, posX, posY, (float) scale, (float) yawOffset, -500, partialTicks);
             return;
         }
@@ -451,23 +484,35 @@ public class HudPreviewCache {
             // (build/rfg/minecraft-src/java/net/minecraft/client/shader/Framebuffer.java:197-208 — only the
             // `true` branch does), so the caller owns it.
             GL11.glViewport(0, 0, screenW, screenH);
-            // Clear with transparent black — the model is rendered on top.
+            // Clear with transparent black — the model is rendered on top. FboCache#bind saved the caller's clear
+            // colour and #unbind puts it back, so this does not outlive the bake.
             GL11.glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
-            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
-
-            // Delegate to the EXACT same rendering code that was used before —
-            // RenderUtil.renderPlayerEntity sets up its own transforms (push/pop),
-            // calls withGuiEntityLighting, and uses the existing GUI projection.
-            // The only difference is that output goes to our FBO instead of the screen.
+            // The measured cost of one bake starts here, at the clear: a full-size colour+depth clear is part of what
+            // a refresh costs, and the catalog tile path measures the same span (its clear is the callback that runs
+            // inside RenderUtil#renderEntityInInventory). Timing from after the clear - as this did before - told
+            // targetRefreshHz that a bake is cheaper than it is, so the 150 ms/s budget was overspent every second.
             long renderStart = System.nanoTime();
-            RenderUtil.renderPlayerEntity(player, posX, posY, (float) scale, (float) yawOffset, -500, partialTicks);
-            bakeCostMs = (System.nanoTime() - renderStart) / 1.0e6F;
+            try {
+                GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
+
+                // Delegate to the EXACT same rendering code that was used before —
+                // RenderUtil.renderPlayerEntity sets up its own transforms (push/pop),
+                // calls withGuiEntityLighting, and uses the existing GUI projection.
+                // The only difference is that output goes to our FBO instead of the screen.
+                RenderUtil.renderPlayerEntity(player, posX, posY, (float) scale, (float) yawOffset, -500, partialTicks);
+                bakeCostMs = (System.nanoTime() - renderStart) / 1.0e6F;
+            } finally {
+                // Whatever happened above, the frame has to end on the screen framebuffer in the GUI matrix mode.
+                // The model pipeline runs host events and can throw; without this bracket a throw left this FBO bound
+                // and its viewport current, so the rest of the HUD was drawn off-screen and never reached the player.
+                // The bracket is the same one the catalog tile uses (ModelButton#bakePreviewIfDue).
+                GL11.glMatrixMode(GL11.GL_MODELVIEW);
+                fboCache.unbind(mc);
+            }
             // First sample seeds the estimate; afterwards a 0.7/0.3 EMA.
             smoothRenderCostMs = smoothRenderCostMs <= 0.0F
                 ? bakeCostMs
                 : smoothRenderCostMs * 0.7F + bakeCostMs * 0.3F;
-
-            fboCache.unbind(mc);
 
             // Update snapshot
             prevScale = scale;
@@ -503,6 +548,9 @@ public class HudPreviewCache {
         boolean lightWasOn = GL11.glIsEnabled(GL11.GL_LIGHTING);
         boolean colorMatWasOn = GL11.glIsEnabled(GL11.GL_COLOR_MATERIAL);
         boolean blendWasOn = GL11.glIsEnabled(GL11.GL_BLEND);
+        // Depth writes are masked off around the blit and used to be turned back on unconditionally, which is only
+        // correct when they were on before. Read the real state instead, the way the four flags above are read.
+        boolean depthMaskWasOn = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
 
         GL11.glDepthMask(false);
         long blitStart = System.nanoTime();
@@ -514,7 +562,7 @@ public class HudPreviewCache {
         if (lightWasOn) GL11.glEnable(GL11.GL_LIGHTING); else GL11.glDisable(GL11.GL_LIGHTING);
         if (colorMatWasOn) GL11.glEnable(GL11.GL_COLOR_MATERIAL); else GL11.glDisable(GL11.GL_COLOR_MATERIAL);
         if (!blendWasOn) GL11.glDisable(GL11.GL_BLEND);
-        GL11.glDepthMask(true);
+        GL11.glDepthMask(depthMaskWasOn);
 
         publishStats(doRender, bakeCostMs, blitCostMs, gapFrames, soleAnimationDriver, targetHz);
     }

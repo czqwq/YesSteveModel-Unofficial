@@ -25,14 +25,15 @@ import com.fox.ysmu.util.TickScheduler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.AbstractClientPlayer;
 import net.minecraft.client.entity.EntityClientPlayerMP;
+import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.entity.RenderManager;
-import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.event.ClickEvent;
 import net.minecraft.util.ChatComponentTranslation;
+import net.minecraft.util.MovementInput;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.StatCollector;
 import net.minecraft.world.World;
@@ -63,7 +64,6 @@ import com.fox.ysmu.util.SessionScope;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
 
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
-import cpw.mods.fml.common.gameevent.InputEvent;
 import cpw.mods.fml.common.gameevent.PlayerEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
 import cpw.mods.fml.common.network.FMLNetworkEvent;
@@ -169,6 +169,13 @@ public class ClientEventHandler {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
+        // The extra-animation movement lock's stop path. Upstream stops the wheel/extra animation as soon as the
+        // player is moving and reads that from the movement input every tick, not from key events: its own comment on
+        // that handler says the tick shape replaced a key-event one because a key event misses the key state with
+        // other mods (PlayerMoveEvent.java:36-58, the movement test at :60-68). The port used to do it from
+        // InputEvent.KeyInputEvent, which only fires on a fresh press, so an animation started while a movement key
+        // was already held kept playing until that key was pressed again.
+        tickExtraAnimationMovementStop();
         // Reference ClientEventHandler.java:134-137: drive existing password/entity waits without a pool worker.
         TickScheduler.client().runDueTasks();
         // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
@@ -180,17 +187,6 @@ public class ClientEventHandler {
         // Record this as the client thread, so the model manager can refuse to install animations from anywhere else
         // (a host mod may query clips from the server thread).
         ClientModelManager.markClientThread();
-        // Direct-buffer safety net. It rate-limits itself (one JMX read per 100 calls, i.e. ~5 s) and returns
-        // immediately while `Config.ENABLE_DIRECT_BUFFER_WATCHDOG` is off, so this is one boolean read and one
-        // increment per tick in the normal case.
-        //
-        // Called **every tick**, not from a 1200-tick block the way the reference does
-        // (`tmp/YesSteveModel-Unofficial-perf-previewUI/.../ClientEventHandler.java:155-160` nests it inside
-        // `if (++unloadTick >= 1200)`): the watchdog's own interval is 100 calls, so nesting it inside another
-        // interval multiplies the two and the "check at ~5s intervals" its javadoc promises becomes ~100 minutes.
-        // Wiring it here is what makes `ENABLE_DIRECT_BUFFER_WATCHDOG` and `DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB`
-        // real switches - before this line both were declared, configurable and read by nothing that ever ran.
-        DirectBufferWatchdog.tick();
         // Install at most a few models that finished building on the loader thread. This is the publish half of
         // on-demand model loading: the parse happens off this thread and only the cache write and the texture upload
         // happen here, a few per tick, so a catalog of models fills in without ever blocking a frame.
@@ -451,7 +447,14 @@ public class ClientEventHandler {
     @SubscribeEvent
     public static void onRenderScreen(RenderGameOverlayEvent.Pre event) {
         if (event.type != RenderGameOverlayEvent.ElementType.HOTBAR) return;
-        if (Config.DISABLE_PLAYER_RENDER) return;
+        if (Config.DISABLE_PLAYER_RENDER) {
+            // The paperdoll is switched off for this session/world, so the cache's framebuffer is VRAM nothing will
+            // read again: release it here rather than keeping a full-size colour+depth buffer allocated until the
+            // process exits. Idempotent (FboCache#delete null-checks) and one GL delete on the first frame after the
+            // switch flips; turning it back on re-creates the FBO through checkAndResize.
+            hudPreviewCache.delete();
+            return;
+        }
         Minecraft mc = Minecraft.getMinecraft();
         EntityPlayer player = mc.thePlayer;
         if (player == null) return;
@@ -607,28 +610,53 @@ public class ClientEventHandler {
         mc.fontRenderer.drawStringWithShadow(text, textX, textY, 0xFFFFFF);
     }
 
-    @SubscribeEvent
-    public static void onKeyboardInput(InputEvent.KeyInputEvent event) {
-        Minecraft mc = Minecraft.getMinecraft();
-        // CU-04: 先调用 isMoveKey() 消费移动键的 pressTime（KeyBinding.pressTime 是一次性信号，
-        // 不消费会在界面关闭后的下一个按键事件上补触发），再判断界面：
-        // 1.7.10 的按键状态与 KeyInputEvent 都不受 GUI 影响（Minecraft.java:1839/1964）。
-        boolean moveKey = isMoveKey();
-        EntityPlayer player = mc.thePlayer;
-        if (!moveKey || mc.currentScreen != null || player == null) {
+    /**
+     * Stops the extra animation the wheel started as soon as the local player is moving - upstream's
+     * {@code PlayerMoveEvent.onClientTick} ({@code tmp/YesSteveModel-dev-1.20/.../client/event/PlayerMoveEvent.java:
+     * 36-58}), which runs on {@code TickEvent.ClientTickEvent.END} like this one and reads the movement input rather
+     * than key events. Its own comment gives the reason: a key-event handler misses the key state when another mod
+     * (Touch Controller is the one it names) drives the input. The port used to run the same stop from
+     * {@code InputEvent.KeyInputEvent}, which only sees a fresh press, so an animation started while a movement key
+     * was already held kept playing until that key was pressed again.
+     * <p>
+     * The lock is upstream's: while it is on, movement must not stop the animation ({@code PlayerMoveEvent.java:44-46}),
+     * and the early return is placed before the movement test exactly as upstream orders it. The local EEP is cleared
+     * before the packet goes out, which is also upstream's order ({@code :50-53}: {@code cap.stopExtraAnimation()} and
+     * then the report); the server stays authoritative and its {@code SyncModelInfo} echo re-establishes the same
+     * value, but the local clear is what stops a second and third report from being sent on the ticks before the echo
+     * arrives.
+     */
+    private static void tickExtraAnimationMovementStop() {
+        if (WheelAnimationLock.isLocked()) {
             return;
         }
-        // D1: the roulette's movement lock. Upstream returns before stopping the animation when the lock is on
-        // (PlayerMoveEvent.java:44-46), which is the whole point of the lock: play an extra animation while walking.
-        // This must stay *after* isMoveKey(): that call consumes the movement key's one-shot pressTime (CU-04), and
-        // the lock decides only whether we stop, never whether the signal is consumed.
-        if (WheelAnimationLock.isLocked()) {
+        Minecraft mc = Minecraft.getMinecraft();
+        EntityPlayer player = mc.thePlayer;
+        if (!isMoveInput(player)) {
             return;
         }
         ExtendedModelInfo eep = ExtendedModelInfo.get(player);
         if (eep != null && eep.isPlayAnimation()) {
+            eep.stopAnimation();
             NetworkHandler.CHANNEL.sendToServer(SetPlayAnimation.stop());
         }
+    }
+
+    /**
+     * Whether the local player is providing movement input, in the shape upstream's {@code isMoveKey} reads it
+     * ({@code PlayerMoveEvent.java:60-68}: {@code leftImpulse}/{@code forwardImpulse} non-zero, {@code jumping} or
+     * {@code shiftKeyDown}). 1.7.10's counterparts are the public {@code MovementInput} fields the player's own update
+     * copies into {@code moveStrafing}/{@code moveForward} ({@code EntityPlayerSP.java:95-97}).
+     */
+    private static boolean isMoveInput(EntityPlayer player) {
+        if (!(player instanceof EntityPlayerSP playerSp) || playerSp.movementInput == null) {
+            return false;
+        }
+        MovementInput input = playerSp.movementInput;
+        return Math.abs(input.moveStrafe) > 1.0E-5F
+            || Math.abs(input.moveForward) > 1.0E-5F
+            || input.jump
+            || input.sneak;
     }
 
     @SubscribeEvent
@@ -771,6 +799,12 @@ public class ClientEventHandler {
         Minecraft.getMinecraft().func_152344_a(() -> {
             RenderUtil.clearPreviewPoseCache();
             ModelFormExecution.clear();
+            // The HUD paperdoll's FBO is GL state (a colour texture + a depth renderbuffer + the framebuffer itself),
+            // so it belongs on this queue for the same reason: FboCache#delete issues GL deletes, and this method runs
+            // on the Netty thread or the integrated server's thread. Nothing else frees that cache - it is a
+            // client-wide static - so without this line one full-size framebuffer stayed allocated for the whole
+            // process after leaving a server (~16.6 MB at 1920x1080, ~66 MB at 3840x2160).
+            hudPreviewCache.delete();
         });
         // CU-10 闭环：清掉 AnimationManager 里两个不会自然释放的 per-player 进度表。
         AnimationManager.clearPlayerState();
@@ -841,20 +875,5 @@ public class ClientEventHandler {
             player.prevRotationPitch = this.prevRotationPitch;
             player.prevRotationYawHead = this.prevRotationYawHead;
         }
-    }
-
-    private static boolean isMoveKey() {
-        KeyBinding[] keyBindings = Minecraft.getMinecraft().gameSettings.keyBindings;
-        for (KeyBinding keyBinding : keyBindings) {
-            if ((keyBinding == Minecraft.getMinecraft().gameSettings.keyBindForward
-                || keyBinding == Minecraft.getMinecraft().gameSettings.keyBindBack
-                || keyBinding == Minecraft.getMinecraft().gameSettings.keyBindLeft
-                || keyBinding == Minecraft.getMinecraft().gameSettings.keyBindRight
-                || keyBinding == Minecraft.getMinecraft().gameSettings.keyBindJump
-                || keyBinding == Minecraft.getMinecraft().gameSettings.keyBindSneak) && keyBinding.isPressed()) {
-                return true;
-            }
-        }
-        return false;
     }
 }

@@ -91,6 +91,12 @@ public final class EntityQueryBindings {
      * {@code query.yaw_speed} (the port smooths and clamps them for a remote player). Upstream has no such
      * refinements; a sub-entity takes the plain value here, which is upstream's.</p>
      *
+     * <p><b>Two names take the remote-player branch inside this class</b>, not in the refinement above:
+     * {@code ysm.food_level} and {@code query.player_level}. 1.7.10 sends food and experience only to the player
+     * themself, so a remote player's entity value is the stale default; packet 11
+     * ({@code SyncPlayerMotionState}) carries both and {@link RemotePlayerMotionStates} stores them. The local player
+     * still reads its own entity, unchanged.</p>
+     *
      * @param partialTicks the render partial tick, needed by the one binding that interpolates a body yaw
      *                     ({@code ysm.input_vertical})
      */
@@ -192,7 +198,9 @@ public final class EntityQueryBindings {
         // A player's inventory is the only armor source 1.7.10 has for this query.
         parser.setValue("query.equipment_count", () -> player == null ? 0.0D : (double) getEquipmentCount(player));
         parser.setValue("query.has_cape", () -> MolangUtils.booleanToFloat(hasCape(player)));
-        parser.setValue("query.player_level", () -> player == null ? 0.0D : (double) player.experienceLevel);
+        // Remote players take packet 11's synced value; the local player keeps its own entity value (see the class
+        // javadoc and #playerLevel/#foodLevel).
+        parser.setValue("query.player_level", () -> player == null ? 0.0D : (double) playerLevel(player));
 
         parser.setValue("ysm.has_helmet", () -> MolangUtils.booleanToFloat(player != null && getSlotValue(player, 4)));
         parser.setValue("ysm.has_chest_plate", () -> MolangUtils.booleanToFloat(player != null && getSlotValue(player, 3)));
@@ -224,11 +232,33 @@ public final class EntityQueryBindings {
         parser.setValue("ysm.elytra_rot_x", () -> player == null ? 0.0D : (double) EtFuturumCompat.elytraRotX(player));
         parser.setValue("ysm.elytra_rot_y", () -> player == null ? 0.0D : (double) EtFuturumCompat.elytraRotY(player));
         parser.setValue("ysm.elytra_rot_z", () -> player == null ? 0.0D : (double) EtFuturumCompat.elytraRotZ(player));
-        // Upstream returns 20 for a living entity that is not a player (YSMBinding.java:342-350).
+        // Upstream returns 20 for a living entity that is not a player (YSMBinding.java:342-350). A remote player
+        // takes packet 11's synced value (see #foodLevel); the local player reads its own FoodStats unchanged.
         parser.setValue(
             "ysm.food_level",
-            () -> player != null ? (double) player.getFoodStats()
-                .getFoodLevel() : (living != null ? 20.0D : 0.0D));
+            () -> player != null ? (double) foodLevel(player) : (living != null ? 20.0D : 0.0D));
+    }
+
+    /**
+     * {@code query.player_level} for one player. A remote player's {@code experienceLevel} is never updated on this
+     * client (1.7.10 sends {@code S1FPacketSetExperience} only to the player themself), so packet 11 carries it and
+     * {@link RemotePlayerMotionStates} stores it. The local player keeps the entity field, and so does a remote player
+     * this client has no packet for yet - {@code RemotePlayerMotionStates.experienceLevel} falls back to the entity
+     * value, which is exactly what the pre-sync path read.
+     */
+    private static int playerLevel(EntityPlayer player) {
+        return RemotePlayerMotionStates.isRemotePlayer(player) ? RemotePlayerMotionStates.experienceLevel(player)
+            : player.experienceLevel;
+    }
+
+    /**
+     * {@code ysm.food_level} for one player, the food half of {@link #playerLevel}: synced for a remote player, the
+     * entity's own {@code FoodStats} for the local player and as the no-packet fallback.
+     */
+    private static int foodLevel(EntityPlayer player) {
+        return RemotePlayerMotionStates.isRemotePlayer(player) ? RemotePlayerMotionStates.foodLevel(player)
+            : player.getFoodStats()
+                .getFoodLevel();
     }
 
     /** Upstream's {@code getSlotValue} (YSMBinding.java:358-360): is anything equipped in that slot. */

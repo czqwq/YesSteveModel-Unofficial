@@ -51,9 +51,11 @@ public final class OpenYsmModelSyncServer {
      * limit. Ported from the reference branch's {@code network/sync/OpenYsmModelSyncServer.java:65}; the cooldown
      * applies only to the command, never to the join-time round ({@code C2SVersionCheck17} -> {@link #startSync}).
      * <p>
-     * The reference drops the entry on logout from its {@code CommonEventHandler}; this tree's logout hook
-     * ({@code event/CommonEventHandler.java:92-96}) is outside this task's files, so an entry survives a relog for
-     * the cooldown's duration. Recorded in {@code .agent/phase39-ysm-subcommands.md}.
+     * Both this map and {@link #SYNC_STATES} are per-session, so the logout hook drops them
+     * ({@code event/CommonEventHandler#onPlayerLoggedOut} calls {@link #clear} and {@link #clearResyncCooldown}) -
+     * the same place the reference clears its cooldown from its {@code CommonEventHandler}. A round that never
+     * completes (the client's feedback never arrives) is therefore held at most until the player leaves, and a new
+     * attempt replaces it ({@link #startSync} overwrites the entry for that UUID).
      */
     private static final Map<UUID, Long> LAST_RESYNC = Maps.newConcurrentMap();
 
@@ -234,8 +236,10 @@ public final class OpenYsmModelSyncServer {
         return Math.max(0L, remaining);
     }
 
-    /** Drops a player's resync cooldown. The reference calls this from its logout handler
-     *  ({@code network/sync/OpenYsmModelSyncServer.java:112-117}); see {@link #LAST_RESYNC} for this tree's gap. */
+    /** Drops a player's resync cooldown. Called from the logout hook
+     *  ({@code event/CommonEventHandler#onPlayerLoggedOut}) beside {@link #clear}, so a relog does not inherit the
+     *  cooldown of the session that ended - the reference clears it from its own logout handler
+     *  ({@code network/sync/OpenYsmModelSyncServer.java:112-117}). */
     public static void clearResyncCooldown(UUID playerId) {
         if (playerId != null) {
             LAST_RESYNC.remove(playerId);

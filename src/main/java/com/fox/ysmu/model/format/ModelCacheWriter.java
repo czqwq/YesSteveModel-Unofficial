@@ -64,7 +64,18 @@ public final class ModelCacheWriter {
     // reverse order placed every multi-axis-rotated cube (hair, clothing, tilted decals) somewhere else in
     // the baked payload than the legacy channel draws it. Every folder model - including the built-in
     // default fallback - must be re-baked instead of being served from a cache written by bake version 7.
-    static final int OPEN_YSM_BAKE_VERSION = 8;
+    // 8 -> 9: YSMFolderDeserializer.parseGlobalResources now reads the manifest's files.sound_path /
+    // files.function_path / files.language_path (with the deprecated files.player.sound_path fallback) instead of
+    // the hard-coded sounds/functions/lang prefixes. A pack that renamed one of those directories now contributes
+    // sounds/functions/language tables it never did before; a payload baked by an older build has them missing
+    // while the source signature still matches, so it must be re-baked rather than served.
+    // 9 -> 10: the folder cube bake now keeps upstream's two mirror flags apart
+    // (YSMFolderDeserializer.parseCube/bakeFace): `mirroredLayout = boneMirror || cube.mirror` selects the corner
+    // group while only the cube's own `mirror` flips the uv order and the normal x sign
+    // (tmp/YesSteveModel-dev-1.20/format/parser/GeoBuilder.java:120,122,125,142-157,251-253,282-285). The old bake
+    // merged both into one flag, so every cube under a bone-declared mirror was baked with the opposite east/west and
+    // up/down uv direction and normal sign relative to the legacy channel; those payloads must be re-baked.
+    static final int OPEN_YSM_BAKE_VERSION = 10;
 
     /**
      * M-19:传统缓存容器的最小长度 = 幻数/版本(8) + 载荷 MD5(16) + 至少一个 AES 分组(16)。

@@ -158,6 +158,12 @@ public class ClientProxy extends CommonProxy {
 
     @Override
     public void handlePlayerMotionState(SyncPlayerMotionState message) {
-        RemotePlayerMotionStates.update(message.getPlayerId(), message.getFlags());
+        // Packet 11 carries the movement flags plus the two gameplay facts 1.7.10 only sends to the player themself
+        // (food/experience, see SyncPlayerMotionState's javadoc); all three land in the one per-UUID table.
+        RemotePlayerMotionStates.update(
+            message.getPlayerId(),
+            message.getFlags(),
+            message.getFoodLevel(),
+            message.getExperienceLevel());
     }
 }

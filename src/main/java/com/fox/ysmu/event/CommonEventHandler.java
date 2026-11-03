@@ -3,16 +3,22 @@ package com.fox.ysmu.event;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.IntPredicate;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime;
+import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
+import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime;
 import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.particle.CustomParticleManager;
+import com.fox.ysmu.client.renderer.ArrowProjectileRenderer;
 import com.fox.ysmu.compat.LocalAssetProvider;
 import com.fox.ysmu.data.VehicleModelStates;
 import com.fox.ysmu.network.message.S2CVehicleModelState;
 import cpw.mods.fml.common.gameevent.TickEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
@@ -57,7 +63,15 @@ public class CommonEventHandler {
      */
     private static final double PLAYER_TRACKING_RANGE = 512.0D;
 
-    private static final Map<UUID, Byte> LAST_MOTION_STATES = new HashMap<>();
+    /**
+     * Last {@link SyncPlayerMotionState} state sent per player, so the per-tick check only broadcasts on a change.
+     * <p>
+     * The value packs all three synchronised facts - flags, food level and experience level - because the packet
+     * carries all three: keeping only the byte flags would leave a food/experience change unsent until a movement flag
+     * happened to change too. Layout of the key: bits 0-7 flags, 8-15 food level, 32-63 experience level
+     * ({@link #motionStateKey(EntityPlayer)}).
+     */
+    private static final Map<UUID, Long> LAST_MOTION_STATES = new HashMap<>();
 
     @SubscribeEvent
     public static void onPlayerLoggedIn(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedInEvent event) {
@@ -112,11 +126,16 @@ public class CommonEventHandler {
             EntityClips.clear();
             ModelGuiApi.clearAllSelectionGrants();
         }
-        // 客户端世界卸载：上一份世界遗留的音效音源与"控制器→音效"归属表、弹射物控制器状态、自定义粒子
-        // 都要清掉，否则它们会跟着进下一个世界（SOURCE CommonEventHandler.java:87-93）。
+        // 客户端世界卸载：上一份世界遗留的音效音源与"控制器→音效"归属表、弹射物/载具控制器状态与时间线、
+        // 箭矢落地计时、自定义粒子都要清掉，否则它们会跟着进下一个世界（SOURCE CommonEventHandler.java:87-93，
+        // 上游按"实体离开世界"逐个 reset）。1.7.10 没有实体离开事件，世界卸载是可用边界；这些表的键都是
+        // entityId，而 entityId 在下一个世界会从同一数字段重新分配，因此不清理会被无关实体读到。
         if (event.world != null && event.world.isRemote) {
             YSMSoundManager.clear();
             ProjectileControllerRuntime.clear();
+            ProjectileTimelineRuntime.clear();
+            VehicleControllerRuntime.clear();
+            ArrowProjectileRenderer.clearGroundTracker();
             CustomParticleManager.clear();
         }
     }
@@ -127,7 +146,38 @@ public class CommonEventHandler {
             // 高版本资源健康检查：配置了路径但加载失败时在 chat 提醒玩家（幂等，成本极低）
             LocalAssetProvider.warnIfMisconfigured();
             CustomParticleManager.tick();
+            pruneDepartedClientEntityState();
         }
+    }
+
+    /**
+     * D-A1: trims {@link EntityClips} the same way {@link #onServerTick} trims {@link NPCData}.
+     * <p>
+     * The clip table is written on the client by a host mod through {@code api/EntityAnimationApi} and is keyed by
+     * tracked entity id; a clip pushed for an entity that later despawns is unreachable but its entry is never
+     * removed, so a long session would keep one entry per maid/entity that ever played one. {@link EntityClips} has
+     * carried {@code retainAll} for this since it was written - this is the call site that was missing. A TTL alone
+     * cannot be used (a host that pushes once per clip change would lose a still-valid clip), which is why the
+     * predicate is "the entity still exists in the client's current world" and the grace only protects a freshly
+     * pushed entry. The table and its touch map are concurrent, so pruning from the client tick is the same kind of
+     * write the host already does; a disconnect or world change clears the whole table separately
+     * ({@code ClientEventHandler#clearClientRuntimeState}, {@link #onWorldUnload} client branch).
+     */
+    private static void pruneDepartedClientEntityState() {
+        if (++clientClipPruneTicker < 1200) {
+            return;
+        }
+        clientClipPruneTicker = 0;
+        WorldClient world = Minecraft.getMinecraft().theWorld;
+        if (world == null) {
+            // Nothing to test against; the table belongs to the connection that owns it and that connection's end
+            // clears it (see the javadoc above), so an absent world is not a reason to drop every clip.
+            return;
+        }
+        EntityClips.retainAll(
+            System.currentTimeMillis(),
+            id -> world.getEntityByID(id) != null,
+            ENTITY_STATE_GRACE_MILLIS);
     }
 
     @SubscribeEvent
@@ -154,9 +204,32 @@ public class CommonEventHandler {
         }
     }
 
+    /**
+     * Copies the EEP data into the clone <b>only</b> when the clone came from a death, which is exactly the case
+     * 1.7.10 leaves uncopied.
+     * <p>
+     * Measured against the platform rather than assumed:
+     * <ul>
+     * <li><b>Death / respawn</b> - {@code ServerConfigurationManager.respawnPlayer} constructs a new
+     * {@code EntityPlayerMP} and calls {@code EntityPlayer.clonePlayer(player, false)}
+     * ({@code ServerConfigurationManager.java:482-484}); {@code clonePlayer} copies
+     * {@code extendedProperties} only when its second argument is true ({@code EntityPlayer.java:2262-2277}), so the
+     * new player keeps the fresh instances {@code EntityConstructing} registered and the data has to be copied
+     * here. Forge posts this event with {@code wasDeath == true} at the end of that method
+     * ({@code EntityPlayer.java:2300}), so this is the one branch that needs the copy.</li>
+     * <li><b>Dimension travel is not a clone</b> - {@code transferPlayerToDimension} moves the <em>same</em>
+     * {@code EntityPlayerMP} to the other world ({@code ServerConfigurationManager.java:533-556} calls
+     * {@code transferEntityToWorld}), so the EEP instances travel with the entity and no copy is due. Copying here
+     * would instead overwrite the live instances with a stale snapshot.</li>
+     * <li><b>End-portal respawn</b> - {@code clonePlayer(player, true)} copies the whole
+     * {@code extendedProperties} map and re-inits each instance for the new player
+     * ({@code EntityPlayer.java:2274-2277}), so the data already moved and this event arrives with
+     * {@code wasDeath == false}.</li>
+     * </ul>
+     */
     @SubscribeEvent
     public static void onPlayerClone(net.minecraftforge.event.entity.player.PlayerEvent.Clone event) {
-        if (event.wasDeath) { // TODO 跨维度？
+        if (event.wasDeath) {
             copyPlayerProperties(event.original, event.entityPlayer);
         }
     }
@@ -200,13 +273,22 @@ public class CommonEventHandler {
             // EntityPlayerMP guard skips the client-side player (EntityClientPlayerMP), so this is a no-op on the
             // client half of a single-player world.
             resetSelectionIfUnauthorized(player);
+            stopJoinedAnimationState(player);
             syncJoinedPlayerState(player);
         }
     }
 
     private static int npcPruneTicker;
+    /**
+     * D-A1: client-side counterpart of {@link #npcPruneTicker} for the host-pushed animation clips. The server does
+     * not own that table - it is written by {@code api/EntityAnimationApi} on the client - so it is pruned on the
+     * client tick instead.
+     */
+    private static int clientClipPruneTicker;
     /** phase55: /ysm upload transfers that stopped receiving chunks are dropped after a two-minute TTL. */
     private static int uploadSweepTicker;
+    /** Shared by the per-entity override tables: how long an entry survives an entity being outside every world. */
+    private static final long ENTITY_STATE_GRACE_MILLIS = 10L * 60L * 1000L;
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
@@ -230,7 +312,7 @@ public class CommonEventHandler {
         long now = System.currentTimeMillis();
         // Entity ids are never reused, so a missing entry is only wasted memory; the grace keeps a
         // temporarily chunk-unloaded entity's override from being pruned.
-        NPCData.retainAll(now, id -> {
+        IntPredicate aliveInAnyWorld = id -> {
             WorldServer[] worlds = server.worldServers;
             if (worlds != null) {
                 for (WorldServer world : worlds) {
@@ -240,7 +322,14 @@ public class CommonEventHandler {
                 }
             }
             return false;
-        }, 10L * 60L * 1000L);
+        };
+        NPCData.retainAll(now, aliveInAnyWorld, ENTITY_STATE_GRACE_MILLIS);
+        // The vehicle table is keyed by entity id for the same reason and needs the same bound: upstream hangs its
+        // counterpart on the entity itself (VehicleModelInfoCapability), so it dies with the entity there, while this
+        // port's static table would otherwise keep one entry per vehicle ever mounted for the server's whole uptime.
+        // Dismount and death are deliberately not removal points - the model is meant to outlive both
+        // (VehicleModelStates' javadoc) - only "no longer exists in any loaded world" is.
+        VehicleModelStates.retainAll(now, aliveInAnyWorld, ENTITY_STATE_GRACE_MILLIS);
     }
 
     @SubscribeEvent
@@ -355,9 +444,7 @@ public class CommonEventHandler {
 
     private static void syncTrackedPlayerMotionState(EntityPlayer trackingPlayer, EntityPlayer trackedPlayer) {
         if (!trackedPlayer.worldObj.isRemote) {
-            NetworkHandler.sendToClientPlayer(
-                createMotionStateMessage(trackedPlayer, PlayerMotionState.pack(trackedPlayer)),
-                trackingPlayer);
+            NetworkHandler.sendToClientPlayer(createMotionStateMessage(trackedPlayer), trackingPlayer);
         }
     }
 
@@ -394,6 +481,33 @@ public class CommonEventHandler {
         if (modelInfo != null) {
             SyncModelInfo syncMsg = new SyncModelInfo(trackedPlayer.getEntityId(), modelInfo);
             NetworkHandler.sendToClientPlayer(syncMsg, trackingPlayer);
+        }
+    }
+
+    /**
+     * Drops the persisted "play this extra animation" request before a joining player's state is published.
+     * <p>
+     * Upstream does the same thing on the event that corresponds to this one:
+     * {@code event/CapabilityEvent.java:167-175} is its {@code EntityJoinLevelEvent} handler for a
+     * {@code ServerPlayer}, and its first model-state action is {@code modelInfoCap.stopAnimation(serverPlayer)}
+     * ({@code :173}) before the state is published. The animation is a transient client effect, but this port's
+     * {@link ExtendedModelInfo} serialises it into the player's save data along with the selection
+     * ({@code eep/ExtendedModelInfo#saveNBTData}), so without this reset a player who logged out (or travelled to
+     * another dimension) while an emote was playing would come back with {@code play_animation} still true and every
+     * tracking client would replay that emote from the NBT this port syncs. The stop is published by the same
+     * {@code SyncModelInfo} that carries the selection, because it marks the EEP dirty and every observer is sent the
+     * current state.
+     * <p>
+     * The reset only exists on the server half of the EEP; a client-side join (single-player client world) has no
+     * animation authority and {@code ExtendedModelInfo} there is written by {@code SyncModelInfo}.
+     */
+    private static void stopJoinedAnimationState(EntityPlayer player) {
+        if (!(player instanceof EntityPlayerMP)) {
+            return;
+        }
+        ExtendedModelInfo joined = ExtendedModelInfo.get(player);
+        if (joined != null && joined.isPlayAnimation()) {
+            joined.stopAnimation();
         }
     }
 
@@ -443,15 +557,33 @@ public class CommonEventHandler {
 
     private static void syncDirtyMotionState(EntityPlayer player) {
         UUID playerId = player.getUniqueID();
-        byte newState = PlayerMotionState.pack(player);
-        Byte oldState = LAST_MOTION_STATES.get(playerId);
-        if (oldState == null || oldState.byteValue() != newState) {
+        long newState = motionStateKey(player);
+        Long oldState = LAST_MOTION_STATES.get(playerId);
+        if (oldState == null || oldState != newState) {
             LAST_MOTION_STATES.put(playerId, newState);
-            NetworkHandler.CHANNEL.sendToDimension(createMotionStateMessage(player, newState), player.dimension);
+            NetworkHandler.CHANNEL.sendToDimension(createMotionStateMessage(player), player.dimension);
         }
     }
 
-    private static SyncPlayerMotionState createMotionStateMessage(EntityPlayer player, byte motionState) {
-        return new SyncPlayerMotionState(player.getUniqueID(), motionState);
+    /**
+     * The change-detection key for {@link #LAST_MOTION_STATES}: every fact the packet carries, so a food or
+     * experience change alone also produces one update. The clamping here matches the wire encoding
+     * ({@code SyncPlayerMotionState.MAX_FOOD_LEVEL}) - if the key used the unclamped value, a modded food level above
+     * 255 would look like a change on every tick while the packet would carry the same saturated byte.
+     */
+    private static long motionStateKey(EntityPlayer player) {
+        int foodLevel = Math.clamp(player.getFoodStats()
+            .getFoodLevel(), 0, SyncPlayerMotionState.MAX_FOOD_LEVEL);
+        return ((long) PlayerMotionState.pack(player) & 0xFFL) | ((long) foodLevel << 8)
+            | ((long) player.experienceLevel << 32);
+    }
+
+    private static SyncPlayerMotionState createMotionStateMessage(EntityPlayer player) {
+        return new SyncPlayerMotionState(
+            player.getUniqueID(),
+            PlayerMotionState.pack(player),
+            player.getFoodStats()
+                .getFoodLevel(),
+            player.experienceLevel);
     }
 }

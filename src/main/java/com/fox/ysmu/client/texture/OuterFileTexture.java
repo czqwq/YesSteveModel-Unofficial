@@ -48,6 +48,27 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
         this.componentData.putAll(components);
     }
 
+    /**
+     * Attaches compressed PBR component bytes to a texture built from an already-decoded base image.
+     * <p>
+     * The image constructor's {@code Map} overload takes <em>decoded</em> components, and a second overload taking
+     * compressed ones would erase to the same signature. The loader's "decoded base + compressed components" case
+     * therefore attaches them here: that is the path when no PBR host exists, so the component pixels were deliberately
+     * not decoded ({@code ClientModelManager#buildModel}), and it is also the path when one component failed to decode.
+     * Keeping the map non-empty matters beyond memory accounting: {@link #uploadImage} skips the
+     * {@code TEXTURE_TARGET_SIZE} downscale while either component map is non-empty, so a PBR texture is treated the
+     * same whether its components arrived decoded or compressed, and {@link #preparePbr} can still decode them if a
+     * host asks.
+     * <p>
+     * Must be called before the texture is registered (the client thread does this inside
+     * {@code ClientModelManager.uploadTextures}); the map is not synchronised.
+     */
+    public void setComponentData(Map<Integer, byte[]> components) {
+        if (components != null && !components.isEmpty()) {
+            this.componentData.putAll(components);
+        }
+    }
+
     public Map<Integer, PbrComponentTexture> preparePbr(IResourceManager manager) throws IOException {
         Map<Integer, PbrComponentTexture> result = new LinkedHashMap<>();
         try {
@@ -252,10 +273,11 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
         // Only textures this registry owns are accounted for. The budget's own javadoc scopes it to "YSM model
         // textures", and only such a texture can ever be freed by ModelTextureRegistry.enforceVramBudget, so counting
         // anything else would either make the budget unreachable (a footprint nothing can free) or leak: the pack
-        // icons (ClientPackRegistry.registerIcon) and author avatars (ClientModelMetadataRegistry.uploadAvatar) also
-        // upload OuterFileTextures, and they replace their entry by hand - deleteTexture + loadTexture - so a replaced
-        // object's bytes would never be given back. The reference counts every OuterFileTexture because its counter
-        // lives in a class that has no notion of "a model texture"; here the registry id supplies that notion for free.
+        // icons (ClientPackRegistry) and author avatars (ClientModelMetadataRegistry) also upload OuterFileTextures,
+        // but they are owned by CustomTextureManager directly rather than by ModelTextureRegistry, so this object never
+        // gets a registry id and is released through that manager's own delayed release instead. The reference counts
+        // every OuterFileTexture because its counter lives in a class that has no notion of "a model texture"; here the
+        // registry id supplies that notion for free.
         if (this.registryId == null) {
             return;
         }

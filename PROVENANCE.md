@@ -410,3 +410,30 @@ counterpart, in the relevant `.agent/` ExecPlan and in this file.
 The engine is MIT-licensed. Its licence text was copied verbatim to `LICENSE-geckolib-engine.txt`
 (byte-identical to `E:\IDEA\Geckolib\LICENSE`, SHA-256
 `C4D38B71AEFA6FEB4CB26A12353698489B1E0951859FF6DA24A173B7005873CC`; copyright (c) 2026 czqwq).
+
+## 2026-11-03 audit round: engine edits
+
+A team audit of rendering memory/GC, missing upstream code and engine-vs-upstream semantics made the following
+edits in the vendored trees. Each one is a defect/parity fix, not a refactor; the authoritative account with
+evidence and residual deviations is `.agent/audit-2026-11-03-team-render-memory-and-parity.md` and
+`.agent/divergences.md` (same date section).
+
+| file | change |
+|---|---|
+| `core/keyframe/AnimationPoint.java` | Catmull-Rom segments need the two keyframes outside the segment: added `controlLeft`/`controlRight`/`hasControlPoints` + `obtainWithControls`; plain `obtain` resets the flag so every non-catmullrom path is byte-equivalent. |
+| `core/controller/AnimationController.java` | `findCurrentKeyFrame` exposes the found index (all return paths); `getAnimationPointAtTick` supplies the outer control points for `EasingType.Catmullrom` and converts them with the source frame's own primitive flag (`convertKeyFrameValue`), so the degree→radian / X-Y sign rule is applied exactly once. Also caches `blend_weight`/`anim_speed` parsed expressions per animation instead of re-parsing them every frame in `processConcurrent` (upstream parses them at assembly: `AnimationPlayer:318,346,365`). |
+| `core/util/MathUtil.java` | Added the four-control-point `catmullRom(percent,left,begin,end,right)` exactly as upstream (`.../geckolib3/core/util/MathUtil.java:71-77`) and a no-boxing Catmullrom fast path; scalar `EasingManager.catmullRom` stays for points without control values. |
+| `core/easing/EasingManager.java` | `catmullRom(double)` made public for the above (visibility only; behaviour unchanged). |
+| `core/builder/Animation.java` | Two `transient` slots + accessors to hold the parsed `blend_weight`/`anim_speed` expressions (upstream's `Animation` carries parsed expressions too). |
+| `util/json/JsonKeyFrameUtils.java` | Easing parsing aligned with upstream `EasingType.fromJson:19-26`: only `linear`/`catmullrom`, everything else LINEAR with a de-duplicated warning instead of `RuntimeException` that killed the whole clip; `easingArgs` normalised to the declared `List<Double>` (a string entry used to throw CCE every frame at evaluation). |
+| `geo/IGeoRenderer.java` | `renderEarly`/`renderAfter` in try/finally: the static `MATRIX_STACK` used to leak one depth level per escaped draw exception and then poison every later model draw. |
+| `geo/GeoReplacedEntityRenderer.java` | Visibility aligned with upstream `:86-128`: `bodyVisible = !isInvisible() && !isInvisibleToPlayer()` is what `getRenderType` sees (null → draw nothing), and the layers/held items/hurt colour draw only inside the same gate. Upstream asks exactly this, the port used to draw invisible-but-visible-to-team players as an opaque model and their held items regardless. |
+| `geo/material/MaterialBake.java` | Alpha inspection reads the image's `getAlphaRaster()` band instead of `BufferedImage.getRGB` per texel (no `ColorModel` conversion), short-circuits images without alpha, keeps `getRGB` for palette images. Same classification bits, once-per-texture baked cost removed. |
+| `geo/render/built/GeoCube.java` | Upstream-shape fixes: skip a face whose uv/uv_size data is missing (`GeoBuilder:186-193`) instead of failing the whole model; box-UV layout honours bone-level `mirror`; box-UV non-mirrored down-face winding changed to upstream `{p1,p5,p6,p2}` (the old ring made `windingSign=-1`, so CPU-culled cutout/translucent draws dropped the bottom face); `texture_width/height == 0` treated as undeclared→64 as upstream. |
+| `geo/render/built/GeoModel.java` | Added `locatorGroup(String baseName)` — upstream's digit-stripping locator groups (`GeoLocatorType:33-47`) as a transient, lazily-built index over `topLevelBones`; serialization stream is unchanged (BakedGeometryCache readable in both directions, no BAKE_FORMAT bump). |
+| `geo/raw/pojo/FaceUv.java` | `getRotationEnum()` now always `NONE`: upstream comments `uv_rotation` out as unimplemented (`format/parser/pojo/model/FaceUv.java:10-15`) and native has no such concept, so the engine's legacy/cube path stops diverging from both. Parsing/type/`rotateUvs` kept. |
+| `geo/raw/tree/RawGeometryTree.java` | Restored the geometry-array guard from upstream `GeoBuilder:27-31` (readable `IOException` instead of an NPE when the layout has no `minecraft:geometry`); the former MON-04 guard was lost in a re-vendor. |
+| `util/RenderUtils.java` | Per-bone temporary quaternions replaced by scratch instances (bit-identical results, hot path in held-item/head layers). |
+`core/keyframe/AnimationPoint`'s pool is unchanged and `EasingManager`'s scalar catmullrom path stays: the pre/post
+flattened-entry residual (22,041 keyframes whose catmullrom tangent comes from the neighbouring entry rather than the
+neighbouring keyframe) is recorded in `.agent/divergences.md`, not guessed at.

@@ -1,6 +1,7 @@
 package software.bernie.geckolib3.geo.material;
 
 import java.awt.image.BufferedImage;
+import java.awt.image.Raster;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -21,6 +22,14 @@ public final class MaterialBake {
         java.util.Objects.requireNonNull(quads, "quads");
         java.util.Objects.requireNonNull(image, "image");
         if (version < 0 || version > 65535) throw new IllegalArgumentException("UV version outside uint16");
+        // The classification below only needs the alpha channel. Reading it through the image's own alpha band
+        // avoids a ColorModel conversion per sampled texel (BufferedImage#getRGB), which for one big model's first
+        // bake is millions of conversions and a visible hitch. A palette image has no separate alpha band; those keep
+        // the getRGB path. An image without any alpha channel is opaque by definition, so its texels need not be read
+        // at all.
+        Raster alphaRaster = image.getAlphaRaster();
+        boolean opaque = alphaRaster == null && !image.getColorModel()
+            .hasAlpha();
         List<GeoQuad> source = new ArrayList<>();
         for (GeoQuad quad : quads) {
             if (quad == null) continue;
@@ -36,7 +45,7 @@ public final class MaterialBake {
                 uv[i * 2] = quad.vertices[i].textureU;
                 uv[i * 2 + 1] = quad.vertices[i].textureV;
             }
-            BakedFace.AlphaKind kind = inspect(uv, image, version);
+            BakedFace.AlphaKind kind = inspect(uv, image, alphaRaster, opaque, version);
             uvs.add(uv);
             kinds.add(kind);
             if (kind == BakedFace.AlphaKind.SOLID) solids++;
@@ -86,7 +95,15 @@ public final class MaterialBake {
         return Math.min(base, extent);
     }
 
-    private static BakedFace.AlphaKind inspect(float[] uv, BufferedImage image, int version) {
+    /**
+     * @param alphaRaster the image's alpha band ({@link BufferedImage#getAlphaRaster()}), or {@code null} when the
+     *                    image has no separate alpha band (a palette image) and the value must be read through
+     *                    {@link BufferedImage#getRGB(int, int)}
+     * @param opaque      whether the image has no alpha channel at all, i.e. every sampled texel is alpha 255 and the
+     *                    region cannot be empty or translucent
+     */
+    private static BakedFace.AlphaKind inspect(float[] uv, BufferedImage image, Raster alphaRaster, boolean opaque,
+        int version) {
         int processing = version >= 29 ? 29 : version >= 28 ? 28 : version >= 17 ? 17 : version >= 6 ? 6 : 0;
         int width = image.getWidth(), height = image.getHeight();
         int minU = width, maxU = 0, minV = height, maxV = 0;
@@ -128,10 +145,14 @@ public final class MaterialBake {
             uv[0] += uOffset; uv[6] += uOffset;
             uv[5] += vOffset; uv[7] += vOffset;
         }
+        if (opaque) {
+            // No alpha channel: every texel of the (always non-empty) region is alpha 255.
+            return BakedFace.AlphaKind.SOLID;
+        }
         boolean empty = true, transparent = false;
         for (int y = minV; y < maxV; y++) {
             for (int x = minU; x < maxU; x++) {
-                int alpha = image.getRGB(x, y) >>> 24;
+                int alpha = alphaRaster != null ? alphaRaster.getSample(x, y, 0) : image.getRGB(x, y) >>> 24;
                 if (alpha != 0) {
                     empty = false;
                     if (alpha != 255) return BakedFace.AlphaKind.TRANSLUCENT;

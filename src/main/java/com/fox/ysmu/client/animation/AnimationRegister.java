@@ -858,6 +858,10 @@ public class AnimationRegister {
         // EntityQueryBindings now, each with upstream's guard (livingEntityVar / playerVar / clientPlayerVar):
         // a boat answers false/0 for them instead of the local player's value, and a living non-player answers the
         // living-level ones (food_level is 20, matching YSMBinding.java:342-350).
+        // food_level and query.player_level are the two names that also take the *remote* path: 1.7.10 sends food and
+        // experience only to the player themself, so packet 11 carries both to observers and EntityQueryBindings reads
+        // RemotePlayerMotionStates for a remote player (the local player is unchanged). The registered defaults above
+        // (food 20, player_level 0) remain the values before any per-frame binding, exactly as before.
 
         // A-3 / A-5 / A-6: the values whose input is this frame's own AnimationEvent - which animatable is being
         // drawn (the first-person arm, the selected texture, the screen-owned preview), which render pass that is,

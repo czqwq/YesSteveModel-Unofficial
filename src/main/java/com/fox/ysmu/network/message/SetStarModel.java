@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.eep.ExtendedStarModels;
+import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
@@ -26,8 +27,15 @@ public class SetStarModel implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        this.modelId = ByteBufUtils.readUTF8String(buf);
-        this.isAdd = buf.readBoolean();
+        // N-10: a decoder that throws is turned into a disconnect by FMLProxyPacket.processPacket, so a truncated
+        // payload soft-fails into an ignored message (null modelId) instead.
+        try {
+            this.modelId = ByteBufUtils.readUTF8String(buf);
+            this.isAdd = buf.readBoolean();
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM star-model packet: {}", e.toString());
+            this.modelId = null;
+        }
     }
 
     @Override
@@ -52,8 +60,10 @@ public class SetStarModel implements IMessage {
             // rejectHandshake, so the body is guarded and a bad packet is only logged.
             try {
                 EntityPlayerMP sender = ctx.getServerHandler().playerEntity;
-                if (sender != null) {
-                    handleEEP(message, sender);
+                if (sender != null && message.modelId != null) {
+                    // The EEP is a plain HashSet, and the server tick / save path read it; the handler runs on the
+                    // Netty thread, so write it from the server thread like the other EEP packets do.
+                    DeferredWork.server(() -> handleEEP(message, sender));
                 }
             } catch (Exception e) {
                 ysmu.LOG.warn("Ignoring malformed YSM star-model packet", e);
@@ -63,14 +73,16 @@ public class SetStarModel implements IMessage {
 
         private void handleEEP(SetStarModel message, EntityPlayerMP sender) {
             ExtendedStarModels eep = ExtendedStarModels.get(sender);
-            if (eep != null) {
-                ResourceLocation modelLoc = message.modelId == null || message.modelId.isEmpty() ? null
-                    : new ResourceLocation(message.modelId);
-                if (message.isAdd) {
-                    eep.addModel(modelLoc);
-                } else {
-                    eep.removeModel(modelLoc);
-                }
+            if (eep == null || message.modelId == null || message.modelId.isEmpty()) {
+                // A null/empty id is not a model; storing null would poison the save data (saveNBTData calls
+                // toString() on every entry), and no legitimate sender produces one.
+                return;
+            }
+            ResourceLocation modelLoc = new ResourceLocation(message.modelId);
+            if (message.isAdd) {
+                eep.addModel(modelLoc);
+            } else {
+                eep.removeModel(modelLoc);
             }
         }
     }

@@ -8,7 +8,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.world.World;
 
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,7 +21,7 @@ import com.fox.ysmu.ysmu;
 import cpw.mods.fml.common.registry.GameRegistry;
 
 /**
- * Adds two datawatcher entries to {@code EntityArrow} so the client can draw the shooter's projectile sub-model.
+ * Adds three datawatcher entries to {@code EntityArrow} so the client can draw the shooter's projectile sub-model.
  * <p>
  * 1.7.10 syncs nothing about who fired an arrow: {@code shootingEntity} is a plain field that the server assigns and
  * never sends, so the client cannot ask "whose model should this arrow use". The model id therefore travels in a
@@ -32,6 +31,9 @@ import cpw.mods.fml.common.registry.GameRegistry;
  * holding - and {@code ysm.shoot_item_id} is what a pack uses to choose between its bow and crossbow sub-models.
  * Taking it once, at construction, is deliberate: that is the instant the arrow was loosed, and the weapon it should
  * be drawn with is the one held then, not whatever the shooter picks up later.
+ * <p>
+ * The third slot carries the shooter's entity id, which is what makes {@code ysm.projectile_owner} a context rather
+ * than a boolean; see {@link #ysmu$getProjectileOwnerId()}.
  */
 @Mixin(value = EntityArrow.class, priority = 900)
 public abstract class MixinEntityArrow implements IProjectileModelArrow {
@@ -53,12 +55,6 @@ public abstract class MixinEntityArrow implements IProjectileModelArrow {
      */
     @Unique
     private static final int ysmu$DW_OWNER = 20;
-
-    @Shadow
-    public Entity shootingEntity;
-
-    @Shadow
-    protected abstract void entityInit();
 
     @Inject(method = "entityInit", at = @At("TAIL"))
     private void ysmu$onEntityInit(CallbackInfo ci) {

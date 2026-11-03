@@ -90,6 +90,8 @@ public final class BakedGeometryCache {
     /** Bump when the meaning of a cached entry changes without the mod version changing (engine-side edits). */
     public static final int BAKE_FORMAT = 1;
     private static final String EXTENSION = ".geo";
+    /** Infix of the half-written file {@link #store} moves into place; see {@link #pruneTemporaryFiles}. */
+    private static final String TEMPORARY_MARKER = ".tmp-";
     private static final String BAKED_DIR = "baked";
     /** Refuse to allocate a payload larger than this when reading a header; a build that big is not a model. */
     private static final int MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
@@ -184,7 +186,7 @@ public final class BakedGeometryCache {
         try {
             Path directory = target.getParent();
             Files.createDirectories(directory);
-            Path temporary = directory.resolve(target.getFileName() + ".tmp-" + UUID.randomUUID());
+            Path temporary = directory.resolve(target.getFileName() + TEMPORARY_MARKER + UUID.randomUUID());
             try {
                 writeFile(temporary, identity, subModelKey, inputDigest, payload);
                 try {
@@ -550,9 +552,43 @@ public final class BakedGeometryCache {
             for (Path directory : stale) {
                 deleteRecursively(directory);
             }
+            pruneTemporaryFiles();
             enforceBudget();
         } finally {
             LOCK.unlock();
+        }
+    }
+
+    /**
+     * Deletes the half-written temporary files an interrupted write left behind.
+     * <p>
+     * {@link #store} writes to {@code <name>.tmp-<uuid>} and only then moves it into place, so a killed process can
+     * leave those files in the current ABI directory. They are never read (nothing but {@link #store}'s own move
+     * names them), and {@link #enforceBudget} only deletes them once the budget is exceeded, so without this step they
+     * would sit there for the life of the cache.
+     */
+    private static void pruneTemporaryFiles() {
+        Path current = root();
+        if (!Files.isDirectory(current)) {
+            return;
+        }
+        try (DirectoryStream<Path> directories = Files.newDirectoryStream(current)) {
+            for (Path directory : directories) {
+                if (!Files.isDirectory(directory)) {
+                    continue;
+                }
+                try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+                    for (Path entry : entries) {
+                        if (entry.getFileName()
+                            .toString()
+                            .contains(TEMPORARY_MARKER)) {
+                            Files.deleteIfExists(entry);
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            ysmu.LOG.warn("YSM client could not prune the baked geometry cache's temporary files", e);
         }
     }
 

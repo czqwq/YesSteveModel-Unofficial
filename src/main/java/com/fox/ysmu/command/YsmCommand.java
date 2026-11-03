@@ -1546,6 +1546,10 @@ public class YsmCommand extends CommandBase {
         StopWatch watch = new StopWatch();
         watch.start();
         checkModelFiles(sender, CUSTOM);
+        // 本仓的 auth 根与 custom 同构（上游的第三个扫描根，见 AGENTS"模型授权"），同一次 reload 也要校验它：
+        // 只查 custom 会让搬进 config/ysmu/auth 的坏模型目录在 reload 时完全静默。builtin 根是随包契约资产
+        // （内容不可由用户修），不在此列。
+        checkModelFiles(sender, AUTH);
         ServerModelManager.reloadPacks();
 
         // 模型授权随目录一起重算：把模型移进/移出 config/ysmu/auth 或撤销授权后，在线玩家的当前选择可能不再可用，

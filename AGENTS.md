@@ -5,8 +5,6 @@ YSMU 是一个 Minecraft Forge 1.7.10 模组，将 Yes Steve Model/OpenYSM 风�
 
 构建通过 settings.gradle.kts 和 build.gradle.kts 使用 GTNH Gradle 约定插件。gradle.properties 目标为 Minecraft 1.7.10、Forge 10.13.4.1614、MCP stable 12，启用 Mixins，并通过 JVM Downgrader 启用现代 Java（enableModernJavaSyntax = jvmDowngrader，downgradeTargetVersion = 8），因此源码可使用 Java 9+ 语法和标准库，而 jar 仍携带 JVM 8 类文件。运行时/开发依赖在 dependencies.gradle 中声明。GeckoLib 3 动画引擎已内置于本仓库，位于 src/main/java/{software,com/eliotlash,net/geckominecraft}，作为一次性源码快照；它不是外部模组，也不在 libs/ 中。参见 PROVENANCE.md。
 
-当前工作重点是移植 OpenYSM。应仔细分析 OpenYSM 代码，并严格遵循其实现。
-
 上游保真
 当上游已实现某功能时，按上游方式实现。不要为上游已解决的问题自行发明机制。
 

@@ -4,7 +4,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import net.minecraft.client.Minecraft;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.MathHelper;
 
@@ -32,7 +31,7 @@ public final class RemotePlayerAnimationQueries {
         }
         float groundSpeed = getGroundSpeed(player);
         float yawSpeed = getYawSpeed(player);
-        if (!isRemotePlayer(player)) {
+        if (!RemotePlayerMotionStates.isRemotePlayer(player)) {
             return new QueryValues(rawHeadYaw, groundSpeed, yawSpeed);
         }
 
@@ -50,14 +49,10 @@ public final class RemotePlayerAnimationQueries {
         STATES.clear();
     }
 
-    private static boolean isRemotePlayer(EntityPlayer player) {
-        return player != null && player != Minecraft.getMinecraft().thePlayer;
-    }
-
     private static float getGroundSpeed(EntityPlayer player) {
         double dx;
         double dz;
-        if (isRemotePlayer(player)) {
+        if (RemotePlayerMotionStates.isRemotePlayer(player)) {
             dx = player.posX - player.prevPosX;
             dz = player.posZ - player.prevPosZ;
         } else {

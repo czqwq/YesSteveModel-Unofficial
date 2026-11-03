@@ -100,6 +100,15 @@ public final class ArrowProjectileRenderer {
     }
 
     /**
+     * Drops the {@code ysm.on_ground_time} timers keyed by entity id. Called from
+     * {@code CommonEventHandler#onWorldUnload}: 1.7.10 reuses entity ids in the next world, so a leftover timer
+     * would be read by an unrelated arrow.
+     */
+    public static void clearGroundTracker() {
+        GROUND_TRACKER.clear();
+    }
+
+    /**
      * Turns off the fixed-pipeline directional light for the duration of a projectile draw.
      *
      * @return whether this call turned it off, i.e. whether it has to be restored
@@ -166,6 +175,15 @@ public final class ArrowProjectileRenderer {
         // this entry - a broad predicate at MixinRenderArrow would have to know about every other replacement as well.
         if (Config.DISABLE_PROJECTILE_MODEL) {
             return false;
+        }
+        // Upstream's own guard, first statement of its projectile renderer: an entity invisible to the local player is
+        // not drawn at all (CustomProjectileRenderer.java:22). The wrapper has already suppressed the vanilla renderer
+        // by then, so the answer is "claimed, nothing drawn" rather than "let vanilla draw". A 1.7.10 arrow is never
+        // invisible in vanilla; a mod can still mark one, and this is the renderer's rule rather than a property of the
+        // platform.
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null || entity.isInvisibleToPlayer(mc.thePlayer)) {
+            return true;
         }
         if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_RENDER) {
             ysmu.LOG.info("[YSMU-ARROW] render start: modelId={}, entityId={}", modelId, entity.getEntityId());
@@ -518,9 +536,13 @@ public final class ArrowProjectileRenderer {
             double animationTick;
             if (animationLength > 0) {
                 // A one-shot clip is clamped, not wrapped: wrapping restarts it repeatedly, which makes a bone scale
-                // oscillate between 0 and 1 instead of settling.
-                boolean isLooping = animation.loop != null && animation.loop.isRepeatingAfterEnd()
-                    && animation.loop != ILoopType.EDefaultLoopTypes.HOLD_ON_LAST_FRAME;
+                // oscillate between 0 and 1 instead of settling. The test is upstream's exact one - only LOOP repeats
+                // (AnimationPlayer.java:209-224 branches `currentLoopType == LoopType.LOOP` for the wrap,
+                // `HOLD_ON_LAST_FRAME` for the clamp and PLAY_ONCE for neither). It is deliberately not
+                // `isRepeatingAfterEnd()`: HOLD_ON_LAST_FRAME answers true there because the engine's own controller
+                // checks HOLD before repeating (ILoopType.java:54-72, AnimationController.java:1314-1316), so the
+                // predicate alone would restart a "hold on last frame" clip.
+                boolean isLooping = animation.loop == ILoopType.EDefaultLoopTypes.LOOP;
                 animationTick = isLooping ? animationAge % animationLength : Math.min(animationAge, animationLength);
             } else {
                 animationTick = animationAge;

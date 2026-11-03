@@ -145,8 +145,13 @@ public final class ParticleTextureManager {
      * 清空纹理/失败缓存（{@code LocalAssetProvider.reset()} 配置变更时调用）。
      * 否则旧的 GL 纹理 id 与失败状态会残留，导致同一进程内"同时出现高版本粒子
      * 与 fallback 粒子"，或配置修好后仍一直 fallback（需重启才能生效）。
+     * <p>
+     * 已生成的 {@link CustomParticleFX} 各自持有这里返回的 GL id；纹理被删除后它们仍会
+     * 每帧 bind 一个已释放的名字（GL 可能已把该名字分配给新纹理，于是画出别的贴图），
+     * 所以清缓存必须连同这些粒子一起丢弃——它们最多再活一秒，重建后自然按新纹理生成。
      */
     public static void clearCache() {
+        CustomParticleManager.clear();
         for (int texId : TEXTURES.values()) {
             try {
                 TextureUtil.deleteTexture(texId);

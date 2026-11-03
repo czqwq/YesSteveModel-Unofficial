@@ -39,6 +39,13 @@ public class ConfigScreen extends GuiScreen {
 
         if (page == 0) {
             int i = 0;
+            // 模型音效音量（上游 ClientConfig.SoundVolume，其设置页第一项）：0-100%，步进 5。
+            // 拖拽由 ConfigSlider 自己跟踪鼠标并在 onChange 里实时写回，落盘仍走 onGuiClosed 的 Config.save()；
+            // 因为 actionPerformed 的 switch 没有 id 20，点击滑条本身不做动作（值由拖动改变）。
+            this.buttonList.add(new ConfigSlider(20, x + 5, y + 25 + i++ * 22, 400,
+                "gui.yes_steve_model.config.sound_volume",
+                0.0, 100.0, 5.0, Config.SOUND_VOLUME,
+                v -> Config.SOUND_VOLUME = v));
             addCheckbox(1,  x + 5, y + 25 + i++ * 22, "disable_self_model",       Config.DISABLE_SELF_MODEL);
             addCheckbox(2,  x + 5, y + 25 + i++ * 22, "disable_other_model",     Config.DISABLE_OTHER_MODEL);
             addCheckbox(4,  x + 5, y + 25 + i++ * 22, "disable_self_hands",      Config.DISABLE_SELF_HANDS);
@@ -47,8 +54,6 @@ public class ConfigScreen extends GuiScreen {
             addCheckbox(16, x + 5, y + 25 + i++ * 22, "disable_projectile_model", Config.DISABLE_PROJECTILE_MODEL);
             addCheckbox(17, x + 5, y + 25 + i++ * 22, "disable_vehicle_model",  Config.DISABLE_VEHICLE_MODEL);
             addCheckbox(5,  x + 5, y + 25 + i++ * 22, "disable_player_render",   Config.DISABLE_PLAYER_RENDER);
-            // `swap_config_sides` (id 6) 的复选框已移除：本仓轮盘没有配置面板/预览，那个开关点不动。
-            // 值仍在 config/ysmu.cfg（见 Config.SWAP_CONFIG_SIDES 的注释）。
             addCheckbox(8,  x + 5, y + 25 + i++ * 22, "gui_enhancements",        Config.GUI_ENHANCEMENTS);
             // 预览刷新：点击循环离散值（0-4），文本置中与其他点击项一致
             this.buttonList.add(new FlatColorButton(9, x + 5, y + 25 + i++ * 22, 400, 20,
@@ -99,7 +104,7 @@ public class ConfigScreen extends GuiScreen {
                 page = (page + 1) % PAGE_COUNT;
                 this.initGui();
                 break;
-            case 1: case 2: case 3: case 4: case 5: case 6: case 8: case 16: case 17:
+            case 1: case 2: case 3: case 4: case 5: case 8: case 16: case 17:
                 actionPage0(button);
                 break;
             case 7: case 9: case 11: case 12: case 13: case 14: case 18: case 19:
@@ -129,14 +134,6 @@ public class ConfigScreen extends GuiScreen {
             case 5:
                 Config.DISABLE_PLAYER_RENDER = !Config.DISABLE_PLAYER_RENDER;
                 ((ConfigCheckBox) button).doPress();
-                break;
-            case 6:
-                // `swap_config_sides` is deliberately not exposed: this port's AnimationRouletteScreen has neither a
-                // config panel nor a 3D preview, so the reference's feature it switches has no seam here and the
-                // checkbox did nothing when clicked. The value stays in `config/ysmu.cfg`
-                // (`Config.SWAP_CONFIG_SIDES`, which records the reference's five usage sites) - the same treatment
-                // `NamedParallelExtraSlots` gets above, for the same reason: a control that visibly does nothing
-                // reads as a bug, while a config-file-only value does not lie.
                 break;
             case 8:
                 Config.GUI_ENHANCEMENTS = !Config.GUI_ENHANCEMENTS;

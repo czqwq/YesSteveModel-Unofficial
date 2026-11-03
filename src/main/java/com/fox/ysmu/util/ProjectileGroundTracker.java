@@ -65,6 +65,15 @@ public final class ProjectileGroundTracker {
         this.states.remove(entityId);
     }
 
+    /**
+     * 丢掉所有实体 id 的计时状态。世界卸载（客户端切换维度/服务器）必须调用：1.7.10 的实体 id 在下一个
+     * 世界上会从同一个数字段重新分配，旧条目会被无关实体读到（同 {@code NPCData}/{@code VehicleModelStates}
+     * 在 {@code CommonEventHandler#onWorldUnload} 的清理由）。
+     */
+    public void clear() {
+        this.states.clear();
+    }
+
     /** 已跟踪的实体数（测试/诊断用）。 */
     int tracked() {
         return this.states.size();

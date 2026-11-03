@@ -19,6 +19,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.data.ModelData;
+import com.fox.ysmu.model.resource.LegacyInfo;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
@@ -133,7 +134,15 @@ public final class FolderFormat {
     @NotNull
     private static ModelData getModelDataFromPath(Path modelPath, String modelId) throws IOException {
         Map<String, byte[]> model = Maps.newHashMap();
-        model.put("main", getBytes(modelPath, MAIN_MODEL_FILE_NAME));
+        byte[] mainModel = getBytes(modelPath, MAIN_MODEL_FILE_NAME);
+        // A flat (pre-ysm.json) model's metadata lives in info.json, which upstream reads as its legacy manifest
+        // (tmp/YesSteveModel-dev-1.20/.../format/parser/LegacyManifestBuilder.java:18,72-93). The legacy payload has no
+        // metadata field, so the manifest is folded into the geometry's `ysm_extra_info` block - the carrier the client
+        // already reads for name/tips/authors/license/extra labels (see model/resource/LegacyInfo). A model without
+        // info.json keeps its bytes untouched.
+        model.put(
+            "main",
+            LegacyInfo.mergeIntoGeometry(mainModel, LegacyInfo.readFile(modelPath)));
         model.put("arm", getBytes(modelPath, ARM_MODEL_FILE_NAME));
 
         Map<String, byte[]> texture = Maps.newHashMap();

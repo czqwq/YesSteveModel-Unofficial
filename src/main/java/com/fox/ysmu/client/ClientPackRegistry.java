@@ -7,10 +7,11 @@ import java.util.Map;
 import java.util.Objects;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.texture.CustomTextureManager;
 import com.fox.ysmu.client.texture.OuterFileTexture;
+import com.fox.ysmu.client.texture.TextureHolder;
 import com.fox.ysmu.ysmu;
 import com.google.common.collect.Maps;
 
@@ -32,7 +33,34 @@ import cpw.mods.fml.relauncher.SideOnly;
 public final class ClientPackRegistry {
 
     private static final Map<String, ClientPackInfo> PACKS = Maps.newConcurrentMap();
+    /**
+     * The published cover textures, keyed by the id they are published under, with the holder that keeps each
+     * registration alive.
+     * <p>
+     * They are registered through {@link CustomTextureManager}, not straight into the platform's texture map, so that
+     * {@link #clear()} can release them: 1.7.10's {@code TextureManager.mapTextureObjects} holds the texture object -
+     * and with it the decoded {@code BufferedImage} - for the rest of the session, so dropping the
+     * {@code ResourceLocation} from {@link ClientPackInfo#icon} alone frees neither the GL texture nor the heap. This is
+     * the same lifecycle {@code ClientModelMetadataRegistry} gives its author avatars; upstream's GUI textures use the
+     * same owner (its {@code CustomTextureManager} registers them and its pages release them when they close).
+     * <p>
+     * The holder is kept as a field of {@link PackIcon}: dropping it is what arms {@code CustomTextureManager}'s
+     * delayed release, so it must stay reachable for exactly as long as the cover is wanted.
+     */
+    private static final Map<ResourceLocation, PackIcon> ICONS = new LinkedHashMap<>();
     private static volatile int version;
+
+    /** One published pack-cover texture; see {@link #ICONS}. */
+    private static final class PackIcon {
+
+        private final OuterFileTexture texture;
+        private final TextureHolder holder;
+
+        private PackIcon(OuterFileTexture texture, TextureHolder holder) {
+            this.texture = texture;
+            this.holder = holder;
+        }
+    }
 
     private ClientPackRegistry() {}
 
@@ -40,6 +68,11 @@ public final class ClientPackRegistry {
      * Publishes the packs of one sync round. Must run on the client thread: it uploads the cover textures.
      */
     public static void accept(List<ClientPackInfo> packs) {
+        // The previous round's covers belong to the previous round; release them (and their platform registrations)
+        // before publishing this round's, exactly as clear() does. A pack that survives the round keeps its id - it is
+        // derived from the hierarchy - so its cover is re-uploaded under the same id and the released registration is
+        // discarded by CustomTextureManager's identity check (see MinecraftHost#release).
+        releaseIcons();
         PACKS.clear();
         if (packs != null) {
             for (ClientPackInfo pack : packs) {
@@ -52,6 +85,7 @@ public final class ClientPackRegistry {
     }
 
     public static void clear() {
+        releaseIcons();
         PACKS.clear();
         version++;
     }
@@ -97,21 +131,39 @@ public final class ClientPackRegistry {
         }
         try {
             pack.icon = iconId(pack.hierarchy);
-            TextureManager textureManager = Minecraft.getMinecraft()
-                .getTextureManager();
-            // loadTexture only replaces the map entry, so re-registering would leak the previous GL texture; the
-            // delete keeps it idempotent, exactly like ClientModelManager.registerTexture.
-            textureManager.deleteTexture(pack.icon);
-            textureManager.loadTexture(pack.icon, new OuterFileTexture(pack.iconData));
+            // Idempotent, like the avatar registry: a cover re-registered under the same id releases the previous
+            // registration first, so its GL texture and decoded image do not stay reachable from the platform's map.
+            releaseIcon(pack.icon);
+            OuterFileTexture texture = new OuterFileTexture(pack.iconData);
+            ICONS.put(pack.icon, new PackIcon(texture, CustomTextureManager.register(texture, pack.icon)));
         } catch (RuntimeException e) {
             pack.icon = null;
             ysmu.LOG.warn("Failed to upload cover of model pack {}", pack.hierarchy, e);
         }
     }
 
+    /** Starts the delayed release of every published cover and forgets them; client thread only. */
+    private static void releaseIcons() {
+        for (PackIcon icon : ICONS.values()) {
+            CustomTextureManager.release(icon.texture);
+        }
+        ICONS.clear();
+    }
+
+    /** Starts the delayed release of one published cover and forgets it; a {@code null} or unknown id is a no-op. */
+    private static void releaseIcon(ResourceLocation id) {
+        if (id == null) {
+            return;
+        }
+        PackIcon icon = ICONS.remove(id);
+        if (icon != null) {
+            CustomTextureManager.release(icon.texture);
+        }
+    }
+
     /**
      * Manifest text for the running game language, falling back to the primary language subtag ({@code zh_cn} ->
-     * {@code zh}) and then to the manifest's untranslated value.
+     * {@code zh}) and then the manifest's untranslated value.
      */
     private static String localized(ClientPackInfo pack, String key, String fallback) {
         String locale = currentLocale();

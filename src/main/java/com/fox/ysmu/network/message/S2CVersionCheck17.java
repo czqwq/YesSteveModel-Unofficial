@@ -3,6 +3,7 @@ package com.fox.ysmu.network.message;
 import com.fox.ysmu.client.sync.OpenYsmModelSyncClient;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -23,7 +24,14 @@ public class S2CVersionCheck17 implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        this.version = ByteBufUtils.readUTF8String(buf);
+        // N-10: a decoder that throws is turned into a disconnect by FMLProxyPacket.processPacket, so a truncated
+        // payload falls back to the empty version (which then simply skips the round) instead.
+        try {
+            this.version = ByteBufUtils.readUTF8String(buf);
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM version-check packet: {}", e.toString());
+            this.version = "";
+        }
     }
 
     @Override

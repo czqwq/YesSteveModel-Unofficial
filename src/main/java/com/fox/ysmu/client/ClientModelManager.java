@@ -50,6 +50,7 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerExpressionEvalu
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
 import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.compat.AngelicaPbrCompat;
 import com.fox.ysmu.client.model.AnimationPayload;
 import com.fox.ysmu.client.model.BakedAnimationCache;
 import com.fox.ysmu.client.model.PreparedAnimations;
@@ -85,6 +86,7 @@ import com.google.gson.JsonObject;
 
 import it.unimi.dsi.fastutil.Pair;
 import software.bernie.geckolib3.core.builder.Animation;
+import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.manager.AnimationData;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
@@ -478,10 +480,18 @@ public class ClientModelManager {
     /**
      * Animation sets already built on the loader thread, waiting for the client thread to install them.
      * <p>
-     * Same shape as {@code COMPLETED_BUILDS} for geometry: {@link #deferAnimations} parks the payload and schedules the
-     * build, and {@link #ensureAnimations} - which runs on the client thread the first time a model is drawn - installs
-     * the finished files instead of paying for the parse itself. A bundle whose payload is no longer the parked one is
+     * Same shape as {@code COMPLETED_BUILDS} for geometry: the build is scheduled the first time the model is
+     * actually wanted for drawing ({@link #requestAnimationPreparation}, from {@link #requestBuild}), and
+     * {@link #ensureAnimations} - which runs on the client thread when the model is first drawn - installs the
+     * finished files instead of paying for the parse itself. A bundle whose payload is no longer the parked one is
      * discarded (see {@link PreparedAnimations}).
+     * <p>
+     * The trigger is demand, not registration, and that is the same rule the geometry half follows. Parsing every
+     * synced model's animation graph at registration keeps all of them resident here - a catalog can be much larger
+     * than the set of models a session ever draws - and puts that work in front of the geometry builds the player is
+     * waiting for. Upstream has the same shape: a render target's animations are built as part of loading that target
+     * ({@code model/resource/client/render/ModelRenderTargetLoader.java:232-253}), i.e. on demand, not for the whole
+     * catalog.
      */
     private static final Map<ResourceLocation, PreparedAnimations> PREPARED_ANIMATIONS = Maps.newConcurrentMap();
 
@@ -971,6 +981,41 @@ public class ClientModelManager {
         // server's geometry, simply because it happens to use the same model id.
         long generation = SYNC_GENERATION;
         modelLoader().submit(() -> buildModel(modelId, data, generation));
+        // The model is now actually wanted for drawing, so this is the moment its animations become worth preparing;
+        // see requestAnimationPreparation. Submitted after the geometry build so the loader's other threads take the
+        // parse that is on the critical path (the geometry the player is waiting for) before the animation graph,
+        // which the first draw can still install inline if preparation has not finished by then.
+        requestAnimationPreparation(modelId);
+    }
+
+    /**
+     * Prepares a model's animation sets on the loader thread, once, when the model is first wanted for drawing.
+     * <p>
+     * The trigger is {@link #requestBuild} - the first frame that actually draws this model - rather than
+     * registration, for the reason on {@link #PREPARED_ANIMATIONS}: a synced catalog can be far larger than the set of
+     * models a session ever draws, and parsing every model's animation graph up front keeps all of them resident and
+     * competes with the geometry builds that are on the critical path. Upstream has the same shape, building a render
+     * target's animations as part of loading that target
+     * ({@code model/resource/client/render/ModelRenderTargetLoader.java:232-253}).
+     * <p>
+     * This only decides <em>when</em> the optional off-thread build runs; it changes no outcome. The payload stays
+     * parked in {@link #PENDING_ANIMATIONS}, and {@link #ensureAnimations} still installs inline on the client thread
+     * when no bundle is ready, which is exactly what it did before preparation existed. A repeated request is
+     * harmless: the bundle for an older payload is discarded by {@link #prepareAnimations}'s identity check, and
+     * {@link #deferAnimations} drops the marker for a replaced payload.
+     */
+    private static void requestAnimationPreparation(ResourceLocation modelId) {
+        ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
+        AnimationPayload payload = PENDING_ANIMATIONS.get(mainId);
+        if (payload == null || PREPARED_ANIMATIONS.containsKey(mainId)) {
+            return;
+        }
+        try {
+            modelLoader().submit(() -> prepareAnimations(mainId, payload));
+        } catch (RuntimeException failure) {
+            // Preparation is an optimisation: without it the client thread builds on demand, exactly as before.
+            ysmu.LOG.warn("YSM client could not schedule animation preparation for {}", mainId, failure);
+        }
     }
 
     /**
@@ -1011,14 +1056,26 @@ public class ClientModelManager {
                         com.fox.ysmu.client.render.ModelFailureNotifier.Outcome.PARTIAL);
                 }
             }
+            // PBR components (normal/specular images) are decoded only when a host will consume them: the only caller
+            // of OuterFileTexture.preparePbr is the loader AngelicaPbrCompat registers with the host's PBR texture
+            // manager (client/compat/AngelicaPbrCompat.java:30-43), and without a host those pixels have no reader.
+            // They are also the largest thing a PBR texture adds to the heap (2 × w·h·4 per texture, wine_fox
+            // 01/11/15 and others ship PBR), and the published texture keeps them for the whole session - so decoding
+            // them for nobody is pure residency. The compressed bytes still travel with the texture (they are passed
+            // to uploadTextures as data.getPbrComponents() below), so preparePbr can decode them on demand if a host
+            // ever asks and the non-empty component map keeps uploadImage from treating a PBR texture as an ordinary
+            // one (it does not downscale when components are present). See AngelicaPbrCompat#isAvailable for why the
+            // answer is fixed before the first decode.
             Map<String, Map<Integer, BufferedImage>> components = new LinkedHashMap<>();
-            for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
-                Map<Integer, BufferedImage> roles = new LinkedHashMap<>();
-                for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
-                    try { roles.put(role.getKey(), OuterFileTexture.decode(role.getValue())); }
-                    catch (Exception failure) { ysmu.LOG.warn("Could not decode PBR component {} of {}", role.getKey(), base.getKey(), failure); }
+            if (AngelicaPbrCompat.isAvailable()) {
+                for (Map.Entry<String, Map<Integer, byte[]>> base : data.getPbrComponents().entrySet()) {
+                    Map<Integer, BufferedImage> roles = new LinkedHashMap<>();
+                    for (Map.Entry<Integer, byte[]> role : base.getValue().entrySet()) {
+                        try { roles.put(role.getKey(), OuterFileTexture.decode(role.getValue())); }
+                        catch (Exception failure) { ysmu.LOG.warn("Could not decode PBR component {} of {}", role.getKey(), base.getKey(), failure); }
+                    }
+                    components.put(base.getKey(), roles);
                 }
-                components.put(base.getKey(), roles);
             }
             COMPLETED_BUILDS.add(new BuiltModel(modelId, built, data.getTexture(), images, components, data, generation));
         } catch (Throwable failure) {
@@ -1509,14 +1566,9 @@ public class ClientModelManager {
         // publish path and nothing can re-read them from here (see the field's javadoc and R7 of
         // .agent/perf-audit-memory.md).
         PENDING_ANIMATIONS.put(mainId, payload);
-        // Build the animation sets now, on the loader thread, so the first draw does not pay for it.
+        // A bundle prepared for the payload being replaced describes the older bytes; dropping it here is what lets
+        // the new payload be prepared again when the model is next drawn (see requestAnimationPreparation).
         PREPARED_ANIMATIONS.remove(mainId);
-        try {
-            modelLoader().submit(() -> prepareAnimations(mainId, payload));
-        } catch (RuntimeException failure) {
-            // Preparation is an optimisation: without it the client thread builds on demand, exactly as before.
-            ysmu.LOG.warn("YSM client could not schedule animation preparation for {}", mainId, failure);
-        }
     }
 
     /** Whether this model's animations are still parked; see {@link #PENDING_ANIMATIONS}. */
@@ -2167,6 +2219,15 @@ public class ClientModelManager {
                 BufferedImage base = decoded.get(entry.getKey());
                 if (base != null && componentImages.containsKey(entry.getKey())) {
                     ModelTextureRegistry.register(textureId, new OuterFileTexture(base, componentImages.get(entry.getKey())));
+                } else if (base != null && components.containsKey(entry.getKey())) {
+                    // A decoded base with only compressed PBR components: the no-host case (buildModel skipped the
+                    // component decode) or a component that failed to decode. Hand the texture its base image so it is
+                    // not decoded a second time, and keep the compressed bytes so the texture stays PBR-classified -
+                    // OuterFileTexture.uploadImage does not downscale while either component map is non-empty, and
+                    // preparePbr can still decode them if a host asks.
+                    OuterFileTexture texture = new OuterFileTexture(base);
+                    texture.setComponentData(components.get(entry.getKey()));
+                    ModelTextureRegistry.register(textureId, texture);
                 } else if (components.containsKey(entry.getKey())) {
                     ModelTextureRegistry.register(textureId, new OuterFileTexture(entry.getValue(), components.get(entry.getKey())));
                 } else registerTexture(textureId, entry.getValue(), base);
@@ -3297,6 +3358,12 @@ public class ClientModelManager {
         // conditions, per-model pack scripts), so they belong to the same lifetime as the model tables above.
         OpenYsmControllerExpressionEvaluator.clearCompiledCache();
         MolangScriptRegistry.clear();
+        // The engine's own version of the same table: one parsed MolangExpression per distinct anim_time_update
+        // expression text, shared by every controller. It is keyed by text and written when a controller first ticks
+        // an animation carrying that field, so a client that visits several servers (or reloads several catalogs)
+        // accumulates one expression graph per distinct text, and its clear() had no caller at all. It belongs to the
+        // animations being dropped here, exactly like the two tables above; see AnimationController:397-403.
+        AnimationController.clearAnimTimeUpdateCache();
         // The engine's two caches are the last piece: they outlive every table above and are not cleared by anything
         // else in this method. See releaseEngineCaches.
         releaseEngineCaches();

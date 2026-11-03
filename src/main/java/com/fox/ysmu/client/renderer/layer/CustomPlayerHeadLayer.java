@@ -1,5 +1,6 @@
 package com.fox.ysmu.client.renderer.layer;
 
+import java.util.List;
 import java.util.UUID;
 
 import net.minecraft.block.Block;
@@ -47,8 +48,15 @@ public class CustomPlayerHeadLayer<T extends EntityLivingBase & IAnimatable> ext
     /** The head slot of a 1.7.10 inventory: 0 boots, 1 legs, 2 chest, 3 head. */
     private static final int HEAD_SLOT = 3;
 
-    /** The bone the port already treats as the head; {@code CustomPlayerModel#codeAnimation} uses the same name. */
-    private static final String HEAD_BONE = "Head";
+    /**
+     * The humanoid head locator group; a pack expresses an extra or transformed head by numbering the bone
+     * ({@code Head2}/{@code Head3}/{@code Head5}) and the group rule strips the trailing digits. Upstream's head layer
+     * draws the head-slot item at <b>every</b> member of that group
+     * ({@code tmp/YesSteveModel-dev-1.20/.../client/renderer/layer/CustomPlayerHeadLayer.java:26-50}: the
+     * {@code visitLocatorGroup(PlayerLocator.get().head, ...)} callback at {@code :44} runs once per locator), and this
+     * port used to take only the exact-named {@code Head}.
+     */
+    private static final String HEAD_LOCATOR_GROUP = "Head";
 
     public CustomPlayerHeadLayer(IGeoRenderer<T> entityRendererIn) {
         super(entityRendererIn);
@@ -72,17 +80,27 @@ public class CustomPlayerHeadLayer<T extends EntityLivingBase & IAnimatable> ext
         if (geoModel == null) {
             return;
         }
-        GeoBone headBone = geoModel.getBone(HEAD_BONE)
-            .orElse(null);
-        if (headBone == null) {
+        // Every member of the group, like upstream's visitLocatorGroup; empty means the model has no head locator at
+        // all, which is the same "draw nothing" the single exact-name lookup answered before.
+        List<GeoBone> headBones = geoModel.locatorGroup(HEAD_LOCATOR_GROUP);
+        if (headBones.isEmpty()) {
             return;
         }
 
         GL11.glPushMatrix();
         try {
             GL11.glEnable(GL12.GL_RESCALE_NORMAL);
-            applyHeadBoneTransform(headBone);
-            renderHeadItem(player, head);
+            for (GeoBone headBone : headBones) {
+                // One matrix per head: the transform below is relative to the current matrix, so without this every
+                // extra head would be drawn on top of the previous one's accumulated chain.
+                GL11.glPushMatrix();
+                try {
+                    applyHeadBoneTransform(headBone);
+                    renderHeadItem(player, head);
+                } finally {
+                    GL11.glPopMatrix();
+                }
+            }
         } finally {
             GL11.glDisable(GL12.GL_RESCALE_NORMAL);
             GL11.glPopMatrix();

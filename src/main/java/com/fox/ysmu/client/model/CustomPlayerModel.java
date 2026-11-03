@@ -243,24 +243,49 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         }
     }
 
+    /**
+     * The humanoid head locator group. Upstream rotates <b>every</b> member of it, not one bone: a pack expresses an
+     * extra or transformed head by numbering the bone ({@code Head2}/{@code Head3}/{@code Head5}), the group rule
+     * strips the trailing digits ({@code GeoLocatorType#getByBoneName:33-47}), and
+     * {@code client/entity/CustomHumanoidEntity.java:68-89} adds {@code headPitch}/{@code netHeadYaw} to each member of
+     * {@code model.locatorGroup(head)}. The port used to take the single exact-named {@code Head}, so an extra head kept
+     * its bind rotation and did not follow the camera.
+     */
+    private static final String HEAD_LOCATOR_GROUP = "Head";
+
+    /** The exact-named head, the one whose pivot defines the first-person head position (write-only today, R-10). */
+    private static final String HEAD_BONE = "Head";
+
     private void codeAnimation(AnimationEvent animationEvent, EntityModelData data, EntityPlayer player) {
         // FIXME: 2023/6/21 这一块设计应该改成 molang 的，而且这个寻找效率低下
-        IBone head = getBone("Head");
         FIRST_PERSON_HEAD_POS = 24;
-        if (head != null) {
-            float headPitch = (float) Math.toRadians(data.headPitch);
-            float headYaw = (float) Math.toRadians(
-                RemotePlayerAnimationQueries.get(animationEvent, player, data.netHeadYaw)
-                    .headYaw());
-            head.setRotationX(head.getRotationX() + headPitch);
-            head.setRotationY(head.getRotationY() + headYaw);
-            headPoseOffsets.put(head, new HeadPoseOffset(headPitch, headYaw));
-            FIRST_PERSON_HEAD_POS = head.getPivotY()
-                * ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
-        }
-        // R-10: getCurrentModel() is a plain field read and can be null when super.setLivingAnimations never
-        // ran (no model resolved yet), so it is resolved once and guarded here.
+        // R-10: getCurrentModel() is a plain field read and can be null when the model was never resolved, so it is
+        // resolved once here and guarded (the group accessor lives on the model).
         GeoModel currentModel = getCurrentModel();
+        if (currentModel != null) {
+            List<GeoBone> heads = currentModel.locatorGroup(HEAD_LOCATOR_GROUP);
+            if (!heads.isEmpty()) {
+                float headPitch = (float) Math.toRadians(data.headPitch);
+                float headYaw = (float) Math.toRadians(
+                    RemotePlayerAnimationQueries.get(animationEvent, player, data.netHeadYaw)
+                        .headYaw());
+                float heightScale = ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();
+                for (GeoBone head : heads) {
+                    head.setRotationX(head.getRotationX() + headPitch);
+                    head.setRotationY(head.getRotationY() + headYaw);
+                    // Same offset/undo carrier as the single-bone version, one entry per head: clearHeadPoseOffsets()
+                    // at the start of the next setLivingAnimations subtracts exactly what this frame added, which is
+                    // what keeps the world draw, the HUD paper doll's second draw of the same frame and the GUI
+                    // preview's write-back idempotent (upstream's headRotBackup/recoverLastCodedAnimation pair,
+                    // CustomHumanoidEntity.java:70-111, expressed as an offset so a repeated draw re-applies rather
+                    // than needing a separate recover call).
+                    headPoseOffsets.put(head, new HeadPoseOffset(headPitch, headYaw));
+                    if (HEAD_BONE.equals(head.name)) {
+                        FIRST_PERSON_HEAD_POS = head.getPivotY() * heightScale;
+                    }
+                }
+            }
+        }
         GeoBone locator = currentModel == null ? null : currentModel.firstPersonViewLocator;
         if (locator != null) {
             float heightScale = ((CustomPlayerEntity) animationEvent.getAnimatable()).getHeightScale();

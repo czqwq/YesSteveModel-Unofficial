@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import javax.annotation.Nullable;
 
 import net.minecraft.client.renderer.texture.AbstractTexture;
+import net.minecraft.client.renderer.texture.ITextureObject;
 import net.minecraft.util.ResourceLocation;
 
 /**
@@ -438,7 +439,20 @@ public final class CustomTextureManager {
                 // Re-registering an id replaces the map entry, so the previous GL texture would leak. With a
                 // caller-supplied id (a model texture) this is the ordinary re-registration path; upstream's ids are
                 // fresh per registration, so it never sees this branch.
-                manager.deleteTexture(id);
+                //
+                // The release goes through the texture's own deleteGlTexture() instead of TextureManager
+                // .deleteTexture(): the platform's method only frees the GL name it reads, while an OuterFileTexture's
+                // release also invalidates the optional host PBR holder registered for that base texture
+                // (OuterFileTexture#deleteGlTexture -> PbrInvalidation#delete). Going through the manager instead left
+                // the previous base's PBR component textures alive in the host on every model re-sync, which is a VRAM
+                // leak visible only with the optional PBR host installed. The GL call is the same
+                // (TextureUtil.deleteTexture), and the id is reset rather than left pointing at a freed name.
+                ITextureObject previous = manager.getTexture(id);
+                if (previous instanceof AbstractTexture previousTexture) {
+                    previousTexture.deleteGlTexture();
+                } else {
+                    manager.deleteTexture(id);
+                }
             }
             if (manager.loadTexture(id, texture)) {
                 ownsGlTexture.add(id);

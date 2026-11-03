@@ -143,15 +143,23 @@ public class ExtendedAuthModels implements IExtendedEntityProperties {
      */
     @Override
     public void loadNBTData(NBTTagCompound compound) {
-        if (compound.hasKey(EXT_PROP_NAME)) {
-            NBTTagList listTag = (NBTTagList) compound.getTag(EXT_PROP_NAME);
-            this.authModels.clear();
-            for (int i = 0; i < listTag.tagCount(); i++) {
-                try {
-                    authModels.add(new ResourceLocation(listTag.getStringTagAt(i)));
-                } catch (Exception e) {
-                    FMLLog.warning("[ysmu] Skipping an unreadable Authorized Model entry at index " + i);
-                }
+        if (!compound.hasKey(EXT_PROP_NAME)) {
+            return;
+        }
+        // A save written by a build that stored something else under this name must not brick the login: Forge
+        // catches a Throwable thrown here and logs it, but the table would then stay empty and overwrite the stored
+        // data on the next save, i.e. silently lose every grant. Upstream's read is equally defensive
+        // (AuthModelsCapability.java:50-58 drops only the entries it cannot parse).
+        if (!(compound.getTag(EXT_PROP_NAME) instanceof NBTTagList listTag)) {
+            FMLLog.warning("[ysmu] Ignoring Authorized Model save data that is not a string list");
+            return;
+        }
+        this.authModels.clear();
+        for (int i = 0; i < listTag.tagCount(); i++) {
+            try {
+                authModels.add(new ResourceLocation(listTag.getStringTagAt(i)));
+            } catch (Exception e) {
+                FMLLog.warning("[ysmu] Skipping an unreadable Authorized Model entry at index " + i);
             }
         }
     }

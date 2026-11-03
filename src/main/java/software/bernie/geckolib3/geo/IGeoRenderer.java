@@ -95,28 +95,35 @@ public interface IGeoRenderer<T> {
         }
         GL11.glEnable(GL11.GL_TEXTURE_2D);
         renderEarly(model, animatable, partialTicks, red, green, blue, alpha);
-
-        renderLate(model, animatable, partialTicks, red, green, blue, alpha);
-        Tessellator tess = Tessellator.instance;
-        // BufferBuilder builder = Tessellator.instance.getBuffer();
-
-        // builder.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
-        tess.startDrawing(GL11.GL_QUADS);// , DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
-        MaterialDrawSession session =
-            MaterialDrawSession.begin(
-                model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
+        // renderEarly pushes onto the shared static MATRIX_STACK and renderAfter pops it, so the pair has to be
+        // balanced on every path. The draw body used to sit outside this try/finally, and a throw from it (the
+        // tessellator's own flush, a material drain, an Error from a bone) skipped the pop: one leaked frame per
+        // failure, and because the stack is process-static every later model rendered with a wrong transform until
+        // the stack grew into its MAX_DEPTH guard. renderRecursively already brackets each bone this way for the
+        // same reason; this is the same bracket one level up.
         try {
-            for (GeoBone group : model.topLevelBones) {
-                renderRecursively(tess, animatable, group, red, green, blue, alpha);
+            renderLate(model, animatable, partialTicks, red, green, blue, alpha);
+            Tessellator tess = Tessellator.instance;
+            // BufferBuilder builder = Tessellator.instance.getBuffer();
+
+            // builder.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
+            tess.startDrawing(GL11.GL_QUADS);// , DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL);
+            MaterialDrawSession session =
+                MaterialDrawSession.begin(
+                    model.properties != null && Boolean.TRUE.equals(model.properties.getForceCulling()), type);
+            try {
+                for (GeoBone group : model.topLevelBones) {
+                    renderRecursively(tess, animatable, group, red, green, blue, alpha);
+                }
+            } finally {
+                session.close(tess);
             }
+
+            software.bernie.geckolib3.util.GeoStats.noteFlush();
+            software.bernie.geckolib3.util.TessellatorBufferKeep.draw(Tessellator.instance);
         } finally {
-            session.close(tess);
+            renderAfter(model, animatable, partialTicks, red, green, blue, alpha);
         }
-
-        software.bernie.geckolib3.util.GeoStats.noteFlush();
-        software.bernie.geckolib3.util.TessellatorBufferKeep.draw(Tessellator.instance);
-
-        renderAfter(model, animatable, partialTicks, red, green, blue, alpha);
         // GlStateManager.disableRescaleNormal();
         // Restores the 1.7.10 baseline the vanilla draws after this one expect: no blend, alpha test on, culling on.
         // The alpha test is part of that baseline rather than of this draw: Minecraft enables it once at startup

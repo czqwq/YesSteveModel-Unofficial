@@ -3,6 +3,7 @@ package com.fox.ysmu.data;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 
 import javax.annotation.Nullable;
 
@@ -25,6 +26,12 @@ import net.minecraft.util.ResourceLocation;
  * id travels with the spawn packet and is identical on both sides. Entity ids are allocated from one JVM-wide counter
  * and never reused, so a stale entry can never point at a different entity - which is also why entries are not pruned
  * on dismount or death: the model is meant to outlive both.
+ *
+ * <p><b>The one removal point is the entity ceasing to exist.</b> Upstream's state lives on the entity, so it is
+ * collected with it; this static table would otherwise keep one entry per vehicle ever mounted for the server's whole
+ * uptime. {@link #retainAll} is the same "no longer exists in any loaded world, after a grace period" prune
+ * {@link NPCData#retainAll} performs, and both are driven from the single server-tick prune in
+ * {@code event/CommonEventHandler}.
  *
  * <p>The value carries the owner as well, because upstream needs it twice more: a client that starts tracking the
  * vehicle is resent the state ({@code EntityTrackerEntry:456} → {@code PlayerEvent.StartTracking}), and when the owner
@@ -57,6 +64,8 @@ public final class VehicleModelStates {
     }
 
     private static final Map<Integer, State> DATA = new ConcurrentHashMap<>();
+    /** entityId -> last write time in milliseconds, for {@link #retainAll}'s grace window. */
+    private static final Map<Integer, Long> TOUCHED = new ConcurrentHashMap<>();
 
     private VehicleModelStates() {}
 
@@ -65,6 +74,7 @@ public final class VehicleModelStates {
             return;
         }
         DATA.put(entityId, new State(modelId, ownerId));
+        TOUCHED.put(entityId, System.currentTimeMillis());
     }
 
     public static void put(Entity vehicle, ResourceLocation modelId, @Nullable UUID ownerId) {
@@ -89,13 +99,43 @@ public final class VehicleModelStates {
 
     public static void remove(int entityId) {
         DATA.remove(entityId);
+        TOUCHED.remove(entityId);
     }
 
     public static void clear() {
         DATA.clear();
+        TOUCHED.clear();
     }
 
     public static int size() {
         return DATA.size();
+    }
+
+    /**
+     * Drops entries whose entity no longer exists in any loaded world, the same prune {@link NPCData#retainAll}
+     * performs for the NPC override table and for the same reason: a static, entity-id-keyed table has no lifetime
+     * tied to the entity, so the server tick has to supply one.
+     *
+     * @param now         current time in milliseconds
+     * @param alive       tests whether an entity id still exists in some loaded world
+     * @param graceMillis how long an untracked entry is protected from pruning, so a temporarily chunk-unloaded
+     *                    vehicle does not lose the model it is meant to keep
+     * @return the number of entries dropped
+     */
+    public static int retainAll(long now, IntPredicate alive, long graceMillis) {
+        int removed = 0;
+        for (Integer entityId : DATA.keySet()) {
+            Long touched = TOUCHED.get(entityId);
+            if (touched != null && now - touched < graceMillis) {
+                continue;
+            }
+            if (alive == null || !alive.test(entityId)) {
+                if (DATA.remove(entityId) != null) {
+                    removed++;
+                }
+                TOUCHED.remove(entityId);
+            }
+        }
+        return removed;
     }
 }

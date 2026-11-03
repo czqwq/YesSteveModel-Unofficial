@@ -13,6 +13,14 @@ public class Config {
     // General Config
     public static boolean DISCLAIMER_SHOW = true;
     public static boolean PRINT_ANIMATION_ROULETTE_MSG = true;
+    /**
+     * 模型动画音效的音量百分比（0-100，默认 100）。上游 {@code ClientConfig.SOUND_VOLUME}
+     * （{@code config/ClientConfig.java:16,61}，默认 100）在 {@code MinecraftSoundInstance.java:25} 把它乘进每条
+     * 自定义音效的音量（{@code configuredVolume * SOUND_VOLUME / 100}）；本仓的落点是
+     * {@code YSMSoundManager#volumeScale()}，由 {@code MolangSoundPlayback} 与
+     * {@code YSMSoundManager} 的各条播放路径共同乘入，另有设置页滑条（{@code ConfigScreen}）写回它。
+     */
+    public static double SOUND_VOLUME = 100.0;
     public static boolean DISABLE_SELF_MODEL = false;
     public static boolean DISABLE_OTHER_MODEL = false;
     public static boolean DISABLE_SELF_HANDS = false;
@@ -72,17 +80,6 @@ public class Config {
     public static int PLAYER_POS_Y = 10;
     public static double PLAYER_SCALE = 40.0;
     public static double PLAYER_YAW_OFFSET = 5.0;
-    /**
-     * Swap the roulette's config panel and preview sides.
-     * <p>
-     * Declared here and exposed as the "swap_config_sides" checkbox on the options screen
-     * ({@code ConfigScreen}), but this port has <b>no consumer</b>: its {@code AnimationRouletteScreen} is a
-     * ~240-line radial fan with neither a config panel nor a 3D preview - a model's own settings live in
-     * {@code ModelConfigScreen}, a separate screen. The reference's ~914-line wheel is what has both halves
-     * (its {@code AnimationRouletteScreen.java:178}, {@code :196}, {@code :270}, {@code :487}, {@code :719}).
-     * Carried and recorded rather than given an invented second meaning; see the task-9 report for the owner.
-     */
-    public static boolean SWAP_CONFIG_SIDES = false;
 
     /** HUD paperdoll follow mode: 0 = vanilla (current), 1 = vanilla smooth, 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock). */
     public static final int HUD_FOLLOW_VANILLA = 0;
@@ -242,12 +239,6 @@ public class Config {
     // External wearable rendering (AdventureBackpack2 backpacks/copter/jetpack etc.)
     public static boolean RENDER_WEARABLE = true;
     public static double WEARABLE_RENDER_SCALE = 0.8;
-
-    // Direct Buffer watchdog
-    /** Safety-net: periodically check Direct Buffer usage and GC if over threshold */
-    public static boolean ENABLE_DIRECT_BUFFER_WATCHDOG = true;
-    /** Direct Buffer GC trigger threshold in MB */
-    public static int DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = 1024;
 
     // Texture VRAM config
     /** Target texture dimension (px) uploaded to VRAM; 0 = disabled (full resolution).
@@ -437,6 +428,8 @@ public class Config {
         // General config values
         DISCLAIMER_SHOW = syncBoolean("DisclaimerShow", Configuration.CATEGORY_GENERAL, DISCLAIMER_SHOW, "Whether to display disclaimer GUI", load);
         PRINT_ANIMATION_ROULETTE_MSG = syncBoolean("PrintAnimationRouletteMsg", Configuration.CATEGORY_GENERAL, PRINT_ANIMATION_ROULETTE_MSG, "Whether to print animation roulette play message", load);
+        // Upstream ClientConfig.SOUND_VOLUME (config/ClientConfig.java:16,61); applied in client/audio.
+        SOUND_VOLUME = syncDouble("SoundVolume", "gui", SOUND_VOLUME, "Volume of the models' animation sounds in percent (0-100, 100 = full). Applied on top of the vanilla PLAYERS sound category, like upstream's ClientConfig.SoundVolume.", 0.0, 100.0, load);
         DISABLE_SELF_MODEL = syncBoolean("DisableSelfModel", Configuration.CATEGORY_GENERAL, DISABLE_SELF_MODEL, "Prevents rendering of self player's model", load);
         DISABLE_OTHER_MODEL = syncBoolean("DisableOtherModel", Configuration.CATEGORY_GENERAL, DISABLE_OTHER_MODEL, "Prevents rendering of other player's model", load);
         DISABLE_SELF_HANDS = syncBoolean("DisableSelfHands", Configuration.CATEGORY_GENERAL, DISABLE_SELF_HANDS, "Prevents rendering of self player's hand", load);
@@ -456,7 +449,6 @@ public class Config {
         PLAYER_POS_Y = syncInt("PlayerPosY", "extra_player_render", PLAYER_POS_Y, "Player position y in screen", 0, Integer.MAX_VALUE, load);
         PLAYER_SCALE = syncDouble("PlayerScale", "extra_player_render", PLAYER_SCALE, "Player scale in screen", 8.0, 360.0, load);
         PLAYER_YAW_OFFSET = syncDouble("PlayerYawOffset", "extra_player_render", PLAYER_YAW_OFFSET, "Player yaw offset in screen", load);
-        SWAP_CONFIG_SIDES = syncBoolean("SwapConfigSides", "extra_player_render", SWAP_CONFIG_SIDES, "Swap wheel config panel and preview sides", load);
         HUD_FOLLOW_MODE = syncInt("HudFollowMode", "extra_player_render", HUD_FOLLOW_MODE, "HUD paperdoll follow mode: 0 = vanilla, 1 = vanilla smooth (smoothed offset, no abrupt snap), 2 = ysm (body locked, head follows view), 3 = ysm smooth (body locked, head references real body yaw, no auto-center, fast-turn immune without lock, default)", HUD_FOLLOW_VANILLA, HUD_FOLLOW_YSM_SMOOTH, load);
 
         // GUI config values
@@ -506,8 +498,6 @@ public class Config {
         // Model sync config values
         RENDER_WEARABLE = syncBoolean("RenderWearable", "compatibility", RENDER_WEARABLE, "Whether to render external wearable models (e.g. AdventureBackpack2 backpack/copter/jetpack) on YSM model's back", load);
         WEARABLE_RENDER_SCALE = syncDouble("WearableRenderScale", "compatibility", WEARABLE_RENDER_SCALE, "Scale factor for wearable model rendering (1.0 = default)", 0.1, 5.0, load);
-        ENABLE_DIRECT_BUFFER_WATCHDOG = syncBoolean("EnableDirectBufferWatchdog", "watchdog", ENABLE_DIRECT_BUFFER_WATCHDOG, "Safety-net: periodically check Direct Buffer usage and trigger GC when over threshold", load);
-        DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB = syncInt("DirectBufferWatchdogThreshold", "watchdog", DIRECT_BUFFER_WATCHDOG_THRESHOLD_MB, "Direct Buffer GC trigger threshold in MB", 128, 8192, load);
         // `EnableSyncProtocol` (the reference branch's name for the OpenYSM channel switch) is deliberately absent:
         // see `ENABLE_OPEN_YSM_SYNC_PROTOCOL`'s javadoc.
         MOLANG_CONTROL_SCRIPTS = syncBoolean("MolangControlScripts", "animation", MOLANG_CONTROL_SCRIPTS, "Execute @player_ctrl_<slot>.molang animation-control scripts every frame (wiki: molang/script). When disabled only the statically extracted state->animation mapping is used", load);

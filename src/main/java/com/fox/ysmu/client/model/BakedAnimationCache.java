@@ -59,6 +59,8 @@ public final class BakedAnimationCache {
     /** Bump when a cached animation's meaning changes without the mod version changing (engine-side edits). */
     public static final int BAKE_FORMAT = 1;
     private static final String EXTENSION = ".anim";
+    /** Infix of the half-written file {@link #store} moves into place; see {@link #pruneTemporaryFiles}. */
+    private static final String TEMPORARY_MARKER = ".tmp-";
     private static final String BAKED_DIR = "baked_animations";
     private static final int MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
     private static final long DEFAULT_MAX_BYTES = 256L * 1024 * 1024;
@@ -132,7 +134,7 @@ public final class BakedAnimationCache {
         try {
             Path directory = target.getParent();
             Files.createDirectories(directory);
-            Path temporary = directory.resolve(target.getFileName() + ".tmp-" + UUID.randomUUID());
+            Path temporary = directory.resolve(target.getFileName() + TEMPORARY_MARKER + UUID.randomUUID());
             try {
                 writeFile(temporary, identity, animationKey, inputDigest, payload);
                 try {
@@ -332,9 +334,39 @@ public final class BakedAnimationCache {
             for (Path directory : stale) {
                 deleteRecursively(directory);
             }
+            pruneTemporaryFiles();
             enforceBudget();
         } finally {
             LOCK.unlock();
+        }
+    }
+
+    /**
+     * Deletes the half-written temporary files an interrupted write left behind; see
+     * {@code BakedGeometryCache#pruneTemporaryFiles()} for the reason and the shape.
+     */
+    private static void pruneTemporaryFiles() {
+        Path current = root();
+        if (!Files.isDirectory(current)) {
+            return;
+        }
+        try (DirectoryStream<Path> directories = Files.newDirectoryStream(current)) {
+            for (Path directory : directories) {
+                if (!Files.isDirectory(directory)) {
+                    continue;
+                }
+                try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+                    for (Path entry : entries) {
+                        if (entry.getFileName()
+                            .toString()
+                            .contains(TEMPORARY_MARKER)) {
+                            Files.deleteIfExists(entry);
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            ysmu.LOG.warn("YSM client could not prune the animation cache's temporary files", e);
         }
     }
 

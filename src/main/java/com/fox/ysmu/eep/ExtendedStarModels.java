@@ -82,20 +82,29 @@ public class ExtendedStarModels implements IExtendedEntityProperties {
     }
 
     /**
-     * 从 NBT 读取数据
+     * 从 NBT 读取数据。
+     * <p>
+     * A save written by a build that stored something else under this name must not brick the login: Forge catches a
+     * Throwable thrown here, but the table would then stay empty and overwrite the stored data on the next save. The
+     * element read itself is already defensive for the same reason ({@code getStringTagAt} answers junk rather than
+     * throwing for a non-string element - see {@link ExtendedAuthModels#loadNBTData}).
      */
     @Override
     public void loadNBTData(NBTTagCompound compound) {
-        if (compound.hasKey(EXT_PROP_NAME)) {
-            NBTTagList listTag = (NBTTagList) compound.getTag(EXT_PROP_NAME);
-            this.starModels.clear();
-            for (int i = 0; i < listTag.tagCount(); i++) {
-                String modelIdStr = listTag.getStringTagAt(i);
-                try {
-                    starModels.add(new ResourceLocation(modelIdStr));
-                } catch (Exception e) {
-                    FMLLog.warning("[ysmu] Failed to load Starred Model ResourceLocation from NBT: " + modelIdStr);
-                }
+        if (!compound.hasKey(EXT_PROP_NAME)) {
+            return;
+        }
+        if (!(compound.getTag(EXT_PROP_NAME) instanceof NBTTagList listTag)) {
+            FMLLog.warning("[ysmu] Ignoring Starred Model save data that is not a string list");
+            return;
+        }
+        this.starModels.clear();
+        for (int i = 0; i < listTag.tagCount(); i++) {
+            String modelIdStr = listTag.getStringTagAt(i);
+            try {
+                starModels.add(new ResourceLocation(modelIdStr));
+            } catch (Exception e) {
+                FMLLog.warning("[ysmu] Failed to load Starred Model ResourceLocation from NBT: " + modelIdStr);
             }
         }
     }

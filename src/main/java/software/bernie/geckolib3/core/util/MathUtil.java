@@ -40,6 +40,23 @@ public class MathUtil {
         if (easingType == EasingType.Linear || easingType == EasingType.NONE) {
             return lerpValues(percent, animationPoint.animationStartValue, animationPoint.animationEndValue);
         }
+        // YSMU perf: Catmullrom 是随包动画里唯一实际出现的缓动（`"lerp_mode": "catmullrom"`，
+        // 语料里 397k 处），而它是三种"不需要 easingArgs"的曲线之一 —— getEasingFuncImpl 对
+        // 它返回的就是 in(catmullRom)，即原样调用下面这个双参函数。EasingManager.ease 那一路
+        // 每次调用要分配 EasingFunctionArgs + 一个绑定方法引用（Memoizer 里的 function::apply）
+        // + 两个 Double（Function<Double,Double> 的拆装箱），再做一次 ConcurrentHashMap 查找；
+        // 一个 70 骨骼的模型每帧要过 ~630 次这条路径，是渲染线程上的主要分配点之一。
+        // 结果与走 ease() 完全一致（Catmullrom 忽略 easingArgs，见 getEasingFuncImpl），只是不再装箱。
+        if (easingType == EasingType.Catmullrom) {
+            if (animationPoint.hasControlPoints) {
+                // 关键帧段：与上游同一个四控制点样条，见下面 catmullRom 重载的注释。
+                return (float) catmullRom(percent, animationPoint.controlLeft, animationPoint.animationStartValue,
+                    animationPoint.animationEndValue, animationPoint.controlRight);
+            }
+            // 非关键帧段（transition / concurrent fold 建的点没有相邻关键帧）：保持原来的标量缓动。
+            return lerpValues(EasingManager.catmullRom(percent), animationPoint.animationStartValue,
+                animationPoint.animationEndValue);
+        }
         double ease = EasingManager.ease(
             percent,
             easingType,
@@ -63,5 +80,32 @@ public class MathUtil {
 
     public static double lerp(double pct, double start, double end) {
         return start + pct * (end - start);
+    }
+
+    /**
+     * A Catmull-Rom spline over four control points, exactly upstream's formula.
+     *
+     * <p>Copied from {@code tmp/YesSteveModel-dev-1.20 .../geckolib3/core/util/MathUtil.java:71-77}, which is the
+     * curve {@code CatmullRomKeyFrame#getLerpPoint} uses ({@code .../core/keyframe/bone/CatmullRomKeyFrame.java:22-34}):
+     * <pre>
+     *   v0 = (end - left) * 0.5          // tangent at begin
+     *   v1 = (right - begin) * 0.5       // tangent at end
+     *   f(t) = (2*begin - 2*end + v0 + v1)*t^3 + (-3*begin + 3*end - 2*v0 - v1)*t^2 + v0*t + begin
+     * </pre>
+     * Endpoint check: {@code t = 0} collapses to {@code begin}; {@code t = 1} gives
+     * {@code 2b - 2e + v0 + v1 - 3b + 3e - 2v0 - v1 + v0 + b = e}. Both endpoints are therefore still exact, and
+     * two adjacent segments share the same tangent at the keyframe between them (that continuity is the whole
+     * point of the curve - the scalar ease this engine used before stops at every keyframe).</p>
+     *
+     * <p>{@code EasingManager.catmullRom} is a different thing and stays: it shapes a scalar 0..1 progress with
+     * virtual control points, which is all a segment without neighbouring values can do.</p>
+     */
+    public static double catmullRom(double percent, double left, double begin, double end, double right) {
+        double v0 = (end - left) * 0.5;
+        double v1 = (right - begin) * 0.5;
+        double t2 = percent * percent;
+        double t3 = percent * t2;
+        return (2 * begin - 2 * end + v0 + v1) * t3 + (-3 * begin + 3 * end - 2 * v0 - v1) * t2 + v0 * percent
+            + begin;
     }
 }

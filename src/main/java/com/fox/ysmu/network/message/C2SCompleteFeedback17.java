@@ -43,12 +43,24 @@ public class C2SCompleteFeedback17 implements IMessage {
 
     @Override
     public void fromBytes(ByteBuf buf) {
-        this.sessionId = buf.readInt();
-        this.status = buf.readInt();
-        this.loaded = buf.readInt();
-        this.downloaded = buf.readInt();
-        this.cacheHits = buf.readInt();
-        this.message = ByteBufUtils.readUTF8String(buf);
+        // N-10: a decode-time exception would be a disconnect; a truncated feedback is dropped (all-zero fields,
+        // which the session-id check then rejects) instead.
+        try {
+            this.sessionId = buf.readInt();
+            this.status = buf.readInt();
+            this.loaded = buf.readInt();
+            this.downloaded = buf.readInt();
+            this.cacheHits = buf.readInt();
+            this.message = ByteBufUtils.readUTF8String(buf);
+        } catch (RuntimeException e) {
+            ysmu.LOG.warn("Ignoring truncated YSM sync feedback: {}", e.toString());
+            this.sessionId = 0;
+            this.status = 0;
+            this.loaded = 0;
+            this.downloaded = 0;
+            this.cacheHits = 0;
+            this.message = "";
+        }
     }
 
     @Override

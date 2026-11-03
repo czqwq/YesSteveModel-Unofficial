@@ -171,8 +171,9 @@ public final class MolangSoundPlayback {
         }
         float effectiveVolume() {
             // Master gain is already applied by SoundSystem (SoundManager:119,148-151).
-            // Upstream MinecraftSoundInstance:16 uses PLAYERS; 1.7.10 also has that category.
-            return Math.max(0f, Math.min(1f, configuredVolume * Minecraft.getMinecraft().gameSettings
+            // Upstream MinecraftSoundInstance:16 uses PLAYERS; 1.7.10 also has that category. The configured
+            // model-sound percentage multiplies on top, exactly as upstream MinecraftSoundInstance:25 does.
+            return Math.max(0f, Math.min(1f, configuredVolume * YSMSoundManager.volumeScale() * Minecraft.getMinecraft().gameSettings
                 .getSoundLevel(net.minecraft.client.audio.SoundCategory.PLAYERS)));
         }
         void tick() {
@@ -212,7 +213,8 @@ public final class MolangSoundPlayback {
         Vanilla(ResourceLocation name, Entity owner, boolean ui, boolean loop, float volume, float pitch) {
             super(name);
             this.owner = owner; this.ui = ui; this.repeat = loop;
-            this.volume = volume; this.field_147663_c = pitch;
+            // Configured model-sound percentage on top of the PLAYERS category (upstream MinecraftSoundInstance:25).
+            this.volume = volume * YSMSoundManager.volumeScale(); this.field_147663_c = pitch;
             if (ui) this.field_147666_i = ISound.AttenuationType.NONE;
             update();
         }

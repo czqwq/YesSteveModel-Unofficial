@@ -39,6 +39,33 @@ public class AnimationPoint {
      */
     public KeyFrame<IValue> keyframe;
 
+    // ---- catmullrom outer control points ----
+
+    /**
+     * The two control points a Catmull-Rom segment needs <em>outside</em> its own endpoints: the value of the
+     * keyframe before the segment's start ({@code controlLeft}) and of the keyframe after its end
+     * ({@code controlRight}).
+     *
+     * <p>Upstream keeps them on the keyframe object itself: {@code CatmullRomKeyFrame} holds
+     * {@code leftPoint}/{@code beginPoint}/{@code endPoint}/{@code rightPoint} and interpolates with
+     * {@code MathUtil.catmullRom(percent, left, begin, end, right)}
+     * ({@code tmp/YesSteveModel-dev-1.20 .../geckolib3/core/keyframe/bone/CatmullRomKeyFrame.java:13-34};
+     * {@code .../core/util/MathUtil.java:71-77}), picking them as
+     * {@code keyFrames[max(0,i-2)].post} / {@code [i-1].post} / {@code [i].pre} / {@code [min(size-1,i+1)].pre}
+     * ({@code .../core/keyframe/bone/EasingType.java:45-55}). This engine has one keyframe type for every easing
+     * mode, so the two outer values ride on the point that carries the segment, and they are only read when the
+     * resolved easing is {@link software.bernie.geckolib3.core.easing.EasingType#Catmullrom}.</p>
+     *
+     * <p>{@link #obtain} leaves {@link #hasControlPoints} false, so every other easing mode - and every point
+     * built for a transition or for the concurrent fold, which carry no segment at all - behaves exactly as
+     * before; the two extra doubles live in an object that is pooled anyway.</p>
+     */
+    public double controlLeft;
+    /** See {@link #controlLeft}. */
+    public double controlRight;
+    /** Whether {@link #controlLeft}/{@link #controlRight} were filled in for a catmullrom segment. */
+    public boolean hasControlPoints;
+
     public AnimationPoint() {}
 
     public AnimationPoint(KeyFrame<IValue> keyframe, double currentTick, double animationEndTick,
@@ -67,20 +94,37 @@ public class AnimationPoint {
     /** Obtain an AnimationPoint from the pool, or create new if pool is empty. */
     public static AnimationPoint obtain(KeyFrame<IValue> keyframe, double currentTick,
         double animationEndTick, double animationStartValue, double animationEndValue) {
-        AnimationPoint p;
-        synchronized (POOL) {
-            if (!POOL.isEmpty()) {
-                p = POOL.remove(POOL.size() - 1);
-            } else {
-                p = new AnimationPoint();
-            }
-        }
+        AnimationPoint p = take();
         p.keyframe = keyframe;
         p.currentTick = currentTick;
         p.animationEndTick = animationEndTick;
         p.animationStartValue = animationStartValue;
         p.animationEndValue = animationEndValue;
+        p.hasControlPoints = false;
         return p;
+    }
+
+    /**
+     * Obtain a point for a Catmull-Rom segment: as {@link #obtain}, plus the two outer control values; see
+     * {@link #controlLeft}.
+     */
+    public static AnimationPoint obtainWithControls(KeyFrame<IValue> keyframe, double currentTick,
+        double animationEndTick, double animationStartValue, double animationEndValue, double controlLeft,
+        double controlRight) {
+        AnimationPoint p = obtain(keyframe, currentTick, animationEndTick, animationStartValue, animationEndValue);
+        p.controlLeft = controlLeft;
+        p.controlRight = controlRight;
+        p.hasControlPoints = true;
+        return p;
+    }
+
+    private static AnimationPoint take() {
+        synchronized (POOL) {
+            if (!POOL.isEmpty()) {
+                return POOL.remove(POOL.size() - 1);
+            }
+        }
+        return new AnimationPoint();
     }
 
     /** Return this AnimationPoint to the pool for reuse. */

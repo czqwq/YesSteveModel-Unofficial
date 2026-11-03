@@ -479,6 +479,12 @@ public final class OpenYsmModelSyncClient {
             // call, moved here because this port has no method that sees a parsed RawYsmModel at registration.
             com.fox.ysmu.client.audio.YSMSoundManager
                 .registerModelSounds(mainModelId, raw);
+            // The client task below only needs the pack's function files out of the parsed model. Capturing that map
+            // rather than `raw` matters because the task can wait for a client tick: `raw` is the whole parsed payload
+            // (geometry, animation, texture and sound structures), and one registration is queued per synced model, so
+            // holding `raw` there would keep a payload-sized graph alive per queued model. See parseAndRegisterModel's
+            // caller, which loops over the whole catalog's cache hits.
+            Map<String, RawYsmModel.RawDataFile> functionFiles = raw.functionFiles;
             long generation = ClientModelManager.currentGeneration();
             Minecraft.getMinecraft()
                 .func_152344_a(() -> {
@@ -510,7 +516,7 @@ public final class OpenYsmModelSyncClient {
                     }
                     // The pack's functions/*.molang bodies travel in this same payload; register them so the model's
                     // own scripts (fn.<name>) can be evaluated while it renders.
-                    PackUserFunctions.register(modelId, raw.functionFiles);
+                    PackUserFunctions.register(modelId, functionFiles);
                     // The same bodies are also what AnimationManager reads as *animation control scripts*
                     // (Config.MOLANG_CONTROL_SCRIPTS -> AnimationManager.applyControlScript ->
                     // AnimationControlScripts.evaluate -> MolangScriptRegistry.controlScript), and until this
@@ -526,7 +532,7 @@ public final class OpenYsmModelSyncClient {
                     Map<String, String> scriptFunctions = new LinkedHashMap<>();
                     Map<String, List<String>> scriptEvents = new LinkedHashMap<>();
                     Map<String, String> scriptControls = new LinkedHashMap<>();
-                    for (Map.Entry<String, RawYsmModel.RawDataFile> functionFile : raw.functionFiles.entrySet()) {
+                    for (Map.Entry<String, RawYsmModel.RawDataFile> functionFile : functionFiles.entrySet()) {
                         RawYsmModel.RawDataFile functionData = functionFile.getValue();
                         if (functionData == null || functionData.data == null) {
                             continue;

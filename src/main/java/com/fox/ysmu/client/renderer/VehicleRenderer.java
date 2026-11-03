@@ -95,9 +95,10 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * {@code Render#doRenderShadowAndFire}, which the dispatcher calls after the redirected call
  * ({@code RenderManager.java:309}).
  *
- * <p>Animation is not driven yet: the geometry is drawn at its authored rest pose. The vehicle animation sets are
- * forwarded and registered (see {@code RawYsmModelAdapter} and {@code ClientModelManager#registerAnimations}), so
- * adding a vehicle controller runtime is a renderer-only change later.
+ * <p>Animation is driven by hand: a vehicle is not an {@code IAnimatable}, so {@link #tickAnimation} selects the
+ * active clips ({@link VehicleControllerRuntime}) and samples their keyframes onto the bones before the draw, exactly
+ * as the projectile path does. The vehicle animation sets are forwarded and registered (see
+ * {@code RawYsmModelAdapter} and {@code ClientModelManager#registerAnimations}).
  */
 public final class VehicleRenderer {
 
@@ -236,8 +237,8 @@ public final class VehicleRenderer {
         // `!ClientConfig.DISABLE_VEHICLE_MODEL.get()`, so with the switch on the entity is left to its vanilla
         // renderer. This port's replacement is entered from MixinRenderManager, so that entry is where the same
         // decision belongs; a predicate there would also have to cover the arrow path, which has its own switch.
-        // Upstream's other read, the animation ticker (AnimationParallelTicker.java:64-66), has no counterpart here -
-        // this renderer drives no animation yet (see the class javadoc).
+        // Upstream's other read, the animation ticker (AnimationParallelTicker.java:64-66), is the counterpart of
+        // {@link #tickAnimation} below, which is reached further down this same entry.
         if (Config.DISABLE_VEHICLE_MODEL) {
             return false;
         }
@@ -273,6 +274,16 @@ public final class VehicleRenderer {
         if (match == null) {
             warnOnce("no-vehicle-type", "no vehicle entry among {} for {} matches {}", declared, modelId, candidates);
             return false;
+        }
+
+        // Upstream's own guard, first statement of its vehicle renderer: an entity invisible to the local player is
+        // not drawn at all (CustomVehicleRenderer.java:22). Its dispatcher wrapper has already suppressed the vanilla
+        // renderer by then, so the answer is "claimed, nothing drawn" - which is also what vanilla does for an entity
+        // invisible to this player. Reachable here for a living vehicle: an invisible horse or pig still carries a
+        // YSM model. A boat or minecart is never invisible, so this changes nothing for them.
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.thePlayer == null || entity.isInvisibleToPlayer(mc.thePlayer)) {
+            return true;
         }
 
         ResourceLocation geoId = ModelIdUtil.getSubModelId(modelId, "vehicle_" + match);

@@ -34,10 +34,29 @@ public class YSMFolderDeserializer implements AutoCloseable {
     private static final String ARM_ANIMATION_JSON = "arm.animation.json";
     private static final String EXTRA_ANIMATION_JSON = "extra.animation.json";
 
+    /**
+     * The resource directories a manifest may rename with {@code files.sound_path} / {@code files.function_path} /
+     * {@code files.language_path} ({@code format/parser/RawModelAssembler.java:294-306}: {@code soundPath} defaults to
+     * {@code "sounds"} and may also be declared on the deprecated {@code files.player.sound_path}, {@code functionPath}
+     * to {@code "functions"}, {@code languagePath} to {@code "lang"}). Upstream collects each kind from its declared
+     * root only, recursively, and names an entry by its path under that root without the extension
+     * ({@code RawModelSource.collectFileNames:81-108} -> {@code writeSounds:422-461} / {@code writeFunctions:463-473} /
+     * {@code writeLanguageFiles:475-489}).
+     */
+    private static final String DEFAULT_SOUND_PATH = "sounds";
+    private static final String DEFAULT_FUNCTION_PATH = "functions";
+    private static final String DEFAULT_LANGUAGE_PATH = "lang";
+
     private final Map<String, String> readFilesMd5Map = new TreeMap<>();
     private final Path rootPath;
     private final RawYsmModel model = new RawYsmModel();
     private String finalFolderHash = "";
+    /** See {@link #DEFAULT_SOUND_PATH}; replaced by the manifest's declaration when it has one. */
+    private String soundPath = DEFAULT_SOUND_PATH;
+    /** See {@link #DEFAULT_FUNCTION_PATH}. */
+    private String functionPath = DEFAULT_FUNCTION_PATH;
+    /** See {@link #DEFAULT_LANGUAGE_PATH}. */
+    private String languagePath = DEFAULT_LANGUAGE_PATH;
 
     public YSMFolderDeserializer(Path sourcePath) throws IOException {
         if (sourcePath == null || !Files.exists(sourcePath)) {
@@ -115,6 +134,7 @@ public class YSMFolderDeserializer implements AutoCloseable {
         }
 
         JsonObject files = ysmJson.getAsJsonObject("files");
+        parseResourcePaths(files);
         if (hasObject(files, "player")) {
             parseMainEntity(files.getAsJsonObject("player"));
         }
@@ -124,6 +144,48 @@ public class YSMFolderDeserializer implements AutoCloseable {
         if (files.has("projectiles")) {
             parseSubEntities(files.get("projectiles"), this.model.projectiles, "projectile");
         }
+    }
+
+    /**
+     * Reads the manifest's resource roots: {@code files.sound_path} (with the deprecated {@code files.player.sound_path}
+     * as its fallback), {@code files.function_path} and {@code files.language_path}. All three are optional and default
+     * to {@code sounds} / {@code functions} / {@code lang}, which is what upstream's
+     * {@code RawModelAssembler.writeCommonAssets:294-306} does with the same keys.
+     * <p>
+     * This used to be hard-coded in {@link #parseGlobalResources()}, so a pack that renamed one of the three
+     * directories had its sounds, {@code .molang} functions or language tables silently dropped - upstream parses and
+     * reads them. The declared path is normalised like every other resource path of the manifest, and a declaration
+     * that would escape the model directory is ignored (the model folder is the only readable root here).
+     */
+    private void parseResourcePaths(JsonObject files) {
+        String declaredSoundPath = getStr(files, "sound_path", "");
+        if (declaredSoundPath.isEmpty() && hasObject(files, "player")) {
+            declaredSoundPath = getStr(files.getAsJsonObject("player"), "sound_path", "");
+        }
+        this.soundPath = normalizeResourceRoot(declaredSoundPath, DEFAULT_SOUND_PATH);
+        this.functionPath = normalizeResourceRoot(getStr(files, "function_path", ""), DEFAULT_FUNCTION_PATH);
+        this.languagePath = normalizeResourceRoot(getStr(files, "language_path", ""), DEFAULT_LANGUAGE_PATH);
+    }
+
+    /**
+     * A manifest-declared resource root, or {@code defaultPath} when it is absent/blank or unusable. Usable means a
+     * relative path that stays inside the model directory: {@link #readResource(String)} reads relative to
+     * {@link #rootPath} and refuses to escape it, so a declaration like {@code ../sounds} is dropped here rather than
+     * turning every resource read into a silent miss.
+     */
+    private static String normalizeResourceRoot(String declared, String defaultPath) {
+        if (declared == null) {
+            return defaultPath;
+        }
+        String normalized = normalizeResourcePath(declared.trim());
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.isEmpty() || normalized.equals("..") || normalized.startsWith("../")
+            || normalized.contains("/../")) {
+            return defaultPath;
+        }
+        return normalized;
     }
 
     private void parseMetadata(JsonObject metaObj) throws IOException {
@@ -499,13 +561,30 @@ public class YSMFolderDeserializer implements AutoCloseable {
     /**
      * 把 ysm.json/main.json 里的一个 cube 烘焙成二进制格式使用的四边面列表。
      * 坐标约定与 {@code OpenYSM} 参考实现一致(位置除以 16，X 轴取反)。
+     *
+     * <p>{@code mirror} 在上游是<b>两个</b>不同的东西，不能合成一个布尔值
+     * （{@code tmp/YesSteveModel-dev-1.20/format/parser/GeoBuilder.java}）：
+     * <ul>
+     * <li><b>布局</b>：{@code mirroredLayout = boneMirror || cube.mirror}（{@code GeoBuilder.java:120}），决定每个方向
+     * 使用哪一组顶点序——镜像布局下 west/east 必然交换，up/down 只在逐面 uv 分支交换（{@code addPerFaceQuads:142-157}），
+     * box uv 分支不交换 up/down（{@code addBoxQuads:169-183}）；</li>
+     * <li><b>贴图与法线</b>：只跟 <b>cube 自己的</b> {@code mirror}（{@code cubeMirror}，{@code GeoBuilder.java:122,125}
+     * 传入、{@code GeoQuad} 的 {@code mirrorIn} 与 {@code CubeBuilder.addQuad:282-285} 消费），控制 u 方向是否翻转
+     * 以及法线 x 分量是否取反（{@code Direction.createNormal:251-253}）。</li>
+     * </ul>
+     * 修复前这里把二者合并成一个 {@code mirror}（且是“cube 覆盖 bone”而不是上游的“或”）：bone 声明 mirror、cube
+     * 未声明时，legacy 通道（原样转发 JSON，客户端引擎按上游语义渲染）与 OpenYSM 二进制通道（这里烘焙）会得到相反的
+     * 东/西、上/下面 UV 方向与法线符号；逐面 uv + cube 自身 mirror 的 up/down 面也少了一次顶点组交换。
      */
     private static RawYsmModel.RawCube parseCube(RawYsmModel.RawGeometry geometry, JsonObject cubeObj,
         float boneInflate, boolean boneMirror) {
         RawYsmModel.RawCube cube = new RawYsmModel.RawCube();
 
         float inflate = cubeObj.has("inflate") ? cubeObj.get("inflate").getAsFloat() : boneInflate;
-        boolean mirror = cubeObj.has("mirror") ? cubeObj.get("mirror").getAsBoolean() : boneMirror;
+        // Upstream's Bone.mirror and Cube.mirror both default to false and are OR-ed for the layout switch, while the
+        // uv/normal half reads only the cube's own flag (see this method's javadoc).
+        boolean cubeMirror = getBool(cubeObj, "mirror", false);
+        boolean mirroredLayout = boneMirror || cubeMirror;
 
         float[] origin = getFloatArray(cubeObj, "origin", 3);
         float[] size = getFloatArray(cubeObj, "size", 3);
@@ -527,36 +606,44 @@ public class YSMFolderDeserializer implements AutoCloseable {
             return cube;
         }
         JsonObject faceUvs;
+        boolean boxUv;
         if (uvElem.isJsonArray()) {
             JsonArray uvArray = uvElem.getAsJsonArray();
             float uvX = uvArray.size() > 0 ? uvArray.get(0).getAsFloat() : 0f;
             float uvY = uvArray.size() > 1 ? uvArray.get(1).getAsFloat() : 0f;
             faceUvs = createBoxUv(uvX, uvY, (float) Math.floor(size[0]), (float) Math.floor(size[1]),
                 (float) Math.floor(size[2]));
+            boxUv = true;
         } else if (uvElem.isJsonObject()) {
             faceUvs = uvElem.getAsJsonObject();
+            boxUv = false;
         } else {
             return cube;
         }
 
-        bakeFace(cube, faceUvs, "north", "north", mirror, x, y, z, width, height, depth, geometry, bake);
-        bakeFace(cube, faceUvs, "south", "south", mirror, x, y, z, width, height, depth, geometry, bake);
-        bakeFace(cube, faceUvs, "east", mirror ? "west" : "east", mirror, x, y, z, width, height, depth, geometry,
+        // Every face keeps its own uv data; the layout switch moves which corner group that direction is drawn on.
+        bakeFace(cube, faceUvs, "north", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
             bake);
-        bakeFace(cube, faceUvs, "west", mirror ? "east" : "west", mirror, x, y, z, width, height, depth, geometry,
+        bakeFace(cube, faceUvs, "south", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
             bake);
-        bakeFace(cube, faceUvs, "up", "up", mirror, x, y, z, width, height, depth, geometry, bake);
-        bakeFace(cube, faceUvs, "down", "down", mirror, x, y, z, width, height, depth, geometry, bake);
+        bakeFace(cube, faceUvs, "east", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
+            bake);
+        bakeFace(cube, faceUvs, "west", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
+            bake);
+        bakeFace(cube, faceUvs, "up", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
+            bake);
+        bakeFace(cube, faceUvs, "down", boxUv, mirroredLayout, cubeMirror, x, y, z, width, height, depth, geometry,
+            bake);
         return cube;
     }
 
-    private static void bakeFace(RawYsmModel.RawCube cube, JsonObject faceUvs, String faceType, String uvFaceName,
-        boolean mirror, float x, float y, float z, float width, float height, float depth,
+    private static void bakeFace(RawYsmModel.RawCube cube, JsonObject faceUvs, String faceType, boolean boxUv,
+        boolean mirroredLayout, boolean cubeMirror, float x, float y, float z, float width, float height, float depth,
         RawYsmModel.RawGeometry geometry, CubeBakeTransform bake) {
-        if (!hasObject(faceUvs, uvFaceName)) {
+        if (!hasObject(faceUvs, faceType)) {
             return;
         }
-        JsonObject faceData = faceUvs.getAsJsonObject(uvFaceName);
+        JsonObject faceData = faceUvs.getAsJsonObject(faceType);
         float[] uv = getFloatArray(faceData, "uv", 2);
         float[] uvSize = getFloatArray(faceData, "uv_size", 2);
 
@@ -566,7 +653,10 @@ public class YSMFolderDeserializer implements AutoCloseable {
         float v0 = uv[1] / textureHeight;
         float u1 = (uv[0] + uvSize[0]) / textureWidth;
         float v1 = (uv[1] + uvSize[1]) / textureHeight;
-        if (!mirror) {
+        // Upstream's GeoQuad: the horizontal uv order and the normal's x sign follow the cube's OWN mirror flag
+        // (GeoBuilder.java:282-285 `mirror ? {u1..} : {u2..}`, :251-253 `createNormal(boolean mirror)`), not the
+        // bone's. The layout switch below is what combines the two flags.
+        if (!cubeMirror) {
             float swap = u0;
             u0 = u1;
             u1 = swap;
@@ -593,6 +683,10 @@ public class YSMFolderDeserializer implements AutoCloseable {
                 rawNormal = new float[] { 0f, -1f, 0f };
                 break;
         }
+        if (cubeMirror) {
+            // GeoQuad flips only the x component of the direction normal when its mirrorIn is true.
+            rawNormal[0] = -rawNormal[0];
+        }
 
         float x1 = x / 16f;
         float x2 = (x + width) / 16f;
@@ -610,27 +704,8 @@ public class YSMFolderDeserializer implements AutoCloseable {
         float[] p7 = { x2, y2, z1 };
         float[] p8 = { x2, y2, z2 };
 
-        float[][] corners;
-        switch (faceType) {
-            case "west":
-                corners = new float[][] { p4, p3, p1, p2 };
-                break;
-            case "east":
-                corners = new float[][] { p7, p8, p6, p5 };
-                break;
-            case "north":
-                corners = new float[][] { p3, p7, p5, p1 };
-                break;
-            case "south":
-                corners = new float[][] { p8, p4, p2, p6 };
-                break;
-            case "up":
-                corners = new float[][] { p4, p8, p7, p3 };
-                break;
-            default:
-                corners = new float[][] { p1, p5, p6, p2 };
-                break;
-        }
+        float[][] points = new float[][] { p1, p2, p3, p4, p5, p6, p7, p8 };
+        float[][] corners = faceCorners(faceType, points, mirroredLayout, boxUv);
 
         RawYsmModel.RawFace face = new RawYsmModel.RawFace();
         if (bake == null) {
@@ -647,6 +722,55 @@ public class YSMFolderDeserializer implements AutoCloseable {
         face.u = new float[] { u0, u1, u1, u0 };
         face.v = new float[] { v0, v0, v1, v1 };
         cube.faces.add(face);
+    }
+
+    /**
+     * The four corners one face direction is drawn on, in the order the engine's {@code GeoQuad} consumes them.
+     * {@code points} is the cube's p1..p8 in the engine's numbering (1/3/5/7 are the min-x plane, 5..8 the max-x one,
+     * exactly as the port engine's {@code GeoCube.createFromPojoCube:209-237} names them; the server bake uses the same
+     * order here).
+     * <p>
+     * In a mirrored layout the corner group moves to the opposite side. Upstream has <b>two</b> variants and they
+     * differ: per-face uv swaps west/east <b>and</b> up/down
+     * ({@code GeoBuilder.addPerFaceQuads:149-156}), box uv swaps only west/east
+     * ({@code addBoxQuads:176-183}) - the port engine's {@code GeoCube} carries the same split
+     * ({@code :329-396} per-face, {@code :476-531} box), so this must not be generalised into one rule.
+     */
+    private static float[][] faceCorners(String faceType, float[][] points, boolean mirroredLayout, boolean boxUv) {
+        String direction = mirroredLayout ? layoutDirection(faceType, boxUv) : faceType;
+        switch (direction) {
+            case "west":
+                return new float[][] { points[3], points[2], points[0], points[1] };
+            case "east":
+                return new float[][] { points[6], points[7], points[5], points[4] };
+            case "north":
+                return new float[][] { points[2], points[6], points[4], points[0] };
+            case "south":
+                return new float[][] { points[7], points[3], points[1], points[5] };
+            case "up":
+                return new float[][] { points[3], points[7], points[6], points[2] };
+            default:
+                return new float[][] { points[0], points[4], points[5], points[1] };
+        }
+    }
+
+    /**
+     * The corner group a face uses in a mirrored layout: west/east always swap; up/down swap only for per-face uv
+     * (upstream {@code addBoxQuads:176-183} keeps them in place), north/south never do.
+     */
+    private static String layoutDirection(String faceType, boolean boxUv) {
+        switch (faceType) {
+            case "west":
+                return "east";
+            case "east":
+                return "west";
+            case "up":
+                return boxUv ? "up" : "down";
+            case "down":
+                return boxUv ? "down" : "up";
+            default:
+                return faceType;
+        }
     }
 
     /** 把 box-uv 数组形式(uv 偏移 + 尺寸)展开成六个面的 uv 节点。 */
@@ -991,24 +1115,61 @@ public class YSMFolderDeserializer implements AutoCloseable {
                     continue;
                 }
                 String relative = normalizeResourcePath(this.rootPath.relativize(path).toString());
-                if (relative.startsWith("sounds/") || relative.endsWith(".ogg")) {
+                // Upstream collects each kind from its declared root only (RawModelSource.collectFiles is given that
+                // root and is recursive), so a file outside every root is not part of the model's resources. The entry
+                // name is the path under the root without its extension (RawModelSource.collectFileNames:98-100), which
+                // is the basename for a flat sounds/functions/lang directory.
+                String sound = resourceUnderRoot(relative, this.soundPath);
+                if (sound != null) {
                     byte[] data = readResource(relative);
                     if (data != null) {
-                        this.model.soundFiles.put(extractFileName(relative), new RawYsmModel.RawDataFile(sha256Hex(data), data));
+                        this.model.soundFiles.put(
+                            stripExtension(sound),
+                            new RawYsmModel.RawDataFile(sha256Hex(data), data));
                     }
-                } else if (relative.startsWith("functions/") && relative.endsWith(".molang")) {
+                    continue;
+                }
+                String function = resourceUnderRoot(relative, this.functionPath);
+                if (function != null && function.endsWith(".molang")) {
                     byte[] data = readResource(relative);
                     if (data != null) {
-                        this.model.functionFiles.put(extractFileName(relative), new RawYsmModel.RawDataFile(sha256Hex(data), data));
+                        this.model.functionFiles.put(
+                            stripExtension(function),
+                            new RawYsmModel.RawDataFile(sha256Hex(data), data));
                     }
-                } else if (relative.startsWith("lang/") && relative.endsWith(".json")) {
+                    continue;
+                }
+                String language = resourceUnderRoot(relative, this.languagePath);
+                if (language != null && language.endsWith(".json")) {
                     byte[] data = readResource(relative);
                     if (data != null) {
-                        this.model.languageFiles.put(parseLocale(relative), parseLanguageFile(data));
+                        this.model.languageFiles.put(stripExtension(language), parseLanguageFile(data));
                     }
                 }
             }
         }
+    }
+
+    /**
+     * {@code relative} as a path under {@code root}, or {@code null} when it is not inside that root. Both arguments are
+     * {@code /}-separated and already normalised. {@code root} itself is never a file, so the result is always non-empty
+     * for a hit.
+     */
+    private static String resourceUnderRoot(String relative, String root) {
+        if (root.isEmpty()) {
+            return relative;
+        }
+        if (relative.equals(root)) {
+            return null;
+        }
+        String prefix = root + "/";
+        return relative.startsWith(prefix) ? relative.substring(prefix.length()) : null;
+    }
+
+    /** {@code name} without its last extension, matching {@code RawModelSource.removeExtension:128-131}. */
+    private static String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(0, dot) : name;
     }
 
     private RawYsmModel.RawLanguageFile parseLanguageFile(byte[] data) {
@@ -1029,6 +1190,16 @@ public class YSMFolderDeserializer implements AutoCloseable {
         }
         this.model.mainEntity.mainModel = parseGeometry(mainData, 1, MAIN_JSON);
         this.model.mainEntity.armModel = parseGeometry(armData, 2, ARM_JSON);
+
+        // The flat model's manifest: upstream's LegacyManifestBuilder reads info.json (name/tips/license/author names,
+        // the extra_animation_names wheel slots and free) when there is no ysm.json, and it is the only metadata source
+        // on that path (format/parser/LegacyManifestBuilder.java:18,72-93). Filling it here keeps a RawYsmModel built
+        // from a legacy directory equivalent to one built from a modern pack; the flat legacy *payload* path
+        // (FolderFormat) folds the same file into the geometry's ysm_extra_info, see LegacyInfo's javadoc.
+        byte[] infoData = readResource(LegacyInfo.FILE_NAME);
+        if (infoData != null) {
+            LegacyInfo.applyToRawModel(this.model, LegacyInfo.parse(infoData));
+        }
 
         boolean hasTexture = false;
         try (Stream<Path> stream = Files.list(this.rootPath)) {
@@ -1295,14 +1466,6 @@ public class YSMFolderDeserializer implements AutoCloseable {
             }
         }
         return values;
-    }
-
-    private static String parseLocale(String relativePath) {
-        String name = relativePath.substring("lang/".length());
-        if (name.endsWith(".json")) {
-            name = name.substring(0, name.length() - ".json".length());
-        }
-        return name;
     }
 
     private static String extractFileName(String fullPath) {

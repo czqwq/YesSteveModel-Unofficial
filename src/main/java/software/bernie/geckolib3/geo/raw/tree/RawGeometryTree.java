@@ -1,5 +1,6 @@
 package software.bernie.geckolib3.geo.raw.tree;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -15,7 +16,14 @@ public class RawGeometryTree {
     public HashMap<String, RawBoneGroup> topLevelBones = new HashMap<>();
     public ModelProperties properties;
 
-    public static RawGeometryTree parseHierarchy(RawGeoModel model) {
+    public static RawGeometryTree parseHierarchy(RawGeoModel model) throws IOException {
+        // Upstream's bake opens with the same explicit rejection of a document without a geometry array
+        // (tmp/YesSteveModel-dev-1.20/.../format/parser/GeoBuilder.java:27-31). Dereferencing it instead used to
+        // surface as a bare NPE from the line below, which says nothing about why the model did not load.
+        if (model == null || model.getMinecraftGeometry() == null || model.getMinecraftGeometry().length == 0) {
+            throw new IOException(
+                "geometry document has no 'minecraft:geometry' array (legacy 'geometry.<name>' layout is not supported)");
+        }
         RawGeometryTree hierarchy = new RawGeometryTree();
         MinecraftGeometry geometry = model.getMinecraftGeometry()[0];
         hierarchy.properties = geometry.getProperties();

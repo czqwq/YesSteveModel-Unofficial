@@ -45,7 +45,18 @@ public class AnimationRouletteKey {
         if (lockPressed) {
             WheelAnimationLock.switchLock();
         }
-        if (!pressed || mc.currentScreen != null || mc.thePlayer == null) {
+        if (!pressed) {
+            return;
+        }
+        // 轮盘键是**开关**，上游如此：它的 keyPressed 命中 ANIMATION_ROULETTE_KEY 就 onClose
+        // （AnimationRouletteScreen.java:628-636）。这条关闭不能写在轮盘屏幕自己的 keyTyped 里 —— 1.7.10 的
+        // Minecraft.runTick 先调 currentScreen.handleKeyboardInput()（keyTyped）再 fireKeyInput()（本事件），
+        // 屏幕里关掉后同一 tick 的这个处理器会立刻把它重新打开。开关因此只能放在这一个处理器里。
+        if (mc.currentScreen instanceof AnimationRouletteScreen) {
+            mc.displayGuiScreen(null);
+            return;
+        }
+        if (mc.currentScreen != null || mc.thePlayer == null) {
             return;
         }
         mc.displayGuiScreen(new AnimationRouletteScreen());

@@ -269,18 +269,15 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
             if (entityObj instanceof EntityPlayer player && com.fox.ysmu.Config.RENDER_WEARABLE) {
                 com.fox.ysmu.compat.AdventureBackpackCompat.renderWearable(player, x, y, z, partialTicks);
             }
-            // Restore the step that cancelling RenderPlayerEvent.Pre takes away with the rest of the draw.
-            // RendererLivingEntity#doRender calls passSpecialRender as its own step once its matrix is popped
-            // (build/rfg/minecraft-src .../RendererLivingEntity.java:295-296), and that is where a name tag is drawn
-            // and where RenderLivingEvent.Specials.Pre/Post fire. This renderer implements the whole draw itself
-            // instead of calling super, so both were simply missing: a YSM-drawn player had no name tag at all, and
-            // CustomPlayerRenderer#func_96449_a - which the port wrote to add the scoreboard line above the name -
-            // was waiting for a call that never came. The coordinates are the ones vanilla passes: passSpecialRender
-            // translates by them itself, so this runs with the matrix back at the camera-relative origin.
-            // A preview needs no equivalent of upstream's `isFakePlayer` gate: vanilla's own func_110813_b already
-            // refuses the camera's own player (the local player) and passengers, which is every entity this port
-            // previews.
-            passSpecialRender(entityObj, x, y, z);
+            // No second passSpecialRender here. The engine's doRender - reached through the super.doRender above -
+            // already calls it once, after its matrix is popped (software/bernie/geckolib3/geo/
+            // GeoReplacedEntityRenderer.java:171), which is where a name tag is drawn and where
+            // RenderLivingEvent.Specials.Pre/Post fire, and CustomPlayerRenderer#func_96449_a (the scoreboard line
+            // above the name) is reached from there. This call used to be here as well, from a reading of the engine
+            // that had missed its own call, so every YSM-drawn player had its name tag drawn twice and the Specials
+            // events posted twice per frame. A preview needs no equivalent of upstream's `isFakePlayer` gate:
+            // vanilla's own func_110813_b already refuses the camera's own player (the local player) and passengers,
+            // which is every entity this port previews.
         } finally {
             MolangPhysicsRuntime.setBoneTracking(false, 1.0F, 1.0F, 1.0F, null);
             if (pose != null) {
@@ -525,11 +522,6 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
     }
 
     /**
-     * Whether an override carries both halves. N-1: the NPC path can only be null-free because
-     * {@code NPCData} rejects nulls, and a half-filled EEP can still exist (the client's own selection
-     * packet maps an empty texture string to {@code null}), so both are validated here as well.
-     */
-    /**
      * The texture for this render: the event's override when a listener supplied one, otherwise whatever the model
      * provider resolves.
      * <p>
@@ -545,6 +537,11 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
         return override != null ? override : super.getTextureLocation(instance);
     }
 
+    /**
+     * Whether an override carries both halves. N-1: the NPC path can only be null-free because
+     * {@code NPCData} rejects nulls, and a half-filled EEP can still exist (the client's own selection
+     * packet maps an empty texture string to {@code null}), so both are validated here as well.
+     */
     private static boolean isComplete(@Nullable EntityModelData override) {
         return override != null && override.getModelId() != null && override.getTextureId() != null;
     }

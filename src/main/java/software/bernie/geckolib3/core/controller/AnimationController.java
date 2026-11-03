@@ -1077,8 +1077,12 @@ public class AnimationController<T extends IAnimatable> {
             Animation speedAnimation = child.currentAnimation != null ? child.currentAnimation : child.animationQueue.peek();
             if (speedAnimation != null && speedAnimation.animSpeed != null) {
                 parser.setValue("query.anim_time", child.getSyncTick() / 20d);
-                try { speed *= parser.parseExpression(speedAnimation.animSpeed).get(); }
-                catch (Exception ignored) { speed = 1; }
+                // Parsed once per (animation, text) and cached on the animation: this used to be a full Molang
+                // parse for every concurrent child on every frame. See Animation#parsedAnimSpeed.
+                try {
+                    MolangExpression speedExpression = speedAnimation.animSpeedExpression(parser);
+                    speed = speedExpression == null ? 1 : speed * speedExpression.get();
+                } catch (Exception ignored) { speed = 1; }
             }
             child.setAnimationSpeed(speed);
             AnimationEvent<T> childEvent = new AnimationEvent<>(animatable, event.getLimbSwing(),
@@ -1095,8 +1099,11 @@ public class AnimationController<T extends IAnimatable> {
             double weight = 1;
             Animation animation = child.currentAnimation;
             if (animation != null && animation.blendWeight != null) {
-                try { weight = parser.parseExpression(animation.blendWeight).get(); }
-                catch (Exception ignored) { weight = 0; }
+                // Cached on the animation (upstream keeps the parsed expression there: AnimationPlayer:318).
+                try {
+                    MolangExpression weightExpression = animation.blendWeightExpression(parser);
+                    weight = weightExpression == null ? 0 : weightExpression.get();
+                } catch (Exception ignored) { weight = 0; }
             }
             boolean ending = !Double.isNaN(child.endingStarted);
             double fade = 1;
@@ -1612,22 +1619,66 @@ public class AnimationController<T extends IAnimatable> {
         if (isRotation) {
             // Primitive-inlined values were pre-converted by JsonKeyFrameUtils;
             // Molang-expression values need runtime conversion.
-            if (!currentFrame.isStartPrimitive()) {
-                startValue = Math.toRadians(startValue);
-                if (axis == Axis.X || axis == Axis.Y) {
-                    startValue *= -1;
+            startValue = convertKeyFrameValue(startValue, currentFrame.isStartPrimitive(), true, axis);
+            endValue = convertKeyFrameValue(endValue, currentFrame.isEndPrimitive(), true, axis);
+        }
+
+        // A Catmull-Rom segment needs the two keyframes just outside it, and its curve therefore cannot live in
+        // the shared point lerp alone. Upstream builds a CatmullRomKeyFrame per segment from
+        // keyFrames[max(0,i-2)].post / [i-1].post / [i].pre / [min(size-1,i+1)].pre
+        // (tmp/YesSteveModel-dev-1.20 .../core/keyframe/bone/EasingType.java:45-55). This engine's frame[i]
+        // carries exactly that segment: its start is entry (i-1) and its end is entry i, so
+        //   begin = frame[i].startValue, end = frame[i].endValue   (already converted above)
+        //   left  = entry (i-2) = frames[i-1].startValue
+        //   right = entry (i+1) = frames[i+1].endValue
+        // and upstream's max(0, i-2) / min(size-1, i+1) clamps are the two fallbacks below, which reuse the
+        // already-converted begin/end instead of converting a clamped neighbour twice.
+        if (currentFrame.easingType == EasingType.Catmullrom) {
+            int index = currentKeyFrameIndex;
+            int size = frames.size();
+            double controlLeft = startValue;
+            double controlRight = endValue;
+            if (index >= 2) {
+                KeyFrame<IValue> leftFrame = frames.get(index - 1);
+                controlLeft = leftFrame.getStartValueDouble();
+                if (isRotation) {
+                    controlLeft = convertKeyFrameValue(controlLeft, leftFrame.isStartPrimitive(), true, axis);
                 }
             }
-            if (!currentFrame.isEndPrimitive()) {
-                endValue = Math.toRadians(endValue);
-                if (axis == Axis.X || axis == Axis.Y) {
-                    endValue *= -1;
+            if (index + 1 < size) {
+                KeyFrame<IValue> rightFrame = frames.get(index + 1);
+                controlRight = rightFrame.getEndValueDouble();
+                if (isRotation) {
+                    controlRight = convertKeyFrameValue(controlRight, rightFrame.isEndPrimitive(), true, axis);
                 }
             }
+            return AnimationPoint.obtainWithControls(currentFrame, currentKeyFrameTick,
+                currentFrame.getLengthPrimitive(), startValue, endValue, controlLeft, controlRight);
         }
 
         return AnimationPoint.obtain(currentFrame, currentKeyFrameTick, currentFrame.getLengthPrimitive(), startValue,
             endValue);
+    }
+
+    /**
+     * The one value conversion a keyframe endpoint travels through, so a rotation's own degree&rarr;radian and
+     * X/Y sign rule is applied once per value, with the flag belonging to the frame the value came from.
+     *
+     * <p>{@code primitive} means {@code JsonKeyFrameUtils} already stored the value in engine units (radians,
+     * with X and Y negated) - see the conversion in {@code JsonKeyFrameUtils.convertJson}: only
+     * {@code ConstantValue} endpoints are pre-converted, a Molang expression stays in degrees and is converted
+     * where it is evaluated. A control value read from a <em>different</em> keyframe therefore has to use that
+     * keyframe's flag, which is why this is a method taking the flag rather than an inline branch.</p>
+     */
+    private static double convertKeyFrameValue(double value, boolean primitive, boolean isRotation, Axis axis) {
+        if (!isRotation || primitive) {
+            return value;
+        }
+        double converted = Math.toRadians(value);
+        if (axis == Axis.X || axis == Axis.Y) {
+            converted = -converted;
+        }
+        return converted;
     }
 
     /** Cache entry for {@link #getCurrentKeyFrameLocation} — remembers the last
@@ -1654,6 +1705,13 @@ public class AnimationController<T extends IAnimatable> {
      *  {@code KeyFrameLocation} —— 堆快照里同时躺着 173 万个，全是这一处造的垃圾。 */
     private KeyFrame<IValue> currentKeyFrame;
     private double currentKeyFrameTick;
+    /**
+     * Index of {@link #currentKeyFrame} inside the list it was found in. Only the catmullrom branch of
+     * {@link #getAnimationPointAtTick} reads it, to pick the two neighbouring keyframes that supply the spline's
+     * outer control points (upstream {@code EasingType.buildCatmullRomKeyFrame} does the same with
+     * {@code index-2}/{@code index+1}).
+     */
+    private int currentKeyFrameIndex;
 
     /**
      * 定位 {@code ageInTicks} 落在哪个关键帧，结果写进 {@link #currentKeyFrame} /
@@ -1685,6 +1743,7 @@ public class AnimationController<T extends IAnimatable> {
                     cached.set(cached.index, cached.cumulativeTime, ageInTicks);
                     currentKeyFrame = frame;
                     currentKeyFrameTick = tick;
+                    currentKeyFrameIndex = cached.index;
                     return;
                 } else {
                     // Moved to a later keyframe — scan from cached index + 1
@@ -1697,6 +1756,7 @@ public class AnimationController<T extends IAnimatable> {
                             cached.set(i, newTotal, ageInTicks);
                             currentKeyFrame = frame;
                             currentKeyFrameTick = tick;
+                            currentKeyFrameIndex = i;
                             return;
                         }
                         totalTimeTracker = newTotal;
@@ -1706,6 +1766,7 @@ public class AnimationController<T extends IAnimatable> {
                     cached.set(last, totalTimeTracker, ageInTicks);
                     currentKeyFrame = frames.get(last);
                     currentKeyFrameTick = ageInTicks;
+                    currentKeyFrameIndex = last;
                     return;
                 }
             }
@@ -1726,6 +1787,7 @@ public class AnimationController<T extends IAnimatable> {
                 kfCache.put(frames, new KfCacheEntry(i, totalTimeTracker, ageInTicks));
                 currentKeyFrame = frame;
                 currentKeyFrameTick = tick;
+                currentKeyFrameIndex = i;
                 return;
             }
         }
@@ -1736,6 +1798,7 @@ public class AnimationController<T extends IAnimatable> {
         kfCache.put(frames, new KfCacheEntry(last, totalTimeTracker, ageInTicks));
         currentKeyFrame = frames.get(last);
         currentKeyFrameTick = ageInTicks;
+        currentKeyFrameIndex = last;
     }
 
     /** 旧的"返回一个新对象"取法，保留给测试；生产路径见 {@link #findCurrentKeyFrame}。 */

@@ -20,20 +20,51 @@ import software.bernie.geckolib3.geo.render.built.GeoCube;
  */
 public final class RenderUtils {
 
+    /**
+     * Scratch quaternions for the per-bone axis rotations below. The methods run on the render thread only (the
+     * held-item and head layers call them per bone per frame), and {@link GlStateManager#rotate(Quaternion)} consumes
+     * the value immediately into the GL matrix, so a single reusable pair is safe - and this used to allocate one
+     * {@code Quaternionf} plus one LWJGL {@code Quaternion} per non-zero axis, i.e. up to six objects per bone per
+     * rendered player per frame.
+     */
+    private static final Quaternionf ROTATION = new Quaternionf();
+    private static final Quaternion ROTATION_LWJGL = new Quaternion();
+
     public static void translateMatrixToBone(GeoBone bone) {
         GlStateManager.translate(-bone.getPositionX() / 16f, bone.getPositionY() / 16f, bone.getPositionZ() / 16f);
     }
 
     public static void rotateMatrixAroundBone(GeoBone bone) {
         if (bone.getRotationZ() != 0.0F) {
-            GlStateManager.rotate(j2l(Axis.ZP.rotation(bone.getRotationZ())));
+            rotateAroundZ(bone.getRotationZ());
         }
         if (bone.getRotationY() != 0.0F) {
-            GlStateManager.rotate(j2l(Axis.YP.rotation(bone.getRotationY())));
+            rotateAroundY(bone.getRotationY());
         }
         if (bone.getRotationX() != 0.0F) {
-            GlStateManager.rotate(j2l(Axis.XP.rotation(bone.getRotationX())));
+            rotateAroundX(bone.getRotationX());
         }
+    }
+
+    private static void rotateAroundZ(float radians) {
+        ROTATION.rotationZ(radians);
+        GlStateManager.rotate(toLwjgl(ROTATION));
+    }
+
+    private static void rotateAroundY(float radians) {
+        ROTATION.rotationY(radians);
+        GlStateManager.rotate(toLwjgl(ROTATION));
+    }
+
+    private static void rotateAroundX(float radians) {
+        ROTATION.rotationX(radians);
+        GlStateManager.rotate(toLwjgl(ROTATION));
+    }
+
+    /** Copies {@code source} into the reusable LWJGL quaternion, so the value is not retained anywhere. */
+    private static Quaternion toLwjgl(Quaternionf source) {
+        ROTATION_LWJGL.set(source.x, source.y, source.z, source.w);
+        return ROTATION_LWJGL;
     }
 
     public static void rotateMatrixAroundCube(GeoCube cube) {
