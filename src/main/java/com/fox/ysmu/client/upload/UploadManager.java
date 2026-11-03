@@ -52,6 +52,18 @@ public final class UploadManager {
     /** GUI 选中/手填的本地文件路径；上传开始后保留到服务端回执。 */
     public static volatile String FILE_PATH = null;
 
+    /**
+     * 最后一次"有进展"的时刻（毫秒）：进入 {@link Statue#PROCESSING} 时置上，每发出一片更新一次。
+     * <p>{@code 0} 表示没有上传在跑。</p>
+     */
+    private static volatile long lastProgressMillis = 0L;
+    /**
+     * 多久没有进展就认为"服务端不会再有回执"并自行解锁（{@link #releaseStalledUpload()}）。
+     * <p>与 {@code ServerModelUploadManager.TRANSFER_TTL_MILLIS}（2 分钟）同一量级：服务端在分片半路丢失时
+     * 只是把这个累加器静默清掉，<b>不发</b> {@code CompleteFeedback}，所以客户端必须有自己的一侧兜底。</p>
+     */
+    private static final long STALL_TIMEOUT_MILLIS = 2L * 60L * 1000L;
+
     /** 一次只处理一个上传请求；命令与 GUI 都是串行触发的，重复请求只可能是异常情况。 */
     private static final AtomicBoolean BUSY = new AtomicBoolean();
     /**
@@ -95,6 +107,7 @@ public final class UploadManager {
         }
         FILE_PATH = path;
         STATUE = Statue.PROCESSING;
+        lastProgressMillis = System.currentTimeMillis();
         try {
             ThreadTools.THREAD_POOL.submit(() -> {
                 boolean sent = false;
@@ -105,17 +118,15 @@ public final class UploadManager {
                     chat("commands.yes_steve_model.upload.client.read_failed", path);
                 } finally {
                     if (!sent) {
-                        // 没发出去（读/校验/连接失败）：没有服务端回执会来，GUI 必须自己解锁。
-                        STATUE = Statue.FULFILL;
-                        FILE_PATH = null;
+                        // 没发出去（读/校验/连接失败）：没有服务端回执会来，GUI 必须自己解锁（reset 也放 BUSY）。
+                        reset();
+                    } else {
+                        BUSY.set(false);
                     }
-                    BUSY.set(false);
                 }
             });
         } catch (RuntimeException rejected) {
-            BUSY.set(false);
-            STATUE = Statue.FULFILL;
-            FILE_PATH = null;
+            reset();
             ysmu.LOG.error("[YSMU-UPLOAD] Could not schedule the upload task for '{}'", path, rejected);
             chat("commands.yes_steve_model.upload.client.read_failed", path);
         }
@@ -205,6 +216,8 @@ public final class UploadManager {
                 ysmu.LOG.error("[YSMU-UPLOAD] Failed to send chunk at offset {} of '{}'", offset, fileName, e);
                 return false;
             }
+            // 每一片都算"有进展"：卡住判定（releaseStalledUpload）只在大文件传输真的停下来时才触发。
+            lastProgressMillis = System.currentTimeMillis();
             chunkIndex++;
             if (!isStillConnected()) {
                 ysmu.LOG.warn(
@@ -282,6 +295,47 @@ public final class UploadManager {
         BUSY.set(false);
         STATUE = Statue.FULFILL;
         FILE_PATH = null;
+        lastProgressMillis = 0L;
+    }
+
+    /**
+     * 客户端侧的"卡住"兜底：{@link Statue#PROCESSING} 期间长时间没有任何进展就自行解锁。
+     *
+     * <p><b>为什么需要它。</b>解锁的唯一正常路径是服务端的 {@code CompleteFeedback}（S2C id 12），而服务端在
+     * <b>它观察到的每个终态</b>都会发（成功/内容被拒/写盘失败/权限拒绝/乱序分片），但有一类它观察不到：分片在
+     * 半路丢了，累加器一直凑不满，{@code ServerModelUploadManager.sweepStale} 到 TTL（2 分钟）只是把累加器
+     * 静默移除，<b>不发</b>该包。这时管理界面会永远停在"上传中"：确认按钮与上传按钮都被挡住，只有重连
+     * （{@code ClientEventHandler.onClientDisconnect} → {@link #reset()}）才恢复。服务端崩溃/重启同理。</p>
+     *
+     * <p>由打开着的管理界面每帧调用（{@code ModelManageScreen#updateScreen}）；没有上传在跑时是纯读，开销是
+     * 一个 volatile 读加一次比较。</p>
+     *
+     * @return 本次调用是否刚刚解锁（用于让调用方重绘）
+     */
+    public static boolean releaseStalledUpload() {
+        if (STATUE != Statue.PROCESSING) {
+            return false;
+        }
+        long last = lastProgressMillis;
+        if (last <= 0L) {
+            return false;
+        }
+        long idle = System.currentTimeMillis() - last;
+        if (idle < STALL_TIMEOUT_MILLIS) {
+            return false;
+        }
+        ysmu.LOG.warn(
+            "[YSMU-UPLOAD] No upload progress for {} ms; releasing the manage screen from Processing. The server "
+                + "never sent its completion feedback (a lost chunk leaves the transfer to expire silently).",
+            idle);
+        // 只解锁界面看得到的两个状态。BUSY 是真正的并发锁，留给后台任务自己的 finally：如果那个线程确实还卡在
+        // 网络写里，下一次上传被"已有一个上传正在进行"挡住才是诚实的答案；而常见的卡法（分片都发完了、服务端
+        // 那边凑不满）此刻 BUSY 早就是 false。
+        STATUE = Statue.FULFILL;
+        FILE_PATH = null;
+        lastProgressMillis = 0L;
+        chat("commands.yes_steve_model.upload.client.stalled");
+        return true;
     }
 
     /**

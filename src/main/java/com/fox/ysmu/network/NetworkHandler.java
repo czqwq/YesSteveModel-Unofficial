@@ -87,9 +87,14 @@ public final class NetworkHandler {
      * ({@code capability/ServerDrivenPlayerPropertiesTracker.java:59-78,151-183}). The id is unchanged, but a peer
      * that decoded the old length would read the appended bytes as the next packet's fields, so the handshake has to
      * reject the pair. Nothing existing is renumbered or reused.</li>
+     * <li>12: the {@code /ysm play <targets>} / {@code /ysm molang execute} / {@code CanSwitchModel} batch,
+     * clientbound id 39 ({@code S2CServerConfig}) and 40 ({@code S2CExecuteMolang}). The first is sent in answer to
+     * the handshake, the second by an ordinary command; a peer that does not know either id is disconnected by FML on
+     * the unknown discriminator, so the handshake has to reject the pair rather than let it decode. Nothing existing
+     * is renumbered or reused: 39 and 40 are above the highest clientbound id in use (38).</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 11;
+    public static final int NETWORK_PROTOCOL = 12;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -258,6 +263,22 @@ public final class NetworkHandler {
      * highest clientbound id in use (37); see {@link #NETWORK_PROTOCOL} version 9 for the protocol bump.
      */
     private static final int CLIENTBOUND_REQUEST_MODEL_UPLOAD = 38;
+    /**
+     * The {@code CanSwitchModel} slice of upstream's server-config sync: the server-side switch the two client key
+     * handlers read, sent in answer to {@link com.fox.ysmu.network.message.HandshakeMessage} because 1.7.10 has no
+     * Forge config file exchange. Appended above the highest clientbound id in use (38); see
+     * {@link #NETWORK_PROTOCOL} version 12. The sender is {@code HandshakeMessage.Handler}, the client half is
+     * {@code client/input/ServerSwitchState}.
+     */
+    private static final int CLIENTBOUND_SERVER_CONFIG = 39;
+    /**
+     * {@code /ysm molang execute <targets> <expression>}: the port of upstream's {@code ExecuteMolangEvent}, which
+     * {@code command/sub/MolangCommand.java:44-50} broadcasts to <b>every</b> client so each one runs the expression
+     * against the entity ids it can see ({@code network/forge/ControlHandler.java:112-122,253-272}). Appended above 39;
+     * see {@link #NETWORK_PROTOCOL} version 12. The client half is {@code client/animation/molang/
+     * RemoteMolangExecution}.
+     */
+    private static final int CLIENTBOUND_EXECUTE_MOLANG = 40;
 
     public static void init() {
         registerServerboundMessages();
@@ -479,6 +500,18 @@ public final class NetworkHandler {
             S2CRequestModelUpload.Handler.class,
             S2CRequestModelUpload.class,
             CLIENTBOUND_REQUEST_MODEL_UPLOAD,
+            Side.CLIENT);
+        // The server's switches for a client (today: CanSwitchModel) and the /ysm molang execute broadcast. See the
+        // two id constants above for the protocol bump and the upstream they come from.
+        CHANNEL.registerMessage(
+            S2CServerConfig.Handler.class,
+            S2CServerConfig.class,
+            CLIENTBOUND_SERVER_CONFIG,
+            Side.CLIENT);
+        CHANNEL.registerMessage(
+            S2CExecuteMolang.Handler.class,
+            S2CExecuteMolang.class,
+            CLIENTBOUND_EXECUTE_MOLANG,
             Side.CLIENT);
     }
 

@@ -81,15 +81,33 @@ public final class OpenYsmFormat {
         if (ModelIndexCache.restoreIfHit(source, modelId)) {
             return;
         }
+        cacheExtractedFolderModel(rootPath, dir, modelId, source, dir);
+    }
+
+    /**
+     * 解析/烘焙/登记一个"不是扫描直接走到的"文件夹模型：{@link ZipModelFormat} 把 {@code .zip} 解到暂存目录后，
+     * 用这一份实现把暂存目录当成原始模型目录来解析——与上游"raw directory 与 archive 走同一个 parser"的形态一致
+     * （{@code model/catalog/RawModelImporter.java:21-30}；本仓的 folder parser 是 {@link Path} 读取，所以先落到
+     * 暂存目录再交给它，理由见 {@link ZipModelFormat} 的类注释）。索引命中判定留在调用方：ZIP 扫描器在解压**之前**
+     * 就要问索引，命中时连暂存目录都不建。
+     *
+     * @param dir                实际读取的模型目录（普通扫描就是磁盘目录，ZIP 就是暂存目录）
+     * @param registrationSource 登记/日志里显示的来源（普通扫描是 {@code dir}，ZIP 是 {@code .zip} 文件——
+     *                           不能让暂存目录名进登记表），{@code null} 时退回 {@code dir}
+     */
+    static void cacheExtractedFolderModel(Path rootPath, Path dir, String modelId, ModelIndexCache.Source source,
+        Path registrationSource) {
+        Path display = registrationSource == null ? dir : registrationSource;
         try (YSMFolderDeserializer deserializer = new YSMFolderDeserializer(dir)) {
             RawYsmModel raw = deserializer.deserialize();
             raw.modelId = modelId;
             if (Config.DEBUG_MODEL_LOAD && Config.DEBUG_MODEL_SCAN) {
                 int texCount = raw.mainEntity != null ? raw.mainEntity.textures.size() : 0;
-                ysmu.LOG.info("[YSMU-MODEL] Folder model {} ({}): textures={}", dir.getFileName(), modelId, texCount);
+                ysmu.LOG
+                    .info("[YSMU-MODEL] Folder model {} ({}): textures={}", display.getFileName(), modelId, texCount);
             }
             if (!RawYsmModelAdapter.isBridgeable(raw)) {
-                ysmu.LOG.warn("OpenYSM folder model {} parsed but cannot be bridged to legacy ModelData", dir);
+                ysmu.LOG.warn("OpenYSM folder model {} parsed but cannot be bridged to legacy ModelData", display);
                 return;
             }
             ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, modelId);
@@ -97,25 +115,25 @@ public final class OpenYsmFormat {
             if (info != null) {
                 // 第 6 项：唯一登记入口的第一次调用（legacy 半边）。拿到 17 载荷后同一来源会再登记一次＝补齐，
                 // 不产生冲突（见 ServerModelManager.registerModel 的 javadoc 第 4 条）。
-                ServerModelManager.registerModel(modelId, info, null, dir, rootPath);
+                ServerModelManager.registerModel(modelId, info, null, display, rootPath);
             }
             // M-01:二进制同步缓存只序列化已烘焙的 bones/cubes/faces,不能用 isBridgeable 做门控
             // ——它对散件模型因 sourceJson != null 恒 true,会写出一个几何为空的缓存。
             if (!RawYsmModelAdapter.isBinaryPayloadBridgeable(raw)) {
                 ysmu.LOG.warn(
                     "Skipping OpenYSM binary sync cache for folder model {}: baked geometry is empty (main faces={}, arm faces={})",
-                    dir,
+                    display,
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
                 ModelIndexCache.remember(source, modelId, info, null);
                 return;
             }
             OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
-            ServerModelManager.registerModel(modelId, info, syncInfo, dir, rootPath);
+            ServerModelManager.registerModel(modelId, info, syncInfo, display, rootPath);
             ModelIndexCache.remember(source, modelId, info, syncInfo);
         } catch (Exception | LinkageError e) {
             // S-02:类加载/链接期错误(缺类、版本不匹配)也应按"跳过并 warn"处理,而不是中断整次扫描。
-            ysmu.LOG.warn("Failed to load OpenYSM folder model {}", dir, e);
+            ysmu.LOG.warn("Failed to load OpenYSM folder model {}", display, e);
         }
     }
 
@@ -216,8 +234,8 @@ public final class OpenYsmFormat {
     }
 
     /**
-     * M-12:三个扫描器(OpenYsmFormat/FolderFormat/YsmFormat)统一的"磁盘模型名"口径
-     * —— 相对 root 的路径 + 正斜杠。分散实现会让嵌套目录的模型在三个扫描器里得到不同的 id。
+     * M-12:各扫描器(OpenYsmFormat/FolderFormat/YsmFormat/ZipModelFormat)统一的"磁盘模型名"口径
+     * —— 相对 root 的路径 + 正斜杠。分散实现会让嵌套目录的模型在不同扫描器里得到不同的 id。
      */
     public static String toModelName(Path rootPath, Path path) {
         return rootPath.relativize(path)

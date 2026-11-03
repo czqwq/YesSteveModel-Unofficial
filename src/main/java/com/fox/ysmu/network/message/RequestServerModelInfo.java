@@ -26,8 +26,9 @@ import io.netty.buffer.ByteBuf;
  * <ul>
  *   <li>两个列表（custom / auth），Lgeacy 的 ManageCommand 也分两个根；参考分支的 1.7.10 副本只有
  *       custom 一个列表。</li>
- *   <li>只会有 FOLDER 与 YSM 两类条目：本仓扫描器不加载 {@code .zip}（Lgeacy 的 Type 还有 ZIP），列出无法
- *       加载的文件只会误导管理员；UNKNOWN 在解码时兜底，不用于正常列表。</li>
+ *   <li>条目类型是三值 {@code FOLDER} / {@code YSM} / {@code ZIP}（{@link com.fox.ysmu.model.format.Type}）：本仓
+ *       扫描器自 ZIP 模型包移植后也加载 {@code .zip}，与 Lgeacy 的 Type 对齐；{@code UNKNOWN} 在解码时兜底，不用于
+ *       正常列表。</li>
  *   <li>解码按本仓 N-10 软失败：条目数与字符串长度先校验，畸形包解成 null 列表、处理器不打开 GUI，不抛异常
  *       （抛出去会被 FML 当成协议错误断开玩家）。</li>
  *   <li>打开 GUI 经 {@code Minecraft.func_152344_a} 回客户端线程（1.7.10 的 handler 在 Netty 线程）。</li>

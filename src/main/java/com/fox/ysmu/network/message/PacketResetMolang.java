@@ -20,7 +20,8 @@ import cpw.mods.fml.relauncher.Side;
  * 残留），保留模型定义与实时 query/ysm 变量。模型文件缓存不受影响，无需重载。
  *
  * <p>整套消费者挂在默认关闭的 {@link Config#DEBUG_MOLANG_OVERLAY} 之后：开关关闭时这里直接丢弃消息
- * （{@code /ysmclient} 命令本身在开关关闭时也不会注册）。</p>
+ * （{@code /ysmclient} 本身是给所有玩家的纯客户端命令，由 {@code ClientProxy} 无条件注册，重载自己的
+ * Molang 状态走本地路径，不经过这个包）。</p>
  */
 public class PacketResetMolang implements IMessage {
 

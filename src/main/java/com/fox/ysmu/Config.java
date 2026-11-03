@@ -71,6 +71,31 @@ public class Config {
      * intrinsic default (or to vanilla rendering for arrows and vehicles).</p>
      */
     public static boolean RESTRICTED_AUTH = false;
+    /**
+     * Whether players may switch their own model - the port of upstream's {@code ServerConfig.CAN_SWITCH_MODEL}
+     * ({@code config/ServerConfig.java:15,35-36}, config key {@code CanSwitchModel}, default {@code true}).
+     *
+     * <p><b>Three consumers, exactly upstream's three.</b> The server refuses a model-selection request
+     * ({@code network/forge/SessionProtocolHandler.java:563-565}: a null selection or a disabled switch answers
+     * {@code INVALID_REQUEST} instead of reaching {@code session.select}, so the current selection is left alone), and
+     * the two client key handlers read the same value: the model screen key opens the settings screen instead of the
+     * model screen when a remote YSM channel is present and switching is off
+     * ({@code client/input/PlayerModelScreenKey.java:41-44}), and the animation roulette is allowed when there is no
+     * remote channel or switching is allowed ({@code client/input/AnimationRouletteKey.java:45-46}). The port's
+     * counterparts are {@code network/message/SetModelAndTexture.handleEEP}, {@code client/input/PlayerModelScreenKey}
+     * and {@code client/input/AnimationRouletteKey}.</p>
+     *
+     * <p><b>Why the client has this value at all.</b> Upstream registers this spec as
+     * {@code ModConfig.Type.SERVER} ({@code YesSteveModel.java:54}), and Forge ships the server config file to the
+     * client on login, which is what makes {@code ServerConfig.CAN_SWITCH_MODEL.get()} answer the <em>server's</em>
+     * value in those two client consumers. 1.7.10's {@code Configuration} has no such exchange, so the port carries
+     * the one flag a client needs over its own login-time packet
+     * ({@code network/message/S2CServerConfig}, sent in answer to {@code HandshakeMessage}) and stores it back into
+     * this field - the same place the synced file would have written it. The server-side read
+     * ({@code SetModelAndTexture}) is the authoritative gate; the client copy only decides which screen the key
+     * opens.</p>
+     */
+    public static boolean CAN_SWITCH_MODEL = true;
     public static String DEFAULT_MODEL_ID = "default";
     public static String DEFAULT_MODEL_TEXTURE = "default.png";
 
@@ -208,12 +233,15 @@ public class Config {
     // its own controller instead of being flattened into one. So there is no name to filter, and a switch that
     // filters nothing is the dead-switch defect, not a feature. `grep` for `__ysm_merged__` over this tree is now 0.
     /**
-     * Master switch for the Molang debug overlay and the {@code /ysmclient} Molang commands: the full-screen
-     * {@code v.*}/{@code query.*}/{@code ctrl.*} table (Ctrl+P, or {@code S2CSetDebugOverlay}), the
-     * {@code PacketQueryMolangVar} / {@code PacketEvalMolang} / {@code PacketResetMolang} consumers, and the engine's
-     * per-frame variable snapshot. <b>Off by default</b>, even though the reference branch has no such switch and
-     * always captures: with it off no snapshot is taken, no overlay renders, no client command is registered, and the
-     * four packets' client-side handlers do nothing (see {@code MolangDebugCaptureTest}).
+     * Master switch for the Molang debug overlay: the full-screen {@code v.*}/{@code query.*}/{@code ctrl.*} table
+     * (Ctrl+P, or {@code S2CSetDebugOverlay}), the {@code PacketQueryMolangVar} / {@code PacketEvalMolang} /
+     * {@code PacketResetMolang} consumers, and the engine's per-frame variable snapshot. <b>Off by default</b>, even
+     * though the reference branch has no such switch and always captures: with it off no snapshot is taken, no
+     * overlay renders, and the four debug packets' client-side handlers do nothing (see
+     * {@code MolangDebugCaptureTest}).
+     * <p>
+     * <b>It gates the debug cluster only.</b> The client command {@code /ysmclient} is registered for every player
+     * regardless of this switch, and nothing else outside the debug overlay reads it.
      * <p>
      * It is a <b>client opt-out, not a wire switch</b>: the server-side senders ({@code /ysm debug query|eval|overlay}
      * and {@code /ysm reset}, {@code command/YsmCommand}) do <em>not</em> read it - neither do the reference's - so a
@@ -440,6 +468,9 @@ public class Config {
         // Model authorization: the restricted set is named by the config/ysmu/auth scan root, not by a switch (see
         // api/ModelAuthorization). RestrictedAuth is upstream's asset gate and defaults to off.
         RESTRICTED_AUTH = syncBoolean("RestrictedAuth", "ysm_sync", RESTRICTED_AUTH, "Withhold a restrictive (config/ysmu/auth) model's assets from players who are not authorized for it. Off by default: unauthorized players can still render other players wearing it, as upstream's default does. Selection of a restricted model always needs a grant regardless of this switch.", load);
+        // Upstream ServerConfig.CanSwitchModel (config/ServerConfig.java:35-36), same name and same default. Sent to
+        // each client at login (S2CServerConfig) because two client key handlers read it; see the field javadoc.
+        CAN_SWITCH_MODEL = syncBoolean("CanSwitchModel", "ysm_sync", CAN_SWITCH_MODEL, "Whether players are allowed to switch their own model. Off means the server refuses every model-selection request and the client's model-screen key opens the settings screen instead (upstream's ServerConfig.CanSwitchModel, default true).", load);
         DEFAULT_MODEL_ID = syncString("DefaultModelId", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_ID, "The default model ID when a player first enters the game", load);
         DEFAULT_MODEL_TEXTURE = syncString("DefaultModelTexture", Configuration.CATEGORY_GENERAL, DEFAULT_MODEL_TEXTURE, "The default model texture when a player first enters the game", load);
 
@@ -483,7 +514,7 @@ public class Config {
         PARTICLE_ZERO_OFFSET = syncBoolean("ParticleZeroOffset", "debug", PARTICLE_ZERO_OFFSET, "Force particle()/abs_particle() xyz offsets to 0 (spawn at entity position; debug/testing)", load);
         // `DebugMergedAnimations` (the reference branch's name) is deliberately absent: the `__ysm_merged__`
         // synthesised animation it filters does not exist in this port. See the note beside PARTICLE_ZERO_OFFSET.
-        DEBUG_MOLANG_OVERLAY = syncBoolean("DebugMolangOverlay", "debug", DEBUG_MOLANG_OVERLAY, "Enable the Molang debug overlay and the /ysmclient Molang commands. Off by default: while off, no per-frame variable snapshot is taken, no overlay renders, no client command is registered, and this client ignores the /ysm debug|reset packets it is sent (the senders do not read this switch)", load);
+        DEBUG_MOLANG_OVERLAY = syncBoolean("DebugMolangOverlay", "debug", DEBUG_MOLANG_OVERLAY, "Enable the Molang debug overlay and its four debug packets. Off by default: while off, no per-frame variable snapshot is taken, no overlay renders, and this client ignores the /ysm debug|reset packets it is sent (the senders do not read this switch). It gates the debug cluster only - /ysmclient is registered for every player regardless of it", load);
 
         // The engine's geometry-submission counters (`GeoStats`: cubes/vertices/flushes/animation ticks) are gated on
         // an engine-owned switch, because the engine must not read this mod's config - the dependency direction is

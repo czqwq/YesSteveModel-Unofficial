@@ -43,7 +43,7 @@ import com.fox.ysmu.ysmu;
  * {@code ConvertedSourceIndexStore.java}（上游是权威，参考分支只作形状参考）：
  * <ul>
  * <li>键是源在<b>扫描根内的相对路径</b>加命名空间前缀，即上游 {@code ModelSourceResolver:63-64} 的
- * {@code <rootKind>/<relativePath>}。本仓有三个扫描器而上游只有一个 resolver，所以键里再带一层扫描器
+ * {@code <rootKind>/<relativePath>}。本仓有四个扫描步骤而上游只有一个 resolver，所以键里再带一层扫描器
  * 标识：一次命中只允许重放<b>同一个扫描器</b>当初记下的东西。</li>
  * <li>失效靠<b>源内容指纹</b>，不是 mtime/大小。上游同样只比内容：{@code ModelSourceResolver:66-76} 拿
  * {@code ModelParser.capture} 对源算出的 {@code modelId()} 与索引里的 modelId 比，不相等就重新 convert。</li>
@@ -614,12 +614,19 @@ public final class ModelIndexCache {
 
     // ---------------------------------------------------------------- 类型
 
-    /** 记录这条条目的是哪一个扫描器。上游只有一个 resolver，本仓有三个，所以键里必须区分。 */
+    /**
+     * 记录这条条目的是哪一个扫描器。上游只有一个 resolver（raw directory 与 archive 都从
+     * {@code ModelSourceResolver} 走），本仓有四个缓存步骤，所以键里必须区分。{@link #ZIP} 与
+     * {@link #OPEN_YSM}/{@link #LEGACY_FOLDER} 是不同步骤：ZIP 源是文件、走 {@link ZipModelFormat} 的暂存目录，
+     * 指纹覆盖的是 zip 文件本身的字节；同相对路径的目录与 zip 不会互相命中。
+     */
     public enum Scanner {
 
         OPEN_YSM("openysm"),
         LEGACY_FOLDER("folder"),
-        LEGACY_YSM("ysm");
+        LEGACY_YSM("ysm"),
+        /** {@code <name>.zip} 模型包：见 {@link ZipModelFormat}。 */
+        ZIP("zip");
 
         private final String id;
 

@@ -15,6 +15,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ChatComponentTranslation;
 
+import com.fox.ysmu.compat.ServerUtilitiesCompat;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.C2SUploadModelFile;
 import com.fox.ysmu.network.message.CompleteFeedback;
@@ -40,7 +41,11 @@ import com.fox.ysmu.ysmu;
  * （{@code client/ClientEventHandler.java:239}）。服务端把收到握手的玩家记进 {@link #YSM_CLIENTS}，命令分支
  * 据此判断"这次上传能不能指望客户端读文件"：没收到握手的客户端（原版客户端/未装模组）不可能响应
  * {@link S2CRequestModelUpload}，直接给聊天栏提示比静默无响应好。这不是新的信任面——上传数据包本身仍然每次
- * 重新做权限等级 4 检查（{@code EntityPlayerMP.canCommandSenderUseCommand(4, "ysm")}），握手只影响回执时机。</p>
+ * 重新做权限检查（命令入口与分片入口都是 {@link #UPLOAD_PERMISSION_LEVEL} 级，见
+ * {@link #acceptChunk(EntityPlayerMP, ModelUploadTarget, String, int, int, byte[])}），握手只影响回执时机。
+ * 权限检查的 ServerUtilities 覆盖：rank 显式 ALLOW {@code command.ysmu.ysm.upload} 时跳过 4 级复检
+ * （{@link ServerUtilitiesCompat#isExplicitlyAllowed}，与 {@code YsmCommand#processUpload} 同一节点、
+ * 同一判定）；未安装 ServerUtilities 或无 rank 条目时就是原来的原版 4 级检查。</p>
  *
  * <p><b>线程。</b>分片包处理器在 Netty 线程上：只做字段校验、计数与内存拷贝（有界），校验/写盘退到
  * {@link ThreadTools#THREAD_POOL}，聊天回执经 {@code DeferredWork.server} 回服务端线程。累加器按玩家 UUID
@@ -121,6 +126,10 @@ public final class ServerModelUploadManager {
                     entry.getKey(),
                     transfer.receivedBytes,
                     transfer.totalLength);
+                // 客户端管理界面的"处理中"状态只由 CompleteFeedback 解除（见 sendCompleteFeedback 的 javadoc），
+                // 所以丢掉累加器也必须回执：否则一次半路断流会让界面一直挡着提交按钮，只能等客户端自己的
+                // 两分钟无进展兜底（UploadManager#releaseStalledUpload）或重连。
+                sendCompleteFeedback(entry.getKey());
             }
         }
         for (Map.Entry<UUID, Long> entry : LAST_REJECTION_NOTICE.entrySet()) {
@@ -274,7 +283,11 @@ public final class ServerModelUploadManager {
                 return;
             }
             rejectUnlessValidChunk(totalLength, offset, data.length);
-            if (!player.canCommandSenderUseCommand(UPLOAD_PERMISSION_LEVEL, "ysm")) {
+            // ServerUtilities 的 rank 显式 ALLOW command.ysmu.ysm.upload 时跳过 4 级复检（与命令入口同一节点、
+            // 同一判定）；未装 ServerUtilities 或无 rank 条目时 permissionResult 返回 DEFAULT，行为与原版检查
+            // 逐字节一致（ServerUtilitiesCompat 类注释）。
+            if (!ServerUtilitiesCompat.isExplicitlyAllowed(player, ServerUtilitiesCompat.Subcommand.UPLOAD)
+                && !player.canCommandSenderUseCommand(UPLOAD_PERMISSION_LEVEL, "ysm")) {
                 TRANSFERS.remove(playerId);
                 notifyRejectedOnce(playerId, "permission level " + UPLOAD_PERMISSION_LEVEL + " is required", "commands.generic.permission");
                 // phase55: the manage GUI shows "processing" until this packet arrives, so a refusal has to

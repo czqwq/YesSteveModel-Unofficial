@@ -1,5 +1,6 @@
 package com.fox.ysmu.client.input;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.client.gui.AnimationRouletteScreen;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
@@ -46,6 +47,14 @@ public class AnimationRouletteKey {
             WheelAnimationLock.switchLock();
         }
         if (!pressed) {
+            return;
+        }
+        // Upstream's condition on the same event (client/input/AnimationRouletteKey.java:45-46): the roulette is
+        // allowed when there is no remote YSM channel or when the server's CanSwitchModel is on. It gates the whole
+        // block there (closing an open roulette included), so it is checked here, before the toggle. The lock key
+        // above is deliberately not gated: upstream toggles LOCK_EXTRA_ANIMATION unconditionally
+        // (PlayerMoveEvent.java:28-29).
+        if (ServerSwitchState.isRemoteChannelPresent() && !Config.CAN_SWITCH_MODEL) {
             return;
         }
         // 轮盘键是**开关**，上游如此：它的 keyPressed 命中 ANIMATION_ROULETTE_KEY 就 onClose

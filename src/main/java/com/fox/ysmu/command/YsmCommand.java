@@ -27,6 +27,7 @@ import org.apache.commons.lang3.time.StopWatch;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.api.ModelAuthorization;
+import com.fox.ysmu.compat.ServerUtilitiesCompat;
 import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.ServerModelManager;
@@ -40,9 +41,11 @@ import com.fox.ysmu.network.message.PacketEvalMolang;
 import com.fox.ysmu.network.message.PacketQueryMolangVar;
 import com.fox.ysmu.network.message.PacketResetMolang;
 import com.fox.ysmu.network.message.RequestServerModelInfo;
+import com.fox.ysmu.network.message.S2CExecuteMolang;
 import com.fox.ysmu.network.message.S2CPlaySound;
 import com.fox.ysmu.network.message.S2CSetDebugOverlay;
 import com.fox.ysmu.network.message.SetModelAndTexture;
+import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.network.message.SetWelcomeConfig;
 import com.fox.ysmu.network.message.ShowBufferInfo;
 import com.fox.ysmu.network.message.SyncGamePath;
@@ -81,10 +84,25 @@ public class YsmCommand extends CommandBase {
      * subcommands ({@code command/sub/AuthCommand.java} and {@code command/sub/ModelCommand.java}, siblings under
      * {@code command/RootCommand.java:16-24}), appended after {@code reset}. {@code upload} and {@code manage} are
      * port-specific (phase55: the /ysm upload command and the LgeacyYSM model-manage GUI); each needs a summary line
-     * here because {@link #processHelp} walks this array.
+     * here because {@link #processHelp} walks this array. {@code molang} is upstream's {@code MolangCommand}, placed
+     * after {@code play} because that is where {@code command/RootCommand.java:21-22} registers it.
      */
-    private static final String[] HELP_TOPICS = { "reload", "play", "playsound", "buffer", "setgamepath", "welcome",
-        "sync", "reset", "auth", "model", "upload", "manage", "debug", "ysmclient" };
+    private static final String[] HELP_TOPICS = { "reload", "play", "molang", "playsound", "buffer", "setgamepath",
+        "welcome", "sync", "reset", "auth", "model", "upload", "manage", "debug", "ysmclient" };
+
+    /**
+     * The literal word upstream's play command treats as "stop instead of play"
+     * ({@code command/sub/PlayAnimationCommand.java:24,38-42}: {@code if (STOP.equals(animation)) cap.stopAnimation}
+     * {@code else cap.playAnimation}). Note this is a different sentinel from {@code SetPlayAnimation}'s packet
+     * spelling ({@code ".stop"}, that class's {@code :51}); each is upstream's own for its own channel.
+     */
+    private static final String PLAY_STOP = "stop";
+
+    /**
+     * The one action word of {@code /ysm molang <execute> <targets> <expression>} - upstream's literal
+     * ({@code command/sub/MolangCommand.java:22,28,33}).
+     */
+    private static final String[] MOLANG_ACTIONS = { "execute" };
 
     /**
      * The action words of {@code /ysm auth <targets> <action> [model]} - upstream's four literals
@@ -104,11 +122,14 @@ public class YsmCommand extends CommandBase {
 
     /**
      * The subcommands exempt from the level-2 re-check inside {@link #processCommand}: every one of them either runs
-     * entirely on the issuing client or is handled before the check ({@code help}). Copied from the reference's
-     * exclusion list ({@code YsmCommand:109-113}).
+     * entirely on the issuing client or is handled before the check ({@code help}). The reference's exclusion list
+     * ({@code YsmCommand:109-113}) has exactly these five.
+     * <p>
+     * Derived from {@link ServerUtilitiesCompat.Subcommand} (its {@link ServerUtilitiesCompat.VanillaGate#OPEN} rows)
+     * instead of being written out again: the ServerUtilities node table, the per-subcommand gate and this exemption
+     * list are one list, so a new subcommand cannot land in one and not the others.
      */
-    private static final java.util.Set<String> LEVEL_ZERO_SUBCOMMANDS = new java.util.HashSet<>(
-        Arrays.asList("help", "setgamepath", "welcome", "buffer", "sync"));
+    private static final Set<String> LEVEL_ZERO_SUBCOMMANDS = ServerUtilitiesCompat.openSubcommandNames();
 
     @Override
     public String getCommandName() {
@@ -173,8 +194,8 @@ public class YsmCommand extends CommandBase {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(
                 args,
-                "reload", "play", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset", "sync", "auth",
-                "model", "upload", "manage", "help");
+                "reload", "play", "molang", "playsound", "setgamepath", "buffer", "welcome", "debug", "reset",
+                "sync", "auth", "model", "upload", "manage", "help");
         }
         if (args.length == 2) {
             if ("welcome".equalsIgnoreCase(args[0])) {
@@ -182,6 +203,16 @@ public class YsmCommand extends CommandBase {
             }
             if ("debug".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, "query", "overlay", "eval");
+            }
+            // /ysm play <targets> <animation> and /ysm molang execute <targets> <expr>: upstream's targets slot is
+            // EntityArgument.players() (command/sub/PlayAnimationCommand.java:28, MolangCommand.java:31), which is
+            // the same selector-or-name slot /ysm auth and /ysm model set complete. The molang slot before the targets
+            // is its one literal instead (MolangCommand.java:28).
+            if ("play".equalsIgnoreCase(args[0])) {
+                return playerNameSuggestions(args);
+            }
+            if ("molang".equalsIgnoreCase(args[0])) {
+                return getListOfStringsMatchingLastWord(args, MOLANG_ACTIONS);
             }
             if ("model".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, MODEL_ACTIONS);
@@ -213,6 +244,14 @@ public class YsmCommand extends CommandBase {
             if ("auth".equalsIgnoreCase(args[0])) {
                 return getListOfStringsMatchingLastWord(args, AUTH_ACTIONS);
             }
+            // /ysm play <targets> <animation>: upstream suggests its CommandRegistry.ALL_ANIMATIONS here, which is the
+            // local client's animation names plus "stop" and empty on a dedicated server (CommandRegistry.java:41-56).
+            if ("play".equalsIgnoreCase(args[0])) {
+                return getListOfStringsFromIterableMatchingLastWord(args, playAnimationSuggestions());
+            }
+            if ("molang".equalsIgnoreCase(args[0]) && "execute".equalsIgnoreCase(args[1])) {
+                return playerNameSuggestions(args);
+            }
             // /ysm model set <targets> ...: upstream's targets argument is EntityArgument.players()
             // (command/sub/ModelCommand.java:42), the same selector-or-name slot /ysm auth completes.
             if ("model".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
@@ -234,6 +273,12 @@ public class YsmCommand extends CommandBase {
             ResourceLocation modelId = ModelAuthorization.resolveModelArgument(stripOneQuotePair(args[3]));
             Set<String> names = modelId == null ? null : textureNamesOf(modelId);
             return names == null ? null : getListOfStringsFromIterableMatchingLastWord(args, textureSuggestions(names));
+        }
+        // /ysm molang execute <targets> <expression>: upstream's last argument is
+        // StringArgumentType.greedyString() (MolangCommand.java:30), i.e. free text the server cannot suggest; the
+        // placeholder follows the same convention /ysm upload and /ysm setgamepath use for their free-text slots.
+        if (args.length >= 4 && "molang".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, "<expression>");
         }
         // /ysm model set <targets> <model> <texture> [ignore_auth]: upstream's BoolArgumentType.bool() slot
         // (ModelCommand.java:48).
@@ -280,20 +325,36 @@ public class YsmCommand extends CommandBase {
      * {@code /ysm help} still works. {@code /ysm debug} then re-checks level 4 on top of it ({@link #processDebug}),
      * and {@code auth}/{@code model} are upstream's own {@code requires(hasPermission(source, 2))}
      * ({@code command/sub/AuthCommand.java:29}, {@code command/sub/ModelCommand.java:35}).
+     * <p>
+     * <b>ServerUtilities per-subcommand nodes.</b> Each subcommand also has its own rank node
+     * ({@link ServerUtilitiesCompat.Subcommand}); this method is the only place that can enforce it, because
+     * {@code /ysm} is one manually dispatched {@code CommandBase} rather than a {@code CommandTreeBase}. An explicit
+     * rank ALLOW on the subcommand's node replaces the level-2 re-check below (and, in
+     * {@link #processDebug}/{@link #processUpload}/{@link #processManage}, the in-body level-4 re-check); an explicit
+     * DENY refuses the subcommand before dispatch; DEFAULT - ServerUtilities absent, or no rank entry - falls through
+     * to the vanilla rules above, so today's permission levels are unchanged. Non-player senders always take the
+     * vanilla path (ServerUtilities' command hooks only cover {@code EntityPlayerMP}).
      */
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
         if (args.length < 1) {
             throw new WrongUsageException(getCommandUsage(sender));
         }
-        // help is available to everyone, before any permission check (reference :101-105).
+        ServerUtilitiesCompat.Subcommand permissionNode = ServerUtilitiesCompat.subcommand(args[0]);
+        int permissionVerdict = rankVerdict(sender, permissionNode);
+        if (permissionVerdict == ServerUtilitiesCompat.PERMISSION_DENY) {
+            throw new CommandException("commands.generic.permission");
+        }
+        // help is available to everyone by default, before any permission check (reference :101-105); the explicit
+        // rank DENY above is the only thing that refuses it.
         if ("help".equalsIgnoreCase(args[0])) {
             processHelp(sender, args);
             return;
         }
         // setgamepath, welcome, buffer and sync are player-facing and client-side only; the rest needs the command's
-        // own level 2 (reference :106-113).
-        if (!LEVEL_ZERO_SUBCOMMANDS.contains(args[0].toLowerCase(Locale.ROOT))
+        // own level 2 (reference :106-113). An explicit rank ALLOW for the subcommand's node replaces the re-check.
+        if (permissionVerdict != ServerUtilitiesCompat.PERMISSION_ALLOW
+            && !LEVEL_ZERO_SUBCOMMANDS.contains(args[0].toLowerCase(Locale.ROOT))
             && !super.canCommandSenderUseCommand(sender)) {
             throw new CommandException("commands.generic.permission");
         }
@@ -301,6 +362,8 @@ public class YsmCommand extends CommandBase {
             processReload(sender);
         } else if ("play".equalsIgnoreCase(args[0])) {
             processPlay(sender, args);
+        } else if ("molang".equalsIgnoreCase(args[0])) {
+            processMolang(sender, args);
         } else if ("playsound".equalsIgnoreCase(args[0])) {
             processPlaySound(sender, args.length >= 2 ? joinCommandArguments(args, 1) : "");
         } else if ("setgamepath".equalsIgnoreCase(args[0])) {
@@ -326,6 +389,33 @@ public class YsmCommand extends CommandBase {
         } else {
             throw new WrongUsageException(getCommandUsage(sender));
         }
+    }
+
+    /**
+     * ServerUtilities' rank verdict for one subcommand node, as the three states
+     * {@link ServerUtilitiesCompat#PERMISSION_ALLOW}, {@link ServerUtilitiesCompat#PERMISSION_DENY} and
+     * {@link ServerUtilitiesCompat#PERMISSION_DEFAULT}.
+     * <p>
+     * Non-player senders are always DEFAULT: ServerUtilities' command hooks only cover {@code EntityPlayerMP}
+     * ({@code MixinCommandHandler.java:39,50}), so the console and command blocks keep exactly the vanilla rules. An
+     * unknown subcommand (null node) is DEFAULT as well and falls through to the vanilla gate before the dispatch
+     * chain answers with the usage line.
+     */
+    private static int rankVerdict(ICommandSender sender, @Nullable ServerUtilitiesCompat.Subcommand node) {
+        return sender instanceof EntityPlayerMP
+            ? ServerUtilitiesCompat.permissionResult((EntityPlayerMP) sender, node)
+            : ServerUtilitiesCompat.PERMISSION_DEFAULT;
+    }
+
+    /**
+     * Whether ServerUtilities' ranks explicitly allow this subcommand node for this sender - the override used by the
+     * in-body level-4 re-checks ({@link #processDebug}, {@link #processUpload}, {@link #processManage}). Non-player
+     * senders are always false: ServerUtilities' command permissions only cover players, so the console/command-block
+     * path keeps the vanilla re-checks untouched.
+     */
+    private static boolean rankAllows(ICommandSender sender, ServerUtilitiesCompat.Subcommand node) {
+        return sender instanceof EntityPlayerMP
+            && ServerUtilitiesCompat.isExplicitlyAllowed((EntityPlayerMP) sender, node);
     }
 
     /**
@@ -381,50 +471,132 @@ public class YsmCommand extends CommandBase {
     }
 
     /**
-     * {@code /ysm play <animation>} - play a named animation of the issuer's model, ported from the reference's
-     * {@code processPlay} ({@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../command/YsmCommand.java:191-232}).
+     * {@code /ysm play <targets> <animation|stop>} - play (or stop) an animation on the named players' models.
      * <p>
-     * The animation state lives in the player's {@link ExtendedModelInfo} EEP, which the server owns: the tick handler
-     * broadcasts a dirty EEP to every tracking client ({@code event/CommonEventHandler.java:257-264}) and the client's
-     * {@code AnimationManager} consumes the replay request ({@code client/animation/AnimationManager.java:208-209}), so
-     * setting it here is the whole feature.
+     * Ported from upstream's {@code command/sub/PlayAnimationCommand.java:26-45}: permission level 2 (the whole
+     * {@code /ysm} baseline, re-checked by {@link #processCommand}), {@code targets} is
+     * {@code EntityArgument.players()} - a selector <em>or</em> a name - and {@code animation} is one string whose
+     * literal {@code stop} calls {@code cap.stopAnimation(player)} while anything else calls
+     * {@code cap.playAnimation(player, animation)} ({@code :37-43}). The animation state lives in each target's
+     * {@link ExtendedModelInfo} EEP, which the server owns: the tick handler broadcasts a dirty EEP to every tracking
+     * client ({@code event/CommonEventHandler.java:257-264}) and the client's {@code AnimationManager} consumes the
+     * replay request ({@code client/animation/AnimationManager.java:208-209}), so setting it here is the whole
+     * feature - for another player exactly as for the issuer.
      * <p>
-     * The existence check runs only on a side that can answer it: {@code GeckoLibCache}'s animation table is filled by
-     * the client while it parses models, so on a dedicated server it is empty. The reference's own comment
-     * ({@code :215-219}) says the same. The check therefore rejects a name only when the table has the model at all
-     * (integrated server / single player) and otherwise leaves the verdict to the client, which skips a missing
-     * animation safely instead of failing.
+     * <b>A console sender is allowed</b>, as upstream's is: {@code EntityArgument.getPlayers} needs no player source
+     * and its body only touches the targets. The earlier port required the issuer to be a player because the
+     * animation landed on them; the receipts now go to the command source.
+     * <p>
+     * <b>The existence check</b> runs only on a side that can answer it: {@code GeckoLibCache}'s animation table is
+     * filled by the client while it parses models, so on a dedicated server it is empty. The reference's own comment
+     * ({@code :215-219}) says the same. The check therefore rejects a name only when the table has the target's model
+     * at all (integrated server / single player) and otherwise leaves the verdict to the client, which skips a
+     * missing animation safely instead of failing ({@link SetPlayAnimation#modelDeclaresAnimation} is the same rule,
+     * used by the roulette packet's handler).
+     * <p>
+     * <b>The receipts are a port addition</b> (upstream answers nothing at all): one refusal line per target and one
+     * summary line, in the same shape {@code /ysm auth} and {@code /ysm model set} use. Every key is {@code %s}-only,
+     * because {@code ChatComponentTranslation} refuses other conversions on 1.7.10.
      */
     private void processPlay(ICommandSender sender, String[] args) {
-        if (!(sender instanceof EntityPlayerMP)) {
-            throw new CommandException("commands.generic.player.notFound");
+        if (args.length < 3) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.play.usage"));
+            return;
         }
-        EntityPlayerMP player = (EntityPlayerMP) sender;
         String animName = parsePlayAnimationName(args);
         if (StringUtils.isBlank(animName)) {
             sender.addChatMessage(
                 new ChatComponentTranslation("message.yes_steve_model.model.animation_roulette.play", "?"));
             return;
         }
-        ExtendedModelInfo eep = ExtendedModelInfo.get(player);
-        if (eep == null) {
-            player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.play.no_data"));
+        // Resolve the targets before touching anything, so a bad selector cannot leave a partial round behind (the
+        // same order /ysm auth and /ysm model set use).
+        EntityPlayerMP[] targets = resolveAuthTargets(sender, args[1]);
+        boolean stop = PLAY_STOP.equals(animName);
+        int affected = 0;
+        for (EntityPlayerMP target : targets) {
+            ExtendedModelInfo eep = ExtendedModelInfo.get(target);
+            if (eep == null) {
+                sender.addChatMessage(
+                    new ChatComponentTranslation(
+                        "commands.yes_steve_model.play.no_data",
+                        target.getCommandSenderName()));
+                continue;
+            }
+            if (!stop && !SetPlayAnimation.modelDeclaresAnimation(eep, animName)) {
+                sender.addChatMessage(
+                    new ChatComponentTranslation(
+                        "commands.yes_steve_model.play.not_found",
+                        animName,
+                        target.getCommandSenderName()));
+                continue;
+            }
+            if (stop) {
+                eep.stopAnimation();
+            } else {
+                eep.playAnimation(animName);
+            }
+            affected++;
+        }
+        if (affected > 0) {
+            sender.addChatMessage(
+                stop ? new ChatComponentTranslation(
+                    "commands.yes_steve_model.play.stopped",
+                    String.valueOf(affected))
+                    : new ChatComponentTranslation(
+                        "commands.yes_steve_model.play.done",
+                        animName,
+                        String.valueOf(affected)));
+        }
+    }
+
+    /**
+     * {@code /ysm molang execute <targets> <expression>} - run a Molang expression in the targets' model scopes.
+     * <p>
+     * Ported from upstream's {@code command/sub/MolangCommand.java:26-50}: permission level 2, the literal
+     * {@code execute}, {@code targets} = {@code EntityArgument.players()}, {@code exp} = a greedy string. The body
+     * ({@code :44-50}) builds one message carrying the expression plus every target's entity id and
+     * <b>broadcasts it to all players</b> - not only the targets' own clients, because each viewer's client then
+     * resolves those ids in its own level and runs the expression there ({@code
+     * network/forge/ControlHandler.executeMolang:253-272}). The port's message is {@link S2CExecuteMolang} (clientbound
+     * id 40) and its consumer is {@code client/animation/molang/RemoteMolangExecution}.
+     * <p>
+     * <b>Two behaviours that look like missing validation and are not.</b> Upstream bounds the payload on the
+     * <em>receiving</em> side ({@code ControlHandler.java:115-116}: at most 1024 targets, at most 4096 characters of
+     * expression) and drops an over-long expression without telling anyone; the port keeps both bounds in the same
+     * place ({@link S2CExecuteMolang#MAX_TARGETS}, the roulette codec's {@code MAX_EXPRESSION_LENGTH}) and likewise
+     * adds no command-side rejection. And the command prints no result: the expression's value is not what it is for -
+     * side effects in the target's scope are - which is why {@code /ysm debug eval} (whose whole job is the value,
+     * printed into the issuer's chat) stays a separate command.
+     * <p>
+     * The summary line is a port addition, like every other {@code /ysm} receipt, and is {@code %s}-only.
+     */
+    private void processMolang(ICommandSender sender, String[] args) {
+        if (args.length < 2 || !isKnownMolangAction(args[1])) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.molang.usage"));
             return;
         }
-        ResourceLocation modelId = eep.getModelId();
-        if (modelId != null) {
-            ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
-            AnimationFile animFile = GeckoLibCache.getInstance()
-                .getAnimations()
-                .get(mainId);
-            if (animFile != null && !animFile.animations.containsKey(animName)) {
-                player.addChatMessage(
-                    new ChatComponentTranslation("commands.yes_steve_model.play.not_found", animName));
-                return;
-            }
+        if (args.length < 4) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.molang.usage"));
+            return;
         }
-        eep.playAnimation(animName);
-        player.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.play.done", animName));
+        String expression = parseMolangExpression(args);
+        if (StringUtils.isBlank(expression)) {
+            sender.addChatMessage(new ChatComponentTranslation("commands.yes_steve_model.molang.usage"));
+            return;
+        }
+        EntityPlayerMP[] targets = resolveAuthTargets(sender, args[2]);
+        int[] entityIds = new int[targets.length];
+        for (int i = 0; i < targets.length; i++) {
+            entityIds[i] = targets[i].getEntityId();
+        }
+        // Upstream's NetworkHandler.broadcastToAllPlayers (MolangCommand.java:48): every client, so every viewer of
+        // those entities runs the expression on its own copy of them. sendToAll is the same audience on 1.7.10.
+        NetworkHandler.CHANNEL.sendToAll(new S2CExecuteMolang(expression, entityIds));
+        sender.addChatMessage(
+            new ChatComponentTranslation(
+                "commands.yes_steve_model.molang.done",
+                String.valueOf(targets.length)));
     }
 
     /**
@@ -549,13 +721,16 @@ public class YsmCommand extends CommandBase {
     }
 
     /**
-     * The animation name of {@code /ysm play}: every argument from index 1 re-joined with single spaces and stripped
-     * of every {@code "} and {@code '} (reference {@code :195-204}, including its {@code replaceAll("[\"']", "")} -
-     * so an internal quote disappears too, not just one surrounding pair).
+     * The animation name of {@code /ysm play <targets> <animation|stop>}: every argument from index <b>2</b> re-joined
+     * with single spaces and stripped of every {@code "} and {@code '} (the reference {@code :195-204}, including its
+     * {@code replaceAll("[\"']", "")} - so an internal quote disappears too, not just one surrounding pair).
+     * <p>
+     * It starts at 2 because index 1 is now the targets argument, exactly as in upstream's grammar
+     * ({@code command/sub/PlayAnimationCommand.java:28-30}).
      */
     static String parsePlayAnimationName(String[] args) {
         StringBuilder name = new StringBuilder();
-        for (int i = 1; i < args.length; i++) {
+        for (int i = 2; i < args.length; i++) {
             if (name.length() > 0) {
                 name.append(' ');
             }
@@ -563,6 +738,51 @@ public class YsmCommand extends CommandBase {
         }
         return name.toString()
             .replaceAll("[\"']", "");
+    }
+
+    /**
+     * The expression of {@code /ysm molang execute <targets> <expression>}: every argument from index 3 re-joined with
+     * single spaces (1.7.10 splits the command line on spaces even inside quotes, which is also how a multi-statement
+     * expression is reassembled), then one surrounding pair of double quotes stripped - the same convention
+     * {@link #parseEvalExpression} and {@link #parseUploadPath} use.
+     */
+    static String parseMolangExpression(String[] args) {
+        return stripOneQuotePair(
+            joinCommandArguments(args, 3)
+                .trim());
+    }
+
+    /** Whether an action word is one of {@link #MOLANG_ACTIONS}; there is no "unknown action" fallback upstream. */
+    static boolean isKnownMolangAction(String action) {
+        for (String known : MOLANG_ACTIONS) {
+            if (known.equalsIgnoreCase(action)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The animation names {@code /ysm play}'s second slot completes to.
+     * <p>
+     * Upstream suggests {@code CommandRegistry.ALL_ANIMATIONS}: the local default render target's animation names
+     * plus {@code "stop"}, and nothing at all on a dedicated server
+     * ({@code event/CommandRegistry.java:41-56}). This port has no single default render target accessor to read, and
+     * its command names arbitrary targets whose models can differ, so the set is every animation name this JVM's
+     * {@code GeckoLibCache} holds plus {@link #PLAY_STOP}; a dedicated server's table is empty, so the list degrades
+     * to just {@code "stop"} exactly as upstream's does. Sorted, so the suggestion order is stable.
+     */
+    static List<String> playAnimationSuggestions() {
+        Set<String> names = new TreeSet<>();
+        names.add(PLAY_STOP);
+        for (AnimationFile file : GeckoLibCache.getInstance()
+            .getAnimations()
+            .values()) {
+            if (file != null && file.animations != null) {
+                names.addAll(file.animations.keySet());
+            }
+        }
+        return new ArrayList<>(names);
     }
 
     /**
@@ -639,9 +859,12 @@ public class YsmCommand extends CommandBase {
      * <p>
      * <b>Permission.</b> The reference re-checks level {@value #DEBUG_PERMISSION_LEVEL} here rather than relying on the
      * command's own default level 2, because {@code eval} can call any {@code ysm} function, including the
-     * side-effecting ones ({@code particle}, {@code play_sound}). That gate is kept verbatim, including the vanilla
-     * {@code commands.generic.permission} exception it throws. On a default server ({@code op-permission-level=2}) this
-     * means only players explicitly granted level 4 can use {@code /ysm debug}; a single-player host always can.
+     * side-effecting ones ({@code particle}, {@code play_sound}). The vanilla {@code commands.generic.permission}
+     * exception is kept, and so is the check itself - with one override: an explicit ServerUtilities rank ALLOW on
+     * {@code command.ysmu.ysm.debug} replaces it ({@link #rankAllows}), which is the per-subcommand grant interface
+     * this class exists to expose. With ServerUtilities absent, or with no rank entry, the check is exactly the
+     * vanilla one. On a default server ({@code op-permission-level=2}) this means only players explicitly granted
+     * level 4 can use {@code /ysm debug}; a single-player host always can.
      */
     private void processDebug(ICommandSender sender, String[] args) {
         if (!(sender instanceof EntityPlayerMP)) {
@@ -649,8 +872,10 @@ public class YsmCommand extends CommandBase {
         }
         EntityPlayerMP player = (EntityPlayerMP) sender;
         // 1.7.10 的 EntityPlayerMP.canCommandSenderUseCommand 为双参签名 (permissionLevel, commandName)，
-        // 与 CommandBase 内部的调用方式一致（参考分支 :369 的注释）。
-        if (!player.canCommandSenderUseCommand(DEBUG_PERMISSION_LEVEL, getCommandName())) {
+        // 与 CommandBase 内部的调用方式一致（参考分支 :369 的注释）。ServerUtilities 的 rank 显式 ALLOW
+        // 这个节点时跳过该复检（见 ServerUtilitiesCompat 类注释）。
+        if (!rankAllows(player, ServerUtilitiesCompat.Subcommand.DEBUG)
+            && !player.canCommandSenderUseCommand(DEBUG_PERMISSION_LEVEL, getCommandName())) {
             throw new CommandException("commands.generic.permission");
         }
         if (args.length < 2) {
@@ -1425,8 +1650,11 @@ public class YsmCommand extends CommandBase {
      *
      * <p><b>Permission level 4, re-checked here.</b> The whole command is gated at level 2 by the framework and by
      * {@link #processCommand}; that is not enough for an operation that writes into the server's model catalog, so
-     * this method re-checks level 4 in-body - the same shape {@link #processDebug} uses. The network path checks it
-     * again on every chunk, because a client can send an upload packet without going through this command.</p>
+     * this method re-checks level 4 in-body - the same shape {@link #processDebug} uses. The network path
+     * ({@code ServerModelUploadManager#acceptChunk}) re-checks the same node on every chunk, because a client can send
+     * an upload packet without going through this command. An explicit ServerUtilities rank ALLOW on
+     * {@code command.ysmu.ysm.upload} replaces both checks ({@link #rankAllows}); with ServerUtilities absent, or
+     * with no rank entry, they are exactly the vanilla level-4 checks.</p>
      *
      * <p><b>Feedback.</b> A player sender gets one line only when their client cannot read the path (no YSMU
      * handshake recorded - a vanilla client has no way to answer the request); otherwise the client's upload task
@@ -1439,7 +1667,8 @@ public class YsmCommand extends CommandBase {
      * that is the owner's explicit decision (a player-triggered upload must not force a whole-catalog resync).</p>
      */
     private void processUpload(ICommandSender sender, String[] args) {
-        if (!sender.canCommandSenderUseCommand(UPLOAD_PERMISSION_LEVEL, getCommandName())) {
+        if (!rankAllows(sender, ServerUtilitiesCompat.Subcommand.UPLOAD)
+            && !sender.canCommandSenderUseCommand(UPLOAD_PERMISSION_LEVEL, getCommandName())) {
             throw new CommandException("commands.generic.permission");
         }
         if (args.length < 3) {
@@ -1497,14 +1726,18 @@ public class YsmCommand extends CommandBase {
      *
      * <p>The server lists the top-level entries of {@code config/ysmu/custom} and {@code config/ysmu/auth}
      * ({@code ServerModelManage.listEntries}) and sends them to the player, whose client opens
-     * {@code ModelManageScreen}. The GUI's own packets (refresh, delete/move/rename, upload) re-check permission
-     * level 4 server-side, so this command is only the entry point, not the security boundary.</p>
+     * {@code ModelManageScreen}. The GUI's own packets (refresh, delete/move/rename, upload) re-check the same
+     * ServerUtilities node plus the vanilla level-4 gate server-side
+     * ({@code RefreshModelManage.Handler}, {@code HandleFile.Handler}), so this command is only the entry point, not
+     * the security boundary. An explicit rank ALLOW on {@code command.ysmu.ysm.manage} replaces both level-4 checks
+     * ({@link #rankAllows}); with ServerUtilities absent, or with no rank entry, they are exactly the vanilla checks.</p>
      *
      * <p><b>Player-only.</b> Lgeacy opens a client GUI, so the sender must have a client: {@code getPlayerOrException}
      * on its side, {@code commands.generic.player.notFound} here. A console sender has no GUI to open.</p>
      */
     private void processManage(ICommandSender sender) {
-        if (!sender.canCommandSenderUseCommand(MANAGE_PERMISSION_LEVEL, getCommandName())) {
+        if (!rankAllows(sender, ServerUtilitiesCompat.Subcommand.MANAGE)
+            && !sender.canCommandSenderUseCommand(MANAGE_PERMISSION_LEVEL, getCommandName())) {
             throw new CommandException("commands.generic.permission");
         }
         if (!(sender instanceof EntityPlayerMP)) {

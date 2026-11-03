@@ -767,6 +767,21 @@ public final class RenderUtil {
      * and all of its tuning therefore come from the reference branch; its on-screen direction can only be settled in
      * a running client (the reference itself iterated on it three times - see the "v2/v3" note in its mode-1
      * comment), so the shape is ported as-is rather than re-derived.
+     * <p>
+     * <b>The mirror below is bracketed with a winding flip.</b> {@code glScalef(-scale, scale, scale)} makes the draw
+     * diverging (negative determinant), and GL decides front/back faces by screen-space winding, so for everything
+     * drawn until the matrix is popped - the model itself, the held/off-hand item and head-slot layers that hang off
+     * it, and any {@code IItemRenderer} a held stack brings - "front" has to be read as CW. That is the same bracket
+     * the other two mirrored draws in this port already carry
+     * ({@code FirstPersonHandRenderer:449}/{@code :422}, {@code CustomPlayerItemInHandLayer:168}/{@code :174}); it is
+     * the GL half phase45 recorded and left to the owner (".agent/phase45-mirrored-draw-face-culling.md:75-88"), now
+     * applied here. The CPU material path needs no equivalent: {@code MaterialFacing#culled} already refuses to cull
+     * a mirrored draw. See {@code .agent/phase62-hud-firstperson-hud-face-review.md}.
+     * <p>
+     * Known caveat, recorded rather than fixed: {@code CustomPlayerItemInHandLayer} flips to CW for its own off-hand
+     * mirror, so under this outer bracket that item's winding is not flipped in total. Harmless today because that
+     * layer draws items with GL culling disabled ({@code :146}); if culling is ever re-enabled there, the outer flag
+     * has to be folded into that decision instead of blindly flipping again.
      */
     public static void renderPlayerEntity(EntityPlayer player, double posX, double posY, float scale, float yawOffset,
         double z, float partialTicks) {
@@ -837,6 +852,11 @@ public final class RenderUtil {
 
             GL11.glTranslatef((float) (posX + scale * 0.5), (float) (posY + scale * 2), (float) z);
             GL11.glScalef(-scale, scale, scale);
+            // 镜像使屏幕空间绕序整体反转：以下所有绘制（模型 + 原版层：手持物/副手/头饰/自定义 IItemRenderer）
+            // 的 GL 正反面判定都要按 CW 解释。与另两处镜像绘制同形（FirstPersonHandRenderer.java:449/:422、
+            // CustomPlayerItemInHandLayer.java:168/:174），收尾在 finally 还原。见 phase45 记录的未修半边
+            // （.agent/phase45-mirrored-draw-face-culling.md:75-88）与 .agent/phase62-hud-firstperson-hud-face-review.md。
+            GL11.glFrontFace(GL11.GL_CW);
             GL11.glRotatef(180.0F, 0.0F, 0.0F, 1.0F);
             GL11.glRotatef(outerYaw + yawOffset, 0.0F, 1.0F, 0.0F);
 
@@ -852,6 +872,7 @@ public final class RenderUtil {
             player.renderYawOffset = saveBody;
             player.prevRotationYawHead = savePrevHead;
             player.rotationYawHead = saveHead;
+            GL11.glFrontFace(GL11.GL_CCW);
             GL11.glPopMatrix();
             RenderHelper.disableStandardItemLighting();
             GL11.glDisable(GL12.GL_RESCALE_NORMAL);

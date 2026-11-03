@@ -487,6 +487,17 @@ public class HudPreviewCache {
             // Clear with transparent black — the model is rendered on top. FboCache#bind saved the caller's clear
             // colour and #unbind puts it back, so this does not outlive the bake.
             GL11.glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
+            // The bake owns the depth state it needs instead of inheriting the HUD's. The model drawn into this FBO
+            // has to depth-test and depth-write, or its near/far faces composite in submission order; and the depth
+            // clear below obeys GL_DEPTH_WRITEMASK, so a host pipeline that leaves the mask off (Iris's
+            // FinalPassRenderer.renderFinalPass sets glDepthMask(false); its own mixin puts it back, but the bake must
+            // not depend on that) would silently make both wrong. Read the real values and put them back in the
+            // finally, exactly as the blit below does for its own four flags. See
+            // .agent/phase62-hud-firstperson-hud-face-review.md.
+            boolean depthWasOn = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+            boolean depthMaskWasOn = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+            GL11.glEnable(GL11.GL_DEPTH_TEST);
+            GL11.glDepthMask(true);
             // The measured cost of one bake starts here, at the clear: a full-size colour+depth clear is part of what
             // a refresh costs, and the catalog tile path measures the same span (its clear is the callback that runs
             // inside RenderUtil#renderEntityInInventory). Timing from after the clear - as this did before - told
@@ -508,6 +519,12 @@ public class HudPreviewCache {
                 // The bracket is the same one the catalog tile uses (ModelButton#bakePreviewIfDue).
                 GL11.glMatrixMode(GL11.GL_MODELVIEW);
                 fboCache.unbind(mc);
+                GL11.glDepthMask(depthMaskWasOn);
+                if (depthWasOn) {
+                    GL11.glEnable(GL11.GL_DEPTH_TEST);
+                } else {
+                    GL11.glDisable(GL11.GL_DEPTH_TEST);
+                }
             }
             // First sample seeds the estimate; afterwards a 0.7/0.3 EMA.
             smoothRenderCostMs = smoothRenderCostMs <= 0.0F

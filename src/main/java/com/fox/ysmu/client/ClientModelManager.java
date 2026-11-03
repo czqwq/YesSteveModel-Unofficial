@@ -2948,7 +2948,7 @@ public class ClientModelManager {
             "YSM client starting model sync: currentModels={}, rememberedCachedModels={}",
             MODELS.size(),
             CACHE_MD5.size());
-        clearCachedModelMd5();
+        clearCachedModelMd5(false);
         // CUI-01: the cache reset and the cache-directory listing run in this one client task, in this order, so
         // the reply describes the state the client is actually in when it is built.
         clearRuntimeModelCaches();
@@ -3469,6 +3469,39 @@ public class ClientModelManager {
         }
     }
 
+    /**
+     * The connection boundary: everything a connection delivered stops being usable here, and everything this client
+     * owns for itself keeps working.
+     *
+     * <p><b>Why the split exists.</b> Upstream's model content lives in a process-level local catalog that outlives
+     * every connection, and a session adds a <em>remote projection</em> on top of it. A disconnect withdraws that
+     * projection and immediately re-projects the latest local snapshot - "该过程不 materialize、restore 或等待共享
+     * worker，也不清空已完成 resource cache" ({@code docs/architecture/model-management/catalog-and-sources.md:31},
+     * {@code reload-and-publication.md:42}), and the local catalog keeps scanning and publishing while a connection is
+     * open. Dropping the state of a model the client's own catalogue carries is a port-only outcome, and it breaks the
+     * client for good on a peer that will never re-send that model:
+     * <ul>
+     * <li>{@link #ensureGeometry} distinguishes "parked, a build is coming" from "an id this manager knows nothing
+     * about" by the presence of a {@link #PENDING_GEOMETRY} entry, and answers "nothing to wait for" for the second
+     * ({@code :951-957}). An id that is still listed in {@link #MODELS} but has no payload anywhere therefore never
+     * builds again: it is reported unpublished on every frame, so the renderer substitutes the built-in default
+     * ({@code CustomPlayerRenderer#selectDrawn}) and the first-person arm stays vanilla
+     * ({@code FirstPersonHandRenderer#getCustomHandRenderContext:504-509}).</li>
+     * <li>{@link com.fox.ysmu.client.sync.LocalModelLoader} skips ids that are already listed, so nothing re-registers
+     * it either.</li>
+     * </ul>
+     * A YSMU peer hides this because every new connection re-sends its catalogue, which re-creates the payload (the
+     * sync's own {@link #clearRuntimeModelCaches} clears the list first, so list and payload stay consistent). A peer
+     * without YSMU - but also single player, whose integrated server does the same - never does, and there the client
+     * keeps only the built-in default.
+     *
+     * <p><b>What is kept and what is dropped.</b> The payload state of a client-local model is kept; everything the
+     * connection delivered is dropped, which is what keeps a payload parked for the previous connection from being
+     * built and published as the next connection's model (the generation is stamped when a build is submitted, not
+     * when its payload was parked, so the generation check alone cannot cover a payload that simply stayed parked).
+     * A refusal is dropped for every model: upstream re-grants a new attempt on a connection change
+     * ({@code failure-and-recovery.md:13,28}).
+     */
     public static void clearConnectionState() {
         PASSWORD = null;
         PASSWORD_UUID = null;
@@ -3476,19 +3509,23 @@ public class ClientModelManager {
         // in-flight verification with it.
         SYNC_GENERATION++;
         pendingModelSync = null;
-        clearCachedModelMd5();
-        // Drop the geometry state here, under the lock, instead of leaving it to the next sync's clear. These
-        // structures are all concurrent, so writing them from whichever thread raises the disconnect is safe, and
-        // dropping them is what keeps a payload parked for the connection that just ended from being built later and
-        // published as the *next* connection's model: the generation is stamped when a build is submitted, not when
-        // its payload was parked, so the generation check alone cannot cover a payload that simply stayed parked.
+        clearCachedModelMd5(true);
+        // These structures are all concurrent, so writing them from whichever thread raises the disconnect is safe.
         synchronized (GEOMETRY_STATE_LOCK) {
-            PENDING_GEOMETRY.clear();
-            PENDING_ANIMATIONS.clear();
-            PREPARED_ANIMATIONS.clear();
+            dropConnectionDelivered(PENDING_GEOMETRY);
+            dropConnectionDelivered(PENDING_ANIMATIONS);
+            dropConnectionDelivered(PREPARED_ANIMATIONS);
+            GEOMETRY_READY.removeIf(ClientModelManager::isConnectionDeliveredModel);
+            // The request marker goes for every model: a build that was in flight when the connection ended is
+            // discarded by publishBuiltModelChecked's generation check, and the marker is what would stop the model
+            // from ever being requested again.
             GEOMETRY_REQUESTED.clear();
-            GEOMETRY_READY.clear();
+            // A refusal is per connection: the same bytes get a new attempt on the next one, which is upstream's rule
+            // for an eligibility change. The refusal also removed the parking entry, so the retry only happens when
+            // the payload is registered again (LocalModelLoader: an explicit load, or a peer's sync).
             GEOMETRY_FAILED.clear();
+            // A finished build's payload is either still parked above (and is then built again on demand) or belonged
+            // to the connection, so publishing it is neither possible - the generation no longer matches - nor wanted.
             COMPLETED_BUILDS.clear();
         }
         // The plain HashMaps are deliberately not touched here - MODELS, SCALE_INFO, RENDER_LAYERS_FIRST, EXTRA_INFO
@@ -3497,12 +3534,54 @@ public class ClientModelManager {
         OpenYsmModelSyncClient.clearConnectionState();
     }
 
-    private static void clearCachedModelMd5() {
+    /**
+     * Whether the payload for {@code modelOrSubId} was <b>delivered by a connection</b> rather than belonging to this
+     * client's own catalogue of models scanned from {@code config/ysmu/{builtin,custom,auth}}.
+     *
+     * <p>{@link com.fox.ysmu.model.ServerModelManager#OPEN_YSM_SYNC_INFO} is that catalogue - the index
+     * {@code ServerModelManager.reloadPacks} builds on this side too, and the one
+     * {@link com.fox.ysmu.client.sync.LocalModelLoader} registers from - so this asks the structure that owns the
+     * answer instead of keeping a second record of which ids were registered locally.
+     *
+     * @param modelOrSubId a base model id, or any sub-model id such as {@code ysmu:model/main}
+     */
+    private static boolean isConnectionDeliveredModel(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return true;
+        }
+        return !ServerModelManager.OPEN_YSM_SYNC_INFO.containsKey(
+            ModelIdUtil.getParentModelId(modelOrSubId)
+                .getResourcePath());
+    }
+
+    /** Drops every entry of {@code table} whose payload a connection delivered, i.e. keeps this client's own. */
+    private static <T> void dropConnectionDelivered(Map<ResourceLocation, T> table) {
+        table.keySet()
+            .removeIf(ClientModelManager::isConnectionDeliveredModel);
+    }
+
+    /**
+     * Forgets which cache file each model was read from.
+     *
+     * @param keepClientLocalModels whether the entries of models the client's own catalogue carries survive: the
+     *                              encrypted client cache file is still there and
+     *                              {@link com.fox.ysmu.client.sync.OpenYsmModelSyncClient#readClientCacheToClearBytes}
+     *                              can still open it with the local key, so those records stay valid across a
+     *                              connection boundary, while a model delivered by the connection loses the only place
+     *                              its bytes could be re-read from
+     */
+    private static void clearCachedModelMd5(boolean keepClientLocalModels) {
         synchronized (CACHE_MD5) {
             CACHE_MD5.clear();
         }
         // The "model → encrypted cache file" map describes the models of the connection that just ended (or that is
         // about to start a new sync round), and so does the format flag beside it.
+        if (keepClientLocalModels) {
+            CACHED_MODEL_MD5.keySet()
+                .removeIf(ClientModelManager::isConnectionDeliveredModel);
+            OPENYSM_CACHE_FORMAT.removeIf(ClientModelManager::isConnectionDeliveredModel);
+            return;
+        }
         CACHED_MODEL_MD5.clear();
         OPENYSM_CACHE_FORMAT.clear();
     }

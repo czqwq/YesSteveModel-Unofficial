@@ -5,8 +5,10 @@ import java.nio.charset.StandardCharsets;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ChatComponentTranslation;
 
+import com.fox.ysmu.compat.ServerUtilitiesCompat;
 import com.fox.ysmu.model.manage.ServerModelManage;
 import com.fox.ysmu.model.upload.ModelUploadTarget;
+import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
@@ -30,6 +32,12 @@ import io.netty.buffer.ByteBuf;
  *       客户端看不到任何反馈）。</li>
  *   <li>失败会回一句聊天提示；成功不回话，GUI 随后自己发 {@link RefreshModelManage} 刷新列表。</li>
  * </ul>
+ *
+ * <p><b>权限。</b>三个动作都写服务端模型目录，因此与 {@link RefreshModelManage} 一样：玩家必须通过
+ * {@code command.ysmu.ysm.manage} 的 ServerUtilities rank 判定（显式 ALLOW 时跳过原版 4 级复检）或原版 4 级
+ * 检查。这是 {@code /ysm manage} 命令入口之外的第二道边界（同一节点）；未安装 ServerUtilities 或无 rank 条目
+ * 时与原版逐字节一致。判定与拒绝提示都在服务端线程执行（{@link DeferredWork#server(Runnable)}，与文件动作
+ * 同一个延迟任务）—— ServerUtilities 的 rank 表不是跨线程安全的，查询不能留在 Netty 线程。</p>
  */
 public class HandleFile implements IMessage {
 
@@ -157,15 +165,23 @@ public class HandleFile implements IMessage {
                 if (sender == null) {
                     return null;
                 }
-                if (!sender.canCommandSenderUseCommand(4, "ysm")) {
-                    sender.addChatMessage(new ChatComponentTranslation("commands.generic.permission"));
-                    return null;
-                }
                 ModelUploadTarget target = ModelUploadTarget.fromWireId(message.targetWireId);
                 if (target == null) {
                     return null;
                 }
-                com.fox.ysmu.util.DeferredWork.server(() -> run(sender, target, message));
+                // 权限判定与文件操作都排在服务端线程上：ServerUtilities 的 rank 表不是为跨线程设计的，rank 查询与
+                // 它自己的命令判定一样应留在服务端线程；拒绝提示也因此在服务端线程发出（反馈内容不变）。
+                DeferredWork.server(() -> {
+                    // ServerUtilities 的 rank 显式 ALLOW command.ysmu.ysm.manage 时跳过原版 4 级复检（与
+                    // /ysm manage 命令入口同一节点、同一判定）；未安装或无 rank 条目时 permissionResult 返回
+                    // DEFAULT，行为不变。
+                    if (!ServerUtilitiesCompat.isExplicitlyAllowed(sender, ServerUtilitiesCompat.Subcommand.MANAGE)
+                        && !sender.canCommandSenderUseCommand(4, "ysm")) {
+                        sender.addChatMessage(new ChatComponentTranslation("commands.generic.permission"));
+                        return;
+                    }
+                    run(sender, target, message);
+                });
             } catch (Exception e) {
                 ysmu.LOG.warn("Failed to handle a YSM model-manage file action", e);
             }

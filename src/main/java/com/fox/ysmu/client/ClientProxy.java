@@ -7,11 +7,13 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.input.*;
 import cpw.mods.fml.client.registry.ClientRegistry;
 import net.minecraft.client.Minecraft;
+import net.minecraftforge.client.ClientCommandHandler;
 
 import com.fox.ysmu.CommonProxy;
 import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.client.sync.LocalModelLoader;
+import com.fox.ysmu.command.CommandYsmClient;
 import com.fox.ysmu.eep.ExtendedStarModels;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
 import com.fox.ysmu.network.message.SyncStarModels;
@@ -107,22 +109,20 @@ public class ClientProxy extends CommonProxy {
         ExtraAnimationKey.registerKeyBindings();
         ClientRegistry.registerKeyBinding(ExtraPlayerConfigKey.EXTRA_PLAYER_RENDER_KEY);
         ClientRegistry.registerKeyBinding(PlayerModelScreenKey.PLAYER_MODEL_KEY);
-        // The Molang debug-overlay cluster is behind Config.DEBUG_MOLANG_OVERLAY (default off): with it off no command
-        // is registered, exactly like the engine capture, the overlay render hook and the four packet consumers.
-        // /ysmclient is a *client* command, so it goes to ClientCommandHandler rather than the server dispatcher -
-        // registering a client-side "ysm" would swallow every /ysm call before it could reach the server, which is
-        // why the command has a name of its own (see CommandYsmClient).
-        if (com.fox.ysmu.Config.DEBUG_MOLANG_OVERLAY) {
-            net.minecraftforge.client.ClientCommandHandler.instance
-                .registerCommand(new com.fox.ysmu.command.CommandYsmClient());
-        }
+        // /ysmclient (alias /ysmc) is a client-only command for every player, so it is registered unconditionally.
+        // Config.DEBUG_MOLANG_OVERLAY gates the Molang debug cluster only - the DebugOverlay, the engine's per-frame
+        // variable snapshot and the four debug packet consumers - not this command.
+        // It goes to ClientCommandHandler rather than the server dispatcher, and it needs a name of its own:
+        // registering a client-side "ysm" would swallow every /ysm call before it could reach the server.
+        // CommandYsmClient's javadoc carries the 1.7.10 alias/name rationale.
+        ClientCommandHandler.instance.registerCommand(new CommandYsmClient());
     }
 
     /**
      * 客户端 setup 阶段触发一次本地/内置模型注册，入口就是 {@code /ysmclient load} 用的那个
      * （{@link LocalModelLoader#registerLocalModels()}）。
      * <p>
-     * 调用方式与命令路径一致（{@code CommandYsmClient#processLoad:88-89}）：解析/注册较重，丢到
+     * 调用方式与命令路径一致（{@code CommandYsmClient#processLoad:152-155}）：解析/注册较重，丢到
      * {@link ThreadTools#THREAD_POOL} 后台线程；真正的注册再由
      * {@code OpenYsmModelSyncClient.parseAndRegisterModel:480-489} 用 {@code Minecraft.func_152344_a}
      * 交回客户端线程执行。init 阶段 {@code Minecraft.renderEngine}（{@code Minecraft.java:523}）与

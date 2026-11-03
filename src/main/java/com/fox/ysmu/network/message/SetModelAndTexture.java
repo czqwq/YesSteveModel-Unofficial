@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.api.ModelAuthorization;
 import com.fox.ysmu.data.NPCData;
 import com.fox.ysmu.eep.ExtendedModelInfo;
@@ -63,7 +64,11 @@ public class SetModelAndTexture implements IMessage {
         }
 
         /**
-         * Applies the client's selection after the authorization check.
+         * Applies the client's selection after the switch and authorization checks.
+         * <p>
+         * <b>The switch.</b> Upstream refuses the whole request when {@code CanSwitchModel} is off
+         * ({@code network/forge/SessionProtocolHandler.java:563-565}) - before any authorization or selection work -
+         * so a disabled switch leaves the player's current model untouched. See the first block in the body.
          * <p>
          * <b>Authorization.</b> Before this check the handler turned whatever string the client sent straight
          * into a {@code ResourceLocation} and stored it - any client could apply any model. Upstream decides this in
@@ -78,6 +83,19 @@ public class SetModelAndTexture implements IMessage {
          * model is restricted exactly when its effective source is {@code config/ysmu/auth}.
          */
         private static void handleEEP(EntityPlayerMP sender, String model, String texture) {
+            // Upstream's first decision in the select handler (network/forge/SessionProtocolHandler.java:563-565):
+            // `selection == null || !ServerConfig.CAN_SWITCH_MODEL.get()` answers INVALID_REQUEST and never reaches
+            // session.select, i.e. the current selection stays exactly as it is. The client ignores that result
+            // packet (SessionProtocolHandler.java:321-337 only warns on UNSPECIFIED), so upstream shows nothing;
+            // this refusal is logged and silent for the same reason - the player learns it from the screen, which the
+            // model-screen key refuses to open while switching is off.
+            if (!Config.CAN_SWITCH_MODEL) {
+                ysmu.LOG.info(
+                    "Rejecting YSM model selection {} from {}: CanSwitchModel is off",
+                    model,
+                    sender.getCommandSenderName());
+                return;
+            }
             ResourceLocation modelLoc = model.isEmpty() ? null : new ResourceLocation(model);
             ResourceLocation textureLoc = texture.isEmpty() ? null : new ResourceLocation(texture);
             if (!ModelAuthorization.maySelect(sender, modelLoc)) {

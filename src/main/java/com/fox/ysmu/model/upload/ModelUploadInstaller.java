@@ -9,6 +9,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Locale;
 import java.util.Set;
 
+import com.fox.ysmu.model.format.ZipModelFormat;
 import com.fox.ysmu.ysmu;
 
 /**
@@ -19,17 +20,19 @@ import com.fox.ysmu.ysmu;
  * 一次"的双倍开销。</p>
  *
  * <p><b>为什么文件名要清洗两次。</b>客户端发来的名字只是"建议"：服务端先取最后一段（去掉任何目录成分，
- * 阻止 {@code ../../outside.ysm} 这类路径穿越），再把控制字符/Windows 非法字符换成 {@code _}，确保
- * {@code .ysm} 后缀、限制长度、避开 Windows 设备名。最终写入点由 {@link ModelUploadTarget} 的固定目录加
- * 清洗后的裸文件名决定，任何输入都不能把文件写到目标目录之外。</p>
+ * 阻止 {@code ../../outside.ysm} 这类路径穿越），再把控制字符/Windows 非法字符换成 {@code _}，按<b>内容</b>
+ * 决定后缀（{@code .ysm} 或 {@code .zip}——本仓两个扫描器分别收这两种文件，见
+ * {@link ModelUploadInstaller#MODEL_SUFFIX} 与 {@link ZipModelFormat#SUFFIX}）、限制长度、避开 Windows
+ * 设备名。最终写入点由 {@link ModelUploadTarget} 的固定目录加清洗后的裸文件名决定，任何输入都不能把文件写到
+ * 目标目录之外。</p>
  *
  * <p><b>重名不覆盖。</b>所有者要求 {@code model.ysm} 已存在时依次尝试 {@code model_1.ysm}、
  * {@code model_2.ysm}……；序列写满仍无空位时按写盘失败处理。上传是"装一个新模型"，覆盖会静默毁掉服务器上
- * 已有模型，所以这里不做覆盖。</p>
+ * 已有模型，所以这里不做覆盖。ZIP 走同一条重名规则，只保留自己的后缀（{@code model.zip}、{@code model_1.zip}…）。</p>
  */
 public final class ModelUploadInstaller {
 
-    /** 目标目录里的文件后缀；扫描器只收 {@code .ysm}。 */
+    /** 目标目录里的传统模型文件后缀；legacy {@code .ysm} 扫描器只收它，新上传默认也用它。 */
     public static final String MODEL_SUFFIX = ".ysm";
     /** 清洗后的文件名长度上限（含后缀）。 */
     private static final int MAX_FILE_NAME_LENGTH = 100;
@@ -149,7 +152,10 @@ public final class ModelUploadInstaller {
                 null,
                 ModelFileValidator.describe(validation));
         }
-        String sanitized = sanitizeFileName(proposedFileName);
+        // 后缀由内容决定（ZIP 模型包必须叫 .zip 才会被 ZIP 扫描器接手；其余仍然写 .ysm），不让建议名把内容
+        // 装进一个扫描器不会读取的扩展名里。
+        String suffix = ZipModelFormat.isZipArchive(data) ? ZipModelFormat.SUFFIX : MODEL_SUFFIX;
+        String sanitized = sanitizeFileName(proposedFileName, suffix);
         synchronized (INSTALL_LOCK) {
             try {
                 Files.createDirectories(root);
@@ -213,14 +219,17 @@ public final class ModelUploadInstaller {
     }
 
     /**
-     * 把任意字符串洗成一个可安全落进目标目录的 {@code .ysm} 文件名。
+     * 把任意字符串洗成一个可安全落进目标目录的模型文件名：{@code .ysm} 或 {@code .zip}（扫描器认的两种后缀，
+     * 模型管理也按这两种列条目）。{@code suffix} 由**内容**决定而不是由建议名决定（见 {@link #installInto}）：
+     * 内容/扩展名不一致会让扫描器静默跳过该文件。
      *
      * <p>步骤：去掉目录成分（最后一个 {@code /} 或 {@code \\} 之后的部分）→ 去掉首尾空白 → 控制字符与
      * Windows 非法字符 {@code <>:"|?*} 换成 {@code _} → 去掉首尾的点与空格（Windows 不允许以点/空格结尾）
-     * → 避开 Windows 设备名 → 确保 {@code .ysm} 后缀 → 截断到 {@link #MAX_FILE_NAME_LENGTH} 并保留后缀。
-     * 空结果退回 {@code model.ysm}。</p>
+     * → 去掉建议名里已有的模型后缀（{@code a.zip} 的 YSM 内容会成为 {@code a.ysm}，而不是 {@code a.zip.ysm}）
+     * → 避开 Windows 设备名 → 确保 {@code suffix} → 截断到 {@link #MAX_FILE_NAME_LENGTH} 并保留后缀。
+     * 空结果退回 {@code model<suffix>}。</p>
      */
-    static String sanitizeFileName(String proposedFileName) {
+    static String sanitizeFileName(String proposedFileName, String suffix) {
         String name = proposedFileName == null ? "" : proposedFileName.trim();
         int lastSeparator = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
         if (lastSeparator >= 0) {
@@ -237,23 +246,26 @@ public final class ModelUploadInstaller {
             }
         }
         String result = trimDotsAndSpaces(cleaned.toString());
+        String lower = result.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(MODEL_SUFFIX)) {
+            result = trimDotsAndSpaces(result.substring(0, result.length() - MODEL_SUFFIX.length()));
+        } else if (lower.endsWith(ZipModelFormat.SUFFIX)) {
+            result = trimDotsAndSpaces(result.substring(0, result.length() - ZipModelFormat.SUFFIX.length()));
+        }
         if (result.isEmpty()) {
             result = "model";
         }
-        if (!result.toLowerCase(Locale.ROOT)
-            .endsWith(MODEL_SUFFIX)) {
-            result = result + MODEL_SUFFIX;
-        }
+        result = result + suffix;
         if (result.length() > MAX_FILE_NAME_LENGTH) {
-            String stem = result.substring(0, result.length() - MODEL_SUFFIX.length());
-            stem = trimDotsAndSpaces(stem.substring(0, Math.min(stem.length(), MAX_FILE_NAME_LENGTH - MODEL_SUFFIX
+            String stem = result.substring(0, result.length() - suffix.length());
+            stem = trimDotsAndSpaces(stem.substring(0, Math.min(stem.length(), MAX_FILE_NAME_LENGTH - suffix
                 .length())));
             if (stem.isEmpty()) {
                 stem = "model";
             }
-            result = stem + MODEL_SUFFIX;
+            result = stem + suffix;
         }
-        String stem = result.substring(0, result.length() - MODEL_SUFFIX.length())
+        String stem = result.substring(0, result.length() - suffix.length())
             .toUpperCase(Locale.ROOT);
         if (WINDOWS_RESERVED_NAMES.contains(stem)) {
             result = "_" + result;
@@ -274,7 +286,8 @@ public final class ModelUploadInstaller {
     }
 
     /**
-     * 在目标目录里找一个空位：{@code wanted} 本身、否则 {@code stem_1.ysm}、{@code stem_2.ysm}……
+     * 在目标目录里找一个空位：{@code wanted} 本身、否则 {@code stem_1.ysm} / {@code stem_1.zip}……（保留
+     * {@code wanted} 自己的后缀，{@link #sanitizeFileName} 保证它是 {@code .ysm} 或 {@code .zip} 之一）。
      *
      * @return 可用的裸文件名；序列耗尽时 {@code null}。调用方必须持有 {@link #INSTALL_LOCK}。
      */
@@ -282,9 +295,11 @@ public final class ModelUploadInstaller {
         if (!Files.exists(dir.resolve(wanted))) {
             return wanted;
         }
-        String stem = wanted.substring(0, wanted.length() - MODEL_SUFFIX.length());
+        String suffix = wanted.toLowerCase(Locale.ROOT)
+            .endsWith(ZipModelFormat.SUFFIX) ? ZipModelFormat.SUFFIX : MODEL_SUFFIX;
+        String stem = wanted.substring(0, wanted.length() - suffix.length());
         for (int i = 1; i <= MAX_NAME_SUFFIX; i++) {
-            String candidate = stem + "_" + i + MODEL_SUFFIX;
+            String candidate = stem + "_" + i + suffix;
             if (!Files.exists(dir.resolve(candidate))) {
                 return candidate;
             }

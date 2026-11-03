@@ -13,6 +13,7 @@ import java.util.Set;
 import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.model.format.Type;
+import com.fox.ysmu.model.format.ZipModelFormat;
 import com.fox.ysmu.network.message.RequestServerModelInfo;
 import com.fox.ysmu.ysmu;
 
@@ -20,14 +21,14 @@ import com.fox.ysmu.ysmu;
  * 服务端侧的模型管理文件操作（phase55，LgeacyYSM 的 {@code ManageCommand.getFilesInfo} + {@code HandleFile}
  * 的移植）：列出 {@code config/ysmu/{custom,auth}} 顶层条目，并执行删除/移动/重命名。
  *
- * <p><b>列表范围。</b>只列顶层 FOLDER 与 {@code .ysm} 文件——本仓扫描器只加载这两种形态（Lgeacy 的列表还有
- * {@code .zip}，但本仓不解析 zip，列出无法加载的文件只会误导管理员，所有者也确认了这一裁剪）。符号链接不列也
- * 不允许操作：它可能指向目录之外，而删除目录会跟随链接。</p>
+ * <p><b>列表范围。</b>顶层 FOLDER、{@code .ysm} 文件与 {@code .zip} 模型包——三者都是本仓扫描器会加载的形态
+ * （ZIP 见 {@link ZipModelFormat}；Lgeacy 的列表同样有 {@code .zip} 一类）。符号链接不列也不允许操作：它可能指向
+ * 目录之外，而删除目录会跟随链接。</p>
  *
  * <p><b>名字不可信。</b>条目名来自客户端。每个操作都先经 {@link #sanitizeEntryName} 清洗，再把
  * {@code root.resolve(name).normalize()} 的父目录与根的绝对规范化路径比较——名字里带 {@code /}、
- * {@code \\}、{@code ..} 或控制字符一律拒绝。解析出的条目还必须"像管理列表里的东西"（目录或 {@code .ysm}
- * 常规文件），否则拒绝。</p>
+ * {@code \\}、{@code ..} 或控制字符一律拒绝。解析出的条目还必须"像管理列表里的东西"（目录、{@code .ysm} 或
+ * {@code .zip} 常规文件），否则拒绝。</p>
  *
  * <p><b>不覆盖。</b>移动/重命名的目标已存在时返回 {@link Outcome#DEST_EXISTS}，绝不覆盖已有模型；这是与
  * Lgeacy 的行为差异（它直接 {@code FileUtils.moveFile}，IOException 被 {@code printStackTrace} 吞掉，
@@ -65,7 +66,7 @@ public final class ServerModelManage {
         "LPT7",
         "LPT8",
         "LPT9");
-    /** 本仓扫描器识别为模型的文件后缀。 */
+    /** 本仓扫描器识别为模型的传统文件后缀（legacy/OpenYSM 二进制 {@code .ysm}）。 */
     private static final String MODEL_FILE_SUFFIX = ".ysm";
 
     /** 管理操作的结果；非 {@link #OK} 时带一个聊天提示键。 */
@@ -116,8 +117,11 @@ public final class ServerModelManage {
                 }
                 if (Files.isDirectory(candidate)) {
                     entries.add(new RequestServerModelInfo.Info(name, Type.FOLDER, FileUtils.sizeOf(candidate.toFile())));
-                } else if (isModelFile(candidate)) {
-                    entries.add(new RequestServerModelInfo.Info(name, Type.YSM, safeSize(candidate)));
+                } else if (Files.isRegularFile(candidate)) {
+                    Type type = modelFileType(candidate);
+                    if (type != null) {
+                        entries.add(new RequestServerModelInfo.Info(name, type, safeSize(candidate)));
+                    }
                 }
             }
         } catch (IOException e) {
@@ -166,7 +170,10 @@ public final class ServerModelManage {
         return moveEntry(source, destination);
     }
 
-    /** 在同一根内改名。文件自动保留 {@code .ysm} 扩展名；目录不强制扩展名（与 Lgeacy 的 GUI 规则一致）。 */
+    /**
+     * 在同一根内改名。文件保留自己的模型后缀（{@code .ysm} 还 {@code .ysm}、{@code .zip} 还 {@code .zip}，
+     * 建议名里写了另一个已知后缀时换成源条目那个）；目录不强制扩展名（与 Lgeacy 的 GUI 规则一致）。
+     */
     public static Outcome rename(Path root, String name, String newName) {
         Path source = resolveManagedEntry(root, name);
         if (source == null) {
@@ -176,9 +183,12 @@ public final class ServerModelManage {
         if (safeNewName == null) {
             return Outcome.INVALID_NAME;
         }
-        if (!Files.isDirectory(source) && !safeNewName.toLowerCase(Locale.ROOT)
-            .endsWith(MODEL_FILE_SUFFIX)) {
-            safeNewName = safeNewName + MODEL_FILE_SUFFIX;
+        if (!Files.isDirectory(source)) {
+            String sourceName = source.getFileName()
+                .toString();
+            String suffix = sourceName.toLowerCase(Locale.ROOT)
+                .endsWith(ZipModelFormat.SUFFIX) ? ZipModelFormat.SUFFIX : MODEL_FILE_SUFFIX;
+            safeNewName = withModelSuffix(safeNewName, suffix);
         }
         if (safeNewName.equals(
             source.getFileName()
@@ -190,6 +200,21 @@ public final class ServerModelManage {
             return Outcome.INVALID_NAME;
         }
         return moveEntry(source, destination);
+    }
+
+    /**
+     * 让清洗后的新名字带上目标后缀：先去掉建议名里可能已有的模型后缀（{@code .ysm}/{@code .zip}），再补上
+     * {@code suffix}。与 {@code ModelUploadInstaller.sanitizeFileName} 同一形状，保证重命名不会造出
+     * {@code a.zip.ysm} 这类扫描器读不到的双后缀名。
+     */
+    private static String withModelSuffix(String name, String suffix) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(MODEL_FILE_SUFFIX)) {
+            name = name.substring(0, name.length() - MODEL_FILE_SUFFIX.length());
+        } else if (lower.endsWith(ZipModelFormat.SUFFIX)) {
+            name = name.substring(0, name.length() - ZipModelFormat.SUFFIX.length());
+        }
+        return name + suffix;
     }
 
     private static Outcome moveEntry(Path source, Path destination) {
@@ -246,7 +271,7 @@ public final class ServerModelManage {
 
     /**
      * 解析一个可管理的条目：名字必须能清洗、解析出的路径父目录必须是 {@code root} 本身、条目必须存在且是
-     * 目录或 {@code .ysm} 常规文件、且不是符号链接。
+     * 目录、{@code .ysm} 或 {@code .zip} 常规文件，且不是符号链接。
      *
      * @return 条目路径；任何一项不满足返回 {@code null}
      */
@@ -265,7 +290,7 @@ public final class ServerModelManage {
         if (Files.isDirectory(entry)) {
             return entry;
         }
-        return isModelFile(entry) ? entry : null;
+        return modelFileType(entry) != null ? entry : null;
     }
 
     private static Path resolveChild(Path root, String safeName) {
@@ -282,11 +307,24 @@ public final class ServerModelManage {
         return candidate;
     }
 
-    private static boolean isModelFile(Path path) {
+    /**
+     * 一个常规文件的模型类型，{@code null} 表示不是本仓扫描器会加载的文件。这是管理列表“类型”列的唯一判定：
+     * {@code .ysm} 与 {@code .zip} 各归一类（ZIP 见 {@link ZipModelFormat}）。
+     */
+    private static Type modelFileType(Path path) {
         String name = path.getFileName() == null ? null : path.getFileName()
             .toString();
-        return name != null && Files.isRegularFile(path) && name.toLowerCase(Locale.ROOT)
-            .endsWith(MODEL_FILE_SUFFIX);
+        if (name == null || !Files.isRegularFile(path)) {
+            return null;
+        }
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(ZipModelFormat.SUFFIX)) {
+            return Type.ZIP;
+        }
+        if (lower.endsWith(MODEL_FILE_SUFFIX)) {
+            return Type.YSM;
+        }
+        return null;
     }
 
     private static long safeSize(Path path) {

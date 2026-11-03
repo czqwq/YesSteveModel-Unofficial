@@ -118,6 +118,28 @@ public class SetPlayAnimation implements IMessage {
         return true;
     }
 
+    /**
+     * Whether a player's model declares an animation, answered only by a side that can answer it.
+     * <p>
+     * {@code GeckoLibCache}'s animation table is filled while models are parsed on the client, so on a dedicated
+     * server it is empty and this answers {@code true} for everything - the client then declines to send a name its
+     * model does not declare. Two callers share this one rule: this packet's handler (the roulette's play request) and
+     * {@code YsmCommand.processPlay} ({@code /ysm play <targets> <animation>}), which had the same six lines inline.
+     */
+    public static boolean modelDeclaresAnimation(ExtendedModelInfo eep, String name) {
+        if (eep == null) {
+            return true;
+        }
+        ResourceLocation modelId = eep.getModelId();
+        if (modelId == null) {
+            return true;
+        }
+        AnimationFile animFile = GeckoLibCache.getInstance()
+            .getAnimations()
+            .get(ModelIdUtil.getMainId(modelId));
+        return animFile == null || animFile.animations.containsKey(name);
+    }
+
     public static class Handler implements IMessageHandler<SetPlayAnimation, IMessage> {
 
         @Override
@@ -167,24 +189,6 @@ public class SetPlayAnimation implements IMessage {
             } catch (Exception e) {
                 ysmu.LOG.warn("Ignoring malformed YSM play-animation packet", e);
             }
-        }
-
-        /**
-         * Whether the sender's model declares the animation, answered only by a side that can answer it.
-         * <p>
-         * Same shape and the same caveat as {@code YsmCommand.processPlay}: {@code GeckoLibCache}'s animation table is
-         * filled while models are parsed on the client, so on a dedicated server it is empty and this answers
-         * {@code true} for everything - the client then declines to send a name its model does not declare.
-         */
-        private static boolean modelDeclaresAnimation(ExtendedModelInfo eep, String name) {
-            ResourceLocation modelId = eep.getModelId();
-            if (modelId == null) {
-                return true;
-            }
-            AnimationFile animFile = GeckoLibCache.getInstance()
-                .getAnimations()
-                .get(ModelIdUtil.getMainId(modelId));
-            return animFile == null || animFile.animations.containsKey(name);
         }
     }
 }

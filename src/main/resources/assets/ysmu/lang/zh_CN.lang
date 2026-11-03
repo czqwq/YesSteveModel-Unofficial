@@ -95,10 +95,10 @@ gui.yes_steve_model.model_manage.type.ysm=ysm
 gui.yes_steve_model.model_manage.file=§6文件：%s
 gui.yes_steve_model.model_manage.file.empty=空
 gui.yes_steve_model.model_manage.error.too_large=§c这个文件太大了（上限：%s MiB）
-gui.yes_steve_model.model_manage.error.format_incorrect=§c文件类型不正确，必须是 .ysm 文件
-gui.yes_steve_model.model_manage.error.path_empty=§c请先选择一个 .ysm 文件
+gui.yes_steve_model.model_manage.error.format_incorrect=§c文件类型不正确，必须是 .ysm 或 .zip 文件
+gui.yes_steve_model.model_manage.error.path_empty=§c请先选择一个 .ysm 或 .zip 文件
 gui.yes_steve_model.model_manage.error.read_failed=§c无法读取所选文件
-gui.yes_steve_model.model_manage.error.invalid=§c所选文件不是有效的 .ysm 模型
+gui.yes_steve_model.model_manage.error.invalid=§c所选文件不是有效的 .ysm 或 .zip 模型
 gui.yes_steve_model.extra_player_render.tips=拖动绿色方块： 移动人物\n拖动蓝色方块： 缩放人物\n鼠标右键拖动： 旋转人物\nAlt R 键：重置人物\n\n【按下 Esc 键退出配置界面】
 gui.yes_steve_model.texture.button.animation_name=动画名称：%s
 gui.yes_steve_model.texture.button.attacked=被攻击
@@ -409,7 +409,8 @@ gui.yes_steve_model.config.idle_asset_eviction=释放闲置模型几何(参考�
 gui.yes_steve_model.config.baked_geometry_cache=复用磁盘上的内容寻址几何烘焙缓存. 默认关闭: 本移植实测比重新烘焙更慢(烘焙 0-7 ms, 读缓存 1-52 ms 另加输入摘要), 只有将来烘焙重新变贵时才划算.
 gui.yes_steve_model.config.baked_animation_cache=复用磁盘上的内容寻址动画缓存. 默认关闭: 本移植实测比重新构建更慢(构建 6-57 ms, 读缓存 30-79 ms).
 
-# Molang 调试叠加层 + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, 默认关闭)
+# Molang 调试叠加层 (Config.DEBUG_MOLANG_OVERLAY, 默认关闭). 下面的 /ysmclient 键不受它门控:
+# /ysmclient 是给所有玩家用的纯客户端指令 (CommandYsmClient).
 gui.yes_steve_model.debug.title=[Molang Debug]  %s 个变量
 gui.yes_steve_model.debug.search=[搜索]
 gui.yes_steve_model.debug.search_hint=输入...
@@ -444,8 +445,10 @@ message.yes_steve_model.debug.reset_done=§7Molang 变量已重置.
 message.yes_steve_model.debug.overlay_state_on=调试叠加层: §a开
 message.yes_steve_model.debug.overlay_state_off=调试叠加层: §7关
 message.yes_steve_model.debug.toggle_hint=§7游戏内按 %s§7 切换.
-message.yes_steve_model.debug.ysmclient.usage=用法: /ysmclient <load|reset>
-message.yes_steve_model.debug.ysmclient.unknown=未知子命令: %s. 可用: load | reset
+message.yes_steve_model.debug.ysmclient.usage=用法: /ysmclient <load|reset|help>  (别名: /ysmc)
+message.yes_steve_model.debug.ysmclient.unknown=未知子命令: %s. 可用: load | reset | help
+message.yes_steve_model.debug.ysmclient.help.load=  /ysmclient load - 扫描并注册本地模型 (config/ysmu/custom + builtin), 仅自己可见, 无需服务端装 YSMU
+message.yes_steve_model.debug.ysmclient.help.reset=  /ysmclient reset - 将你的 Molang 变量状态重置回模型默认值, 无需重载模型
 commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §r正在加载本地模型...
 commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §r本地模型: 新增 §e%s§r 个, 跳过 §e%s§r 个(已存在) , 失败 §e%s§r 个
 commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §r未找到本地模型.
@@ -472,9 +475,13 @@ commands.yes_steve_model.reset.done=已重置 %s 个玩家的 Molang 变量.
 # commands.yes_steve_model.welcome / .sound_hint / .help_hint 三条 - 它们由
 # client/ClientEventHandler.java 的进服欢迎代码在本地玩家聊天栏输出. 命令自己的回执
 # commands.yes_steve_model.welcome.on / .off 仍按纯文本(由服务端输出) . 标点按仓库约定用 ASCII + 一个空格.
-commands.yes_steve_model.play.no_data=无法播放动画: 找不到玩家数据.
-commands.yes_steve_model.play.not_found=当前模型没有动画: %s
-commands.yes_steve_model.play.done=播放: %s
+commands.yes_steve_model.play.usage=  语法: /ysm play <玩家|@a|@p> <动画名|stop>
+commands.yes_steve_model.play.no_data=无法播放动画: %s 没有模型数据.
+commands.yes_steve_model.play.not_found=当前模型没有动画: %s (玩家 %s)
+commands.yes_steve_model.play.done=播放 %s 于 %s 名玩家.
+commands.yes_steve_model.play.stopped=已停止 %s 名玩家的动画.
+commands.yes_steve_model.molang.usage=  语法: /ysm molang execute <玩家|@a|@p> <表达式>
+commands.yes_steve_model.molang.done=已向 %s 名玩家广播 Molang 表达式.
 commands.yes_steve_model.setgamepath.usage=/ysm setgamepath <路径> [版本]
 commands.yes_steve_model.setgamepath.example=示例: /ysm setgamepath C:/Users/x/.minecraft 1.21
 commands.yes_steve_model.setgamepath.none=尚未配置游戏路径.
@@ -496,7 +503,8 @@ commands.yes_steve_model.sync.resync.disabled=本服务器已禁用重新同步.
 commands.yes_steve_model.sync.resync.failed=重新同步无法启动(同步协议未开启或尚未就绪).
 commands.yes_steve_model.help.title=指令帮助 - 输入 /ysm help <子命令> 查看详情
 commands.yes_steve_model.help.line.reload=  /ysm reload - 重建服务端模型缓存并重新同步所有玩家 (OP)
-commands.yes_steve_model.help.line.play=  /ysm play <动画名> - 播放当前模型的指定动画 (OP)
+commands.yes_steve_model.help.line.play=  /ysm play <玩家|@a|@p> <动画名|stop> - 播放或停止玩家的模型动画 (OP)
+commands.yes_steve_model.help.line.molang=  /ysm molang execute <玩家|@a|@p> <表达式> - 在玩家模型上下文中执行 Molang 表达式 (OP)
 commands.yes_steve_model.help.line.playsound=  /ysm playsound <名称> - 播放缓存的模型音效 (OP)
 commands.yes_steve_model.help.line.buffer=  /ysm buffer - 打印本客户端的缓冲与堆占用 (所有人)
 commands.yes_steve_model.help.line.setgamepath=  /ysm setgamepath <路径> [版本] - 设置本地高版本游戏路径 (所有人)
@@ -504,14 +512,16 @@ commands.yes_steve_model.help.line.welcome=  /ysm welcome <on|off> - 开关进�
 commands.yes_steve_model.help.line.sync=  /ysm sync - 重新同步自己的模型 (所有人)
 commands.yes_steve_model.help.line.reset=  /ysm reset [<玩家|@a|@p>] - 重置 Molang 变量 (OP)
 commands.yes_steve_model.help.line.debug=  /ysm debug <query|overlay|eval> - 调试查询/覆盖层/求值 (ADMIN)
-commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset> - 加载本地模型 / 重置 Molang 变量 (所有人)
+commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset|help> (别名 /ysmc) - 加载本地模型 / 重置 Molang 变量, 纯客户端 (所有人)
 commands.yes_steve_model.help.welcome_off=  点击 [/ysm welcome off] 或手动输入, 可关闭进服欢迎消息
 commands.yes_steve_model.help.unknown=未知子命令: %s. 输入 /ysm help 查看全部指令.
 commands.yes_steve_model.help.detail.title=指令: %s
 commands.yes_steve_model.help.detail.reload.usage=  语法: /ysm reload
 commands.yes_steve_model.help.detail.reload.desc=  重建服务端模型缓存并重新同步所有玩家. 示例: /ysm reload
-commands.yes_steve_model.help.detail.play.usage=  语法: /ysm play <动画名>
-commands.yes_steve_model.help.detail.play.desc=  播放当前模型的指定动画(以服务器为准). 示例: /ysm play wave
+commands.yes_steve_model.help.detail.play.usage=  语法: /ysm play <玩家|@a|@p> <动画名|stop>
+commands.yes_steve_model.help.detail.play.desc=  在指定玩家的模型上播放命名动画或停止当前动画(以服务器为准). 示例: /ysm play @a wave
+commands.yes_steve_model.help.detail.molang.usage=  语法: /ysm molang execute <玩家|@a|@p> <表达式>
+commands.yes_steve_model.help.detail.molang.desc=  在能看见这些玩家的每个客户端上, 于其模型上下文中解析并执行 Molang 表达式(上游向所有客户端广播). 赋值/particle()/play_sound 等副作用落在该上下文; 不输出返回值 —— 需要看值请用 /ysm debug eval. 示例: /ysm molang execute @a v.foo=1;
 commands.yes_steve_model.help.detail.playsound.usage=  语法: /ysm playsound <名称>
 commands.yes_steve_model.help.detail.playsound.desc=  播放内存中缓存的某个模型音效. 示例: /ysm playsound trident
 commands.yes_steve_model.help.detail.buffer.usage=  语法: /ysm buffer
@@ -526,7 +536,7 @@ commands.yes_steve_model.help.detail.reset.usage=  语法: /ysm reset <玩家|@a
 commands.yes_steve_model.help.detail.reset.desc=  重置其他玩家的 Molang 变量状态(漫游变量, 帧间物理, v.* 残留) 回模型默认值, 无需重载模型. 重置自己请用 /ysmclient reset. 支持原版选择器. 示例: /ysm reset @a
 commands.yes_steve_model.help.detail.debug.usage=  语法: /ysm debug <query|overlay|eval> [args]
 commands.yes_steve_model.help.detail.debug.desc=  调试工具: 查询 Molang 变量, 开关调试覆盖层, 或对 Molang 表达式求值. 示例: /ysm debug query q.is_on_ground, /ysm debug eval math.floor(3.7)
-commands.yes_steve_model.help.detail.ysmclient.usage=  语法: /ysmclient <load|reset>
+commands.yes_steve_model.help.detail.ysmclient.usage=  语法: /ysmclient <load|reset|help>  (别名: /ysmc)
 commands.yes_steve_model.help.detail.ysmclient.desc=  纯客户端指令, 无需服务端. /ysmclient load 注册本地扫描到的模型(config/ysmu/custom + builtin), 仅自己可见; /ysmclient reset 将你的 Molang 变量重置回模型默认值, 无需重载模型. 示例: /ysmclient load
 
 # ShowBufferInfo (/ysm buffer): 由客户端半段在发起者自己的聊天栏输出, 因此沿用其它客户端消息键的前缀与颜色码.
@@ -578,20 +588,20 @@ commands.yes_steve_model.model.set.done=已把模型 %s 设置给 %s 个玩家.
 commands.yes_steve_model.help.line.model=  /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false] - 强制指定玩家的模型 (OP)
 commands.yes_steve_model.help.detail.model.usage=  用法: /ysm model set <玩家|@a|@p> <模型> <贴图> [true|false]
 commands.yes_steve_model.help.detail.model.desc=  强制把某个模型(及其某张贴图)指定给其他玩家; 第五个参数 true 表示同时忽略该模型的授权(等同上游的 ignore_auth). 受限且未授权的目标会被逐个报告并跳过, 选择器里其余玩家照常应用. 上游的 /ysm model reload/errors/disable 未移植(重建目录请用 /ysm reload). 示例: /ysm model set Notch default default.png true
-commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <路径> - 把一个本地 .ysm 模型文件装进 config/ysmu (OP)
+commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <路径> - 把一个本地 .ysm 或 .zip 模型文件装进 config/ysmu (OP)
 commands.yes_steve_model.help.line.manage=  /ysm manage - 打开服务端模型管理界面 (ADMIN)
 commands.yes_steve_model.help.detail.upload.usage=  用法: /ysm upload <auth|custom> <路径>
-commands.yes_steve_model.help.detail.upload.desc=  把一个本地 .ysm 模型文件装进 config/ysmu/auth(受限, 需要 /ysm auth 授权)或 config/ysmu/custom. 玩家执行时路径由该玩家自己的客户端读取并上传到服务端; 控制台执行时路径在服务端本机读取. 文件会在两端分别完整校验, 保存为 <名字>.ysm(重名时依次改名 <名字>_1.ysm, <名字>_2.ysm ...), 且不会自动重载 - 需要执行 /ysm reload 才会加载. 需要权限等级 4. 示例: /ysm upload custom F:/model.ysm
+commands.yes_steve_model.help.detail.upload.desc=  把一个本地 .ysm 或 .zip 模型文件(.zip 等于一个打包好的原始模型目录)装进 config/ysmu/auth(受限, 需要 /ysm auth 授权)或 config/ysmu/custom. 玩家执行时路径由该玩家自己的客户端读取并上传到服务端; 控制台执行时路径在服务端本机读取. 文件会在两端分别完整校验, 保存为 <名字>.ysm / <名字>.zip(重名时依次改名 <名字>_1.ysm, <名字>_2.ysm ...), 且不会自动重载 - 需要执行 /ysm reload 才会加载. 需要权限等级 4. 示例: /ysm upload custom F:/model.ysm
 commands.yes_steve_model.help.detail.manage.usage=  用法: /ysm manage
-commands.yes_steve_model.help.detail.manage.desc=  打开服务端模型管理界面: 列出 custom 与 auth 两个根, 管理员可以上传本地 .ysm 文件, 也可以删除/移动(custom↔auth)/重命名条目. 上传与 /ysm upload 走同一套完整模型校验; 删除/移动/重命名只会改动 config/ysmu/{custom,auth} 下的文件, 且绝不覆盖已存在的条目. 不会自动重载 - 需要执行 /ysm reload 才会生效. 需要权限等级 4, 仅玩家可用. 示例: /ysm manage
+commands.yes_steve_model.help.detail.manage.desc=  打开服务端模型管理界面: 列出 custom 与 auth 两个根, 管理员可以上传本地 .ysm 或 .zip 文件, 也可以删除/移动(custom↔auth)/重命名条目. 上传与 /ysm upload 走同一套完整模型校验; 删除/移动/重命名只会改动 config/ysmu/{custom,auth} 下的文件, 且绝不覆盖已存在的条目. 不会自动重载 - 需要执行 /ysm reload 才会生效. 需要权限等级 4, 仅玩家可用. 示例: /ysm manage
 
 # /ysm upload(phase55; 本仓新增子命令, 上游没有命令行上传). 每一行都是 ChatComponentTranslation 键, 只允许 `%s`
 # 占位符(1.7.10 对其它格式符在渲染聊天时抛异常). client.* 是上传方客户端自己显示的行; 其余是服务端回执
 # (玩家上传与控制台上传共用). 客户端读文件/校验失败时还会在上传方客户端日志打一条 ERROR([YSMU-UPLOAD]), 这是
 # 所有者的明确要求.
-commands.yes_steve_model.upload.usage=  用法: /ysm upload <auth|custom> <路径> - 安装一个本地 .ysm 模型文件 (OP)
+commands.yes_steve_model.upload.usage=  用法: /ysm upload <auth|custom> <路径> - 安装一个本地 .ysm 或 .zip 模型文件 (OP)
 commands.yes_steve_model.upload.done=§6§l【§aYSM§6§l】§r §a已把模型文件保存为 §e%s§r§a. 执行 §e/ysm reload§r§a 后生效.
-commands.yes_steve_model.upload.invalid=§6§l【§aYSM§6§l】§r §c上传被拒绝: 该文件不是有效的 .ysm 模型 (%s). 详见服务端日志.
+commands.yes_steve_model.upload.invalid=§6§l【§aYSM§6§l】§r §c上传被拒绝: 该文件不是有效的 .ysm 或 .zip 模型 (%s). 详见服务端日志.
 commands.yes_steve_model.upload.read_failed=§6§l【§aYSM§6§l】§r §c上传失败: 无法读取执行侧本机路径 '%s'.
 commands.yes_steve_model.upload.too_large=§6§l【§aYSM§6§l】§r §c上传被拒绝: '%s' 超过 %s MiB 的上传上限.
 commands.yes_steve_model.upload.write_failed=§6§l【§aYSM§6§l】§r §c上传失败: 服务端无法把文件写入 config/ysmu.
@@ -599,15 +609,16 @@ commands.yes_steve_model.upload.rejected=§6§l【§aYSM§6§l】§r §c上传�
 commands.yes_steve_model.upload.client_missing=§6§l【§aYSM§6§l】§r §c你的客户端没有完成 YSMU 握手, 无法替服务端读取本地文件. 请在客户端安装 YSMU 后重试.
 commands.yes_steve_model.upload.client.read_failed=§6§l【§aYSM§6§l】§r §c上传失败: 客户端无法读取或校验 '%s'. 详见客户端日志.
 commands.yes_steve_model.upload.client.too_large=§6§l【§aYSM§6§l】§r §c上传失败: '%s' 超过 %s MiB 的上传上限.
-commands.yes_steve_model.upload.client.invalid=§6§l【§aYSM§6§l】§r §c上传失败: '%s' 不是有效的 .ysm 模型 (%s).
+commands.yes_steve_model.upload.client.invalid=§6§l【§aYSM§6§l】§r §c上传失败: '%s' 不是有效的 .ysm 或 .zip 模型 (%s).
 commands.yes_steve_model.upload.client.busy=§6§l【§aYSM§6§l】§r §e已有一个模型上传正在进行, 请等它结束后再试.
+commands.yes_steve_model.upload.client.stalled=§6§l【§aYSM§6§l】§r §e模型上传长时间没有进展, 管理界面已解锁. 请查看客户端与服务端日志后重试.
 
 # /ysm manage(phase55; LgeacyYSM 模型管理 GUI 的移植). 动作失败以聊天行回执; 成功不回话, 列表刷新即证据.
 # %s 是条目名; 聊天键只允许 %s(1.7.10 的 ChatComponentTranslation 在渲染聊天时对其它的格式符抛异常).
 commands.yes_steve_model.manage.error.not_found=§6§l【§aYSM§6§l】§r §c没有这个模型条目: %s
 commands.yes_steve_model.manage.error.dest_exists=§6§l【§aYSM§6§l】§r §c目标已存在: %s
 commands.yes_steve_model.manage.error.invalid_name=§6§l【§aYSM§6§l】§r §c模型条目名不合法: %s
-commands.yes_steve_model.manage.error.unsupported=§6§l【§aYSM§6§l】§r §c只能管理顶层文件夹与 .ysm 文件: %s
+commands.yes_steve_model.manage.error.unsupported=§6§l【§aYSM§6§l】§r §c只能管理顶层文件夹与 .ysm/.zip 文件: %s
 commands.yes_steve_model.manage.error.io_error=§6§l【§aYSM§6§l】§r §c文件操作失败: %s
 
 # 模型加载失败提示（上游 ModelFailureNotificationAggregator 的三种结果，加上本仓特有的"内置兜底不可用"）。

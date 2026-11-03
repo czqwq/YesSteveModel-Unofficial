@@ -6,6 +6,7 @@ import java.util.Map;
 import com.fox.ysmu.Config;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.format.OpenYsmFormat;
+import com.fox.ysmu.model.format.ZipModelFormat;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
 import com.fox.ysmu.model.resource.YSMBinaryDeserializer;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
@@ -16,14 +17,14 @@ import rip.ysm.security.YsmCrypt;
 import software.bernie.geckolib3.geo.raw.pojo.Converter;
 
 /**
- * 一个 {@code .ysm} 文件"是不是这个模组能装的模型"的判定（phase55，{@code /ysm upload} 的安全地基）。
+ * 一个模型文件"是不是这个模组能装的模型"的判定（phase55，{@code /ysm upload} 的安全地基）。
  *
  * <p><b>为什么需要它。</b>上游 LgeacyYSM 的 GUI 上传只检查权限就把客户端字节写盘
  * （{@code tmp/LgeacyYSM-1.20.1-forge/.../network/message/UploadFile.java}）；本仓的上传入口要求
  * "上传到服务端前一定要校验是否是正常/有效的 ysm 文件，防止注入攻击"，所以客户端在发送前、服务端在写盘前
  * 用同一个判定各校验一次。服务端永远独立校验，客户端那一次只为省带宽与给出更快的错误提示。</p>
  *
- * <p><b>判定复用扫描器自己的路径，不另写一套"看起来像"的规则。</b>两个合法容器：</p>
+ * <p><b>判定复用扫描器自己的路径，不另写一套"看起来像"的规则。</b>三个合法来源：</p>
  * <ul>
  *   <li>legacy YSGP 容器（{@link YesModelUtils#input(byte[], String, long, int)}）：要求 {@code main.json}、
  *       {@code arm.json}、至少一个 {@code .png}，与 {@code model/format/YsmFormat.cacheAllModels:57-79} 的
@@ -33,14 +34,20 @@ import software.bernie.geckolib3.geo.raw.pojo.Converter;
  *   <li>OpenYSM 二进制容器（{@link OpenYsmFormat#isOpenYsmBinary(byte[])} 判前缀）：解密、反序列化、
  *       footer、{@link RawYsmModelAdapter#isBridgeable(RawYsmModel)} 全部通过才算有效，
  *       与 {@code OpenYsmFormat.cacheBinaryModel:122-197} 的收录链一致。</li>
+ *   <li>ZIP 模型包（{@link ZipModelFormat#isZipArchive(byte[])} 判 {@code PK} 前缀）：交给
+ *       {@link ZipModelFormat}——有界解压 + 与扫描器相同的 layout 判定 + 同一套只读解析（modern 走
+ *       {@code YSMFolderDeserializer}、legacy 平铺走 {@code FolderFormat}），与 {@code ZipModelFormat} 扫描时的
+ *       {@code cacheAllModels} 判定同源。ZIP 的安全规则（路径穿越/条目数/解压预算）就在那个类里，不在这里复制。</li>
  * </ul>
  *
  * <p><b>资源上限。</b>文件本身上限来自 {@link Config#MAX_MODEL_UPLOAD_MB}；解压输出总预算见
  * {@link #maxDecompressedBytes()}（deflate/zstd 的压缩比没有上界，网络字节必须先证明撑不出 OOM）；条目数
- * 上限见 {@link #MAX_ENTRIES}。校验在后台线程执行，调用方负责 catch 异常并给出回执。</p>
+ * 上限见 {@link #MAX_ENTRIES}。校验在后台线程执行，调用方负责 catch 异常并给出回执。ZIP 分支会在
+ * {@code cache/server/.zip-tmp} 下建一个暂存目录做完整解析，解析完立刻删除（它只是暂存，不是第二份缓存，见
+ * {@link ZipModelFormat} 的类注释）。</p>
  *
- * <p>只做**只读解析**：不解包到磁盘、不加载类、不执行任何模型内容，因此不会把上传变成代码注入面。解析器
- * 自身对长度前缀的防御见 {@code YSMByteBuf.readString/readByteArray} 与
+ * <p>只做**只读解析**：不解包到磁盘以外的位置、不加载类、不执行任何模型内容，因此不会把上传变成代码注入面。
+ * 解析器自身对长度前缀的防御见 {@code YSMByteBuf.readString/readByteArray} 与
  * {@code YSMBinaryDeserializer} 的 visibleBoundsOffset 校验（同为 phase55 的加固）。</p>
  */
 public final class ModelFileValidator {
@@ -51,8 +58,12 @@ public final class ModelFileValidator {
     private static final long DECOMPRESSED_BUDGET_FACTOR = 4L;
     /** 条目数上限：legacy 容器每个文件一个条目，4096 对任何真实模型都绰绰有余。 */
     public static final int MAX_ENTRIES = 4096;
-    /** 条目名长度上限；真实条目是 main.json / arm.json / *.animation.json / *.png。 */
-    private static final int MAX_ENTRY_NAME_LENGTH = 200;
+    /**
+     * 条目名长度上限；真实条目是 main.json / arm.json / *.animation.json / *.png。
+     * <p>ZIP 分支（{@link ZipModelFormat}）把它当"每个条目的相对路径"的上限复用，所以是 public：未信任条目的
+     * 名字上限只有这一处定义。</p>
+     */
+    public static final int MAX_ENTRY_NAME_LENGTH = 200;
 
     private ModelFileValidator() {}
 
@@ -154,7 +165,45 @@ public final class ModelFileValidator {
         if (OpenYsmFormat.isOpenYsmBinary(data)) {
             return validateOpenYsmBinary(data);
         }
-        return reject(Result.Reason.NOT_YSM, "neither a YSGP legacy container nor an OpenYSM binary file");
+        if (ZipModelFormat.isZipArchive(data)) {
+            return validateZip(data);
+        }
+        return reject(
+            Result.Reason.NOT_YSM,
+            "neither a YSGP legacy container, an OpenYSM binary file nor a ZIP model package");
+    }
+
+    /**
+     * ZIP 模型包：把字节交给 {@link ZipModelFormat} 做有界解压 + 与扫描器同源的 layout/解析判定。ZIP 的路径穿越、
+     * 条目数、解压预算、重复条目规则全在那个类里（扫描时同样是它），这里只把拒绝原因映射成本类的
+     * {@link Result.Reason} 供日志与聊天回执使用。
+     */
+    private static Result validateZip(byte[] data) {
+        try (ZipModelFormat.Archive archive = ZipModelFormat.materialize(data)) {
+            archive.validate();
+            return ok();
+        } catch (ZipModelFormat.RejectedException e) {
+            return reject(reasonOf(e.kind()), e.detail());
+        } catch (Exception | LinkageError e) {
+            return reject(Result.Reason.CORRUPT, "the ZIP model package could not be read: " + e);
+        }
+    }
+
+    private static Result.Reason reasonOf(ZipModelFormat.RejectKind kind) {
+        switch (kind) {
+            case UNSAFE_ENTRY:
+                return Result.Reason.INVALID_ENTRY_NAME;
+            case TOO_LARGE:
+                return Result.Reason.TOO_LARGE;
+            case NO_MODEL:
+                return Result.Reason.MISSING_MODEL_FILES;
+            case NOT_A_ZIP:
+            case TOO_MANY_ENTRIES:
+            case INVALID_MODEL:
+            case IO_FAILURE:
+            default:
+                return Result.Reason.CORRUPT;
+        }
     }
 
     private static boolean isLegacyContainer(byte[] data) {

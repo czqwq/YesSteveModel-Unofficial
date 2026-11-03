@@ -97,10 +97,10 @@ gui.yes_steve_model.model_manage.type.ysm=ysm
 gui.yes_steve_model.model_manage.file=§6File: %s
 gui.yes_steve_model.model_manage.file.empty=Empty
 gui.yes_steve_model.model_manage.error.too_large=§cThe file is too large (limit: %s MiB)
-gui.yes_steve_model.model_manage.error.format_incorrect=§cIncorrect file type, must be a .ysm file
-gui.yes_steve_model.model_manage.error.path_empty=§cChoose a .ysm file first
+gui.yes_steve_model.model_manage.error.format_incorrect=§cIncorrect file type, must be a .ysm or .zip file
+gui.yes_steve_model.model_manage.error.path_empty=§cChoose a .ysm or .zip file first
 gui.yes_steve_model.model_manage.error.read_failed=§cThe selected file cannot be read
-gui.yes_steve_model.model_manage.error.invalid=§cThe selected file is not a valid .ysm model
+gui.yes_steve_model.model_manage.error.invalid=§cThe selected file is not a valid .ysm or .zip model
 gui.yes_steve_model.extra_player_render.tips=Drag Green Square: Translate\nDrag Blue Square: Scale\nRight Drag: Rotate\nAlt + R: Reset\n\n[Press Esc To Exit]
 gui.yes_steve_model.texture.button.animation_name=Animation Name: %s
 gui.yes_steve_model.texture.button.attacked=Attacked
@@ -411,7 +411,8 @@ gui.yes_steve_model.config.idle_asset_eviction=Release idle model geometry (refe
 gui.yes_steve_model.config.baked_geometry_cache=Reuse baked geometry from the content-addressed disk cache. DEFAULT OFF: measured slower than rebuilding in this port (build 0-7 ms vs cache read 1-52 ms plus digest), so it only pays off for a future, more expensive bake.
 gui.yes_steve_model.config.baked_animation_cache=Reuse parsed animation sets from the content-addressed disk cache. DEFAULT OFF: measured slower than rebuilding in this port (build 6-57 ms vs cache read 30-79 ms).
 
-# Molang debug overlay + /ysmclient (Config.DEBUG_MOLANG_OVERLAY, off by default)
+# Molang debug overlay (Config.DEBUG_MOLANG_OVERLAY, off by default). The /ysmclient keys below are NOT gated by it:
+# /ysmclient is a client-only command for every player (CommandYsmClient).
 gui.yes_steve_model.debug.title=[Molang Debug]  %s vars
 gui.yes_steve_model.debug.search=[search]
 gui.yes_steve_model.debug.search_hint=type...
@@ -446,8 +447,10 @@ message.yes_steve_model.debug.reset_done=§7Molang variables reset.
 message.yes_steve_model.debug.overlay_state_on=Debug overlay: §aON
 message.yes_steve_model.debug.overlay_state_off=Debug overlay: §7OFF
 message.yes_steve_model.debug.toggle_hint=§7Toggle with %s§7 in-game.
-message.yes_steve_model.debug.ysmclient.usage=Usage: /ysmclient <load|reset>
-message.yes_steve_model.debug.ysmclient.unknown=Unknown subcommand: %s. Use: load | reset
+message.yes_steve_model.debug.ysmclient.usage=Usage: /ysmclient <load|reset|help>  (alias: /ysmc)
+message.yes_steve_model.debug.ysmclient.unknown=Unknown subcommand: %s. Use: load | reset | help
+message.yes_steve_model.debug.ysmclient.help.load=  /ysmclient load - scan and register local models (config/ysmu/custom + builtin) visible only to you; needs no server-side YSMU
+message.yes_steve_model.debug.ysmclient.help.reset=  /ysmclient reset - reset your Molang variable state back to the model defaults, no model reload
 commands.yes_steve_model.loadlocal.started=§6§l[§aYSM§6§l] §rLoading local models...
 commands.yes_steve_model.loadlocal.complete=§6§l[§aYSM§6§l] §rLocal models: §e%s§r registered, §e%s§r skipped (already present), §e%s§r failed
 commands.yes_steve_model.loadlocal.none=§6§l[§aYSM§6§l] §rNo local models found.
@@ -475,9 +478,13 @@ commands.yes_steve_model.reset.done=Reset Molang variables for %s player(s).
 # commands.yes_steve_model.welcome / .sound_hint / .help_hint lines below, which the join-world handler in
 # client/ClientEventHandler.java prints in the local player's chat. The command's own feedback
 # commands.yes_steve_model.welcome.on / .off stays plain text with the rest, because the server prints it.
-commands.yes_steve_model.play.no_data=Cannot play animation: player data not found.
-commands.yes_steve_model.play.not_found=Animation %s not found in current model.
-commands.yes_steve_model.play.done=Play: %s
+commands.yes_steve_model.play.usage=  Usage: /ysm play <player|@a|@p> <animation|stop>
+commands.yes_steve_model.play.no_data=Cannot play animation: %s has no model data.
+commands.yes_steve_model.play.not_found=Animation %s not found in the current model of %s.
+commands.yes_steve_model.play.done=Play %s on %s player(s).
+commands.yes_steve_model.play.stopped=Stopped the animation on %s player(s).
+commands.yes_steve_model.molang.usage=  Usage: /ysm molang execute <player|@a|@p> <expression>
+commands.yes_steve_model.molang.done=Broadcast Molang expression to %s player(s).
 commands.yes_steve_model.setgamepath.usage=/ysm setgamepath <path> [version]
 commands.yes_steve_model.setgamepath.example=Example: /ysm setgamepath C:/Users/x/.minecraft 1.21
 commands.yes_steve_model.setgamepath.none=No game path configured.
@@ -499,7 +506,8 @@ commands.yes_steve_model.sync.resync.disabled=Resync is disabled on this server.
 commands.yes_steve_model.sync.resync.failed=Resync could not be started (sync protocol disabled or not ready).
 commands.yes_steve_model.help.title=Help - use /ysm help <subcommand> for details
 commands.yes_steve_model.help.line.reload=  /ysm reload - rebuild the server-side model cache and resync every player (OP)
-commands.yes_steve_model.help.line.play=  /ysm play <animation> - play an animation of your current model (OP)
+commands.yes_steve_model.help.line.play=  /ysm play <player|@a|@p> <animation|stop> - play or stop a model animation on players (OP)
+commands.yes_steve_model.help.line.molang=  /ysm molang execute <player|@a|@p> <expression> - run a Molang expression in players' model context (OP)
 commands.yes_steve_model.help.line.playsound=  /ysm playsound <name> - play a cached model sound (OP)
 commands.yes_steve_model.help.line.buffer=  /ysm buffer - print this client's buffer and heap usage (everyone)
 commands.yes_steve_model.help.line.setgamepath=  /ysm setgamepath <path> [version] - set the local game path for missing sounds/textures (everyone)
@@ -507,14 +515,16 @@ commands.yes_steve_model.help.line.welcome=  /ysm welcome <on|off> - toggle the 
 commands.yes_steve_model.help.line.sync=  /ysm sync - resync your own models (everyone)
 commands.yes_steve_model.help.line.reset=  /ysm reset [<player|@a|@p>] - reset Molang variables (OP)
 commands.yes_steve_model.help.line.debug=  /ysm debug <query|overlay|eval> - debug queries / overlay / eval (ADMIN)
-commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset> - load local models / reset Molang vars (everyone)
+commands.yes_steve_model.help.line.ysmclient=  /ysmclient <load|reset|help> (alias /ysmc) - load local models / reset Molang vars, client-only (everyone)
 commands.yes_steve_model.help.welcome_off=  Click [/ysm welcome off] or type it to stop the join welcome message
 commands.yes_steve_model.help.unknown=Unknown subcommand: %s. Use /ysm help to list all commands.
 commands.yes_steve_model.help.detail.title=Command: %s
 commands.yes_steve_model.help.detail.reload.usage=  Usage: /ysm reload
 commands.yes_steve_model.help.detail.reload.desc=  Rebuild the server-side model cache and resync all players. Example: /ysm reload
-commands.yes_steve_model.help.detail.play.usage=  Usage: /ysm play <animation>
-commands.yes_steve_model.help.detail.play.desc=  Play the named animation on your current model (server-authoritative). Example: /ysm play wave
+commands.yes_steve_model.help.detail.play.usage=  Usage: /ysm play <player|@a|@p> <animation|stop>
+commands.yes_steve_model.help.detail.play.desc=  Play the named animation, or stop the current one, on the given players' models (server-authoritative). Example: /ysm play @a wave
+commands.yes_steve_model.help.detail.molang.usage=  Usage: /ysm molang execute <player|@a|@p> <expression>
+commands.yes_steve_model.help.detail.molang.desc=  Parse and run a Molang expression inside the given players' model context on every client that can see them (upstream broadcasts to all clients). Side effects such as assignments, particle() and play_sound land there; no value is printed - use /ysm debug eval for that. Example: /ysm molang execute @a v.foo=1;
 commands.yes_steve_model.help.detail.playsound.usage=  Usage: /ysm playsound <name>
 commands.yes_steve_model.help.detail.playsound.desc=  Play one of the model sounds cached in memory. Example: /ysm playsound trident
 commands.yes_steve_model.help.detail.buffer.usage=  Usage: /ysm buffer
@@ -529,7 +539,7 @@ commands.yes_steve_model.help.detail.reset.usage=  Usage: /ysm reset <player|@a|
 commands.yes_steve_model.help.detail.reset.desc=  Reset Molang variable state of other players (roaming vars, frame physics, v.* leftovers) back to model defaults without reloading models. For yourself use /ysmclient reset. Supports vanilla selectors. Example: /ysm reset @a
 commands.yes_steve_model.help.detail.debug.usage=  Usage: /ysm debug <query|overlay|eval> [args]
 commands.yes_steve_model.help.detail.debug.desc=  Debug tooling: query Molang variables, toggle the debug overlay, or evaluate a Molang expression. Examples: /ysm debug query q.is_on_ground, /ysm debug eval math.floor(3.7)
-commands.yes_steve_model.help.detail.ysmclient.usage=  Usage: /ysmclient <load|reset>
+commands.yes_steve_model.help.detail.ysmclient.usage=  Usage: /ysmclient <load|reset|help>  (alias: /ysmc)
 commands.yes_steve_model.help.detail.ysmclient.desc=  Client-side commands, no server needed. /ysmclient load registers locally scanned models (config/ysmu/custom + builtin) visible only to you; /ysmclient reset resets your Molang variables back to model defaults without reloading models. Example: /ysmclient load
 
 # ShowBufferInfo (/ysm buffer): printed in the issuing client's own chat by the client half, so this group keeps
@@ -585,23 +595,23 @@ commands.yes_steve_model.model.set.not_authorized=%s is not authorized for %s
 commands.yes_steve_model.model.set.texture_dash_unavailable=Texture "-" for %s needs the model's declared default texture, which this server does not keep; pass one of the model's texture names (tab completion lists them).
 commands.yes_steve_model.model.set.done=Set model %s for %s player(s).
 commands.yes_steve_model.help.line.model=  /ysm model set <player|@a|@p> <model> <texture> [true|false] - force a model on players (OP)
-commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <path> - install a local .ysm model file into config/ysmu (OP)
+commands.yes_steve_model.help.line.upload=  /ysm upload <auth|custom> <path> - install a local .ysm or .zip model file into config/ysmu (OP)
 commands.yes_steve_model.help.line.manage=  /ysm manage - open the server model management screen (ADMIN)
 commands.yes_steve_model.help.detail.model.usage=  Usage: /ysm model set <player|@a|@p> <model> <texture> [true|false]
 commands.yes_steve_model.help.detail.model.desc=  Force a model (and one of its textures) on other players; the fifth word true also ignores the model's authorization, as upstream's ignore_auth does. A restricted target that is not authorized is reported and skipped, the rest of the selector still gets the model. Upstream's /ysm model reload, errors and disable are not ported (use /ysm reload for the catalog rebuild). Example: /ysm model set Notch default default.png true
 commands.yes_steve_model.help.detail.upload.usage=  Usage: /ysm upload <auth|custom> <path>
-commands.yes_steve_model.help.detail.upload.desc=  Install one local .ysm model file into config/ysmu/auth (restricted, needs /ysm auth) or config/ysmu/custom. A player's path is read by that player's own client and uploaded to the server; a console path is read on the server itself. The file is fully validated on both sides, saved as <name>.ysm (renamed <name>_1.ysm, <name>_2.ysm ... if taken) and is NOT reloaded automatically - run /ysm reload to load it. Permission level 4. Example: /ysm upload custom F:/model.ysm
+commands.yes_steve_model.help.detail.upload.desc=  Install one local .ysm or .zip model file (.zip = one raw model directory, zipped) into config/ysmu/auth (restricted, needs /ysm auth) or config/ysmu/custom. A player's path is read by that player's own client and uploaded to the server; a console path is read on the server itself. The file is fully validated on both sides, saved as <name>.ysm / <name>.zip (renamed <name>_1.ysm, <name>_2.ysm ... if taken) and is NOT reloaded automatically - run /ysm reload to load it. Permission level 4. Example: /ysm upload custom F:/model.ysm
 commands.yes_steve_model.help.detail.manage.usage=  Usage: /ysm manage
-commands.yes_steve_model.help.detail.manage.desc=  Open the server model management screen: the custom and auth roots are listed, and an administrator can upload a local .ysm file, delete, move (custom<->auth) or rename entries. Uploaded files go through the same full model validation as /ysm upload; delete/move/rename only touch files under config/ysmu/{custom,auth} and never overwrite an existing entry. Nothing is reloaded automatically - run /ysm reload to apply changes. Permission level 4, player only. Example: /ysm manage
+commands.yes_steve_model.help.detail.manage.desc=  Open the server model management screen: the custom and auth roots are listed, and an administrator can upload a local .ysm or .zip file, delete, move (custom<->auth) or rename entries. Uploaded files go through the same full model validation as /ysm upload; delete/move/rename only touch files under config/ysmu/{custom,auth} and never overwrite an existing entry. Nothing is reloaded automatically - run /ysm reload to apply changes. Permission level 4, player only. Example: /ysm manage
 
 # /ysm upload (phase55; a port-specific subcommand, upstream has no command-line upload). Every line is a
 # ChatComponentTranslation key, so only `%s` conversions are allowed (1.7.10 throws for any other specifier while the
 # chat is being rendered). The client.* lines are shown by the uploading client itself; the other lines are the
 # server's replies (player upload and console upload share them). Client-side read/validation failures also write an
 # ERROR line to the uploading client's log ([YSMU-UPLOAD]), as the owner asked.
-commands.yes_steve_model.upload.usage=  Usage: /ysm upload <auth|custom> <path> - install a local .ysm model file (OP)
+commands.yes_steve_model.upload.usage=  Usage: /ysm upload <auth|custom> <path> - install a local .ysm or .zip model file (OP)
 commands.yes_steve_model.upload.done=§6§l[§aYSM§6§l]§r §aUploaded the model file as §e%s§r§a. Run §e/ysm reload§r§a to load it.
-commands.yes_steve_model.upload.invalid=§6§l[§aYSM§6§l]§r §cUpload rejected: the file is not a valid .ysm model (%s). See the server log for details.
+commands.yes_steve_model.upload.invalid=§6§l[§aYSM§6§l]§r §cUpload rejected: the file is not a valid .ysm or .zip model (%s). See the server log for details.
 commands.yes_steve_model.upload.read_failed=§6§l[§aYSM§6§l]§r §cUpload failed: cannot read '%s' on the executing side's local disk.
 commands.yes_steve_model.upload.too_large=§6§l[§aYSM§6§l]§r §cUpload rejected: '%s' is larger than the %s MiB upload limit.
 commands.yes_steve_model.upload.write_failed=§6§l[§aYSM§6§l]§r §cUpload failed: the server could not write the file into config/ysmu.
@@ -609,8 +619,9 @@ commands.yes_steve_model.upload.rejected=§6§l[§aYSM§6§l]§r §cUpload rejec
 commands.yes_steve_model.upload.client_missing=§6§l[§aYSM§6§l]§r §cYour client did not complete the YSMU handshake, so it cannot read a local file for the server. Install YSMU on the client and try again.
 commands.yes_steve_model.upload.client.read_failed=§6§l[§aYSM§6§l]§r §cUpload failed: the client could not read or validate '%s'. See the client log for details.
 commands.yes_steve_model.upload.client.too_large=§6§l[§aYSM§6§l]§r §cUpload failed: '%s' is larger than the %s MiB upload limit.
-commands.yes_steve_model.upload.client.invalid=§6§l[§aYSM§6§l]§r §cUpload failed: '%s' is not a valid .ysm model (%s).
+commands.yes_steve_model.upload.client.invalid=§6§l[§aYSM§6§l]§r §cUpload failed: '%s' is not a valid .ysm or .zip model (%s).
 commands.yes_steve_model.upload.client.busy=§6§l[§aYSM§6§l]§r §eAnother model upload is already running; try again when it finishes.
+commands.yes_steve_model.upload.client.stalled=§6§l[§aYSM§6§l]§r §eThe model upload stopped reporting progress, so the manage screen was unlocked. Check the client and server logs and try again.
 
 # /ysm manage (phase55; the LgeacyYSM model-management GUI). The action failures are chat lines; success has no
 # receipt - the list refresh is the answer. `%s` is the entry name. All keys are `%s`-only (ChatComponentTranslation
@@ -618,7 +629,7 @@ commands.yes_steve_model.upload.client.busy=§6§l[§aYSM§6§l]§r §eAnother m
 commands.yes_steve_model.manage.error.not_found=§6§l[§aYSM§6§l]§r §cNo such model entry: %s
 commands.yes_steve_model.manage.error.dest_exists=§6§l[§aYSM§6§l]§r §cThe destination already exists: %s
 commands.yes_steve_model.manage.error.invalid_name=§6§l[§aYSM§6§l]§r §cInvalid model entry name: %s
-commands.yes_steve_model.manage.error.unsupported=§6§l[§aYSM§6§l]§r §cOnly top-level folders and .ysm files can be managed: %s
+commands.yes_steve_model.manage.error.unsupported=§6§l[§aYSM§6§l]§r §cOnly top-level folders, .ysm and .zip files can be managed: %s
 commands.yes_steve_model.manage.error.io_error=§6§l[§aYSM§6§l]§r §cThe file operation failed: %s
 
 # Model failure notices (upstream ModelFailureNotificationAggregator's three outcomes, plus this port's

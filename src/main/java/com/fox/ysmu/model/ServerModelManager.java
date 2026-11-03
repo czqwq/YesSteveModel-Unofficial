@@ -40,6 +40,7 @@ import com.fox.ysmu.model.format.PackFormat;
 import com.fox.ysmu.model.format.ServerModelInfo;
 import com.fox.ysmu.model.format.ServerPackData;
 import com.fox.ysmu.model.format.YsmFormat;
+import com.fox.ysmu.model.format.ZipModelFormat;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.RequestSyncModel;
 import com.fox.ysmu.network.message.S2CVersionCheck17;
@@ -368,8 +369,9 @@ public final class ServerModelManager {
     private static volatile boolean builtinContractWarningLogged;
 
     /**
-     * 登记一个模型。三个扫描器（{@code OpenYsmFormat} / {@code YsmFormat} / {@code FolderFormat}）与索引命中
-     * 路径（{@code ModelIndexCache.restoreIfHit}）都必须走这里，取代原先各自的裸 {@code CACHE_NAME_INFO.put}。
+     * 登记一个模型。四个扫描器（{@code OpenYsmFormat} / {@code YsmFormat} / {@code FolderFormat} /
+     * {@code ZipModelFormat}）与索引命中路径（{@code ModelIndexCache.restoreIfHit}）都必须走这里，取代原先各自的裸
+     * {@code CACHE_NAME_INFO.put}。
      *
      * <h2>裁决规则</h2>
      * <ol>
@@ -664,7 +666,7 @@ public final class ServerModelManager {
         // 包清单先扫：它只读 ysm-pack.json/png，既不影响下面的模型登记，也让 GUI 的文件夹格子在模型到达前
         // 就已有名字与封面。
         //
-        // M1/D9:扫描顺序只是<b>执行顺序</b>，不再是重复 modelId 的胜负规则——三个扫描器都从
+        // M1/D9:扫描顺序只是<b>执行顺序</b>，不再是重复 modelId 的胜负规则——四个扫描器都从
         // {@link #registerModel} 走，胜负由 {@link #PRIORITY_BUILTIN}/{@link #PRIORITY_AUTH}/{@link #PRIORITY_CUSTOM}
         // 显式裁决（内置赢，auth 胜过同路径的 custom，与顺序无关；同优先级保持"后扫的赢"，见 registerModel 的
         // javadoc 第 2 条）。builtin 仍排在 custom 之后，因为 registerModel 的"同一磁盘来源补齐"与各扫描器的去重
@@ -689,14 +691,20 @@ public final class ServerModelManager {
     }
 
     /**
-     * 一个扫描根的三个扫描器步骤。顺序仍是"OpenYSM 先于 legacy"——这是同一磁盘来源去重与"补齐"登记的前提
-     * （{@code FolderFormat} 的 {@code hasOpenYsmRegistration}），与根的权限分类无关。
+     * 一个扫描根的四个扫描器步骤。顺序仍是"OpenYSM 先于 legacy"——这是同一磁盘来源去重与"补齐"登记的前提
+     * （{@code FolderFormat} 的 {@code hasOpenYsmRegistration}），与根的权限分类无关。ZIP 步骤排在 OpenYSM 之后：
+     * 它是 raw archive，与 raw directory 同一层（上游 {@code ModelSourceResolver} 对目录和 archive 只跑一个
+     * resolver），只影响日志顺序，不影响同名裁决（见 {@link #registerModel}）。
      */
     private static void cacheRoot(String label, Path root) {
         runCacheStep("packs (" + label + ")", () -> PackFormat.cacheAllPacks(root));
         runCacheStep("OpenYSM (" + label + ")", () -> {
             OpenYsmFormat.cacheAllModels(root);
             ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.OPEN_YSM, root);
+        });
+        runCacheStep("zip (" + label + ")", () -> {
+            ZipModelFormat.cacheAllModels(root);
+            ModelIndexCache.scanCompleted(ModelIndexCache.Scanner.ZIP, root);
         });
         runCacheStep("legacy (" + label + ")", () -> cacheAllModels(root));
     }

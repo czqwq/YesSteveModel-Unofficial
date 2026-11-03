@@ -94,8 +94,12 @@ public final class FolderFormat {
         return CACHE_NAME_INFO.containsKey(ModelIdUtil.getInternalModelId(OpenYsmFormat.toModelName(rootPath, dir)));
     }
 
-    /** dev 基线的判定条件原样保留:非空 main.json + 非空 arm.json + 至少一个 png。 */
-    private static boolean isModelDirectory(Path dir) {
+    /**
+     * dev 基线的判定条件原样保留:非空 main.json + 非空 arm.json + 至少一个 png。
+     * <p>包内可见是为了让 {@link ZipModelFormat} 用同一份规则判断 {@code .zip} 解出来的暂存目录是不是 legacy 平铺模型
+     * ——"怎么算一个平铺文件夹模型"只有这一处定义。
+     */
+    static boolean isModelDirectory(Path dir) {
         boolean hasMainModelFile = false;
         boolean hasArmModelFile = false;
         boolean hasTextureFile = false;
@@ -116,14 +120,40 @@ public final class FolderFormat {
     }
 
     private static ServerModelInfo cacheModel(Path modelPath, String modelId) {
+        return cacheModel(modelPath, modelId, modelPath);
+    }
+
+    /**
+     * 解析并烘一个 legacy 平铺模型目录，登记留给调用方。{@link ZipModelFormat} 用它在 {@code .zip} 解出的暂存目录
+     * 上跑**与磁盘平铺目录完全相同**的解析：上游的 raw directory 与 archive 走同一个 parser
+     * （{@code model/catalog/RawModelImporter.java:21-30}），所以同内容的 {@code custom/foo/} 与 {@code foo.zip}
+     * 必须烘出同一份 {@link ModelData}。
+     *
+     * @param displayPath 日志里显示的来源（ZIP 传 {@code .zip} 文件，不把暂存目录名写进日志）
+     */
+    static ServerModelInfo cacheExtractedFolderModel(Path modelPath, String modelId, Path displayPath) {
+        return cacheModel(modelPath, modelId, displayPath == null ? modelPath : displayPath);
+    }
+
+    private static ServerModelInfo cacheModel(Path modelPath, String modelId, Path displayPath) {
         try {
             ModelData data = getModelDataFromPath(modelPath, modelId);
             return ModelCacheWriter.write(data);
         } catch (Exception | LinkageError e) {
             // M-16/M-18:统一日志,且单个模型失败不影响其余模型。
-            ysmu.LOG.warn("Failed to cache legacy folder model {}", modelPath, e);
+            ysmu.LOG.warn("Failed to cache legacy folder model {}", displayPath, e);
         }
         return null;
+    }
+
+    /**
+     * Read-only twin of {@link #cacheExtractedFolderModel}: parses a legacy flat model directory and throws if it cannot
+     * be parsed, without writing the server cache. Used by {@link ZipModelFormat.Archive#validate()} for
+     * {@code /ysm upload}, whose contract is that the uploaded content passes the complete model parse; the scan itself
+     * never uses this.
+     */
+    static void validateModelData(Path modelPath, String modelId) throws IOException {
+        getModelDataFromPath(modelPath, modelId);
     }
 
     @NotNull

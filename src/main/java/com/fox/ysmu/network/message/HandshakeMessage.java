@@ -2,6 +2,7 @@ package com.fox.ysmu.network.message;
 
 import net.minecraft.entity.player.EntityPlayerMP;
 
+import com.fox.ysmu.Config;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.ysmu;
@@ -61,6 +62,13 @@ public class HandshakeMessage implements IMessage {
                 // "this is a vanilla client, so the local path cannot be read" - without waiting for a timeout.
                 if (protocol == NetworkHandler.NETWORK_PROTOCOL) {
                     com.fox.ysmu.model.upload.ServerModelUploadManager.markClientHandshake(sender);
+                    // The server-side switches a client has to know, at the moment upstream's Forge config sync
+                    // happens (login). See S2CServerConfig: 1.7.10's Configuration has no such exchange, so the
+                    // CanSwitchModel flag two client key handlers read travels in answer to this handshake, which is
+                    // re-sent after every world load or dimension change and therefore re-establishes it per world.
+                    NetworkHandler.sendToClientPlayer(
+                        new S2CServerConfig(Config.CAN_SWITCH_MODEL),
+                        sender);
                 }
                 // Kick from the server thread; disconnect handling touches connection state, not the Netty pipeline.
                 DeferredWork.server(() -> {

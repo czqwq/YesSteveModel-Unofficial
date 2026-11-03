@@ -1,6 +1,7 @@
 package com.fox.ysmu.client.input;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.gui.ConfigScreen;
 import com.fox.ysmu.client.gui.DisclaimerScreen;
 import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.gtnewhorizon.gtnhlib.eventbus.EventBusSubscriber;
@@ -32,6 +33,15 @@ public class PlayerModelScreenKey {
         }
         boolean isAltKeyDown = Keyboard.isKeyDown(Keyboard.KEY_LMENU) || Keyboard.isKeyDown(Keyboard.KEY_RMENU);
         if (!isAltKeyDown) {
+            return;
+        }
+        // Upstream (client/input/PlayerModelScreenKey.java:41-44): with a remote YSM channel present and the server's
+        // CanSwitchModel off, the key opens the settings screen instead of the model screen - switching is refused
+        // server-side anyway (network/message/SetModelAndTexture), so opening the picker would only offer clicks that
+        // cannot land. The port's "remote channel present" is ServerSwitchState (see its javadoc: 1.7.10 has no
+        // Forge config sync, so the flag arrives with S2CServerConfig in answer to the handshake).
+        if (ServerSwitchState.isRemoteChannelPresent() && !Config.CAN_SWITCH_MODEL) {
+            mc.displayGuiScreen(new ConfigScreen(null));
             return;
         }
         if (Config.DISCLAIMER_SHOW) {
