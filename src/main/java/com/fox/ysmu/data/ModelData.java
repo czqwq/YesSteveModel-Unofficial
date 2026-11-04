@@ -2,7 +2,9 @@ package com.fox.ysmu.data;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
@@ -13,6 +15,35 @@ import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import software.bernie.geckolib3.geo.raw.pojo.RawGeoModel;
 
 public final class ModelData {
+
+    /**
+     * The key prefix a payload carries when an entry belongs to one of the model's <b>sub-entities</b> - a
+     * projectile or a vehicle - rather than to the player.
+     * <p>
+     * {@link com.fox.ysmu.model.resource.RawYsmModelAdapter} produces these keys for geometry
+     * ({@code projectile_<matchId>}), animations ({@code projectile_<matchId>}) and textures
+     * ({@code projectile_<matchId>_<file>.png}), because this port has no render-target kind to hang a target on -
+     * the sub-model id is the whole carrier. Upstream keeps each target's data in its own structure instead: the
+     * player's textures are {@code files.player.texture} ({@code format/parser/RawModelAssembler.java:189-200}) while
+     * a projectile or vehicle target gets its own single {@code "default"} texture
+     * ({@code RawModelAssembler.java:274-280}).
+     * <p>
+     * That difference matters for exactly one question, which is what these constants exist for: which textures the
+     * player may pick as a skin ({@link #getPlayerTextureNames()}). A sub-entity's texture must not be offered there -
+     * picking it would draw the whole player with an arrow's or a boat's art.
+     */
+    public static final String PROJECTILE_KEY_PREFIX = "projectile_";
+
+    /** See {@link #PROJECTILE_KEY_PREFIX}. */
+    public static final String VEHICLE_KEY_PREFIX = "vehicle_";
+
+    /**
+     * Whether a payload texture key belongs to a sub-entity rather than to the player, i.e. whether it is one of the
+     * keys {@link com.fox.ysmu.model.resource.RawYsmModelAdapter} prefixes for a projectile or vehicle target.
+     */
+    public static boolean isSubEntityTextureKey(String name) {
+        return name != null && (name.startsWith(PROJECTILE_KEY_PREFIX) || name.startsWith(VEHICLE_KEY_PREFIX));
+    }
 
     private final String modelId;
     private final Map<String, byte[]> model;
@@ -210,7 +241,24 @@ public final class ModelData {
         this.guiImages = guiImages == null || guiImages.isEmpty()
             ? Collections.emptyMap()
             : Collections.unmodifiableMap(new LinkedHashMap<>(guiImages));
-        this.info = new ServerModelInfo(texture.keySet(), type);
+        this.info = new ServerModelInfo(playerTextureNames(), type);
+    }
+
+    /**
+     * {@link #texture}'s keys without the sub-entity entries, in the same order (see
+     * {@link #isSubEntityTextureKey}). A payload whose textures are all sub-entity ones - which a real pack never
+     * produces, because a player model must declare at least one texture of its own
+     * ({@code RawYsmModelAdapter.validateMainPlayerModel}) - answers with an empty set, i.e. "no skins", rather than
+     * with them.
+     */
+    private Set<String> playerTextureNames() {
+        Set<String> names = new LinkedHashSet<>();
+        for (String name : texture.keySet()) {
+            if (!isSubEntityTextureKey(name)) {
+                names.add(name);
+            }
+        }
+        return names;
     }
 
     public String getModelId() {
@@ -221,12 +269,32 @@ public final class ModelData {
         return model;
     }
 
+    /**
+     * Every texture this payload carries, player and sub-entity alike, keyed by the name the client builds a texture
+     * id from. This is the map the upload path and the renderers consume; for "which textures may the player pick as
+     * a skin" ask {@link #getPlayerTextureNames()} instead (see {@link #isSubEntityTextureKey}).
+     */
     public Map<String, byte[]> getTexture() {
         return texture;
     }
 
     public Map<String, byte[]> getAnimation() {
         return animation;
+    }
+
+    /**
+     * The names of this model's own textures, in declaration order - the list the player picks a skin from.
+     * <p>
+     * It is {@link #texture} minus the sub-entity entries (see {@link #isSubEntityTextureKey}). Upstream's player
+     * render target holds only {@code files.player.texture}
+     * ({@code format/parser/RawModelAssembler.java:189-200}), and every consumer of "the model's texture list"
+     * resolves against exactly that: the selection screen's tiles, the texture count, the texture the renderer binds
+     * ({@code containsTexture}, {@code format/schema/model/ModelManifestLookup.java:10-29}) and the server's
+     * {@code /ysm model set <texture>} validation ({@code command/sub/ModelCommand.java:66-74}, which reads
+     * {@code getPlayer().getTextureNames()}).
+     */
+    public Set<String> getPlayerTextureNames() {
+        return info.getTextures();
     }
 
     /**

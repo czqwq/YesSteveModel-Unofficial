@@ -212,7 +212,9 @@ public final class RawYsmModelAdapter {
             components.put(fileName, pbrComponents(texture));
         }
         // Projectile sub-entity textures. The key carries the matchId as well as the file name, because the renderer
-        // picks a projectile's texture by searching for "projectile_<matchId>_" in the id.
+        // picks a projectile's texture by searching for "projectile_<matchId>_" in the id. That prefix is also what
+        // ModelData classifies by to decide which payload textures the player may pick as a skin
+        // (ModelData#isSubEntityTextureKey), so it is spelled from the same constant rather than twice.
         for (Map.Entry<String, RawYsmModel.RawSubEntity> entry : raw.projectiles.entrySet()) {
             RawYsmModel.RawSubEntity sub = entry.getValue();
             if (sub == null) {
@@ -232,7 +234,7 @@ public final class RawYsmModelAdapter {
                             matchId);
                         continue;
                     }
-                    String textureKey = "projectile_" + matchId + "_" + texture.name;
+                    String textureKey = ModelData.PROJECTILE_KEY_PREFIX + matchId + "_" + texture.name;
                     if (!textureKey.endsWith(".png")) {
                         textureKey += ".png";
                     }
@@ -263,7 +265,7 @@ public final class RawYsmModelAdapter {
                             matchId);
                         continue;
                     }
-                    String textureKey = "vehicle_" + matchId + "_" + texture.name;
+                    String textureKey = ModelData.VEHICLE_KEY_PREFIX + matchId + "_" + texture.name;
                     if (!textureKey.endsWith(".png")) {
                         textureKey += ".png";
                     }

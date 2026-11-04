@@ -291,15 +291,27 @@ public class YSMBinaryDeserializer implements AutoCloseable {
             }
         }
 
-        int extraTextureCount = reader.readVarInt();
-        for (int i = 0; i < extraTextureCount; ++i) {
-            RawYsmModel.RawTexture tex = new RawYsmModel.RawTexture();
-            tex.name = reader.readString();
-            tex.data = reader.readByteArray();
-            tex.width = reader.readVarInt();
-            tex.height = reader.readVarInt();
-            tex.imageFormat = -1; // RGBA
-            model.mainEntity.textures.put(tex.name, tex); // 作為額外紋理存入主實體
+        // 作者头像。这一段在原生解码器里是作者的 avatars：键是作者名、值是头像图片，版本 4 起才有
+        // （tmp/YesSteveModel-Native-dev/modules/legacy/src/v3/container/decoder.cc:1690-1703 的 author_avatars，
+        // 位置与本块一致——在贴图/音效之后、各 hash 表之前），投影时按名字配给同名作者
+        // （.../v3/conversion/projector.cc:991-1002），配不上的头像视为非法模型（:1007-1010）。
+        // 此前这里把它们当"额外纹理"塞进主实体贴图表：头像于是成了玩家皮肤列表里的条目——列表里那两张
+        // 看起来像作者头像的图就是它们——而且还能被选成皮肤，把整个玩家画成一张身份证照片。
+        // 头像不是贴图：与 ysm.json 的 metadata.authors[].avatar 同一去处（见 parseYSMJson 的头像分支）。
+        List<RawYsmModel.RawImage> legacyAvatars = new ArrayList<>();
+        int avatarCount = reader.readVarInt();
+        for (int i = 0; i < avatarCount; ++i) {
+            RawYsmModel.RawImage avatar = new RawYsmModel.RawImage();
+            avatar.name = reader.readString();
+            avatar.data = reader.readByteArray();
+            avatar.width = reader.readVarInt();
+            avatar.height = reader.readVarInt();
+            // 这个版本的容器存的是裸 RGBA（同一段的贴图也是），不是归档的图片文件：记为 -1，由
+            // YSMBinarySerializer 在烘载荷时转成 PNG（:570-575），与 parseYSMJson 读到的头像同一形状。
+            avatar.format = -1;
+            avatar.unknownFlag = 1;
+            avatar.isPng = false;
+            legacyAvatars.add(avatar);
         }
 
         // Tables回填Hash
@@ -354,6 +366,73 @@ public class YSMBinaryDeserializer implements AutoCloseable {
         }
 
         parseYSMJson();
+        assignLegacyAvatars(legacyAvatars);
+    }
+
+    /**
+     * Hands the legacy container's author avatars to the authors they belong to.
+     * <p>
+     * The pairing key is the author's name: the container stores avatars as a name-to-image map keyed by the author
+     * name, and the native projector resolves them the same way
+     * ({@code tmp/YesSteveModel-Native-dev/modules/legacy/src/v3/conversion/projector.cc:991-1002}: find the avatar
+     * whose key equals {@code source_author.name}). The authors come from either the geometry's {@code extra_info}
+     * block or the trailing {@code ysm.json} payload, so this runs after {@link #parseYSMJson()} - which is also why
+     * the avatars are read into a local list rather than assigned where they are parsed.
+     * <p>
+     * An avatar no author answers to is kept in {@link RawYsmModel.RawMetadata#extraAvatars} instead of being
+     * dropped: the native projector treats that case as an invalid model ({@code :1007-1010}), which this port cannot
+     * afford (a pack with a stale avatar would stop loading entirely), and {@code YSMBinarySerializer} already knows
+     * how to carry extra avatars.
+     */
+    private void assignLegacyAvatars(List<RawYsmModel.RawImage> avatars) {
+        for (RawYsmModel.RawImage avatar : avatars) {
+            RawYsmModel.RawMetadata.Author target = authorWithoutAvatarNamed(avatar.name);
+            if (target == null) {
+                model.metadata.extraAvatars.add(avatar);
+                continue;
+            }
+            target.avatar = avatar.name;
+            target.avatarImage = avatar;
+        }
+    }
+
+    /**
+     * Gives one avatar of a modern payload to the author it belongs to.
+     * <p>
+     * The avatar's name is the pairing key when it names an author - that is how the format the name comes from
+     * associates the two ({@code projector.cc:991-1002} for the legacy container) and what
+     * {@link RawYsmModelAdapter}/{@code YSMFolderDeserializer} put there when they read a pack
+     * ({@code YSMFolderDeserializer.parseMetadata:211-219} passes the author's name into {@code RawImage.name}).
+     * The positional rule this used to apply alone is kept as the fallback, because a payload written by another
+     * exporter may name its avatars after the files instead of after the authors; and it is applied only to an
+     * author that has no avatar yet, so a list whose gaps survive {@code YSMBinarySerializer.writeMetadata}'s
+     * skip-null-avatars rule no longer hands every avatar to the wrong author.
+     */
+    private void assignAvatar(RawYsmModel.RawImage avatar, int index) {
+        RawYsmModel.RawMetadata.Author target = authorWithoutAvatarNamed(avatar.name);
+        if (target == null && index < model.metadata.authors.size()
+            && model.metadata.authors.get(index).avatarImage == null) {
+            target = model.metadata.authors.get(index);
+        }
+        if (target == null) {
+            model.metadata.extraAvatars.add(avatar);
+            return;
+        }
+        target.avatar = avatar.name;
+        target.avatarImage = avatar;
+    }
+
+    /** The author named {@code name} that has no avatar yet, or {@code null} when there is none. */
+    private RawYsmModel.RawMetadata.Author authorWithoutAvatarNamed(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        for (RawYsmModel.RawMetadata.Author author : model.metadata.authors) {
+            if (author.avatarImage == null && name.equals(author.name)) {
+                return author;
+            }
+        }
+        return null;
     }
 
     private void deserializeModern() {
@@ -697,12 +776,7 @@ public class YSMBinaryDeserializer implements AutoCloseable {
                 avatar.format = reader.readVarInt();
                 avatar.unknownFlag = reader.readVarInt();
                 avatar.isPng = false;
-                if (i < model.metadata.authors.size()) {
-                    model.metadata.authors.get(i).avatar = avatar.name;
-                    model.metadata.authors.get(i).avatarImage = avatar;
-                } else {
-                    model.metadata.extraAvatars.add(avatar);
-                }
+                assignAvatar(avatar, i);
             }
         }
 

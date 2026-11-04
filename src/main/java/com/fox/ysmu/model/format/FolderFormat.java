@@ -183,6 +183,14 @@ public final class FolderFormat {
                 // 包封面是包自己的资源，不是模型贴图；把它当贴图会让模型默认皮肤变成那张封面。
                 continue;
             }
+            if (ARROW_TEXTURE_FILE_NAME.equals(fileName)) {
+                // 平铺模型根下这个 png 是**箭的**贴图，不是玩家皮肤：上游的 legacy 清单把根目录每个 png 都收成
+                // 玩家贴图，唯独把这个名字单独拿去建 arrow 替换目标
+                // （format/parser/LegacyManifestBuilder.java:22,49-66）。
+                // 本仓的平铺模型没有 arrow 替换目标（差异记在 .agent/phase66-texture-list-and-avatar-split.md），
+                // 所以这里只做上游那条"它不是玩家皮肤"的判定；把它当皮肤会让玩家能把自己画成一根箭。
+                continue;
+            }
             texture.put(fileName, getBytes(modelPath, fileName));
         }
 

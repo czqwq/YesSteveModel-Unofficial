@@ -1584,11 +1584,15 @@ public class YsmCommand extends CommandBase {
     /**
      * The texture names one registered model declares, or {@code null} when the registry has no such model.
      * <p>
-     * The server-side source is {@link ServerModelInfo#getTextures()} - the {@code ModelData.texture} key set of the
-     * baked payload ({@code data/ModelData.java:210}), i.e. the same names the client builds its texture ids from
-     * ({@code client/ClientModelManager.java:1158}). Upstream reads the same list off the loaded model
-     * ({@code ModelCommand.java:68,71}); what this port does <em>not</em> have server-side is the model's declared
-     * <em>default</em> texture, hence the {@code "-"} refusal.
+     * The server-side source is {@link ServerModelInfo#getTextures()} - the model's <b>own</b> texture names, i.e.
+     * {@code ModelData#getPlayerTextureNames()} of the baked payload (the payload's texture map minus its
+     * projectile/vehicle sub-entity entries; {@code data/ModelData.java:244}), and the same names the client builds
+     * its selectable skin ids from ({@code ClientModelManager#indexTextures}). That is upstream's own answer: its
+     * validation reads {@code getPlayer().getTextureNames()}, the player render target's textures
+     * ({@code ModelCommand.java:68,71}), which never contains a sub-entity's texture (a projectile/vehicle target
+     * carries its own, {@code format/parser/RawModelAssembler.java:274-280}). Upstream reads the same list off the
+     * loaded model ({@code ModelCommand.java:68,71}); what this port does <em>not</em> have server-side is the model's
+     * declared <em>default</em> texture, hence the {@code "-"} refusal.
      */
     @Nullable
     private static Set<String> textureNamesOf(ResourceLocation modelId) {

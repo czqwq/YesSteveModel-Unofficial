@@ -161,6 +161,14 @@ public final class ServerModelManager {
     public static final String ARM_ANIMATION_FILE_NAME = "arm.animation.json";
     public static final String EXTRA_ANIMATION_FILE_NAME = "extra.animation.json";
     /**
+     * A flat (pre-{@code ysm.json}) model's arrow texture. It is the <b>projectile sub-entity's</b> texture, not one of
+     * the player's skins: upstream's legacy manifest builder collects every root {@code .png} as a player texture and
+     * takes this one name out to build the {@code arrow} replacement target instead
+     * ({@code tmp/YesSteveModel-dev-1.20/.../format/parser/LegacyManifestBuilder.java:22,49-66}), so a flat model's
+     * player texture list never contains it.
+     */
+    public static final String ARROW_TEXTURE_FILE_NAME = "arrow.png";
+    /**
      * OpenYSM 模型包（pack）清单。带有它的目录是一个**包根目录**，里面放的是若干模型目录，
      * 它自己不是模型 —— 否则 {@code wine_fox/} 这种"包根 + 残留 main.json/arm.json"的目录会被
      * 注册成一个和包同名的模型，并把包封面 {@link #PACK_ICON_FILE_NAME} 当成模型贴图。

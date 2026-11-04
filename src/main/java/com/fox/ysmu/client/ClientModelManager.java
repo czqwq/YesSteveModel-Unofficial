@@ -275,8 +275,14 @@ public class ClientModelManager {
      * is how the renderer picks the projectile's own texture rather than one of the player's.
      */
     public static Map<ResourceLocation, List<ResourceLocation>> PROJECTILE_TEXTURE_IDS = Maps.newHashMap();
-    /** The key prefix a bridged projectile sub-entity uses inside a {@link ModelData} payload. */
-    public static final String PROJECTILE_KEY_PREFIX = "projectile_";
+    /**
+     * The key prefix a bridged projectile sub-entity uses inside a {@link ModelData} payload.
+     * <p>
+     * Defined by {@link ModelData} rather than here, because that class is also the one that decides which payload
+     * textures are the player's own ({@link ModelData#isSubEntityTextureKey}): the prefix is the classifier as well as
+     * the carrier, so the two must be one definition.
+     */
+    public static final String PROJECTILE_KEY_PREFIX = ModelData.PROJECTILE_KEY_PREFIX;
     /** The key prefix a bridged projectile animation-controller file uses. */
     private static final String PROJECTILE_CONTROLLER_KEY_PREFIX = "projectile_ctrl_";
 
@@ -293,8 +299,11 @@ public class ClientModelManager {
      * {@link #PROJECTILE_TEXTURE_IDS}.
      */
     public static Map<ResourceLocation, List<ResourceLocation>> VEHICLE_TEXTURE_IDS = Maps.newHashMap();
-    /** The key prefix a bridged vehicle sub-entity uses inside a {@link ModelData} payload. */
-    public static final String VEHICLE_KEY_PREFIX = "vehicle_";
+    /**
+     * The key prefix a bridged vehicle sub-entity uses inside a {@link ModelData} payload; see
+     * {@link #PROJECTILE_KEY_PREFIX}.
+     */
+    public static final String VEHICLE_KEY_PREFIX = ModelData.VEHICLE_KEY_PREFIX;
     /** The key prefix a bridged vehicle animation-controller file uses. */
     private static final String VEHICLE_CONTROLLER_KEY_PREFIX = "vehicle_ctrl_";
     /**
@@ -2078,6 +2087,15 @@ public class ClientModelManager {
     private static void indexTextures(ResourceLocation id, Map<String, byte[]> mapData) {
         List<ResourceLocation> textures = Lists.newArrayList();
         for (String name : mapData.keySet()) {
+            // A sub-entity's own texture travels in the same payload map - its key carries the match id, see
+            // RawYsmModelAdapter - but it is not one of the player's skins. Upstream keeps each render target's
+            // textures to itself: the player gets files.player.texture
+            // (format/parser/RawModelAssembler.java:189-200) and a projectile/vehicle target gets its own single
+            // "default" texture (:274-280), so it never even has the name to offer. Listing one here let a player pick
+            // an arrow's art as their model's skin, and inflated the texture count beside the tile.
+            if (ModelData.isSubEntityTextureKey(name)) {
+                continue;
+            }
             textures.add(ModelIdUtil.getSubModelId(id, name));
         }
         MODELS.put(id, textures);

@@ -113,6 +113,11 @@ public final class YsmFormat {
 
         Map<String, byte[]> texture = Maps.newHashMap();
         data.forEach((name, textureData) -> {
+            if (ARROW_TEXTURE_FILE_NAME.equals(name)) {
+                // Same rule as FolderFormat: a flat model's arrow.png is the arrow sub-entity's texture, not one of
+                // the player's skins (upstream's legacy manifest, format/parser/LegacyManifestBuilder.java:49-66).
+                return;
+            }
             if (name.endsWith(".png")) {
                 texture.put(name, textureData);
             }

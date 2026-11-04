@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Stream;
 
+import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.ysmu;
 import com.google.gson.JsonArray;
@@ -1213,6 +1214,12 @@ public class YSMFolderDeserializer implements AutoCloseable {
                 }
                 String fileName = path.getFileName().toString();
                 if (fileName.endsWith(".png")) {
+                    if (ServerModelManager.ARROW_TEXTURE_FILE_NAME.equals(fileName)) {
+                        // A flat model's arrow.png is the arrow sub-entity's texture, never one of the player's skins
+                        // (upstream's legacy manifest, format/parser/LegacyManifestBuilder.java:49-66). Same rule as
+                        // FolderFormat/YsmFormat, kept here so every reader of the flat layout agrees.
+                        continue;
+                    }
                     byte[] textureData = readResource(fileName);
                     RawYsmModel.RawTexture texture = parseTexture(fileName, textureData);
                     this.model.mainEntity.textures.put(texture.name, texture);
