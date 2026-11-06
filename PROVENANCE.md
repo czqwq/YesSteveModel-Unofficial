@@ -465,3 +465,11 @@ they remove a per-frame lookup and a per-frame map copy respectively.
 | `core/controller/AnimationController.java` | The playing animation is resolved from the model once per animation-file answer instead of on every frame (`refreshCurrentAnimation`; the "file answer" is `IAnimatableModelProvider#getAnimationFileLocation`, which changes on parked-payload install and model switch). Upstream shape: `AnimationPlayer` holds `currentAnim` and resolves only in `setAnimation`/`loadNextAnim` (`tmp/YesSteveModel-dev-1.20/.../core/controller/AnimationPlayer.java:69,426`). Also reuses the `processConcurrent` fold storage (map/order/scratch arrays) and one child `AnimationEvent` per controller instead of allocating them per frame. |
 | `core/molang/MolangPhysicsRuntime.java` | `syncToRuntimeState` copies from two reused dirty-set generations (`ScopeState#dirtyCurrent`/`dirtyPrevious`, rotated by `begin()`) instead of iterating the whole scope once per controller predicate. The javadoc on that method already recorded the reference branch's identical "本帧/上一帧脏集" shape; this is now the port's implementation. Writes funnel through the single `ScopeState#putVariable`/`MolangPhysicsRuntime#setVariable` entry, so no Molang assignment site needed a hook. |
 
+A follow-up on the same day added one log-only engine change, made necessary by the host's deferred animation install
+(`ClientModelManager#ensureAnimations`, see `.agent/perf-animation-runtime-and-hud-floor.md` § follow-up B): the
+"Could not load animation: … Is it missing?" notice is now emitted once per animation name
+(`AnimationController#MISSING_ANIMATION_REPORTED` / `reportMissingAnimation`) instead of on every frame that a
+controller asks for a name the current file does not define. Whether a name exists is a property of the model, not of
+the frame; during the deferred window the old per-frame print would repeat the same line. No behaviour other than the
+number of log lines changes.
+

@@ -8,7 +8,9 @@ import javax.annotation.Nullable;
 
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationRegister;
+import com.fox.ysmu.util.ModelIdUtil;
 
 /**
  * One GUI tile's preview-animation state, a transcription of upstream's {@code CatalogModelPreviewAnimationState}.
@@ -21,6 +23,7 @@ import com.fox.ysmu.client.animation.AnimationRegister;
 public final class ModelPreviewAnimationState {
 
     private static final DoubleSupplier NO_FADEOUT = () -> 0;
+    private static final ResourceLocation UNKNOWN_MODEL = new ResourceLocation("ysmu", "unknown");
 
     /** Per-model state, so a screen that is opened again replays from the start. */
     private static final Map<ResourceLocation, ModelPreviewAnimationState> STATES = new ConcurrentHashMap<>();
@@ -34,11 +37,27 @@ public final class ModelPreviewAnimationState {
     private double activeFadeoutMillis;
     private boolean wasHovered;
 
-    /** The state for {@code modelId}, configured from the model's own animations on first use. */
+    /**
+     * The state for {@code modelId}, configured from the model's own animations on first use.
+     * <p>
+     * A tile can be baked while its model's animation file is still parked on the loader thread (installing it is
+     * deferred - see {@code ClientModelManager#ensureAnimations}). Configuring from that "no file yet" answer would
+     * freeze "this model has no hover/focus animation" for the whole session, so the state is re-derived on the tile's
+     * next bake until the file is installed. Bakes are rate-limited by the preview refresh policy, so this is not a
+     * per-frame cost.
+     */
     public static ModelPreviewAnimationState forModel(@Nullable ResourceLocation modelId) {
-        return STATES.computeIfAbsent(
-            modelId == null ? new ResourceLocation("ysmu", "unknown") : modelId,
-            key -> new ModelPreviewAnimationState().configuredFor(key));
+        ResourceLocation key = modelId == null ? UNKNOWN_MODEL : modelId;
+        ModelPreviewAnimationState state = STATES.get(key);
+        if (state == null) {
+            ModelPreviewAnimationState created = new ModelPreviewAnimationState().configuredFor(key);
+            STATES.put(key, created);
+            return created;
+        }
+        if (ClientModelManager.animationsPending(ModelIdUtil.getMainId(key))) {
+            state.configuredFor(key);
+        }
+        return state;
     }
 
     /** Forgets every tile's interaction state, so re-entering a screen starts the animations over. */

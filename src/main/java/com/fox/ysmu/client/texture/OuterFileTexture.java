@@ -1,5 +1,7 @@
 package com.fox.ysmu.client.texture;
 
+import java.awt.AlphaComposite;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -513,10 +515,48 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
                 if (decoded == null) {
                     throw new IOException("image reader returned no image for YSM texture data");
                 }
-                return decoded;
+                return toIntArgb(decoded);
             } finally {
                 reader.dispose();
             }
         }
+    }
+
+    /**
+     * Normalises a decoded texture to {@link BufferedImage#TYPE_INT_ARGB}.
+     *
+     * <p><b>Why this is not cosmetic.</b> 1.7.10's generic upload
+     * ({@code TextureUtil.uploadTextureImageSubImpl:236-253}) converts the image with
+     * {@code BufferedImage.getRGB(...)}. Every non-direct-colour-model image - and an RGBA PNG decodes as
+     * {@code TYPE_4BYTE_ABGR}, a {@code ComponentColorModel} - pays a per-pixel {@code ColorModel.getRGB}
+     * conversion there. A spark profile of the model-selection screen measured that conversion at ~5.3 s (about 38 %
+     * of the whole profile) while it uploaded textures on the first view of each model. {@code TYPE_INT_ARGB} is a
+     * {@code DirectColorModel} whose bulk {@code getRGB} is the cheap sample-model path, so converting once here
+     * removes the per-pixel work from the client thread's upload.
+     *
+     * <p>The conversion happens on the loader thread: {@code ClientModelManager#buildModel} already decodes texture
+     * images off the render thread and only uploads them when the model publishes (upstream's
+     * "worker prepares the images, render thread publishes them" split, see the constructor javadoc). Drawing the
+     * source into an ARGB canvas keeps the conversion loop inside the JDK's blit instead of a per-pixel Java call;
+     * {@link AlphaComposite#Src} (not the default SrcOver) is required for it to be exact - SrcOver blends the source
+     * over the transparent canvas through premultiplied alpha and drifts a semi-transparent pixel's colour channels by
+     * up to one unit ({@code 0x80112233} came back as {@code 0x80122234}), while Src copies it verbatim.
+     * Images that are already {@code TYPE_INT_ARGB} (the binary {@code .ysm} channel builds exactly that type, see
+     * {@code RawYsmModelAdapter:569} and {@code YSMBinaryDeserializer:609}) are returned unchanged.
+     */
+    private static BufferedImage toIntArgb(BufferedImage source) {
+        if (source.getType() == BufferedImage.TYPE_INT_ARGB) {
+            return source;
+        }
+        BufferedImage converted = new BufferedImage(source.getWidth(), source.getHeight(),
+            BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = converted.createGraphics();
+        try {
+            graphics.setComposite(AlphaComposite.Src);
+            graphics.drawImage(source, 0, 0, null);
+        } finally {
+            graphics.dispose();
+        }
+        return converted;
     }
 }

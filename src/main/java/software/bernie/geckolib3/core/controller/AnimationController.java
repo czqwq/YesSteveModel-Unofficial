@@ -66,6 +66,24 @@ public class AnimationController<T extends IAnimatable> {
 
     static List<ModelFetcher<?>> modelFetchers = new ArrayList<>();
     /**
+     * "Could not load animation" notices, once per animation name.
+     * <p>
+     * The host installs a model's animation set lazily and (since the animation graph is built on its loader thread)
+     * may answer "not installed" for a few frames after a model is first drawn; during that window a controller whose
+     * selected clip is not in the built-in default file would print the same line every frame. Whether a name is
+     * missing is a property of the model, not of the frame, so reporting it once per name is the information the line
+     * actually carries - and it keeps a genuinely missing name visible instead of burying it in repetition.
+     */
+    private static final Set<String> MISSING_ANIMATION_REPORTED = ConcurrentHashMap.newKeySet();
+
+    /** Reports a missing animation name once per process; see {@link #MISSING_ANIMATION_REPORTED}. */
+    private static void reportMissingAnimation(String animationName) {
+        if (MISSING_ANIMATION_REPORTED.add(animationName)) {
+            System.out.printf("Could not load animation: %s. Is it missing?%n", animationName);
+        }
+    }
+
+    /**
      * The Entity.
      */
     protected T animatable;
@@ -483,8 +501,7 @@ public class AnimationController<T extends IAnimatable> {
                             // model's animations are injected by YSMU's AnimationManager
                             // before calling setAnimation.
                             if (animation == null) {
-                                System.out
-                                    .printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                                reportMissingAnimation(rawAnimation.animationName);
                                 encounteredError.set(true);
                             }
                             if (animation != null && rawAnimation.loopType != null) {
@@ -542,7 +559,7 @@ public class AnimationController<T extends IAnimatable> {
                 Animation animation = model.getAnimation(rawAnimation.animationName, animatable);
                 // Cross-model fallback removed — see setAnimation() for rationale.
                 if (animation == null) {
-                    System.out.printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                    reportMissingAnimation(rawAnimation.animationName);
                     encounteredError.set(true);
                 }
                 if (animation != null && rawAnimation.loopType != null) {
@@ -2073,3 +2090,4 @@ public class AnimationController<T extends IAnimatable> {
     public interface ModelFetcher<T> extends Function<IAnimatable, IAnimatableModel<T>> {
     }
 }
+
