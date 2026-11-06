@@ -1314,7 +1314,7 @@ public class AnimationController<T extends IAnimatable> {
             if (currentAnimation.loop == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
                 tick = Math.max(0.0D, currentAnimation.animationLength);
             } else if (!currentAnimation.loop.isRepeatingAfterEnd()) {
-                processKeyFrameEvents(currentAnimation.animationLength);
+                processKeyFrameEvents(currentAnimation.animationLength, parser);
                 resetEventKeyFrames();
                 // YSMU: report the terminal tick before the state leaves Running, so a
                 // timeline on a PLAY_ONCE animation still sees its final position
@@ -1336,7 +1336,7 @@ public class AnimationController<T extends IAnimatable> {
                     currentAnimation = this.animationQueue.peek();
                 }
             } else {
-                processKeyFrameEvents(currentAnimation.animationLength);
+                processKeyFrameEvents(currentAnimation.animationLength, parser);
                 resetEventKeyFrames();
                 tick = wrapLoopTick(actualTick, tick, currentAnimation.animationLength);
                 wrappedThisFrame = true;
@@ -1350,7 +1350,7 @@ public class AnimationController<T extends IAnimatable> {
         // evaluation below has not run yet — the timeline scheduler dispatches here.
         reportTimelinePlayback(tick, wrappedThisFrame ? timelineUnwrappedTick : tick, wrappedThisFrame);
         setAnimTime(parser, tick);
-        processKeyFrameEvents(tick);
+        processKeyFrameEvents(tick, parser);
 
         // Loop through every boneanimation in the current animation and process the
         // values
@@ -1426,7 +1426,7 @@ public class AnimationController<T extends IAnimatable> {
         return wrappedTick;
     }
 
-    private void processKeyFrameEvents(double tick) {
+    private void processKeyFrameEvents(double tick, MolangParser parser) {
         if (beginningHold) return;
         if (soundListener != null) {
             for (EventKeyFrame<String> soundKeyFrame : currentAnimation.soundKeyFrames) {
@@ -1469,7 +1469,11 @@ public class AnimationController<T extends IAnimatable> {
         }
 
         if (customInstructionListener != null) {
-            for (EventKeyFrame<String> customInstructionKeyFrame : currentAnimation.customInstructionKeyframes) {
+            // Parsed once per animation (Animation#instructionKeyframes), never per dispatch: upstream parses an
+            // instruction keyframe's source at bake time and only evaluates it here
+            // (AnimationProtoMapper.java:77-87 -> InstructionKeyFrameExecutor.java:18-35).
+            for (EventKeyFrame<MolangExpression> customInstructionKeyFrame : currentAnimation
+                .instructionKeyframes(parser)) {
                 if (!this.executedKeyFrames.contains(customInstructionKeyFrame)
                     && tick >= customInstructionKeyFrame.getStartTick()) {
                     CustomInstructionKeyframeEvent<T> event = new CustomInstructionKeyframeEvent<>(

@@ -6,6 +6,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
+import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
+
 /**
  * Bounded timeline merge. Each contributor stores a source index, local phase and
  * distance to its next event; no expanded cycles, execution history or ever-growing
@@ -27,7 +29,7 @@ import java.util.Objects;
  * </ul>
  */
 public final class TimelineEventScheduler {
-    public interface Sink { void dispatch(String instructions); }
+    public interface Sink { void dispatch(MolangExpression program, String source); }
 
     public static final int MAX_CONTRIBUTORS = 128;
     public static final int MAX_EVENTS_PER_CONTRIBUTOR = 16384;
@@ -40,13 +42,18 @@ public final class TimelineEventScheduler {
 
     public static final class Event {
         final double time;
+        /** Source text; kept for identity/equality and diagnostics, never parsed. */
         final String data;
-        public Event(double time, String data) {
+        /** Parsed program of this instruction, evaluated on dispatch (see Animation#instructionKeyframes). */
+        final MolangExpression program;
+        public Event(double time, String data, MolangExpression program) {
             this.time = Double.isFinite(time) && time > 0 ? time : 0;
             this.data = data == null ? "" : data;
+            this.program = program;
         }
         public double getTime() { return time; }
         public String getData() { return data; }
+        public MolangExpression getProgram() { return program; }
         @Override public boolean equals(Object o) {
             if (!(o instanceof Event)) return false;
             Event e = (Event) o;
@@ -267,7 +274,7 @@ public final class TimelineEventScheduler {
                 skipped = true;
                 continue;
             }
-            if (sink != null) sink.dispatch(best.source.events[best.index].data);
+            if (sink != null) sink.dispatch(best.source.events[best.index].program, best.source.events[best.index].data);
             count++;
             best.emitted++;
             best.step();

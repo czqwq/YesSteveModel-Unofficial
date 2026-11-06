@@ -15,6 +15,9 @@ import com.fox.ysmu.ysmu;
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.keyframe.EventKeyFrame;
+import software.bernie.geckolib3.core.molang.MolangParser;
+import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
+import software.bernie.geckolib3.resource.GeckoLibCache;
 import software.bernie.geckolib3.file.AnimationFile;
 
 /**
@@ -62,13 +65,13 @@ public final class ProjectileTimelineRuntime {
     private static final Set<String> LOGGED_PROGRAM = ConcurrentHashMap.newKeySet();
     private static final Set<String> LOGGED_FIRST_DISPATCH = ConcurrentHashMap.newKeySet();
 
-    private static final TimelineEventScheduler.Sink SINK = instructions -> {
+    private static final TimelineEventScheduler.Sink SINK = (program, instructions) -> {
         if (frameBudget <= 0) {
             return;
         }
         frameBudget--;
-        MolangInstructionExecutor.noteTimelineExecution("projectile", instructions);
-        MolangInstructionExecutor.execute(instructions);
+        MolangInstructionExecutor.noteTimelineExecution("projectile", program);
+        MolangInstructionExecutor.execute(program, "projectile");
     };
 
     private ProjectileTimelineRuntime() {}
@@ -110,7 +113,7 @@ public final class ProjectileTimelineRuntime {
         String namesKey = String.join(",", activeAnims);
         Program program = namesKey.equals(state.namesKey) && state.program != null
             ? state.program
-            : buildProgram(file, activeAnims);
+            : buildProgram(file, activeAnims, GeckoLibCache.getInstance().parser);
         state.namesKey = namesKey;
         state.program = program;
 
@@ -183,7 +186,7 @@ public final class ProjectileTimelineRuntime {
         }
     }
 
-    private static Program buildProgram(AnimationFile file, List<String> activeAnims) {
+    private static Program buildProgram(AnimationFile file, List<String> activeAnims, MolangParser parser) {
         List<TimelineEventScheduler.Contributor> contributors = new ArrayList<>();
         StringBuilder key = new StringBuilder();
         // The longest period, used as a fallback for an animation whose own period cannot be derived; without it a
@@ -209,12 +212,22 @@ public final class ProjectileTimelineRuntime {
             }
             boolean loops = animation.loop == ILoopType.EDefaultLoopTypes.LOOP;
             List<TimelineEventScheduler.Event> events = new ArrayList<>();
-            for (EventKeyFrame<String> keyFrame : animation.customInstructionKeyframes) {
-                if (keyFrame == null) {
+            // Same bake-time parse the player path uses: one program per instruction keyframe, aligned by index with
+            // the source list (Animation#instructionKeyframes). A projectile is never driven by a controller, so this
+            // scheduler is its dispatch point and must not tokenise the text per frame either.
+            List<EventKeyFrame<MolangExpression>> programs = animation.instructionKeyframes(parser);
+            List<EventKeyFrame<String>> sources = animation.customInstructionKeyframes;
+            int frames = Math.min(programs.size(), sources.size());
+            for (int frameIndex = 0; frameIndex < frames; frameIndex++) {
+                EventKeyFrame<MolangExpression> programFrame = programs.get(frameIndex);
+                EventKeyFrame<String> sourceFrame = sources.get(frameIndex);
+                if (programFrame == null || sourceFrame == null) {
                     continue;
                 }
-                Double tick = keyFrame.getStartTick();
-                events.add(new TimelineEventScheduler.Event(tick == null ? 0.0d : tick, keyFrame.getEventData()));
+                Double tick = sourceFrame.getStartTick();
+                String text = sourceFrame.getEventData();
+                events.add(new TimelineEventScheduler.Event(tick == null ? 0.0d : tick, text,
+                    programFrame.getEventData()));
                 key.append(name)
                     .append('@')
                     .append(tick == null ? 0.0d : tick)

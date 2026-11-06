@@ -159,6 +159,11 @@ public final class RawAnimationBuilder {
                 animation.animationLength = Math.max(animation.animationLength, keyFrameSpan);
             }
         }
+        // Same bake-time parse as the JSON path (JsonAnimationUtils.deserializeJsonToAnimation): upstream parses
+        // timeline instructions at bake time and its runtime only evaluates them
+        // (AnimationProtoMapper.java:77-87 -> InstructionKeyFrameExecutor.java:18-35). See
+        // Animation#instructionKeyframes.
+        animation.instructionKeyframes(parser);
         return animation;
     }
 

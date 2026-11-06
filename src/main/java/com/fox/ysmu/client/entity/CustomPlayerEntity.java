@@ -204,7 +204,7 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
                     try (com.fox.ysmu.client.audio.MolangSoundContext ignored = soundContext(event.getController())) {
                         // Diagnostic attribution (controller name) rides along so a malformed timeline instruction
                         // failure names its controller instead of leaving a bare fragment.
-                        MolangInstructionExecutor.execute(event.instructions, event.getController().getName());
+                        MolangInstructionExecutor.execute(event.program, event.getController().getName());
                     }
                 });
                 // Player/NPC world sounds belong to their real entity, not the renderer's shared animatable.
