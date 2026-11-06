@@ -444,6 +444,19 @@ public class ClientEventHandler {
         FirstPersonHandRenderer.tryRender(event, mc, player, itemRenderer);
     }
 
+    /**
+     * The HUD paper doll (selfie) overlay: bakes the self player through {@link HudPreviewCache} and blits the cached
+     * texture at the configured position. This is the only HUD call site; the inventory paper doll and the
+     * world-with-a-screen-open draw go through {@link #onRender} instead.
+     *
+     * <p>
+     * Cost note (kept with the feature deliberately, see {@code HudPreviewCache}'s rate policy): a spark profile of
+     * the stuttering ticks measured this bake at ~44 % of the analyzed window while the doll was re-baking every
+     * frame, which is why {@code HudPreviewCache#HUD_MIN_HZ} is 5 Hz rather than the reference's 12 Hz — below 12 fps
+     * that floor beat the frame rate and disabled the FBO cache entirely. The rate policy, the
+     * {@code DISABLE_PLAYER_RENDER} switch and {@code GUI_HUD_PREVIEW_CACHE} (config screen, {@code C}) still govern
+     * how often it runs; nothing here overrides them.
+     */
     @SubscribeEvent
     public static void onRenderScreen(RenderGameOverlayEvent.Pre event) {
         if (event.type != RenderGameOverlayEvent.ElementType.HOTBAR) return;

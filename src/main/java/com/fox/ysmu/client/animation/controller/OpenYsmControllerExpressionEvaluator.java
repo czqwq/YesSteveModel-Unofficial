@@ -985,14 +985,31 @@ public final class OpenYsmControllerExpressionEvaluator {
     }
 
     static final class Context implements ConditionScope {
-        private final AnimationEvent<?> event;
-        private final EntityPlayer player;
-        private final OpenYsmPlayerControllerRuntime.RuntimeState state;
+        private AnimationEvent<?> event;
+        private EntityPlayer player;
+        private OpenYsmPlayerControllerRuntime.RuntimeState state;
 
         Context(AnimationEvent<?> event, EntityPlayer player, OpenYsmPlayerControllerRuntime.RuntimeState state) {
             this.event = event;
             this.player = player;
             this.state = state;
+        }
+
+        /**
+         * Reuses {@code previous} for the current evaluation when there is one; the caller keeps the instance on its
+         * runtime state ({@code RuntimeState#evalContext}). The context is a thin view over its three inputs and is
+         * only held while one controller evaluation runs, so one instance per controller state can serve every
+         * frame - this used to allocate one per controller per frame on the animation predicate path.
+         */
+        static Context reuse(Context previous, AnimationEvent<?> event, EntityPlayer player,
+            OpenYsmPlayerControllerRuntime.RuntimeState state) {
+            if (previous == null) {
+                return new Context(event, player, state);
+            }
+            previous.event = event;
+            previous.player = player;
+            previous.state = state;
+            return previous;
         }
 
         /**

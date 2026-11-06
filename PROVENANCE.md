@@ -452,3 +452,16 @@ evidence and residual deviations is `.agent/audit-2026-11-03-team-render-memory-
 `core/keyframe/AnimationPoint`'s pool is unchanged and `EasingManager`'s scalar catmullrom path stays: the pre/post
 flattened-entry residual (22,041 keyframes whose catmullrom tangent comes from the neighbouring entry rather than the
 neighbouring keyframe) is recorded in `.agent/divergences.md`, not guessed at.
+
+## 2026-11-07 animation-runtime round: engine edits
+
+Two narrow engine edits made while removing the remaining animation-path work of the stuttering-tick profile (see
+`.agent/perf-animation-runtime-and-hud-floor.md`; the HUD paper-doll overlay itself was kept, and its refresh floor was
+lowered 12 Hz → 5 Hz in the host's `HudPreviewCache` by the same owner decision). Both preserve the computed results;
+they remove a per-frame lookup and a per-frame map copy respectively.
+
+| file | change |
+|---|---|
+| `core/controller/AnimationController.java` | The playing animation is resolved from the model once per animation-file answer instead of on every frame (`refreshCurrentAnimation`; the "file answer" is `IAnimatableModelProvider#getAnimationFileLocation`, which changes on parked-payload install and model switch). Upstream shape: `AnimationPlayer` holds `currentAnim` and resolves only in `setAnimation`/`loadNextAnim` (`tmp/YesSteveModel-dev-1.20/.../core/controller/AnimationPlayer.java:69,426`). Also reuses the `processConcurrent` fold storage (map/order/scratch arrays) and one child `AnimationEvent` per controller instead of allocating them per frame. |
+| `core/molang/MolangPhysicsRuntime.java` | `syncToRuntimeState` copies from two reused dirty-set generations (`ScopeState#dirtyCurrent`/`dirtyPrevious`, rotated by `begin()`) instead of iterating the whole scope once per controller predicate. The javadoc on that method already recorded the reference branch's identical "本帧/上一帧脏集" shape; this is now the port's implementation. Writes funnel through the single `ScopeState#putVariable`/`MolangPhysicsRuntime#setVariable` entry, so no Molang assignment site needed a hook. |
+
