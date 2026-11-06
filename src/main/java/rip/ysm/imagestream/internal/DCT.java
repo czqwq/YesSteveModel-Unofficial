@@ -37,7 +37,9 @@ public class DCT {
       for (int i = 0; i < 8; i++) { idctCol(p, i); }
       for (int i = 0; i < 64; i++) {
          int val = (p[i] + 128 * 8 + 4) >> 3;
-         comp.codeBytes[offset + i] = (byte)clamp(val);
+         // Progressive scans never allocate codeBytes; decodeSamplesWithOutput() reads the samples from
+         // codeBlock for this path (baseline goes through JpegScannerInts + decodeSamplesWithOutputBytes).
+         comp.codeBlock[offset + i] = (short)clamp(val);
       }
    }
 
@@ -68,6 +70,20 @@ public class DCT {
       }
    }
 
+   // IDCT_MATRIX[u][x] = sqrt(2) * C(u) * cos((2x+1)u*pi/16).
+   // One 1-D pass is scaled by 2*sqrt(2); the two passes together give 8x the true sample value, which the
+   // callers' (v + 128 * 8 + 4) >> 3 (8-bit) / (v + 2048 * 8 + 4) >> 3 (12-bit) turn into round(v) + levelShift.
+   private static final double[][] IDCT_MATRIX = new double[8][8];
+
+   static {
+      for (int u = 0; u < 8; u++) {
+         double c = u == 0 ? 1.0 / Math.sqrt(2.0) : 1.0;
+         for (int x = 0; x < 8; x++) {
+            IDCT_MATRIX[u][x] = Math.sqrt(2.0) * c * Math.cos((2 * x + 1) * u * Math.PI / 16.0);
+         }
+      }
+   }
+
    private static void idctRow(int[] block, int off) {
       if (block[off + 1] == 0 && block[off + 2] == 0 && block[off + 3] == 0 &&
           block[off + 4] == 0 && block[off + 5] == 0 && block[off + 6] == 0 && block[off + 7] == 0) {
@@ -76,36 +92,18 @@ public class DCT {
          block[off+4] = val; block[off+5] = val; block[off+6] = val; block[off+7] = val;
          return;
       }
-      int x0 = (block[off] << 11) + 128;
-      int x1 = block[off + 4] << 11;
-      int x2 = block[off + 6];
-      int x3 = block[off + 2];
-      int x4 = block[off + 1];
-      int x5 = block[off + 7];
-      int x6 = block[off + 5];
-      int x7 = block[off + 3];
-      int x8 = x4 + x5;
-      x4 = x4 - x5;
-      x5 = x6 + x7;
-      x6 = x6 - x7;
-      x7 = x0 + x1;
-      x0 = x0 - x1;
-      x1 = (x3 * 1108 + x2 * 2676) >> 11;  // W6*x3 + W2*x2
-      x2 = (x3 * 2676 - x2 * 1108) >> 11;  // W2*x3 - W6*x2
-      x3 = x7 + x1;
-      x7 = x7 - x1;
-      x1 = x0 + x2;
-      x0 = x0 - x2;
-      x2 = (181 * (x4 + x6) + 128) >> 8;
-      x4 = (181 * (x4 - x6) + 128) >> 8;
-      block[off] = (x3 + (x8 * 2276 + x5 * 3406 >> 11) + 128) >> 8;
-      block[off + 1] = (x1 + x2 + 128) >> 8;
-      block[off + 2] = (x0 + x4 + 128) >> 8;
-      block[off + 3] = (x7 + (x8 * -3406 + x5 * 2276 >> 11) + 128) >> 8;
-      block[off + 4] = (x7 - (x8 * -3406 + x5 * 2276 >> 11) + 128) >> 8;
-      block[off + 5] = (x0 - x4 + 128) >> 8;
-      block[off + 6] = (x1 - x2 + 128) >> 8;
-      block[off + 7] = (x3 - (x8 * 2276 + x5 * 3406 >> 11) + 128) >> 8;
+
+      int[] in = new int[8];
+      for (int u = 0; u < 8; u++) {
+         in[u] = block[off + u];
+      }
+      for (int x = 0; x < 8; x++) {
+         double sum = 0.0;
+         for (int u = 0; u < 8; u++) {
+            sum += IDCT_MATRIX[u][x] * in[u];
+         }
+         block[off + x] = (int)Math.round(sum);
+      }
    }
 
    private static void idctCol(int[] block, int off) {
@@ -116,36 +114,18 @@ public class DCT {
          block[off+32] = val; block[off+40] = val; block[off+48] = val; block[off+56] = val;
          return;
       }
-      int x0 = (block[off] << 8) + 8192;
-      int x1 = block[off + 32] << 8;
-      int x2 = block[off + 48];
-      int x3 = block[off + 16];
-      int x4 = block[off + 8];
-      int x5 = block[off + 56];
-      int x6 = block[off + 40];
-      int x7 = block[off + 24];
-      int x8 = x4 + x5;
-      x4 = x4 - x5;
-      x5 = x6 + x7;
-      x6 = x6 - x7;
-      x7 = x0 + x1;
-      x0 = x0 - x1;
-      x1 = (x3 * 1108 + x2 * 2676) >> 11;
-      x2 = (x3 * 2676 - x2 * 1108) >> 11;
-      x3 = x7 + x1;
-      x7 = x7 - x1;
-      x1 = x0 + x2;
-      x0 = x0 - x2;
-      x2 = (181 * (x4 + x6) + 128) >> 8;
-      x4 = (181 * (x4 - x6) + 128) >> 8;
-      block[off] = (x3 + (x8 * 2276 + x5 * 3406 >> 11)) >> 14;
-      block[off + 8] = (x1 + x2) >> 14;
-      block[off + 16] = (x0 + x4) >> 14;
-      block[off + 24] = (x7 + (x8 * -3406 + x5 * 2276 >> 11)) >> 14;
-      block[off + 32] = (x7 - (x8 * -3406 + x5 * 2276 >> 11)) >> 14;
-      block[off + 40] = (x0 - x4) >> 14;
-      block[off + 48] = (x1 - x2) >> 14;
-      block[off + 56] = (x3 - (x8 * 2276 + x5 * 3406 >> 11)) >> 14;
+
+      int[] in = new int[8];
+      for (int v = 0; v < 8; v++) {
+         in[v] = block[off + v * 8];
+      }
+      for (int y = 0; y < 8; y++) {
+         double sum = 0.0;
+         for (int v = 0; v < 8; v++) {
+            sum += IDCT_MATRIX[v][y] * in[v];
+         }
+         block[off + y * 8] = (int)Math.round(sum);
+      }
    }
 
    private static int clamp(int val) { return val < 0 ? 0 : Math.min(val, 255); }

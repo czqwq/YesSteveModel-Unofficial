@@ -19,6 +19,21 @@ ImageStream (the JPEG/WebP/AVIF decoder library, `src/main/java/rip/ysm/imagestr
 provenance and licence note are in `NOTICE.md`, and why it is source rather than a jar in
 `.agent/phase54-imagestream-packaging.md`.
 
+**Local fix to the vendored ImageStream JPEG decoder (2026-11-07).** `internal/DCT.java` is no longer byte-identical
+to upstream `71fa2bf`. Upstream's `idctRow`/`idctCol` butterfly was mathematically wrong: the odd-part rotations were
+missing, the odd terms were shifted down 11 bits while the even terms were shifted up 11 bits, and the F4 term came
+out about 8x too large. Every 8-bit baseline JPEG therefore decoded silently wrong - AC coefficients collapsed to
+zero, each 8x8 block became its own average (blocky blur) and colours broke into patches. The progressive path also
+wrote its output to `Component.codeBytes`, which only the baseline path allocates, so progressive JPEGs threw an NPE.
+Both are fixed: the 1-D IDCT is now the exact matrix transform scaled to the callers' existing convention (one pass
+x2*sqrt2, both passes x8, consumed by `(v + 128 * 8 + 4) >> 3`), and the progressive branch writes the samples to
+`codeBlock`, the array `decodeSamplesWithOutput` reads for that path. Verified against the JDK decoder: mean channel
+error on a 1080x1208 photo dropped from 50.69/255 to 0.22/255 (max 765 -> 43), synthetic 4:4:4 and gray charts are
+within 0.06/0.03 of the JDK, and progressive/4:2:0/4:2:2 now decode without exceptions (residual <= 1.1/255 is the
+decoder's nearest-neighbour chroma upsampling, not the IDCT). The two `META-INF/services/javax.imageio.spi.*` files
+are unchanged: on the tested JVM the JDK JPEG reader is already preferred for `ImageIO.read`, and ysmu's own path
+(`ModelImageConverter`) calls `new JpegDecoder()` directly.
+
 **`src/main/java/rip/ysm/{security,algorithms,zstd}` - bounded decode overlays and length-before-allocation guards
 (phase55).** The `/ysm upload` / `/ysm manage` validator has to decode bytes that arrived over the network, so four
 narrow edits were made to the vendored OpenYSM crypto/zstd code; every one is additive and leaves the existing call
