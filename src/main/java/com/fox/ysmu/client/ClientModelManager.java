@@ -505,6 +505,21 @@ public class ClientModelManager {
     private static final Map<ResourceLocation, PreparedAnimations> PREPARED_ANIMATIONS = Maps.newConcurrentMap();
 
     /**
+     * Models whose animation bundle is currently being built on the loader thread; see
+     * {@link #scheduleAnimationPreparation}.
+     */
+    private static final Set<ResourceLocation> ANIMATION_PREPARATION_IN_FLIGHT = Collections
+        .newSetFromMap(new ConcurrentHashMap<>());
+
+    /**
+     * Models whose loader-thread animation preparation threw; their install falls back to the client thread, which is
+     * what this method did before preparation existed. Cleared with the parked payload (a new payload gets a new
+     * attempt) and on a connection change.
+     */
+    private static final Set<ResourceLocation> ANIMATION_PREPARATION_FAILED = Collections
+        .newSetFromMap(new ConcurrentHashMap<>());
+
+    /**
      * Payloads whose geometry and textures have been received but not yet built, keyed by both the model id and the
      * model's {@code main} id.
      * <p>
@@ -547,6 +562,9 @@ public class ClientModelManager {
      * cannot accumulate without bound. See {@link #requestBuild}, which rejects transiently at this limit.
      */
     private static final int MAX_COMPLETED_BUILDS = MAX_PUBLISH_PER_TICK * 4;
+
+    /** Animation-install budget per tick, for the same reason as {@link #MAX_PUBLISH_PER_TICK}. */
+    private static final int MAX_ANIMATION_INSTALL_PER_TICK = 4;
 
     /**
      * Models whose build threw, so they are never asked for again.
@@ -841,7 +859,9 @@ public class ClientModelManager {
         // synchronous build returns.
         markGeometryReady(modelId);
         deferAnimations(modelId, data);
-        ensureAnimations(ModelIdUtil.getMainId(modelId));
+        // Eager path: this model must be drawable immediately, so its animations are installed here rather than
+        // waiting for the loader thread (see ensureAnimationsImmediately).
+        ensureAnimationsImmediately(ModelIdUtil.getMainId(modelId));
     }
 
     /**
@@ -872,6 +892,25 @@ public class ClientModelManager {
      */
     public static boolean isModelPublished(@Nullable ResourceLocation id) {
         return id != null && GEOMETRY_READY.contains(id);
+    }
+
+    /**
+     * Whether a model is a ready render target: published (geometry + textures) and its animations installed.
+     * <p>
+     * The port's {@code AcquireResult.Ready}: upstream installs a target with all its resources, including the
+     * animations it declares ({@code ModelRenderTargetLoader.java:232-253}), and keeps the old target until then
+     * ({@code EntityModelBinding#synchronize:145-167}). This port publishes geometry and installs animations in two
+     * steps, so drawing on {@link #isModelPublished} alone showed a model with the built-in default animations - whose
+     * clips do not hide the pack's optional parts - until the animation install landed. Draw paths use this predicate
+     * and keep the applied target or the built-in default while a model is pending; the install is drained by
+     * {@link #tick()}.
+     */
+    public static boolean isModelReady(@Nullable ResourceLocation id) {
+        if (!isModelPublished(id)) {
+            return false;
+        }
+        ResourceLocation modelId = MODELS.containsKey(id) ? id : ModelIdUtil.getParentModelId(id);
+        return !animationsPending(ModelIdUtil.getMainId(modelId));
     }
 
     /**
@@ -1016,13 +1055,37 @@ public class ClientModelManager {
     private static void requestAnimationPreparation(ResourceLocation modelId) {
         ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
         AnimationPayload payload = PENDING_ANIMATIONS.get(mainId);
-        if (payload == null || PREPARED_ANIMATIONS.containsKey(mainId)) {
+        if (payload == null || PREPARED_ANIMATIONS.containsKey(mainId) || ANIMATION_PREPARATION_FAILED.contains(mainId)) {
+            return;
+        }
+        scheduleAnimationPreparation(mainId, payload);
+    }
+
+    /**
+     * Schedules the loader-thread build of one parked animation payload, once.
+     * <p>
+     * The worker result lands in {@link #PREPARED_ANIMATIONS}; success and failure are tracked by
+     * {@link #ANIMATION_PREPARATION_IN_FLIGHT} / {@link #ANIMATION_PREPARATION_FAILED}. Nothing here waits: the caller
+     * keeps drawing the built-in default animation until {@link #ensureAnimations} finds the bundle (which is the same
+     * fallback rule the geometry build follows). A preparation that throws is recorded as failed so the install falls
+     * back to the client thread instead of rescheduling every frame.
+     */
+    private static void scheduleAnimationPreparation(ResourceLocation mainId, AnimationPayload payload) {
+        if (!ANIMATION_PREPARATION_IN_FLIGHT.add(mainId)) {
             return;
         }
         try {
-            modelLoader().submit(() -> prepareAnimations(mainId, payload));
+            modelLoader().submit(() -> {
+                try {
+                    prepareAnimations(mainId, payload);
+                } finally {
+                    ANIMATION_PREPARATION_IN_FLIGHT.remove(mainId);
+                }
+            });
         } catch (RuntimeException failure) {
-            // Preparation is an optimisation: without it the client thread builds on demand, exactly as before.
+            // No loader (shut down / rejected): fall back to the client-thread build.
+            ANIMATION_PREPARATION_IN_FLIGHT.remove(mainId);
+            ANIMATION_PREPARATION_FAILED.add(mainId);
             ysmu.LOG.warn("YSM client could not schedule animation preparation for {}", mainId, failure);
         }
     }
@@ -1139,10 +1202,11 @@ public class ClientModelManager {
     }
 
     /**
-     * Installs at most {@link #MAX_PUBLISH_PER_TICK} finished models.
+     * Installs at most {@link #MAX_PUBLISH_PER_TICK} finished models, then the finished animation bundles for models
+     * that are already published - together these make a <em>ready render target</em> (see {@link #isModelReady}).
      * <p>
-     * Called from the client tick, so the work that has to happen on this thread - putting the geometry where the
-     * renderer looks for it, and uploading textures - is spread over frames instead of being done in one.
+     * Called from the client tick, so the work that must happen on this thread (geometry into the engine cache,
+     * texture upload, animation merge) is spread over frames.
      */
     public static void tick() {
         // Reference wiring: the reference drives AssetManager.tick() from its periodic cache sweep,
@@ -1159,9 +1223,44 @@ public class ClientModelManager {
         for (int published = 0; published < MAX_PUBLISH_PER_TICK; published++) {
             BuiltModel built = COMPLETED_BUILDS.poll();
             if (built == null) {
-                return;
+                break;
             }
             publishBuiltModel(built);
+        }
+        installPreparedAnimations();
+    }
+
+    /**
+     * Installs finished animation bundles for published models, bounded like {@link #MAX_PUBLISH_PER_TICK}.
+     * A bundle for a model whose geometry is not published yet waits for a later tick; a failed preparation is
+     * retried inline once (its payload is still parked) so the model settles instead of staying pending forever.
+     */
+    private static void installPreparedAnimations() {
+        installPreparedAnimations(new ArrayList<>(PREPARED_ANIMATIONS.keySet()), true);
+        installPreparedAnimations(new ArrayList<>(ANIMATION_PREPARATION_FAILED), false);
+    }
+
+    private static void installPreparedAnimations(List<ResourceLocation> mainIds, boolean usePreparedBundle) {
+        int installed = 0;
+        for (ResourceLocation mainId : mainIds) {
+            if (installed >= MAX_ANIMATION_INSTALL_PER_TICK) {
+                return;
+            }
+            if (!GEOMETRY_READY.contains(mainId)) {
+                continue;
+            }
+            if (usePreparedBundle) {
+                if (!PREPARED_ANIMATIONS.containsKey(mainId)) {
+                    // Replaced by a newer payload since the snapshot, or already installed.
+                    continue;
+                }
+                installPendingAnimations(mainId);
+            } else if (PENDING_ANIMATIONS.containsKey(mainId)) {
+                ensureAnimations(mainId);
+            } else {
+                continue;
+            }
+            installed++;
         }
     }
 
@@ -1569,6 +1668,7 @@ public class ClientModelManager {
             // default animations; dropping anything parked under the id is what makes that fallback reachable.
             PENDING_ANIMATIONS.remove(mainId);
             PREPARED_ANIMATIONS.remove(mainId);
+            ANIMATION_PREPARATION_FAILED.remove(mainId);
             return;
         }
         // Only the animation half is parked: the geometry and texture bytes in the same payload were consumed by the
@@ -1576,8 +1676,10 @@ public class ClientModelManager {
         // .agent/perf-audit-memory.md).
         PENDING_ANIMATIONS.put(mainId, payload);
         // A bundle prepared for the payload being replaced describes the older bytes; dropping it here is what lets
-        // the new payload be prepared again when the model is next drawn (see requestAnimationPreparation).
+        // the new payload be prepared again when the model is next drawn (see requestAnimationPreparation). A failed
+        // preparation is cleared for the same reason - a new payload deserves a new attempt.
         PREPARED_ANIMATIONS.remove(mainId);
+        ANIMATION_PREPARATION_FAILED.remove(mainId);
     }
 
     /** Whether this model's animations are still parked; see {@link #PENDING_ANIMATIONS}. */
@@ -1653,6 +1755,24 @@ public class ClientModelManager {
      * <p>
      * This is called from the engine's animation lookup, so it runs on every frame for whatever animation is
      * playing; after the first call it is a single lookup in a map that holds only the models not yet drawn.
+     *
+     * <p>
+     * <b>The parse waits for the loader thread.</b> The animation graph of a model is built off the client thread by
+     * {@link #requestAnimationPreparation} (scheduled when the model is first wanted for drawing). If that bundle is
+     * not ready yet, this answers "not installed" and returns: the engine then keeps the model on the built-in default
+     * animation fallback ({@code CustomPlayerEntity#getAnimation}) and asks again next frame, exactly as it does for a
+     * model whose geometry is still being built. The first call also schedules the preparation itself, so a model
+     * that was never requested for drawing cannot end up parked forever.
+     * <p>
+     * The alternative - the previous behaviour - parsed the whole graph inline the first time a model was seen. A
+     * spark profile of the model-selection screen measured that at ~4.2 s of client-thread JSON/Molang parsing while
+     * the tiles of one page installed their animations. Upstream builds a render target's animations as part of
+     * loading that target off-thread and only installs a ready target
+     * ({@code model/resource/client/render/ModelRenderTargetLoader.java:232-253};
+     * {@code EntityModelBinding#synchronize:145-167} keeps the old target until the new one is ready), so deferring is
+     * its shape. Preparation failure falls back to the inline install (one attempt, then
+     * {@link #ANIMATION_PREPARATION_FAILED} keeps it from being retried); with the loader disabled there is no failure
+     * at all - the scheduling throws synchronously and the install happens inline as before.
      */
     public static void ensureAnimations(@Nullable ResourceLocation mainId) {
         if (mainId == null) {
@@ -1667,20 +1787,56 @@ public class ClientModelManager {
             // drawn.
             return;
         }
-        AnimationPayload animations = takePendingAnimations(mainId);
-        PreparedAnimations prepared = null;
-        if (animations != null) {
-            prepared = PREPARED_ANIMATIONS.remove(mainId);
-            if (prepared != null && prepared.payload() != animations) {
-                // Built from a payload that has since been replaced; installing it would show the older bytes.
-                prepared = null;
-            }
-        }
+        AnimationPayload animations = PENDING_ANIMATIONS.get(mainId);
         if (animations == null) {
             // Nothing parked: either this model's animations are already installed, or it declares none of its own
             // and reads the built-in default. The eviction seam is the animation half of ensureGeometry's.
             keepAnimationsResident(mainId);
             return;
+        }
+        PreparedAnimations prepared = PREPARED_ANIMATIONS.get(mainId);
+        if (prepared != null && prepared.payload() != animations) {
+            // Built from a payload that has since been replaced; installing it would show the older bytes.
+            prepared = null;
+        }
+        if (prepared == null && deferAnimationsUntilPrepared(mainId, animations)) {
+            return;
+        }
+        installPendingAnimations(mainId);
+    }
+
+    /**
+     * Installs a model's parked animations on the calling (client) thread without waiting for the loader-thread
+     * bundle; see {@link #ensureAnimations} for the deferred path and why it exists.
+     * <p>
+     * Two callers need the old synchronous answer: the eager path that publishes the built-in default model, which
+     * must be drawable immediately, and the host-facing {@code EntityAnimationApi}, whose "does this model define clip
+     * X" answer was immediate before the deferral. The first call for a model pays the inline parse, exactly as
+     * before.
+     */
+    public static void ensureAnimationsImmediately(@Nullable ResourceLocation mainId) {
+        if (mainId == null || !isClientThread()) {
+            return;
+        }
+        installPendingAnimations(mainId);
+    }
+
+    /**
+     * The install half of {@link #ensureAnimations}: takes the parked payload once (a re-entrant request during the
+     * install sees the miss and falls through to the cache) and replays the port's install rule, with the
+     * loader-thread bundle when it describes exactly that payload.
+     */
+    private static void installPendingAnimations(ResourceLocation mainId) {
+        // Take once, after the caller's decision: a deferred call leaves the payload parked for the next frame.
+        AnimationPayload animations = takePendingAnimations(mainId);
+        if (animations == null) {
+            keepAnimationsResident(mainId);
+            return;
+        }
+        PreparedAnimations prepared = PREPARED_ANIMATIONS.remove(mainId);
+        if (prepared != null && prepared.payload() != animations) {
+            // Built from a payload that has since been replaced; installing it would show the older bytes.
+            prepared = null;
         }
         try {
             registerAnimations(mainId, animations, prepared);
@@ -1694,6 +1850,7 @@ public class ClientModelManager {
             // restore into the state a successful install would have produced.
             return;
         }
+        ANIMATION_PREPARATION_FAILED.remove(mainId);
         // Reference wiring, adapted to this port's lazy install. The reference hands the file it just installed to
         // the asset framework at the same moment (reference ClientModelManager.java:644, inside applyPreParsed) and
         // its AssetManager.tick() touches exactly this entry to pin the built-in default (reference
@@ -1704,6 +1861,28 @@ public class ClientModelManager {
         if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(mainId)) {
             com.fox.ysmu.client.asset.AssetManager.registerAnim(mainId, animations);
         }
+    }
+
+    /**
+     * Whether {@link #ensureAnimations} must wait for the loader-thread bundle instead of parsing the graph inline.
+     * <p>
+     * True while a preparation is running (or just got scheduled here). False when the bundle is ready (the caller
+     * installs it) or when preparation already failed / no loader exists (the caller installs inline, which is the
+     * pre-preparation behaviour). The checks are plain concurrent-map lookups: this runs once per drawn model per
+     * frame until the install happens.
+     */
+    private static boolean deferAnimationsUntilPrepared(ResourceLocation mainId, AnimationPayload payload) {
+        if (PREPARED_ANIMATIONS.containsKey(mainId)) {
+            return false;
+        }
+        if (ANIMATION_PREPARATION_FAILED.contains(mainId)) {
+            return false;
+        }
+        if (!ANIMATION_PREPARATION_IN_FLIGHT.contains(mainId)) {
+            // Never requested (e.g. the model was drawn through a path that skipped requestBuild): schedule it now.
+            scheduleAnimationPreparation(mainId, payload);
+        }
+        return true;
     }
 
     /**
@@ -2676,7 +2855,9 @@ public class ClientModelManager {
             }
             PREPARED_ANIMATIONS.put(mainId, new PreparedAnimations(payload, files, mods));
         } catch (Throwable failure) {
-            // Preparation is an optimisation: the client thread still builds on demand.
+            // Preparation is an optimisation: the client thread still builds on demand. Record the failure so
+            // ensureAnimations stops waiting for a bundle that will never arrive and installs inline.
+            ANIMATION_PREPARATION_FAILED.add(mainId);
             ysmu.LOG.warn("YSM client could not prepare animations for {}; building them on demand", mainId, failure);
         }
     }
@@ -2792,13 +2973,22 @@ public class ClientModelManager {
      * Reading the installed copy is what removes the duplicate parse this method used to cause: {@code loadDefaultModel}
      * parsed every default animation file once into these fields and then {@code registerAll} parsed the same bytes
      * again to install them (129 ms on the client thread for the built-in pack).
+     * <p>
+     * <b>The id passed to {@link AnimationDomain#animationFileId} is a model id, not a main id.</b> That helper appends
+     * the sub-name itself ({@code animationFileId(modelId, MAIN) == getMainId(modelId)}), so a main id here produced
+     * {@code ysmu:default/main/main} - a lookup that could never hit. Since the same change stopped filling the static
+     * fields below, that made the fallback empty for <em>every</em> installed model: a model whose own files are
+     * complete was unaffected, while one that relies on inherited clips lost them - the built-in
+     * {@code misc/4_default_controllers} model, whose own animation set only has {@code sneak}/{@code parallel*} and
+     * inherits {@code walk}/{@code run}/{@code idle}, had no locomotion animation at all (regression introduced by
+     * {@code ecd2e3d}, "Build models from binary structures and add bake caches").
      */
     private static AnimationFile defaultAnimationFile(String domain) {
-        ResourceLocation defaultMainId = ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, "default"));
+        ResourceLocation defaultModelId = new ResourceLocation(ysmu.MODID, "default");
         AnimationFile installed = GeckoLibCache.getInstance()
             .getAnimations()
-            .get(AnimationDomain.animationFileId(defaultMainId, domain));
-        if (installed != null) {
+            .get(AnimationDomain.animationFileId(defaultModelId, domain));
+        if (installed != null && !installed.animations.isEmpty()) {
             return installed;
         }
         return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE : DEFAULT_ANIMATION_FILE;
@@ -3297,6 +3487,8 @@ public class ClientModelManager {
             EXTRA_ANIMATION_NAME.clear();
             PENDING_ANIMATIONS.clear();
             PREPARED_ANIMATIONS.clear();
+            ANIMATION_PREPARATION_IN_FLIGHT.clear();
+            ANIMATION_PREPARATION_FAILED.clear();
             PENDING_GEOMETRY.clear();
             COMPLETED_BUILDS.clear();
             GEOMETRY_REQUESTED.clear();
@@ -3333,9 +3525,6 @@ public class ClientModelManager {
         MolangPhysicsRuntime.clear();
         MolangInstructionExecutor.clearWarnings();
         MolangInstructionExecutor.clearTimelineLog();
-        // The parsed timeline instructions belong to the animations of the models being dropped, so they go with
-        // them (they are keyed by instruction text, which a reload may well change under the same spelling).
-        MolangInstructionExecutor.clearParsedInstructions();
         // The projectile index belongs to the models being dropped, and so does the per-projectile state those models
         // were driving.
         PROJECTILE_MODEL_IDS.clear();
@@ -3533,6 +3722,9 @@ public class ClientModelManager {
             dropConnectionDelivered(PENDING_GEOMETRY);
             dropConnectionDelivered(PENDING_ANIMATIONS);
             dropConnectionDelivered(PREPARED_ANIMATIONS);
+            // Per-connection bookkeeping: a new connection gets a new preparation attempt, and a task still running
+            // for the old payload is discarded by prepareAnimations' PENDING identity check.
+            ANIMATION_PREPARATION_FAILED.clear();
             GEOMETRY_READY.removeIf(ClientModelManager::isConnectionDeliveredModel);
             // The request marker goes for every model: a build that was in flight when the connection ended is
             // discarded by publishBuiltModelChecked's generation check, and the marker is what would stop the model

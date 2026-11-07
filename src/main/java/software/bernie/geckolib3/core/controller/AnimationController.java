@@ -53,6 +53,7 @@ import software.bernie.geckolib3.core.keyframe.VectorKeyFrameList;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
 import software.bernie.geckolib3.core.processor.IBone;
+import software.bernie.geckolib3.model.provider.IAnimatableModelProvider;
 import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
 import software.bernie.geckolib3.core.util.Axis;
 
@@ -64,6 +65,24 @@ import software.bernie.geckolib3.core.util.Axis;
 public class AnimationController<T extends IAnimatable> {
 
     static List<ModelFetcher<?>> modelFetchers = new ArrayList<>();
+    /**
+     * "Could not load animation" notices, once per animation name.
+     * <p>
+     * The host installs a model's animation set lazily and (since the animation graph is built on its loader thread)
+     * may answer "not installed" for a few frames after a model is first drawn; during that window a controller whose
+     * selected clip is not in the built-in default file would print the same line every frame. Whether a name is
+     * missing is a property of the model, not of the frame, so reporting it once per name is the information the line
+     * actually carries - and it keeps a genuinely missing name visible instead of burying it in repetition.
+     */
+    private static final Set<String> MISSING_ANIMATION_REPORTED = ConcurrentHashMap.newKeySet();
+
+    /** Reports a missing animation name once per process; see {@link #MISSING_ANIMATION_REPORTED}. */
+    private static void reportMissingAnimation(String animationName) {
+        if (MISSING_ANIMATION_REPORTED.add(animationName)) {
+            System.out.printf("Could not load animation: %s. Is it missing?%n", animationName);
+        }
+    }
+
     /**
      * The Entity.
      */
@@ -107,6 +126,29 @@ public class AnimationController<T extends IAnimatable> {
         if (transition != null) transitionLengthTicks = transition.length();
     }
     private final HashMap<String, BoneSnapshot> concurrentSnapshots = new HashMap<>();
+
+    /**
+     * Reused per-frame accumulators for {@link #processConcurrent}: bone name → per-channel sums. They used to be a
+     * fresh {@code HashMap} plus a fresh {@code double[3][4]} per bone per child per frame; the arrays are reset
+     * instead of reallocated. Keys are model bone names, so the map is bounded by the model.
+     */
+    private final HashMap<String, double[][]> concurrentFolded = new HashMap<>();
+    /** Bone names touched by the current {@link #processConcurrent} call, in first-seen order (emission order). */
+    private final ArrayList<String> concurrentFoldedOrder = new ArrayList<>();
+    /** Guards {@link #concurrentFoldedOrder} against a bone touched by two concurrent children. */
+    private final HashSet<String> concurrentFoldedSeen = new HashSet<>();
+    /** Scratch per-channel fold result, reused for every queue in {@link #processConcurrent}. */
+    private final double[][] concurrentRaw = newConcurrentAccumulator();
+    /** Scratch child event, rebuilt only when the pass' event shape changes; see {@link #processConcurrent}. */
+    private AnimationEvent<T> concurrentChildEvent;
+
+    /**
+     * The animation file the playing {@link #currentAnimation} was last resolved against; see
+     * {@link #refreshCurrentAnimation}. {@code null} means "not resolved yet, or the model cannot name its file".
+     */
+    private Object resolvedAnimationLocation;
+    /** The object the last successful resolution produced; see {@link #refreshCurrentAnimation}. */
+    private Animation resolvedAnimation;
 
     /** Authored entry descriptors contain activation, not a sequential playlist. */
     public static final class ConcurrentAnimation {
@@ -176,6 +218,8 @@ public class AnimationController<T extends IAnimatable> {
         concurrentStateKey = null;
         lastConcurrentPredicateTick = Double.NaN;
         concurrentSnapshots.clear();
+        // Drop the reused child event so an inactive controller does not keep the last pass' event data alive.
+        concurrentChildEvent = null;
     }
 
     protected AnimationState animationState = AnimationState.Stopped;
@@ -457,8 +501,7 @@ public class AnimationController<T extends IAnimatable> {
                             // model's animations are injected by YSMU's AnimationManager
                             // before calling setAnimation.
                             if (animation == null) {
-                                System.out
-                                    .printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                                reportMissingAnimation(rawAnimation.animationName);
                                 encounteredError.set(true);
                             }
                             if (animation != null && rawAnimation.loopType != null) {
@@ -516,7 +559,7 @@ public class AnimationController<T extends IAnimatable> {
                 Animation animation = model.getAnimation(rawAnimation.animationName, animatable);
                 // Cross-model fallback removed — see setAnimation() for rationale.
                 if (animation == null) {
-                    System.out.printf("Could not load animation: %s. Is it missing?", rawAnimation.animationName);
+                    reportMissingAnimation(rawAnimation.animationName);
                     encounteredError.set(true);
                 }
                 if (animation != null && rawAnimation.loopType != null) {
@@ -763,6 +806,63 @@ public class AnimationController<T extends IAnimatable> {
     }
 
     /**
+     * Re-resolves the playing {@link #currentAnimation} against the model's animation file, but only when the file it
+     * was last resolved against changed (or a new animation object was dequeued).
+     *
+     * <p>
+     * <b>Upstream shape.</b> Upstream's {@code AnimationPlayer} holds its animation object and resolves a name only
+     * when the playing animation changes ({@code AnimationPlayer#setAnimation}, {@code #loadNextAnim}). The vendored
+     * GeckoLib 3 controller instead looks the playing animation's name up on <em>every</em> frame
+     * ({@code AnimationController.process}). On this port that lookup walks the host's model selection
+     * ({@code CustomPlayerModel#getAnimation} → {@code CustomPlayerEntity#getMainModel} / {@code ensureAnimations} /
+     * {@code AnimationFile#getAnimation}) once per playing controller per frame, which a spark profile of the
+     * stuttering ticks measured at ~2 % of the client thread. The result only has to change when either
+     * <ul>
+     * <li>the current animation object changed - the queue handed a new one, or {@code setAnimation} replaced it; or
+     * <li>the animation file the model answers with changed - the host answers with the built-in default until a
+     * parked payload's own animations are installed, and a model switch changes the answer as well.
+     * </ul>
+     * Both are detected here, and the frame path costs two identity/equality comparisons plus the model's cheap
+     * "which file am I" answer ({@code getAnimationFileLocation}, which is a map membership test on the host side).
+     * While the file says the name is unknown the old animation keeps playing, exactly as before.
+     *
+     * <p>
+     * A model that cannot name its animation file ({@link IAnimatableModelProvider} not implemented → {@code null}
+     * answer) keeps the previous uncached per-frame lookup, so the engine stays usable without that interface.
+     */
+    private void refreshCurrentAnimation(IAnimatableModel<T> model) {
+        Animation current = this.currentAnimation;
+        Object location = animationFileLocation(model);
+        if (location != null && current == this.resolvedAnimation
+            && location.equals(this.resolvedAnimationLocation)) {
+            return;
+        }
+        Animation animation = model.getAnimation(current.animationName, this.animatable);
+        // Cross-model fallback removed — see setAnimation() for rationale.
+        if (animation != null) {
+            ILoopType loop = current.loop;
+            this.currentAnimation = animation;
+            this.currentAnimation.loop = loop;
+        }
+        // Remember the resolution even when the name is currently unknown: a missing name only becomes known once the
+        // file answer changes (and a model switch also hands a different animation object through setAnimation).
+        this.resolvedAnimation = this.currentAnimation;
+        this.resolvedAnimationLocation = location;
+    }
+
+    /**
+     * The animation file the model currently resolves animation names against, or {@code null} when it cannot say;
+     * see {@link #refreshCurrentAnimation}.
+     */
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    private Object animationFileLocation(IAnimatableModel<T> model) {
+        if (model instanceof IAnimatableModelProvider) {
+            return ((IAnimatableModelProvider) model).getAnimationFileLocation(this.animatable);
+        }
+        return null;
+    }
+
+    /**
      * This method is called every frame in order to populate the animation point
      * queues, and process animation state logic.
      *
@@ -797,13 +897,7 @@ public class AnimationController<T extends IAnimatable> {
         if (currentAnimation != null) {
             IAnimatableModel<T> model = getModel(this.animatable);
             if (model != null) {
-                Animation animation = model.getAnimation(currentAnimation.animationName, this.animatable);
-                // Cross-model fallback removed — see setAnimation() for rationale.
-                if (animation != null) {
-                    ILoopType loop = currentAnimation.loop;
-                    currentAnimation = animation;
-                    currentAnimation.loop = loop;
-                }
+                refreshCurrentAnimation(model);
             }
         }
 
@@ -1068,7 +1162,7 @@ public class AnimationController<T extends IAnimatable> {
         double elapsed = Math.max(0, tick - concurrentStartTick);
         boolean beginning = elapsed < concurrentTransition.length();
         double progress = beginning ? concurrentTransition.progress(elapsed) : 1;
-        Map<String, double[][]> folded = new HashMap<>();
+        resetConcurrentFolded();
         for (ConcurrentPlayer<T> holder : concurrentPlayers) {
             AnimationController<T> child = holder.controller;
             child.emitting = holder.applies && !beginning;
@@ -1085,9 +1179,17 @@ public class AnimationController<T extends IAnimatable> {
                 } catch (Exception ignored) { speed = 1; }
             }
             child.setAnimationSpeed(speed);
-            AnimationEvent<T> childEvent = new AnimationEvent<>(animatable, event.getLimbSwing(),
-                event.getLimbSwingAmount(), event.getPartialTick(), event.isMoving(), event.getExtraData());
+            // Reused child event; a fresh one per child per frame was an allocation on the animation hot path.
+            AnimationEvent<T> childEvent = concurrentChildEvent;
+            if (childEvent == null || !sameEventShape(childEvent, event)) {
+                childEvent = new AnimationEvent<>(animatable, event.getLimbSwing(), event.getLimbSwingAmount(),
+                    event.getPartialTick(), event.isMoving(), event.getExtraData());
+                concurrentChildEvent = childEvent;
+            }
             childEvent.animationTick = event.animationTick;
+            // Each child used to get a fresh event, i.e. RenderContext.NONE; keep that (the children are engine
+            // players, not a pass of their own).
+            childEvent.setRenderContext(null);
             childEvent.setController(child);
             // Beginning blend holds all child playback clocks at zero, then advances them together.
             try {
@@ -1112,7 +1214,8 @@ public class AnimationController<T extends IAnimatable> {
                 fade = child.endingLength > 0 ? Math.max(0, 1 - endingTick / child.endingLength) : 0;
             }
             for (BoneAnimationQueue queue : child.getActiveBoneAnimationQueues()) {
-                double[][] raw = new double[][] { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 1, 1, 1, 0 } };
+                resetConcurrentAccumulator(concurrentRaw);
+                double[][] raw = concurrentRaw;
                 foldChannel(raw[0], queue.rotationXQueue, queue.rotationYQueue, queue.rotationZQueue,
                     1, false, true, child);
                 foldChannel(raw[1], queue.positionXQueue, queue.positionYQueue, queue.positionZQueue,
@@ -1120,10 +1223,23 @@ public class AnimationController<T extends IAnimatable> {
                 foldChannel(raw[2], queue.scaleXQueue, queue.scaleYQueue, queue.scaleZQueue,
                     1, true, true, child);
                 String boneName = queue.bone.getName();
-                if (!ending) child.endingOffsets.put(boneName, raw);
-                else raw = child.endingOffsets.getOrDefault(boneName, raw);
-                double[][] values = folded.computeIfAbsent(boneName, ignored -> new double[][] {
-                    { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 1, 1, 1, 0 } });
+                if (ending) {
+                    raw = child.endingOffsets.getOrDefault(boneName, concurrentRaw);
+                } else {
+                    // The scratch is overwritten by the next queue, so the offsets the ending blend will start from
+                    // have to live in a per-bone array; computeIfAbsent allocates it once per bone, not per frame.
+                    double[][] stored = child.endingOffsets.computeIfAbsent(boneName,
+                        ignored -> newConcurrentAccumulator());
+                    copyConcurrentAccumulator(stored, raw);
+                }
+                double[][] values = concurrentFolded.get(boneName);
+                if (values == null) {
+                    values = newConcurrentAccumulator();
+                    concurrentFolded.put(boneName, values);
+                }
+                if (concurrentFoldedSeen.add(boneName)) {
+                    concurrentFoldedOrder.add(boneName);
+                }
                 if (holder.applies) {
                     for (int channel = 0; channel < 3; channel++) {
                         if (raw[channel][3] == 0 || ending && fade == 0) continue;
@@ -1138,13 +1254,13 @@ public class AnimationController<T extends IAnimatable> {
             }
         }
         event.setController(this);
-        for (Map.Entry<String, double[][]> entry : folded.entrySet()) {
-            IBone bone = bones.get(entry.getKey());
+        for (String boneName : concurrentFoldedOrder) {
+            IBone bone = bones.get(boneName);
             if (bone == null) continue;
-            BoneAnimationQueue queue = getOrCreateQueue(entry.getKey());
+            BoneAnimationQueue queue = getOrCreateQueue(boneName);
             markActiveBoneAnimationQueue(queue);
-            double[][] v = entry.getValue();
-            BoneSnapshot from = concurrentSnapshots.get(entry.getKey());
+            double[][] v = concurrentFolded.get(boneName);
+            BoneSnapshot from = concurrentSnapshots.get(boneName);
             if (beginning && from != null) {
                 if (v[0][3] != 0) blendRotation(v[0], from, bone.getInitialSnapshot(), progress);
                 if (v[1][3] != 0) {
@@ -1162,6 +1278,52 @@ public class AnimationController<T extends IAnimatable> {
             emitFold(v[1], queue.positionXQueue, queue.positionYQueue, queue.positionZQueue);
             emitFold(v[2], queue.scaleXQueue, queue.scaleYQueue, queue.scaleZQueue);
         }
+    }
+
+    /** A fresh per-channel fold accumulator in its default state; see {@link #processConcurrent}. */
+    private static double[][] newConcurrentAccumulator() {
+        double[][] values = new double[3][4];
+        resetConcurrentAccumulator(values);
+        return values;
+    }
+
+    /** Resets a fold accumulator to the state a new one starts in: rotation/position 0, scale 1, all channels unset. */
+    private static void resetConcurrentAccumulator(double[][] values) {
+        for (int channel = 0; channel < 3; channel++) {
+            double[] row = values[channel];
+            row[3] = 0;
+            row[0] = channel == 2 ? 1 : 0;
+            row[1] = channel == 2 ? 1 : 0;
+            row[2] = channel == 2 ? 1 : 0;
+        }
+    }
+
+    private static void copyConcurrentAccumulator(double[][] target, double[][] source) {
+        for (int channel = 0; channel < 3; channel++) {
+            System.arraycopy(source[channel], 0, target[channel], 0, 4);
+        }
+    }
+
+    /** Clears the reused {@link #processConcurrent} accumulators; see {@link #concurrentFolded}. */
+    private void resetConcurrentFolded() {
+        for (double[][] values : concurrentFolded.values()) {
+            resetConcurrentAccumulator(values);
+        }
+        concurrentFoldedOrder.clear();
+        concurrentFoldedSeen.clear();
+    }
+
+    /**
+     * Whether the reusable child event still matches this pass' event shape, so it can be reused; see
+     * {@link #concurrentChildEvent}. The mutable members (tick, controller, render context) are set per child.
+     */
+    private static boolean sameEventShape(AnimationEvent<?> childEvent, AnimationEvent<?> event) {
+        return childEvent.getAnimatable() == event.getAnimatable()
+            && Float.compare(childEvent.getLimbSwing(), event.getLimbSwing()) == 0
+            && Float.compare(childEvent.getLimbSwingAmount(), event.getLimbSwingAmount()) == 0
+            && Float.compare(childEvent.getPartialTick(), event.getPartialTick()) == 0
+            && childEvent.isMoving() == event.isMoving()
+            && childEvent.getExtraData() == event.getExtraData();
     }
 
     private static void foldChannel(double[] result, AnimationPointQueue x, AnimationPointQueue y,
@@ -1314,7 +1476,7 @@ public class AnimationController<T extends IAnimatable> {
             if (currentAnimation.loop == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
                 tick = Math.max(0.0D, currentAnimation.animationLength);
             } else if (!currentAnimation.loop.isRepeatingAfterEnd()) {
-                processKeyFrameEvents(currentAnimation.animationLength);
+                processKeyFrameEvents(currentAnimation.animationLength, parser);
                 resetEventKeyFrames();
                 // YSMU: report the terminal tick before the state leaves Running, so a
                 // timeline on a PLAY_ONCE animation still sees its final position
@@ -1336,7 +1498,7 @@ public class AnimationController<T extends IAnimatable> {
                     currentAnimation = this.animationQueue.peek();
                 }
             } else {
-                processKeyFrameEvents(currentAnimation.animationLength);
+                processKeyFrameEvents(currentAnimation.animationLength, parser);
                 resetEventKeyFrames();
                 tick = wrapLoopTick(actualTick, tick, currentAnimation.animationLength);
                 wrappedThisFrame = true;
@@ -1350,7 +1512,7 @@ public class AnimationController<T extends IAnimatable> {
         // evaluation below has not run yet — the timeline scheduler dispatches here.
         reportTimelinePlayback(tick, wrappedThisFrame ? timelineUnwrappedTick : tick, wrappedThisFrame);
         setAnimTime(parser, tick);
-        processKeyFrameEvents(tick);
+        processKeyFrameEvents(tick, parser);
 
         // Loop through every boneanimation in the current animation and process the
         // values
@@ -1426,7 +1588,7 @@ public class AnimationController<T extends IAnimatable> {
         return wrappedTick;
     }
 
-    private void processKeyFrameEvents(double tick) {
+    private void processKeyFrameEvents(double tick, MolangParser parser) {
         if (beginningHold) return;
         if (soundListener != null) {
             for (EventKeyFrame<String> soundKeyFrame : currentAnimation.soundKeyFrames) {
@@ -1469,7 +1631,11 @@ public class AnimationController<T extends IAnimatable> {
         }
 
         if (customInstructionListener != null) {
-            for (EventKeyFrame<String> customInstructionKeyFrame : currentAnimation.customInstructionKeyframes) {
+            // Parsed once per animation (Animation#instructionKeyframes), never per dispatch: upstream parses an
+            // instruction keyframe's source at bake time and only evaluates it here
+            // (AnimationProtoMapper.java:77-87 -> InstructionKeyFrameExecutor.java:18-35).
+            for (EventKeyFrame<MolangExpression> customInstructionKeyFrame : currentAnimation
+                .instructionKeyframes(parser)) {
                 if (!this.executedKeyFrames.contains(customInstructionKeyFrame)
                     && tick >= customInstructionKeyFrame.getStartTick()) {
                     CustomInstructionKeyframeEvent<T> event = new CustomInstructionKeyframeEvent<>(
@@ -1524,6 +1690,9 @@ public class AnimationController<T extends IAnimatable> {
         animationQueue.clear();
         currentAnimation = null;
         currentAnimationFinished = false;
+        // Drop the resolved-animation cache with the animation it describes; the next play resolves afresh.
+        resolvedAnimation = null;
+        resolvedAnimationLocation = null;
         lastAnimTimeAnimation = null;
         lastAnimTimeTick = -1;
         lastActualTick = -1;
@@ -1921,3 +2090,4 @@ public class AnimationController<T extends IAnimatable> {
     public interface ModelFetcher<T> extends Function<IAnimatable, IAnimatableModel<T>> {
     }
 }
+

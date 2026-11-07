@@ -1,7 +1,9 @@
 package software.bernie.geckolib3.core.molang;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -118,6 +120,9 @@ public final class MolangPhysicsRuntime {
         EntityLivingBase entity = animatable.getMolangEntity();
         ScopeKey key = ScopeKey.from(entity, animatable.getMolangModelId());
         ScopeState state = STATES.computeIfAbsent(key, ignored -> new ScopeState());
+        // Roll the write sets before this pass seeds the scope: the previous pass's writes are what a controller's
+        // sync in this pass must copy (writes happen after the predicates, so they are always one pass old).
+        state.rotateDirty();
         state.physics.update(renderTicks);
         applyRemoteVariables(entity, state);
         applyScopeVariables(animatable, state);
@@ -136,7 +141,9 @@ public final class MolangPhysicsRuntime {
         if (remote == null || remote.isEmpty()) {
             return;
         }
-        state.variables.putAll(remote);
+        for (Map.Entry<String, Double> entry : remote.entrySet()) {
+            state.putVariable(entry.getKey(), entry.getValue());
+        }
     }
 
     /**
@@ -152,7 +159,7 @@ public final class MolangPhysicsRuntime {
         // supplies "v.roaming.C" would otherwise be unreachable from an expression that says "v.roaming.C", since the
         // parser lower-cases the expression before looking anything up.
         for (Map.Entry<String, Double> entry : own.entrySet()) {
-            state.variables.put(MolangParser.canonicalVariableName(entry.getKey()), entry.getValue());
+            state.putVariable(MolangParser.canonicalVariableName(entry.getKey()), entry.getValue());
         }
     }
 
@@ -343,13 +350,13 @@ public final class MolangPhysicsRuntime {
         if (context == null) {
             return false;
         }
-        context.state.variables.put(MolangParser.canonicalVariableName(name), value);
+        context.state.putVariable(MolangParser.canonicalVariableName(name), value);
         return true;
     }
 
     /**
-     * Copies the open frame scope's {@code v.*} variables into a host-side map, stripped of the {@code v.} prefix.
-     * This is SOURCE's {@code MolangPhysicsRuntime#syncToRuntimeState}
+     * Copies the {@code v.*} variables written into the open frame scope into a host-side map, stripped of the
+     * {@code v.} prefix. This is SOURCE's {@code MolangPhysicsRuntime#syncToRuntimeState}
      * ({@code com/fox/ysmu/client/animation/molang/MolangPhysicsRuntime.java:415-461}), and its one caller is
      * {@code OpenYsmPlayerControllerRuntime#prepareFrameVariables} ({@code SOURCE:1537}).
      *
@@ -362,9 +369,13 @@ public final class MolangPhysicsRuntime {
      * 而不是因为这里存在 SOURCE 修掉的那个两表分裂。
      *
      * <p>
-     * 与 SOURCE 的一处实现差异：它只遍历 {@code ScopeState} 的"本帧/上一帧脏集"（那是它自己的一个性能
-     * 优化，因为一帧要跑十来个控制器），本仓的 {@code ScopeState} 没有脏集，所以这里整表遍历。作用域表通常
-     * 十几个键、每帧十来个控制器，代价可忽略；等这里也有了脏集，再改成增量即可。
+     * <b>增量同步（照 SOURCE 的脏集形态）。</b> SOURCE 遍历的是 {@code ScopeState} 的"本帧/上一帧脏集"，而不是
+     * 整张作用域表，因为一帧要跑十来个控制器、每个都同步一次；本仓此前每控制器每帧整表遍历。现在
+     * {@link ScopeState} 也维护两代脏集：{@link ScopeState#rotateDirty()} 在每次 {@link #begin()} 把上一 pass 的
+     * 写入翻成"上一帧脏集"，本方法只拷贝这两代里出现过的键。写入点已集中（{@link #setVariable} 与
+     * {@link #begin()} 的两处种子），所以不需要在每个 Molang 赋值点埋钩子。实测：一份卡顿 tick 的 spark
+     * profile 里 {@code syncToRuntimeState} 合计 ~304 ms，其中大半是这个每控制器整表 CHM 写入
+     * （{@code ConcurrentHashMap.putVal} 是它的直接子节点）。
      */
     public static void syncToRuntimeState(Map<String, Double> target) {
         if (target == null) {
@@ -374,12 +385,21 @@ public final class MolangPhysicsRuntime {
         if (context == null) {
             return;
         }
-        for (Map.Entry<String, Double> entry : context.state.variables.entrySet()) {
-            String key = entry.getKey();
+        ScopeState state = context.state;
+        copyDirty(state, state.dirtyPrevious, target);
+        copyDirty(state, state.dirtyCurrent, target);
+    }
+
+    /** Copies one generation of the dirty set into {@code target}; see {@link #syncToRuntimeState}. */
+    private static void copyDirty(ScopeState state, Set<String> dirty, Map<String, Double> target) {
+        for (String key : dirty) {
             if (!key.startsWith("v.")) {
                 continue;
             }
-            target.put(strippedName(key), entry.getValue());
+            Double value = state.variables.get(key);
+            if (value != null) {
+                target.put(strippedName(key), value);
+            }
         }
     }
 
@@ -761,9 +781,37 @@ public final class MolangPhysicsRuntime {
         return context == null ? null : context.modelId;
     }
 
+    /**
+     * One {@code (entity, model)} variable scope.
+     *
+     * <p>
+     * The two dirty sets are the write-side bookkeeping {@link #syncToRuntimeState} copies from: every write goes
+     * through {@link #putVariable}, which records the (canonical) key in {@link #dirtyCurrent}. {@link #begin()}
+     * rotates them, so at a controller's sync time {@link #dirtyPrevious} holds the writes the last pass made (writes
+     * happen after the predicates, so they are always one pass old) and {@link #dirtyCurrent} the seeds this pass just
+     * wrote. Two buffers are swapped instead of allocating a set per pass.
+     */
     private static final class ScopeState {
         private final MolangPhysicsState physics = new MolangPhysicsState();
         private final Map<String, Double> variables = new ConcurrentHashMap<>();
+        /** Keys written since the last {@link #begin()}; see the class comment. */
+        private Set<String> dirtyCurrent = new HashSet<>();
+        /** Keys written in the pass before the current one; see the class comment. */
+        private Set<String> dirtyPrevious = new HashSet<>();
+
+        /** The single write entry point: keeps {@link #variables} and {@link #dirtyCurrent} in step. */
+        private void putVariable(String key, double value) {
+            variables.put(key, value);
+            dirtyCurrent.add(key);
+        }
+
+        /** Rolls the write sets so the previous pass's writes become visible to this pass's syncs. */
+        private void rotateDirty() {
+            Set<String> previous = dirtyPrevious;
+            dirtyPrevious = dirtyCurrent;
+            dirtyCurrent = previous;
+            dirtyCurrent.clear();
+        }
     }
 
     /**

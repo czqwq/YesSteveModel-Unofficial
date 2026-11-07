@@ -9,8 +9,10 @@ import static com.fox.ysmu.util.ControllerUtils.SWING_CONTROLLER;
 import static com.fox.ysmu.util.ControllerUtils.USE_CONTROLLER;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -309,10 +311,9 @@ public final class OpenYsmPlayerControllerRuntime {
                 return null;
             }
         }
-        OpenYsmControllerExpressionEvaluator.Context context = new OpenYsmControllerExpressionEvaluator.Context(
-            event,
-            player,
-            runtimeState);
+        OpenYsmControllerExpressionEvaluator.Context context = OpenYsmControllerExpressionEvaluator.Context
+            .reuse(runtimeState.evalContext, event, player, runtimeState);
+        runtimeState.evalContext = context;
         event.getController().useBedrockCompletionBoundary(true);
         prepareFrameVariables(geckoControllerName, player, runtimeState, context);
         boolean initializing = !match.controller.states.containsKey(runtimeState.currentState);
@@ -321,7 +322,7 @@ public final class OpenYsmPlayerControllerRuntime {
             return null;
         }
         runtimeState.activeState = state;
-        state = advanceStates(state, initializing,
+        state = advanceStates(state, initializing, runtimeState.visitedStates,
             current -> selectTransition(match.controller, current, context),
             (previous, target) -> {
                 if (runtimeState.subState != null) {
@@ -465,10 +466,15 @@ public final class OpenYsmPlayerControllerRuntime {
     }
 
     /** Upstream BedrockAnimationController:95-106,213-256: only zero-player states chain;
-     * a repeated destination stops before entry/exit side effects. Conditions do not change player count. */
-    static State advanceStates(State state, boolean initializing, java.util.function.Function<State, State> next,
+     * a repeated destination stops before entry/exit side effects. Conditions do not change player count.
+     * <p>
+     * {@code visited} is the caller's scratch set (one per runtime state), cleared here instead of allocating a
+     * {@code HashSet} on every controller predicate call.
+     */
+    static State advanceStates(State state, boolean initializing, Set<String> visited,
+        java.util.function.Function<State, State> next,
         java.util.function.BiConsumer<State, State> transition) {
-        java.util.Set<String> visited = new java.util.HashSet<>();
+        visited.clear();
         if (initializing) {
             visited.add(state.name);
             if (state.playerCount() != 0) {
@@ -1117,6 +1123,16 @@ public final class OpenYsmPlayerControllerRuntime {
          * controllers and the animation, instead of one map per (player, model, controller).
          */
         final Map<String, Double> variables = new ConcurrentHashMap<>();
+
+        /**
+         * Reused evaluator context for this controller state's per-frame evaluation; see
+         * {@link OpenYsmControllerExpressionEvaluator.Context#reuse}. The context is a view over the current event,
+         * player and state, so one instance serves every frame.
+         */
+        OpenYsmControllerExpressionEvaluator.Context evalContext;
+
+        /** Scratch visited set for {@link #advanceStates}; cleared by every call. */
+        final Set<String> visitedStates = new HashSet<>();
 
         /**
          * Writes {@code v.<name>} (name without the {@code v.} prefix). Prefers the engine scope; falls back to the

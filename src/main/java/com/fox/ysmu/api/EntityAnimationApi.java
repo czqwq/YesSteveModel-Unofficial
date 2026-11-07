@@ -156,9 +156,14 @@ public final class EntityAnimationApi {
      * while a model has no animation file of its own, and the engine then plays the default's clips. An answer about
      * "does this model define clip X" that skipped the same fallback would disagree with what actually plays, which
      * is exactly what a host mod uses this to decide.
+     * <p>
+     * The install is forced rather than deferred ({@code ClientModelManager#ensureAnimationsImmediately}): the render
+     * path deliberately waits for the loader-thread bundle, while this host-facing query has always answered
+     * immediately and must not see a transient "no file" for a model the client already owns.
      */
     @Nullable
     static AnimationFile animationFileForModel(@Nullable ResourceLocation mainId) {
+        ClientModelManager.ensureAnimationsImmediately(mainId);
         AnimationFile own = ClientModelManager.animationFileFor(mainId);
         return own != null ? own : ClientModelManager.animationFileFor(defaultAnimationId());
     }

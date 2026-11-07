@@ -85,15 +85,25 @@ public class HudPreviewCache {
     // choppiest preview. In Hz the policy means the same thing on every machine, and
     // MIN_HZ keeps the preview readable when the frame rate is low, at the cost of
     // exceeding the budget there. That trade is deliberate: a frozen preview is a
-    // visible regression, overspending is not.
+    // visible regression, overspending is not. The floor itself is 5 Hz rather than
+    // the reference's 12 Hz: a 12 Hz floor is above the frame rate of a slow client,
+    // so it forced a bake every frame and defeated this whole policy (see HUD_MIN_HZ).
 
     /** Share of wall-clock time the HUD preview may cost (15 % -> 150 ms per second). */
     private static final float HUD_BUDGET_MS_PER_SEC = 150.0F;
     /** Never refresh faster than this, however cheap the preview gets. */
     private static final float HUD_MAX_HZ = 120.0F;
-    /** Never refresh slower than this, however expensive the preview gets — below
-     *  roughly 10 Hz the "selfie" model reads as frozen rather than as animating. */
-    private static final float HUD_MIN_HZ = 12.0F;
+    /** Never refresh slower than this, however expensive the preview gets — this is the readability floor for the
+     *  "selfie" model, not a cost guard: it deliberately overspends the budget at low frame rates so the doll keeps
+     *  animating instead of freezing.
+     *
+     *  <p><b>5 Hz, not the reference's 12 Hz (owner decision).</b> A spark profile of the stuttering ticks put this
+     *  bake at ~44 % of the analyzed window on a client running below 12 fps: with a 12 Hz floor the target interval
+     *  was shorter than the frame interval, so the FBO cache re-baked on every frame and could not throttle at all —
+     *  exactly where throttling matters most. 5 Hz keeps the doll visibly animating (a frame every 200 ms) while
+     *  letting the policy actually skip frames between ~5 and 12 fps; see {@link #render} for the sole-driver
+     *  starvation bound, which still caps the gap independently of this floor. */
+    private static final float HUD_MIN_HZ = 5.0F;
     /** Floor for the measured cost, only to keep the division finite. */
     private static final float HUD_MIN_RENDER_COST_MS = 0.1F;
     /** Ignore frame deltas above this (pause menu, chunk load, alt-tab). */

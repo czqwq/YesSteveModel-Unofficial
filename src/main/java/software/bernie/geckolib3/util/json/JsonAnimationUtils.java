@@ -468,6 +468,11 @@ public class JsonAnimationUtils {
             }
         }
 
+        // Upstream parses timeline instruction sources at bake time and stores the parsed programs on the animation
+        // (AnimationProtoMapper.java:77-87); this port's equivalent is the same warm-up here, on the animation-build
+        // path, so no render frame ever tokenises timeline text. See Animation#instructionKeyframes.
+        animation.instructionKeyframes(parser);
+
         return animation;
     }
 

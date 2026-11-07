@@ -452,3 +452,45 @@ evidence and residual deviations is `.agent/audit-2026-11-03-team-render-memory-
 `core/keyframe/AnimationPoint`'s pool is unchanged and `EasingManager`'s scalar catmullrom path stays: the pre/post
 flattened-entry residual (22,041 keyframes whose catmullrom tangent comes from the neighbouring entry rather than the
 neighbouring keyframe) is recorded in `.agent/divergences.md`, not guessed at.
+
+## 2026-11-07 animation-runtime round: engine edits
+
+Two narrow engine edits made while removing the remaining animation-path work of the stuttering-tick profile (see
+`.agent/perf-animation-runtime-and-hud-floor.md`; the HUD paper-doll overlay itself was kept, and its refresh floor was
+lowered 12 Hz → 5 Hz in the host's `HudPreviewCache` by the same owner decision). Both preserve the computed results;
+they remove a per-frame lookup and a per-frame map copy respectively.
+
+| file | change |
+|---|---|
+| `core/controller/AnimationController.java` | The playing animation is resolved from the model once per animation-file answer instead of on every frame (`refreshCurrentAnimation`; the "file answer" is `IAnimatableModelProvider#getAnimationFileLocation`, which changes on parked-payload install and model switch). Upstream shape: `AnimationPlayer` holds `currentAnim` and resolves only in `setAnimation`/`loadNextAnim` (`tmp/YesSteveModel-dev-1.20/.../core/controller/AnimationPlayer.java:69,426`). Also reuses the `processConcurrent` fold storage (map/order/scratch arrays) and one child `AnimationEvent` per controller instead of allocating them per frame. |
+| `core/molang/MolangPhysicsRuntime.java` | `syncToRuntimeState` copies from two reused dirty-set generations (`ScopeState#dirtyCurrent`/`dirtyPrevious`, rotated by `begin()`) instead of iterating the whole scope once per controller predicate. The javadoc on that method already recorded the reference branch's identical "本帧/上一帧脏集" shape; this is now the port's implementation. Writes funnel through the single `ScopeState#putVariable`/`MolangPhysicsRuntime#setVariable` entry, so no Molang assignment site needed a hook. |
+
+A follow-up on the same day added one log-only engine change, made necessary by the host's deferred animation install
+(`ClientModelManager#ensureAnimations`, see `.agent/perf-animation-runtime-and-hud-floor.md` § follow-up B): the
+"Could not load animation: … Is it missing?" notice is now emitted once per animation name
+(`AnimationController#MISSING_ANIMATION_REPORTED` / `reportMissingAnimation`) instead of on every frame that a
+controller asks for a name the current file does not define. Whether a name exists is a property of the model, not of
+the frame; during the deferred window the old per-frame print would repeat the same line. No behaviour other than the
+number of log lines changes.
+
+## 2026-11-07 bug-fix round: engine edit
+
+One additive engine accessor, made for the nested-head-locator regression (see
+`.agent/phase67-default-inheritance-and-nested-head-locators.md`; the other half of that round was a host-side
+`defaultAnimationFile` id fix, not an engine change):
+
+| file | change |
+|---|---|
+| `geo/render/built/GeoModel.java` | Added `locatorGroupRoots(String)`: the members of a locator group with no ancestor in the same group. The three humanoid consumers (`CustomPlayerModel#codeAnimation`, `CustomPlayerHeadLayer`, `CustomPlayerItemInHandLayer`) use it instead of `locatorGroup`, so a nested group member (`Head3` under `Head` in LaPluma) inherits the transform once instead of twice. Additive: `locatorGroup` and every existing call site keep their behaviour; the index is built from `topLevelBones` like the group accessor and stays out of the serialised geometry stream. Recorded as a deliberate refinement of upstream's literal per-member loop in `.agent/divergences.md`. |
+
+## 2026-11-07 hot-path round: engine edits
+
+Two lock removals on per-frame paths, made after reviewing upstream's `b844fed3` ("细化热路径并发契约，消除
+防御性同步", 2026-11-01) - the port had the same class of defensive synchronization, not the same code. See
+`.agent/phase69-upstream-sep21-to-nov01-triage.md`.
+
+| file | change |
+|---|---|
+| `geo/render/built/GeoModel.java` | Locator-group index is a `ConcurrentMap` instead of a `HashMap` guarded by `synchronized` on every lookup, and `locatorGroupRoots` results are cached in their own transient concurrent map. The accessors sit on the per-frame draw path (head rotation, head/hand layers) and the group build can belong to another renderer's model, so the lock was pure overhead; construction is `putIfAbsent`-idempotent and both maps remain transient, so the serialised geometry stream is unchanged. |
+| `core/keyframe/AnimationPoint.java` | The point pool is a `ThreadLocal<ArrayDeque>` instead of one static list guarded by `synchronized`. Obtain/recycle happens a few times per bone channel per animation update (the hottest evaluation path) and a point never crosses a thread between obtain and recycle, so the monitor was unnecessary. Same `POOL_MAX_SIZE` bound, now per thread. |
+

@@ -157,13 +157,13 @@ public class CustomPlayerRenderer extends GeoReplacedEntityRenderer<CustomPlayer
      */
     private static Drawn selectDrawn(@Nullable ResourceLocation requested,
         @Nullable AppliedModelRegistry.Applied applied, boolean fallBackToDefault) {
-        if (requested != null && ClientModelManager.isModelPublished(requested)) {
+        if (requested != null && ClientModelManager.isModelReady(requested)) {
             return Drawn.REQUESTED;
         }
         if (requested != null && AppliedModelRegistry.keepsAppliedModel(
             false,
             ClientModelManager.hasModelContent(requested),
-            applied != null && ClientModelManager.isModelPublished(applied.mainModelId()))) {
+            applied != null && ClientModelManager.isModelReady(applied.mainModelId()))) {
             return Drawn.APPLIED;
         }
         return fallBackToDefault ? Drawn.FALLBACK : Drawn.NONE;

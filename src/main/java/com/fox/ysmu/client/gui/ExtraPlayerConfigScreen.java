@@ -223,7 +223,7 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         //
         // The reference does not invalidate the cache on this key; this port does, because the FBO still holds the
         // frame from before the cache was switched off and nothing else marks it dirty (the rate policy would
-        // catch up within one interval, ~83 ms at the 12 Hz floor, but that shows as a visibly stale doll).
+        // catch up within one interval, ~200 ms at the 5 Hz floor, but that shows as a visibly stale doll).
         // Calling the existing invalidate() is the reference's own mechanism, not a new one.
         if (keyCode == Keyboard.KEY_C) {
             Config.GUI_HUD_PREVIEW_CACHE = !Config.GUI_HUD_PREVIEW_CACHE;

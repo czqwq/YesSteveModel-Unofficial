@@ -3,10 +3,10 @@ package software.bernie.geckolib3.geo.render.built;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import javax.annotation.Nullable;
 
@@ -34,8 +34,16 @@ public class GeoModel implements Serializable {
      * part in serialisation would either change the cache ABI or come back {@code null} from an entry written before
      * it existed; a transient one is simply absent from both old and new streams, so the bytes on disk are
      * unchanged and every deserialised model can answer the same query.
+     * <p>
+     * Concurrent because the accessors are on the per-frame draw path (head rotation, head/hand layers) and the
+     * builder for the map is another renderer's model: a plain map guarded by {@code synchronized} was a lock on
+     * every lookup, which is the defensive synchronization upstream removed from its hot paths in
+     * {@code b844fed3} ("细化热路径并发契约，消除防御性同步").
      */
-    private transient volatile Map<String, List<GeoBone>> locatorGroups;
+    private transient volatile ConcurrentMap<String, List<GeoBone>> locatorGroups;
+
+    /** {@link #locatorGroupRoots(String)} results, keyed like {@link #locatorGroups}. */
+    private transient volatile ConcurrentMap<String, List<GeoBone>> locatorRootGroups;
 
     public boolean hasTopLevelBone(String name) {
         return topLevelBones.stream()
@@ -102,23 +110,22 @@ public class GeoModel implements Serializable {
         if (baseName == null || baseName.isEmpty()) {
             return Collections.emptyList();
         }
-        Map<String, List<GeoBone>> groups = this.locatorGroups;
+        ConcurrentMap<String, List<GeoBone>> groups = this.locatorGroups;
         if (groups == null) {
-            groups = new HashMap<>();
+            groups = new ConcurrentHashMap<>();
             this.locatorGroups = groups;
         }
-        synchronized (groups) {
-            List<GeoBone> group = groups.get(baseName);
-            if (group == null) {
-                ArrayList<GeoBone> found = new ArrayList<>(2);
-                for (GeoBone topLevelBone : topLevelBones) {
-                    collectLocatorGroup(baseName, topLevelBone, found);
-                }
-                group = found.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(found);
-                groups.put(baseName, group);
-            }
+        List<GeoBone> group = groups.get(baseName);
+        if (group != null) {
             return group;
         }
+        ArrayList<GeoBone> found = new ArrayList<>(2);
+        for (GeoBone topLevelBone : topLevelBones) {
+            collectLocatorGroup(baseName, topLevelBone, found);
+        }
+        List<GeoBone> built = found.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(found);
+        group = groups.putIfAbsent(baseName, built);
+        return group != null ? group : built;
     }
 
     private static void collectLocatorGroup(String baseName, GeoBone bone, List<GeoBone> found) {
@@ -146,6 +153,58 @@ public class GeoModel implements Serializable {
             boneName = boneName.substring(0, suffixStart);
         }
         return boneName.equals(baseName);
+    }
+
+    /**
+     * The top-most members of one locator group: the members that have no ancestor in the same group.
+     * <p>
+     * Use this instead of {@link #locatorGroup(String)} whenever the caller <em>transforms or draws</em> at each
+     * member: a bone's own transform already moves its descendants, so applying the same transform to a nested member
+     * applies it twice. That is not hypothetical - the LaPluma pack has {@code Head3} under {@code FaceHead} under
+     * {@code Head}, so a per-member head rotation made {@code Head3} follow the camera twice and the head visibly
+     * misaligned when turning (regression from the "rotate every locator group member" change). Upstream's literal
+     * per-member loop ({@code CustomHumanoidEntity.java:68-89}) has the same double-apply for a nested member; this
+     * accessor keeps the intent of that change - numbered extra heads such as {@code Head2} declared as siblings or
+     * top-level bones still rotate - while applying the transform once per root.
+     * <p>
+     * A group with no nesting returns the same list {@link #locatorGroup(String)} does.
+     *
+     * @param baseName group name without a numeric suffix, e.g. {@code "Head"} or {@code "LeftHandLocator"}
+     * @return the group's top-most bones in traversal order; empty if none
+     */
+    public List<GeoBone> locatorGroupRoots(String baseName) {
+        if (baseName == null || baseName.isEmpty()) {
+            return Collections.emptyList();
+        }
+        ConcurrentMap<String, List<GeoBone>> cachedRoots = this.locatorRootGroups;
+        if (cachedRoots == null) {
+            cachedRoots = new ConcurrentHashMap<>();
+            this.locatorRootGroups = cachedRoots;
+        }
+        List<GeoBone> roots = cachedRoots.get(baseName);
+        if (roots != null) {
+            return roots;
+        }
+        List<GeoBone> group = locatorGroup(baseName);
+        if (group.isEmpty()) {
+            return group;
+        }
+        ArrayList<GeoBone> built = new ArrayList<>(group.size());
+        for (GeoBone bone : group) {
+            boolean nested = false;
+            for (GeoBone ancestor = bone.parent; ancestor != null; ancestor = ancestor.parent) {
+                if (group.contains(ancestor)) {
+                    nested = true;
+                    break;
+                }
+            }
+            if (!nested) {
+                built.add(bone);
+            }
+        }
+        roots = Collections.unmodifiableList(built);
+        List<GeoBone> previous = cachedRoots.putIfAbsent(baseName, roots);
+        return previous != null ? previous : roots;
     }
 
     private GeoBone getBoneRecursively(String name, GeoBone bone) {

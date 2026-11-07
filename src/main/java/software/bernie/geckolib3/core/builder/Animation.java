@@ -67,6 +67,31 @@ public class Animation implements Serializable {
     /** {@code animSpeed} text {@link #parsedAnimSpeed} was produced from. */
     public transient String parsedAnimSpeedSource;
 
+    /**
+     * Parsed {@link #customInstructionKeyframes}, aligned by index with it: one program per timeline entry.
+     *
+     * <p>{@code transient} for the same reason as {@link #parsedBlendWeight} - the parsed graph is live parser
+     * state, never part of the serialised animation - so a deserialised animation re-parses once on its first
+     * frame. Upstream parses these at bake time and its runtime only evaluates them
+     * ({@code AnimationProtoMapper.java:77-87} builds {@code EventKeyFrame<IValue[]>},
+     * {@code InstructionKeyFrameExecutor.java:18-35} only calls {@code value.eval(evaluator)}); this is the same
+     * split with the parse moved to the first use of the animation, which is the shape this file already uses for
+     * {@link #blendWeight} and {@link #animSpeed}.</p>
+     *
+     * <p>Without it every timeline dispatch re-tokenised and re-parsed the same text: a spark profile of a
+     * 168-tick window showed {@code MolangInstructionExecutor.executeUncached -> MolangParser.parseExpression} at
+     * 10.1 s of 65.6 s client-thread time (15.4 %), with the parser internals
+     * ({@code MolangParser.isOperator}, {@code MathBuilder.breakdownChars}, the regex {@code String.matches}/
+     * {@code String.split} calls) as its self time. One entry of a shipped pack is 11 198 characters and costs
+     * 10.7 ms to parse; one LaPluma entry measures 19.0 ms.</p>
+     */
+    public transient List<EventKeyFrame<MolangExpression>> parsedInstructionKeyframes;
+    /**
+     * The {@link #customInstructionKeyframes} list {@link #parsedInstructionKeyframes} was built from. Identity, not
+     * equality: a caller that replaces the list gets a fresh parse, and the unchanged list keeps the same cache.
+     */
+    public transient List<EventKeyFrame<String>> parsedInstructionKeyframesSource;
+
     public List<BoneAnimation> boneAnimations;
     public List<EventKeyFrame<String>> soundKeyFrames;
     public List<ParticleEventKeyFrame> particleKeyFrames;
@@ -142,6 +167,44 @@ public class Animation implements Serializable {
         } catch (RuntimeException | MolangException failure) {
             return null;
         }
+    }
+
+    /**
+     * Parses {@link #customInstructionKeyframes} once and returns one evaluated program per timeline entry, aligned
+     * by index with the source keyframes. This is the method that keeps timeline text out of the per-frame path;
+     * see {@link #parsedInstructionKeyframes} for the profile that motivated it.
+     *
+     * <p>A keyframe whose text does not parse becomes {@link MolangParser#ZERO} (a constant 0), which is what
+     * upstream's {@code MolangParser#parseExpression} answers on failure - it logs the reason and returns zero
+     * rather than leaving the text for a later retry. The parse itself is reported once by this engine's parser
+     * ({@code MolangParser#reportParseFailure}), which names the failing expression. Entries are parsed whole (all
+     * {@code ;}-separated statements of the entry together), which is also upstream's shape: one conditionless
+     * program per instruction keyframe, not one per statement.
+     *
+     * <p>Called once per animation by whichever path uses it first - both animation builders warm it during the
+     * model bake - so the cost is paid once per animation per model install instead of once per keyframe dispatch.
+     */
+    public List<EventKeyFrame<MolangExpression>> instructionKeyframes(MolangParser parser) {
+        List<EventKeyFrame<String>> source = this.customInstructionKeyframes;
+        if (source == null) {
+            return java.util.Collections.emptyList();
+        }
+        if (this.parsedInstructionKeyframesSource == source) {
+            return this.parsedInstructionKeyframes;
+        }
+        List<EventKeyFrame<MolangExpression>> parsed = new ArrayList<>(source.size());
+        for (EventKeyFrame<String> keyFrame : source) {
+            MolangExpression program = keyFrame == null ? null : parseQuietly(parser, keyFrame.getEventData());
+            Double startTick = keyFrame == null ? null : keyFrame.getStartTick();
+            parsed.add(
+                new EventKeyFrame<>(
+                    startTick == null ? 0.0D : startTick,
+                    program == null ? MolangParser.ZERO : program));
+        }
+        // Program list first, source list second: a reader that sees the new source must see the matching programs.
+        this.parsedInstructionKeyframes = parsed;
+        this.parsedInstructionKeyframesSource = source;
+        return parsed;
     }
 
     /**

@@ -1,8 +1,12 @@
 package com.fox.ysmu.client.texture;
 
+import java.awt.AlphaComposite;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -14,10 +18,15 @@ import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.GLAllocation;
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureUtil;
 import net.minecraft.client.resources.IResourceManager;
 import net.minecraft.util.ResourceLocation;
+
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.ysmu;
@@ -267,7 +276,7 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
         // 正是上游的表现；在 REPEAT 下 u=1.0 绕回第 0 列，实测 (0,0) 是 A255 的不透明灰 (57,51,67) →
         // 整片 60×60 被铺成一块不透明的灰色方片，盖住法阵并与它 z-fighting 出噪点。
         boolean clamp = true; // 是否使用边缘拉伸
-        TextureUtil.uploadTextureImageAllocate(super.getGlTextureId(), toUpload, blur, clamp);
+        uploadPreparedImage(super.getGlTextureId(), toUpload, blur, clamp);
         this.uploaded = true;
         this.failed = false;
         // Only textures this registry owns are accounted for. The budget's own javadoc scopes it to "YSM model
@@ -288,6 +297,83 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
         accounting.base(bytes);
         this.gpuBytes = bytes;
         ModelTextureRegistry.enforceVramBudget();
+    }
+
+    /** 4 MiB of ints per upload chunk; a 2048x2048 texture uploads in four chunks. */
+    private static final int UPLOAD_CHUNK_INTS = 1 << 20;
+    /** Direct scratch buffer for {@link #uploadPreparedImage}; lazily created on the uploading (client) thread. */
+    private static IntBuffer UPLOAD_BUFFER;
+
+    /**
+     * Uploads one decoded texture like 1.7.10's {@code TextureUtil} does, but sources the pixels from the image's
+     * raster instead of calling {@code BufferedImage.getRGB}.
+     * <p>
+     * The generic 1.7.10 upload converts every image with a per-pixel {@code getRGB} (see {@link #decode}'s javadoc);
+     * upstream 1.20 hands a {@code NativeImage} straight to GL, so this is the port's equivalent of that split: for
+     * {@code TYPE_INT_ARGB} the raster's {@code int[]} is exactly the array {@code getRGB} would produce, and
+     * vanilla's own {@code int[]} upload path already feeds such an array as
+     * {@code GL_BGRA}/{@code GL_UNSIGNED_INT_8_8_8_8_REV} through a direct {@code IntBuffer}
+     * ({@code TextureUtil.uploadTextureSub}). Allocation, filters, wrap mode and the GL call stay the same; only the
+     * generic conversion is skipped.
+     * <p>
+     * Falls back to {@link TextureUtil#uploadTextureImageAllocate} when the fast path does not apply: a non-ARGB
+     * image, anaglyph mode (vanilla's {@code int[]} path colour-converts there), or a raster that is not one
+     * contiguous {@code int[]} starting at offset 0.
+     */
+    static void uploadPreparedImage(int glTextureId, BufferedImage image, boolean blur, boolean clamp) {
+        if (!supportsDirectArgb(image)) {
+            TextureUtil.uploadTextureImageAllocate(glTextureId, image, blur, clamp);
+            return;
+        }
+        int width = image.getWidth();
+        int height = image.getHeight();
+        TextureUtil.allocateTexture(glTextureId, width, height);
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, glTextureId);
+        applyTextureParameters(blur, clamp);
+        int[] pixels = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+        IntBuffer buffer = uploadBuffer();
+        int rowsPerChunk = Math.max(1, UPLOAD_CHUNK_INTS / width);
+        for (int y = 0; y < height; y += rowsPerChunk) {
+            int rows = Math.min(rowsPerChunk, height - y);
+            int count = rows * width;
+            buffer.clear();
+            buffer.put(pixels, y * width, count);
+            buffer.position(0)
+                .limit(count);
+            GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, y, width, rows, GL12.GL_BGRA,
+                GL12.GL_UNSIGNED_INT_8_8_8_8_REV, buffer);
+        }
+    }
+
+    private static IntBuffer uploadBuffer() {
+        IntBuffer buffer = UPLOAD_BUFFER;
+        if (buffer == null) {
+            buffer = GLAllocation.createDirectIntBuffer(UPLOAD_CHUNK_INTS);
+            UPLOAD_BUFFER = buffer;
+        }
+        return buffer;
+    }
+
+    private static boolean supportsDirectArgb(BufferedImage image) {
+        if (image.getType() != BufferedImage.TYPE_INT_ARGB
+            || Minecraft.getMinecraft().gameSettings.anaglyph) {
+            return false;
+        }
+        if (!(image.getRaster().getDataBuffer() instanceof DataBufferInt buffer)) {
+            return false;
+        }
+        return buffer.getNumBanks() == 1 && buffer.getOffset() == 0
+            && buffer.getData().length >= image.getWidth() * image.getHeight();
+    }
+
+    /** Vanilla's {@code func_147954_b(blur, false)} + {@code setTextureClamped}, for the direct upload path. */
+    private static void applyTextureParameters(boolean blur, boolean clamp) {
+        int filter = blur ? GL11.GL_LINEAR : GL11.GL_NEAREST;
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, filter);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, filter);
+        int wrap = clamp ? GL11.GL_CLAMP : GL11.GL_REPEAT;
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, wrap);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, wrap);
     }
 
     /**
@@ -513,10 +599,48 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
                 if (decoded == null) {
                     throw new IOException("image reader returned no image for YSM texture data");
                 }
-                return decoded;
+                return toIntArgb(decoded);
             } finally {
                 reader.dispose();
             }
         }
+    }
+
+    /**
+     * Normalises a decoded texture to {@link BufferedImage#TYPE_INT_ARGB}.
+     *
+     * <p><b>Why this is not cosmetic.</b> 1.7.10's generic upload
+     * ({@code TextureUtil.uploadTextureImageSubImpl:236-253}) converts the image with
+     * {@code BufferedImage.getRGB(...)}. Every non-direct-colour-model image - and an RGBA PNG decodes as
+     * {@code TYPE_4BYTE_ABGR}, a {@code ComponentColorModel} - pays a per-pixel {@code ColorModel.getRGB}
+     * conversion there. A spark profile of the model-selection screen measured that conversion at ~5.3 s (about 38 %
+     * of the whole profile) while it uploaded textures on the first view of each model. {@code TYPE_INT_ARGB} is a
+     * {@code DirectColorModel} whose bulk {@code getRGB} is the cheap sample-model path, so converting once here
+     * removes the per-pixel work from the client thread's upload.
+     *
+     * <p>The conversion happens on the loader thread: {@code ClientModelManager#buildModel} already decodes texture
+     * images off the render thread and only uploads them when the model publishes (upstream's
+     * "worker prepares the images, render thread publishes them" split, see the constructor javadoc). Drawing the
+     * source into an ARGB canvas keeps the conversion loop inside the JDK's blit instead of a per-pixel Java call;
+     * {@link AlphaComposite#Src} (not the default SrcOver) is required for it to be exact - SrcOver blends the source
+     * over the transparent canvas through premultiplied alpha and drifts a semi-transparent pixel's colour channels by
+     * up to one unit ({@code 0x80112233} came back as {@code 0x80122234}), while Src copies it verbatim.
+     * Images that are already {@code TYPE_INT_ARGB} (the binary {@code .ysm} channel builds exactly that type, see
+     * {@code RawYsmModelAdapter:569} and {@code YSMBinaryDeserializer:609}) are returned unchanged.
+     */
+    private static BufferedImage toIntArgb(BufferedImage source) {
+        if (source.getType() == BufferedImage.TYPE_INT_ARGB) {
+            return source;
+        }
+        BufferedImage converted = new BufferedImage(source.getWidth(), source.getHeight(),
+            BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = converted.createGraphics();
+        try {
+            graphics.setComposite(AlphaComposite.Src);
+            graphics.drawImage(source, 0, 0, null);
+        } finally {
+            graphics.dispose();
+        }
+        return converted;
     }
 }
