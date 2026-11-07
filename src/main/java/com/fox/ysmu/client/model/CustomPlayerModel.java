@@ -73,8 +73,8 @@ public class CustomPlayerModel extends AnimatedGeoModel {
      * .defaultTextureName()}. That covers a selection left over from a pack that renamed its files, and a mismatched
      * pair, without inventing a rule upstream does not have.
      * <p>
-     * While the model is not published the renderer is drawing the built-in default (see {@link #getModel}), so the
-     * default's texture is the one that belongs with it.
+     * While the model is not a ready target the renderer is drawing the built-in default (see {@link #getModel}), so
+     * the default's texture is the one that belongs with it.
      * <p>
      * A texture deliberately outside the model - the player's own Minecraft skin for the built-in {@code steve} /
      * {@code alex} models, or one a companion mod supplies - never travels through here: it is carried by
@@ -83,7 +83,7 @@ public class CustomPlayerModel extends AnimatedGeoModel {
      */
     public static ResourceLocation textureFor(CustomPlayerEntity customPlayer) {
         ResourceLocation requested = customPlayer.getRequestedMainModel();
-        if (!ClientModelManager.isModelPublished(requested)) {
+        if (!ClientModelManager.isModelReady(requested)) {
             return DEFAULT_TEXTURE;
         }
         ResourceLocation modelId = ModelIdUtil.getModelIdFromMainId(requested);
@@ -146,20 +146,22 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     @Override
     public Animation getAnimation(String name, IAnimatable animatable) {
         if (animatable instanceof CustomPlayerEntity customPlayer) {
-            // Keyed on the model, not on getAnimation(): that one answers with the built-in default until this
-            // model's own animations exist, so asking it first would install the wrong model's payload.
-            ClientModelManager.ensureAnimations(customPlayer.getMainModel());
+            // Keyed on the requested model, not on getAnimation() or getMainModel(): both answer with the built-in
+            // default until this model is a ready target (animation install included), so asking them first would
+            // install the default's payload instead of this model's.
+            ClientModelManager.ensureAnimations(customPlayer.getRequestedMainModel());
         }
         return super.getAnimation(name, animatable);
     }
 
     /**
-     * Draws the model that has been asked for, or the built-in default until it has been built.
+     * Draws the model that has been asked for, or the built-in default until it is a ready render target.
      * <p>
-     * Geometry is built on demand rather than at registration, so the first frame a model is wanted it is usually
-     * still being parsed. Returning the default for those frames is what makes the change invisible to the player -
-     * something is drawn immediately and the real model replaces it on the frame the build is published - and it is
-     * the same thing the engine would do if the model were genuinely absent, minus the warning.
+     * Geometry is built on demand rather than at registration, so the first frames a model is wanted it is still
+     * being parsed. Returning the default for those frames is what makes the change invisible to the player, and it is
+     * the same thing the engine would do if the model were genuinely absent, minus the warning. "Ready" includes the
+     * animation install ({@link ClientModelManager#isModelReady}): drawing the model's own geometry while the engine
+     * still lacks its animation file left every part visible, because the clips that hide them were not playing yet.
      * <p>
      * This is also where the build is requested, which is deliberate: every path that draws a model comes through
      * here, including the GUI tiles, so no caller can forget to ask for it.
@@ -173,6 +175,7 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         // earlier connection, and that geometry is not what this connection asked for.
         if (ClientModelManager.isGeometryFailed(location)
             || !ClientModelManager.ensureGeometry(location)
+            || !ClientModelManager.isModelReady(location)
             || GeckoLibCache.getInstance()
                 .getGeoModels()
                 .get(location) == null) {

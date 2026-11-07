@@ -234,11 +234,11 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     public ResourceLocation getMainModel() {
         // The engine's cache alone is not enough to answer this: it outlives a connection, so a model the previous
-        // server had by this name is still in it. Asking whether *this connection* installed the model is what keeps
-        // the answer agreeing with the predicates the renderer uses - if it disagreed, the renderer would substitute
-        // the built-in default while this method still handed out the foreign id, and the engine would resolve that
-        // id to the previous server's geometry.
-        if (ClientModelManager.isModelPublished(this.mainModel)) {
+        // server had by this name is still in it. Asking whether *this connection* made the model a ready target is
+        // what keeps the answer agreeing with the renderer - if it disagreed, the renderer would substitute the
+        // built-in default while this method still handed out the foreign id. Ready includes the animation install,
+        // so a model whose animations are still parked keeps the previous answer (upstream's Pending target).
+        if (ClientModelManager.isModelReady(this.mainModel)) {
             return mainModel;
         }
         return CustomPlayerModel.DEFAULT_MAIN_MODEL;
@@ -469,16 +469,16 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
     public ResourceLocation resolvedTexture() {
         ResourceLocation requested = getRequestedMainModel();
         ResourceLocation selected = getTexture();
-        boolean published = ClientModelManager.isModelPublished(requested);
+        boolean ready = ClientModelManager.isModelReady(requested);
         long generation = ClientModelManager.currentGeneration();
         if (textureCacheValue != null && requested == textureCacheRequested && selected == textureCacheSelected
-            && published == textureCachePublished && generation == textureCacheGeneration) {
+            && ready == textureCacheReady && generation == textureCacheGeneration) {
             return textureCacheValue;
         }
         ResourceLocation resolved = CustomPlayerModel.textureFor(this);
         textureCacheRequested = requested;
         textureCacheSelected = selected;
-        textureCachePublished = published;
+        textureCacheReady = ready;
         textureCacheGeneration = generation;
         textureCacheValue = resolved;
         return resolved;
@@ -486,7 +486,7 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     private ResourceLocation textureCacheRequested;
     private ResourceLocation textureCacheSelected;
-    private boolean textureCachePublished;
+    private boolean textureCacheReady;
     private long textureCacheGeneration = -1L;
     private ResourceLocation textureCacheValue;
 

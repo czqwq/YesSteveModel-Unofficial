@@ -563,6 +563,9 @@ public class ClientModelManager {
      */
     private static final int MAX_COMPLETED_BUILDS = MAX_PUBLISH_PER_TICK * 4;
 
+    /** Animation-install budget per tick, for the same reason as {@link #MAX_PUBLISH_PER_TICK}. */
+    private static final int MAX_ANIMATION_INSTALL_PER_TICK = 4;
+
     /**
      * Models whose build threw, so they are never asked for again.
      * <p>
@@ -892,6 +895,25 @@ public class ClientModelManager {
     }
 
     /**
+     * Whether a model is a ready render target: published (geometry + textures) and its animations installed.
+     * <p>
+     * The port's {@code AcquireResult.Ready}: upstream installs a target with all its resources, including the
+     * animations it declares ({@code ModelRenderTargetLoader.java:232-253}), and keeps the old target until then
+     * ({@code EntityModelBinding#synchronize:145-167}). This port publishes geometry and installs animations in two
+     * steps, so drawing on {@link #isModelPublished} alone showed a model with the built-in default animations - whose
+     * clips do not hide the pack's optional parts - until the animation install landed. Draw paths use this predicate
+     * and keep the applied target or the built-in default while a model is pending; the install is drained by
+     * {@link #tick()}.
+     */
+    public static boolean isModelReady(@Nullable ResourceLocation id) {
+        if (!isModelPublished(id)) {
+            return false;
+        }
+        ResourceLocation modelId = MODELS.containsKey(id) ? id : ModelIdUtil.getParentModelId(id);
+        return !animationsPending(ModelIdUtil.getMainId(modelId));
+    }
+
+    /**
      * Whether this connection has a payload for this model at all: the server sent it and it was registered, whether
      * or not its geometry was built - or could be built. Accepts either the model's own id or a sub-model id
      * ({@code .../main}, {@code .../arm}).
@@ -1180,10 +1202,11 @@ public class ClientModelManager {
     }
 
     /**
-     * Installs at most {@link #MAX_PUBLISH_PER_TICK} finished models.
+     * Installs at most {@link #MAX_PUBLISH_PER_TICK} finished models, then the finished animation bundles for models
+     * that are already published - together these make a <em>ready render target</em> (see {@link #isModelReady}).
      * <p>
-     * Called from the client tick, so the work that has to happen on this thread - putting the geometry where the
-     * renderer looks for it, and uploading textures - is spread over frames instead of being done in one.
+     * Called from the client tick, so the work that must happen on this thread (geometry into the engine cache,
+     * texture upload, animation merge) is spread over frames.
      */
     public static void tick() {
         // Reference wiring: the reference drives AssetManager.tick() from its periodic cache sweep,
@@ -1200,9 +1223,44 @@ public class ClientModelManager {
         for (int published = 0; published < MAX_PUBLISH_PER_TICK; published++) {
             BuiltModel built = COMPLETED_BUILDS.poll();
             if (built == null) {
-                return;
+                break;
             }
             publishBuiltModel(built);
+        }
+        installPreparedAnimations();
+    }
+
+    /**
+     * Installs finished animation bundles for published models, bounded like {@link #MAX_PUBLISH_PER_TICK}.
+     * A bundle for a model whose geometry is not published yet waits for a later tick; a failed preparation is
+     * retried inline once (its payload is still parked) so the model settles instead of staying pending forever.
+     */
+    private static void installPreparedAnimations() {
+        installPreparedAnimations(new ArrayList<>(PREPARED_ANIMATIONS.keySet()), true);
+        installPreparedAnimations(new ArrayList<>(ANIMATION_PREPARATION_FAILED), false);
+    }
+
+    private static void installPreparedAnimations(List<ResourceLocation> mainIds, boolean usePreparedBundle) {
+        int installed = 0;
+        for (ResourceLocation mainId : mainIds) {
+            if (installed >= MAX_ANIMATION_INSTALL_PER_TICK) {
+                return;
+            }
+            if (!GEOMETRY_READY.contains(mainId)) {
+                continue;
+            }
+            if (usePreparedBundle) {
+                if (!PREPARED_ANIMATIONS.containsKey(mainId)) {
+                    // Replaced by a newer payload since the snapshot, or already installed.
+                    continue;
+                }
+                installPendingAnimations(mainId);
+            } else if (PENDING_ANIMATIONS.containsKey(mainId)) {
+                ensureAnimations(mainId);
+            } else {
+                continue;
+            }
+            installed++;
         }
     }
 

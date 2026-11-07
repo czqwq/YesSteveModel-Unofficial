@@ -60,21 +60,22 @@ public final class AppliedModelRegistry {
      * cannot link Minecraft, so the renderer itself cannot be constructed there):
      *
      * <ul>
-     *   <li>the requested model is published (Ready): no - that is the frame the swap happens on;</li>
-     *   <li>the requested model is <i>Pending</i> (this connection has its payload, the geometry is being built) or
-     *       <i>Failed</i> (refused), and something is applied and still published: yes - upstream keeps the old
-     *       lease for both ({@code EntityModelBinding#synchronize:145-167}, {@code failure-and-recovery.md:36});</li>
+     *   <li>the requested model is a ready target ({@link com.fox.ysmu.client.ClientModelManager#isModelReady}:
+     *       geometry, textures and animations installed): no - that is the frame the swap happens on;</li>
+     *   <li>the requested model is <i>Pending</i> (this connection has its payload, the target is still being
+     *       published) or <i>Failed</i> (refused), and something is applied and still ready: yes - upstream keeps the
+     *       old lease for both ({@code EntityModelBinding#synchronize:145-167}, {@code failure-and-recovery.md:36});</li>
      *   <li>anything else - nothing applied yet, or an id this connection has no content for at all
      *       ({@code EntityModelBinding:106-112}): no, the built-in default stands in.</li>
      * </ul>
      *
-     * @param requestedPublished whether {@code ClientModelManager.isModelPublished(requestedMainId)}
+     * @param requestedReady whether {@code ClientModelManager.isModelReady(requestedMainId)}
      * @param requestedHasContent whether {@code ClientModelManager.hasModelContent(requestedMainId)}
-     * @param appliedPublished whether an applied record exists and its model is still published
+     * @param appliedReady whether an applied record exists and its model is still a ready target
      */
-    public static boolean keepsAppliedModel(boolean requestedPublished, boolean requestedHasContent,
-        boolean appliedPublished) {
-        return !requestedPublished && requestedHasContent && appliedPublished;
+    public static boolean keepsAppliedModel(boolean requestedReady, boolean requestedHasContent,
+        boolean appliedReady) {
+        return !requestedReady && requestedHasContent && appliedReady;
     }
 
     /**

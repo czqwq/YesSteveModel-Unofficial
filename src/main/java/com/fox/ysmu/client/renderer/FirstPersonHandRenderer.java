@@ -501,10 +501,10 @@ public final class FirstPersonHandRenderer {
         // upstream's arm target simply not being loaded.
         ResourceLocation modelId = requested;
         ResourceLocation textureId = eep.getSelectTexture();
-        if (!com.fox.ysmu.client.ClientModelManager.isModelPublished(requested)) {
+        if (!com.fox.ysmu.client.ClientModelManager.isModelReady(requested)) {
             AppliedModelRegistry.Applied applied = AppliedModelRegistry.applied(player);
             if (!com.fox.ysmu.client.ClientModelManager.hasModelContent(requested) || applied == null
-                || !com.fox.ysmu.client.ClientModelManager.isModelPublished(applied.mainModelId())) {
+                || !com.fox.ysmu.client.ClientModelManager.isModelReady(applied.mainModelId())) {
                 return null;
             }
             modelId = applied.mainModelId();
