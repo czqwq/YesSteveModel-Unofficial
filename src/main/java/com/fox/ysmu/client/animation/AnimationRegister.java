@@ -317,6 +317,9 @@ public class AnimationRegister {
      */
     private static void registerThirdPartyCompatPlaceholders(MolangParser parser) {
         // ---- TACZ (TACZCompat.java:42-50, all livingEntityVar) ----
+        // Registered unconditionally like every other optional-mod name here, so a pack that writes them still
+        // evaluates when TacZ is absent. With the mod installed the live values replace these defaults in the same
+        // parser table (TACZCompat#addBinding, upstream's CtrlBinding -> TACZCompat.addBinding shape).
         parser.register(new LazyVariable("ctrl.tac_hold_gun", MolangUtils.FALSE));
         parser.register(new LazyVariable("ctrl.tac_gun_type", MolangStringPool.EMPTY_ID));
         parser.register(new LazyVariable("ctrl.tac_gun_id", MolangStringPool.EMPTY_ID));
@@ -326,6 +329,7 @@ public class AnimationRegister {
         parser.register(new LazyVariable("ctrl.tac_is_melee", MolangUtils.FALSE));
         parser.register(new LazyVariable("ctrl.tac_is_draw", MolangUtils.FALSE));
         parser.register(new LazyVariable("ctrl.tac_fire_mode", MolangStringPool.EMPTY_ID));
+        com.fox.ysmu.client.compat.tacz.TACZCompat.addBinding(parser);
 
         // ---- Immersive Melodies (ImmersiveMelodiesCompat.java:33-37, all livingEntityVar) ----
         parser.register(new LazyVariable("ctrl.im_pitch", 0));

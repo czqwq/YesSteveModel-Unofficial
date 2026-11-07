@@ -31,6 +31,7 @@ import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackFunctionScript;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.compat.tacz.TACZCompat;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
@@ -372,6 +373,13 @@ public final class AnimationManager {
                         continue;
                     }
                     ILoopType loopType = state.getLoopType();
+                    // TacZ (upstream client/animation/predicate/PlayerMainPredicate.java:76-84): a gun in the main hand
+                    // may override the state's clip with `tac:<state name>`; no such clip means the normal state plays.
+                    PlayState gunMainAnimation = TACZCompat.playGunMainAnimation(event, animationName, loopType);
+                    if (gunMainAnimation != null) {
+                        rememberMainState(player, animationName);
+                        return gunMainAnimation;
+                    }
                     rememberMainState(player, animationName);
                     return playAnimation(event, animationName, loopType);
                 }
@@ -927,35 +935,61 @@ public final class AnimationManager {
         if (controllerState != null) {
             return controllerState;
         }
-        if (!player.isSwingInProgress && !player.isUsingItem()) {
-            // 1.7.10 没有**原版**弩（Items.CROSSBOW / CrossbowItem.isCharged 不存在），但 Tinkers' Construct
-            // 的十字弩就是 1.7.10 上的那把弩：装填状态在物品 NBT（InfiTool.Loaded）里，
-            // TinkersCrossbowCompat 读它。所以蓄能待机分支不是"不可能命中"，而是走 TiCon 这一路。
-            // (reference branch AnimationManager.java:1313-1319；参考库把这条判断放在同一位置)
-            if (com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem())) {
-                PlayState charged = playIfPresent(
-                    event,
-                    "hold_mainhand:charged_crossbow",
-                    ILoopType.EDefaultLoopTypes.LOOP);
-                if (charged != PlayState.STOP) {
-                    return charged;
-                }
+        // Upstream MainhandPredicate#test:78-83 yields first, then asks the gun channel, then the crossbow/fishing
+        // branches, then the held-item conditions. The yield is the port's checkSwingAndUse (it also folds in
+        // Backhand's off-hand swing bookkeeping).
+        if (!checkSwingAndUse(player, true)) {
+            // A-07: upstream answers PAUSE here, not STOP (client/animation/predicate/MainhandPredicate.java:31-33).
+            // Stopping made the held-item clip reload mid-swing; pausing holds the pose the player had instead.
+            return PlayState.PAUSE;
+        }
+        // TacZ hold channel (upstream MainhandPredicate.java:35-38): tac:hold/aim/run/climb:<type> while a gun is held.
+        PlayState gunHoldAnimation = TACZCompat.playGunHoldAnimation(player.getHeldItem(), event);
+        if (gunHoldAnimation != null) {
+            return gunHoldAnimation;
+        }
+        // 1.7.10 没有**原版**弩（Items.CROSSBOW / CrossbowItem.isCharged 不存在），但 Tinkers' Construct
+        // 的十字弩就是 1.7.10 上的那把弩：装填状态在物品 NBT（InfiTool.Loaded）里，
+        // TinkersCrossbowCompat 读它。所以蓄能待机分支不是"不可能命中"，而是走 TiCon 这一路。
+        // (reference branch AnimationManager.java:1313-1319；参考库把这条判断放在同一位置)
+        if (com.fox.ysmu.compat.TinkersCrossbowCompat.isCrossbowLoaded(player.getHeldItem())) {
+            PlayState charged = playIfPresent(
+                event,
+                "hold_mainhand:charged_crossbow",
+                ILoopType.EDefaultLoopTypes.LOOP);
+            if (charged != PlayState.STOP) {
+                return charged;
             }
-            if (player.fishEntity != null) {
-                // D-A5: exist-checked, so a model without `hold_mainhand:fishing` gets STOP instead of driving
-                // AnimationController#setAnimation into its "Could not load animation" branch every frame.
-                return playIfPresent(event, "hold_mainhand:fishing", ILoopType.EDefaultLoopTypes.LOOP);
-            }
+        }
+        if (player.fishEntity != null) {
+            // D-A5: exist-checked, so a model without `hold_mainhand:fishing` gets STOP instead of driving
+            // AnimationController#setAnimation into its "Could not load animation" branch every frame.
+            return playIfPresent(event, "hold_mainhand:fishing", ILoopType.EDefaultLoopTypes.LOOP);
         }
 
         // A-01: the "main hand must hold something" precondition is gone - an empty hand now reaches
         // ConditionalHold#doTest, which answers `hold_mainhand:empty` (1.20.1 MainHandHoldPredicate does the same).
-        if (checkSwingAndUse(player, true)) {
-            return playIfPresent(event, findHoldAnimation(event, player, true));
+        return playIfPresent(event, findHoldAnimation(event, player, true));
+    }
+
+    /**
+     * The TacZ one-shot channel, upstream {@code client/animation/predicate/GunFirePredicate.java:15-33}: reload &gt;
+     * melee &gt; fire, on its own controller so a clip with a recovery tail can run past the transition
+     * ({@code CustomPlayerEntity} registers it only when TacZ is installed, like upstream's
+     * {@code PlayerControllerCollection.java:50-52}).
+     */
+    @NotNull
+    public PlayState predicateGunFire(AnimationEvent<CustomPlayerEntity> event) {
+        EntityPlayer player = event.getAnimatable()
+            .getPlayer();
+        if (player == null) {
+            return PlayState.STOP;
         }
-        // A-07: upstream answers PAUSE here, not STOP (client/animation/predicate/MainhandPredicate.java:31-33).
-        // Stopping made the held-item clip reload mid-swing; pausing holds the pose the player had instead.
-        return PlayState.PAUSE;
+        if (!player.isSwingInProgress && !player.isUsingItem()) {
+            PlayState result = TACZCompat.playGunOnceAnimation(player.getHeldItem(), event);
+            return result == null ? PlayState.STOP : result;
+        }
+        return PlayState.STOP;
     }
 
     public PlayState predicateSwing(AnimationEvent<CustomPlayerEntity> event) {

@@ -78,7 +78,7 @@ public class EquippedEnchantmentLevelFunction extends Function {
         return 2;
     }
 
-    /** 限流：每次附魔查询打印一次结果（DEBUG_CONTROLLER）。 */
+    /** 限流：每种槽位/物品/附魔组合只打印一次结果（DEBUG_CONTROLLER）。 */
     private static final java.util.Set<String> LOGGED_ENCH = java.util.Collections
         .newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
 
@@ -88,7 +88,10 @@ public class EquippedEnchantmentLevelFunction extends Function {
             String slotType = MolangStringPool.get((int) getArg(0));
             Entity entity = ParticleEffectUtil.getCurrentEntity();
             if (slotType == null || !(entity instanceof EntityPlayer)) {
-                if (com.fox.ysmu.Config.DEBUG_CONTROLLER) {
+                // 空手/无玩家是常态（这个查询每帧被模型包调用），只按槽位记一次，否则一次会话能刷出几十万行。
+                String contextKey = "bad-ctx|" + slotType + "|"
+                    + (entity == null ? "null" : entity.getClass().getSimpleName());
+                if (com.fox.ysmu.Config.DEBUG_CONTROLLER && LOGGED_ENCH.add(contextKey)) {
                     ysmu.LOG.info("[YSMU-ENCH] slotType={} entity={} -> 0 (bad ctx)",
                         slotType, entity == null ? "null" : entity.getClass().getSimpleName());
                 }
@@ -96,7 +99,7 @@ public class EquippedEnchantmentLevelFunction extends Function {
             }
             ItemStack stack = getStack((EntityPlayer) entity, slotType);
             if (stack == null) {
-                if (com.fox.ysmu.Config.DEBUG_CONTROLLER) {
+                if (com.fox.ysmu.Config.DEBUG_CONTROLLER && LOGGED_ENCH.add("no-stack|" + slotType)) {
                     ysmu.LOG.info("[YSMU-ENCH] slotType={} -> 0 (no stack)", slotType);
                 }
                 return 0.0d;

@@ -15,6 +15,7 @@ import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.condition.ConditionArmor;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
+import com.fox.ysmu.client.compat.tacz.TACZCompat;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 
 import software.bernie.geckolib3.core.IAnimatable;
@@ -108,6 +109,12 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
             new AnimationController(this, HOLD_MAINHAND_CONTROLLER, 0.1f, manager.scripted(manager::predicateMainhandHold)));
         data.addAnimationController(
             new AnimationController(this, OPENYSM_POST_HOLD_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
+        // Upstream registers its gun one-shot channel between `post_hold` and `pre_swing`, only when a gun-compat mod
+        // is installed (client/controller/collections/PlayerControllerCollection.java:50-52).
+        if (TACZCompat.isInstalled()) {
+            data.addAnimationController(
+                new AnimationController(this, FIRE_CONTROLLER, 0f, manager.scripted(manager::predicateGunFire)));
+        }
         data.addAnimationController(
             new AnimationController(this, OPENYSM_PRE_SWING_CONTROLLER, 0, manager.scripted(manager::predicateOpenYsmSlot)));
         data.addAnimationController(

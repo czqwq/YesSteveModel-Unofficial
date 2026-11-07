@@ -234,6 +234,11 @@ final class ConditionNameDiagnostics {
         if (name == null || name.isEmpty()) {
             return true;
         }
+        if (name.startsWith("tac:")) {
+            // TacZ channels (`tac:hold:pistol`, `tac:hold$tacz:ak47`) are produced by the gun compat predicate, not by
+            // a condition classifier; with TacZ absent they are inert content the pack still ships.
+            return true;
+        }
         for (String prefix : HOLD_PREFIXES) {
             if (name.startsWith(prefix)) {
                 return isEmptyOrFishingOrActionOrKind(name.substring(prefix.length()));

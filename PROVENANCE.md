@@ -494,3 +494,19 @@ Two lock removals on per-frame paths, made after reviewing upstream's `b844fed3`
 | `geo/render/built/GeoModel.java` | Locator-group index is a `ConcurrentMap` instead of a `HashMap` guarded by `synchronized` on every lookup, and `locatorGroupRoots` results are cached in their own transient concurrent map. The accessors sit on the per-frame draw path (head rotation, head/hand layers) and the group build can belong to another renderer's model, so the lock was pure overhead; construction is `putIfAbsent`-idempotent and both maps remain transient, so the serialised geometry stream is unchanged. |
 | `core/keyframe/AnimationPoint.java` | The point pool is a `ThreadLocal<ArrayDeque>` instead of one static list guarded by `synchronized`. Obtain/recycle happens a few times per bone channel per animation update (the hottest evaluation path) and a point never crosses a thread between obtain and recycle, so the monitor was unnecessary. Same `POOL_MAX_SIZE` bound, now per thread. |
 
+## 2026-11-07 TacZ compat: compile-only API subset
+
+`libs/tacz-api.jar` is not source we own: it is a class-file subset extracted from the 1.7.10 TacZ port
+(`https://github.com/czqwq/TacZ`, MIT, mod id `tacz`), built locally from `build/libs/tacz-1.0-dev.jar`. Contents:
+`com/tacz/guns/api/**` and `com/tacz/guns/resource/index/**` (174 classes selected, 236 KB), i.e. exactly the classes
+YSM's compat layer compiles against; the 72 MB dev jar (which carries all assets) is not committed.
+
+- Purpose: `compileOnly` dependency for `com.fox.ysmu.client.compat.tacz` so offline builds work on a machine without
+  the TacZ checkout. It is never packaged: `compileOnly` keeps it out of the mod jar, and the player's installed TacZ
+  provides the real classes at runtime. With TacZ absent the adapter is inert (`TACZCompat.isInstalled()`).
+- Regeneration (from the TacZ repo): extract the two package trees from `build/libs/tacz-1.0-dev.jar` and
+  `jar cf libs/tacz-api.jar com`; refresh this section if the TacZ API surface ever changes. The handoff document
+  `TacZ/docs/YSM_COMPAT_HANDOFF.md` is the contract that says which symbols must stay.
+- Licence: TacZ is MIT (`LICENSE`, Copyright (c) 2026 czqwq); the subset is redistributed here under the same terms.
+- See `.agent/phase71-tacz-compat.md` for the adapter itself and `.agent/divergences.md` for the 1.7.10 substitutions.
+

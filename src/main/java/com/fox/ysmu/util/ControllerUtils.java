@@ -7,6 +7,13 @@ public final class ControllerUtils {
     public static final String HOLD_OFFHAND_CONTROLLER = "hold_offhand_controller";
     public static final String USE_CONTROLLER = "use_controller";
     public static final String CAP_CONTROLLER = "cap_controller";
+    /**
+     * The TacZ one-shot channel. Upstream registers it only when a gun-compat mod is installed
+     * ({@code client/controller/collections/PlayerControllerCollection.java:50-52}, key {@code player.fire}); this
+     * port's name drops the {@code player.} category and keeps the {@code _controller} suffix like every other player
+     * controller ({@code OpenYsmPlayerControllerRuntime#candidateControllerNames} strips it back to {@code fire}).
+     */
+    public static final String FIRE_CONTROLLER = "fire_controller";
     /** Plays the GUI preview animation; see {@code ModelPreviewRegistry}. */
     public static final String HOVER_CONTROLLER = "hover_controller";
     /** Plays the GUI preview's focus animation. */
