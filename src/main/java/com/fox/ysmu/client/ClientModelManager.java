@@ -2915,13 +2915,22 @@ public class ClientModelManager {
      * Reading the installed copy is what removes the duplicate parse this method used to cause: {@code loadDefaultModel}
      * parsed every default animation file once into these fields and then {@code registerAll} parsed the same bytes
      * again to install them (129 ms on the client thread for the built-in pack).
+     * <p>
+     * <b>The id passed to {@link AnimationDomain#animationFileId} is a model id, not a main id.</b> That helper appends
+     * the sub-name itself ({@code animationFileId(modelId, MAIN) == getMainId(modelId)}), so a main id here produced
+     * {@code ysmu:default/main/main} - a lookup that could never hit. Since the same change stopped filling the static
+     * fields below, that made the fallback empty for <em>every</em> installed model: a model whose own files are
+     * complete was unaffected, while one that relies on inherited clips lost them - the built-in
+     * {@code misc/4_default_controllers} model, whose own animation set only has {@code sneak}/{@code parallel*} and
+     * inherits {@code walk}/{@code run}/{@code idle}, had no locomotion animation at all (regression introduced by
+     * {@code ecd2e3d}, "Build models from binary structures and add bake caches").
      */
     private static AnimationFile defaultAnimationFile(String domain) {
-        ResourceLocation defaultMainId = ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, "default"));
+        ResourceLocation defaultModelId = new ResourceLocation(ysmu.MODID, "default");
         AnimationFile installed = GeckoLibCache.getInstance()
             .getAnimations()
-            .get(AnimationDomain.animationFileId(defaultMainId, domain));
-        if (installed != null) {
+            .get(AnimationDomain.animationFileId(defaultModelId, domain));
+        if (installed != null && !installed.animations.isEmpty()) {
             return installed;
         }
         return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE : DEFAULT_ANIMATION_FILE;
