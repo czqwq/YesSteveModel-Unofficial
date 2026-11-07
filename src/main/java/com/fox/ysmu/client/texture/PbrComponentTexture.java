@@ -2,7 +2,6 @@ package com.fox.ysmu.client.texture;
 
 import java.awt.image.BufferedImage;
 import net.minecraft.client.renderer.texture.AbstractTexture;
-import net.minecraft.client.renderer.texture.TextureUtil;
 import net.minecraft.client.resources.IResourceManager;
 
 /** Angelica holder-owned component, never registered as a skin. Upstream CustomPBRTextureSet:160-166. */
@@ -20,7 +19,7 @@ public final class PbrComponentTexture extends AbstractTexture implements AutoCl
     public void loadTexture(IResourceManager manager) {
         deleteGlTexture();
         // Upstream uploads original component pixels, with no colour/normal-map resize invented here.
-        TextureUtil.uploadTextureImageAllocate(super.getGlTextureId(), image, false, true);
+        OuterFileTexture.uploadPreparedImage(super.getGlTextureId(), image, false, true);
         bytes = (long) image.getWidth() * image.getHeight() * 4;
         owner.componentBytesChanged(bytes);
     }
