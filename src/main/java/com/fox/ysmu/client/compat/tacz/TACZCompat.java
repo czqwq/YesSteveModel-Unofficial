@@ -1,5 +1,7 @@
 package com.fox.ysmu.client.compat.tacz;
 
+import java.nio.FloatBuffer;
+
 import javax.annotation.Nullable;
 
 import net.minecraft.entity.EntityLivingBase;
@@ -126,5 +128,13 @@ public final class TACZCompat {
         if (installed && TacCompatInner.isGun(offhandItem)) {
             TacCompatInner.renderOffhandGun(layer, offhandItem, livingEntity, geoModel);
         }
+    }
+
+    /**
+     * Third-person main-hand TacZ gun frame fix; see {@link TacCompatInner#mainhandGunFrameFix()} for the derivation.
+     * The returned buffer is reused, so it must be consumed (passed to {@code GL11.glMultMatrix}) immediately.
+     */
+    public static FloatBuffer mainhandGunFrameFix() {
+        return TacCompatInner.mainhandGunFrameFix();
     }
 }

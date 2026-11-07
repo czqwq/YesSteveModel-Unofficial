@@ -24,15 +24,10 @@ dependencies {
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     compileOnly("it.unimi.dsi:fastutil:8.5.18")
-    // TacZ（1.7.10 移植，MIT，https://github.com/czqwq/TacZ）：可选兼容只编译期依赖 API/索引类。
-    // libs/tacz-api.jar 是从其构建产物的 com/tacz/guns/api/** + resource/index/** 提取的子集（见 PROVENANCE.md），
-    // 产物不打包、运行时由玩家安装的 TacZ 提供真实类；缺失时 compat 不加载（Loader.isModLoaded 门控）。
-    compileOnly files("libs/tacz-api.jar")
-    // dev 环境里若本机存在 TacZ 仓库构建产物，则一并加载，便于实机验证联动（非发布依赖）。
-    def taczDevJar = file(System.getenv("TACZ_DEV_JAR") ?: "../TacZ/build/libs/tacz-1.0-dev.jar")
-    if (taczDevJar.isFile()) {
-        devOnlyNonPublishable files(taczDevJar)
-    }
+
+    //Optional Addon
+    devOnlyNonPublishable("com.github.czqwq:TacZ:1.0:dev")
+    compileOnly("com.github.czqwq:TacZ:1.0:dev")
 }
 
 @SuppressWarnings('GrMethodMayBeStatic')

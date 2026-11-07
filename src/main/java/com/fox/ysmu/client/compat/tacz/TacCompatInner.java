@@ -1,6 +1,7 @@
 package com.fox.ysmu.client.compat.tacz;
 
 import java.lang.reflect.Field;
+import java.nio.FloatBuffer;
 import java.util.Locale;
 
 import javax.annotation.Nullable;
@@ -13,6 +14,8 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.common.MinecraftForge;
 
 import org.apache.commons.lang3.StringUtils;
+import org.joml.Matrix4f;
+import org.lwjgl.BufferUtils;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.YsmBuiltinAnimations;
@@ -231,7 +234,9 @@ final class TacCompatInner {
         return gun == null ? null : gun.getGunId(itemInHand);
     }
 
-    /** Upstream {@code TacCompatInner#renderOffhandGun}, drawn by the port's item-in-hand layer at the same locators. */
+    /**
+     * Upstream {@code TacCompatInner#renderOffhandGun}, drawn by the port's item-in-hand layer at the same locators.
+     */
     static void renderOffhandGun(CustomPlayerItemInHandLayer<?> layer, ItemStack heldItem, EntityLivingBase entity,
         GeoModel geoModel) {
         CommonGunIndex gunIndex = gunIndex(heldItem);
@@ -244,6 +249,64 @@ final class TacCompatInner {
         } else {
             layer.renderGunAtLocatorGroup(entity, heldItem, geoModel, "RifleLocator", false);
         }
+    }
+
+    /**
+     * Frame fix for a <b>main-hand</b> TacZ gun in third person: cancels the 1.7.10 compensation the TacZ port applies
+     * in {@code AnimateGeoItemRenderer#renderItem(EQUIPPED)} and leaves the upstream YSM 1.20 hand frame in place.
+     *
+     * <p>
+     * TacZ's port has no {@code ItemDisplayContext} pipeline to lean on, so its {@code IItemRenderer} right-multiplies
+     * {@code COMP = inv(F_1.7.10) · F_1.20} ({@code AnimateGeoItemRenderer#TACZ_EQUIPPED_PAPER_FRAME_INV}):
+     * <ul>
+     * <li>{@code F_1.7.10} = the vanilla 1.7.10 {@code RenderPlayer#renderEquippedItems} frame for a 2D-paper item:
+     * {@code T(-1/16,7/16,1/16) · paper(T(0.25,0.1875,-0.1875)·S(0.375)·Rz(60)·Rx(-90)·Rz(20)) · Forge
+     * T(-0.5,-0.5,-0.5)} (the last one is {@code ForgeHooksClient#renderEquippedItem}'s {@code EQUIPPED_BLOCK}
+     * branch, {@code ForgeHooksClient.java:216-221});</li>
+     * <li>{@code F_1.20} = the vanilla 1.20 {@code ItemInHandLayer} frame:
+     * {@code Rx(-90)·Ry(180)·T(1/16,0.125,-0.625) · T(-0.5,-0.5,-0.5)}.</li>
+     * </ul>
+     * That inverse only cancels when the caller is vanilla {@code RenderPlayer}. The port's item layer replaces the
+     * caller and feeds its own calibrated item frame instead, so the residual (measured:
+     * {@code T(1.25,-0.27,-0.22)} plus a rotation) put the gun in front of the chest instead of in the hand.
+     *
+     * <p>
+     * Upstream YSM 1.20 instead draws the main-hand item itself
+     * ({@code CustomPlayerItemInHandLayer.java:68-70}: locator frame → {@code T(0,-1/16,-0.1)} → {@code Rx(-90)},
+     * then {@code ItemInHandRenderer} adds {@code T(-0.5,-0.5,-0.5)}). So the layer applies that upstream frame and
+     * then pre-multiplies
+     * {@code C = inv(F_1.20) · T(-1/16,7/16,1/16) · paper}, which makes {@code C · Forge · COMP} the identity
+     * (verified numerically, {@code tmp/_probe/TacGunFrameProbe.java}) - TacZ then renders the gun exactly in the
+     * upstream YSM 1.20 hand frame.
+     *
+     * @return the {@code C} matrix, rewound for {@code GL11.glMultMatrix}
+     */
+    static FloatBuffer mainhandGunFrameFix() {
+        MAINHAND_GUN_FRAME_FIX.rewind();
+        return MAINHAND_GUN_FRAME_FIX;
+    }
+
+    /** See {@link #mainhandGunFrameFix()}. Client thread only, like every other GL-touching path. */
+    private static final FloatBuffer MAINHAND_GUN_FRAME_FIX = buildMainhandGunFrameFix();
+
+    private static FloatBuffer buildMainhandGunFrameFix() {
+        // F_1.20 = Rx(-90)·Ry(180)·T(1/16,0.125,-0.625)·T(-0.5,-0.5,-0.5); JOML methods right-multiply like GL calls.
+        Matrix4f f20 = new Matrix4f().rotateX((float) Math.toRadians(-90.0F))
+            .rotateY((float) Math.toRadians(180.0F))
+            .translate(1.0F / 16.0F, 0.125F, -0.625F)
+            .translate(-0.5F, -0.5F, -0.5F);
+        // C = inv(F_1.20) · T(-1/16,7/16,1/16) · paper(1.7.10)
+        Matrix4f fix = f20.invert()
+            .translate(-1.0F / 16.0F, 7.0F / 16.0F, 1.0F / 16.0F)
+            .translate(0.25F, 0.1875F, -0.1875F)
+            .scale(0.375F, 0.375F, 0.375F)
+            .rotateZ((float) Math.toRadians(60.0F))
+            .rotateX((float) Math.toRadians(-90.0F))
+            .rotateZ((float) Math.toRadians(20.0F));
+        FloatBuffer buffer = BufferUtils.createFloatBuffer(16);
+        fix.get(buffer);
+        buffer.flip();
+        return buffer;
     }
 
     /**

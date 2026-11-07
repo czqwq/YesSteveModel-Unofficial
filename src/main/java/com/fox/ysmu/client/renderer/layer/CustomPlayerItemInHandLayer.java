@@ -255,7 +255,11 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
                 GL11.glFrontFace(GL11.GL_CW); // 修正镜像导致的面剔除反转
             }
 
-            doRenderItem(entity, stack);
+            if (isMainHand && TACZCompat.isGun(stack)) {
+                renderTacGunInUpstreamHandFrame(entity, stack);
+            } else {
+                doRenderItem(entity, stack);
+            }
         } finally {
             if (!isMainHand) {
                 GL11.glFrontFace(GL11.GL_CCW);
@@ -275,6 +279,29 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         RenderUtils.translateToPivotPoint(lastBone);
         RenderUtils.rotateMatrixAroundBone(lastBone);
         RenderUtils.scaleMatrixForBone(lastBone);
+    }
+
+    /**
+     * Draws a <b>main-hand</b> TacZ gun in third person in the upstream YSM 1.20 hand frame.
+     *
+     * <p>
+     * The vanilla 1.7.10 path this port replaces ({@code RenderPlayer#renderEquippedItems} + {@code ForgeHooksClient})
+     * is what TacZ's 1.7.10 {@code IItemRenderer} compensates against: it right-multiplies
+     * {@code inv(F_1.7.10)·F_1.20} and that only cancels when the caller really is vanilla {@code RenderPlayer}. The
+     * port's own calibrated item transforms (see {@link #doRenderItem}) are tuned for the YSM hand frame and are not
+     * that frame, so the compensation left the gun at a {@code T(1.25,-0.27,-0.22)} offset with a rotation - the
+     * "gun floating in front of the chest" symptom. This method applies upstream YSM's own frame
+     * ({@code CustomPlayerItemInHandLayer.java:68-70}: locator → {@code T(0,-1/16,-0.1)} → {@code Rx(-90)}, then
+     * {@code ItemRenderer}'s unconditional {@code T(-0.5,-0.5,-0.5)}) and pre-multiplies the inverse compensation, so
+     * the gun ends up exactly in that frame. Derivation and numeric check:
+     * {@code TacCompatInner#mainhandGunFrameFix()} / {@code tmp/_probe/TacGunFrameProbe.java}.
+     */
+    private void renderTacGunInUpstreamHandFrame(EntityLivingBase entity, ItemStack stack) {
+        GL11.glTranslatef(0.0F, -0.0625F, -0.1F);
+        GL11.glRotatef(-90.0F, 1.0F, 0.0F, 0.0F);
+        GL11.glTranslatef(-0.5F, -0.5F, -0.5F);
+        GL11.glMultMatrix(TACZCompat.mainhandGunFrameFix());
+        itemRenderer.renderItem(entity, stack, 0);
     }
 
     private void doRenderItem(EntityLivingBase entity, ItemStack itemInHand) {
