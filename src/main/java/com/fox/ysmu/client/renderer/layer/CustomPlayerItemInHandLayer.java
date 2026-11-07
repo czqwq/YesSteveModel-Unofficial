@@ -5,6 +5,7 @@ import net.minecraft.block.Block;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ItemRenderer;
 import net.minecraft.client.renderer.RenderBlocks;
+import net.minecraft.client.renderer.entity.RenderItem;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Items;
@@ -16,6 +17,7 @@ import net.minecraftforge.client.MinecraftForgeClient;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 
+import com.fox.ysmu.client.compat.tacz.TACZCompat;
 import com.fox.ysmu.compat.BackhandCompat;
 import cpw.mods.fml.common.Optional;
 import software.bernie.geckolib3.core.IAnimatable;
@@ -80,10 +82,26 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
             GlStateManager.pushMatrix();
             // R-04：矩阵栈与 pop 必须成对——物品渲染抛异常时也要回滚，否则后续整帧的渲染状态会错乱。
             try {
-                renderArmWithItemAtLocatorGroup(entity, mainHandItem, geoModel, RIGHT_HAND_LOCATOR,
-                    geoModel.rightHandBones, true, isVanilla);
-                renderArmWithItemAtLocatorGroup(entity, offhandItem, geoModel, LEFT_HAND_LOCATOR,
-                    geoModel.leftHandBones, false, isVanilla);
+                if (mainHandItem != null) {
+                    // TacZ muzzle-flash/shell visibility while the custom model draws the held gun; upstream brackets
+                    // the same draw in client/renderer/layer/CustomPlayerItemInHandLayer.java:37-40.
+                    TACZCompat.openFlashShellRender(entity, mainHandItem);
+                    try {
+                        renderArmWithItemAtLocatorGroup(entity, mainHandItem, geoModel, RIGHT_HAND_LOCATOR,
+                            geoModel.rightHandBones, true, isVanilla);
+                    } finally {
+                        TACZCompat.stopFlashShellRender(mainHandItem);
+                    }
+                }
+                // A gun in the off hand is drawn at the model's own Pistol/Rifle locator instead of the hand
+                // (upstream :42-55). Upstream's else-branch still draws the main-hand stack at the off hand there,
+                // which is a bug; the port skips that duplicate draw.
+                boolean offhandGun = TACZCompat.isGun(offhandItem);
+                if (!offhandGun) {
+                    renderArmWithItemAtLocatorGroup(entity, offhandItem, geoModel, LEFT_HAND_LOCATOR,
+                        geoModel.leftHandBones, false, isVanilla);
+                }
+                TACZCompat.renderOffsetHand(this, offhandItem, entity, geoModel);
             } finally {
                 GlStateManager.popMatrix();
             }
@@ -130,6 +148,76 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
     }
 
     /**
+     * Draws one held TacZ gun at the model's {@code PistolLocator}/{@code RifleLocator} group - the port's replacement
+     * for upstream's {@code TacCompatInner#renderOffhandGun} draw
+     * ({@code client/compat/tacz/TacCompatInner.java:58-87}, a {@code Minecraft#getItemRenderer().renderStatic(...,
+     * ItemDisplayContext.FIXED, ...)} call). The transforms are upstream's, applied in the locator's bone frame;
+     * {@code pistol} selects its branch.
+     * <p>
+     * 1.7.10 has no {@code ItemDisplayContext}: TacZ's own item renderer maps {@code FIXED} to its in-frame
+     * {@code ENTITY} branch (its {@code AnimateGeoItemRenderer#renderItem} reads the vanilla
+     * {@code RenderItem#renderInFrame} flag, which is the 1.7.10 equivalent of passing {@code FIXED}), and that branch
+     * expects the frame's {@code S(0.5)} to be already applied - so it is applied here.
+     */
+    public void renderGunAtLocatorGroup(EntityLivingBase entity, ItemStack stack, GeoModel geoModel,
+        String locatorGroup, boolean pistol) {
+        if (stack == null || stack.getItem() == null) {
+            return;
+        }
+        List<GeoBone> locators = geoModel.locatorGroupRoots(locatorGroup);
+        if (locators.isEmpty()) {
+            return;
+        }
+        IItemRenderer renderer = MinecraftForgeClient.getItemRenderer(stack, IItemRenderer.ItemRenderType.ENTITY);
+        if (renderer == null || !renderer.handleRenderType(stack, IItemRenderer.ItemRenderType.ENTITY)) {
+            return;
+        }
+        for (GeoBone locator : locators) {
+            GL11.glPushMatrix();
+            try {
+                applyHeldItemRenderState();
+                applyBoneTransform(Arrays.asList(entityRenderer.getPathFromRoot(locator)));
+                if (pistol) {
+                    GL11.glTranslatef(0.0F, -0.125F, 0.0F);
+                    GL11.glScalef(0.65F, 0.65F, 0.65F);
+                    GL11.glRotatef(-90.0F, 0.0F, 1.0F, 0.0F);
+                    GL11.glRotatef(90.0F, 0.0F, 0.0F, 1.0F);
+                } else {
+                    GL11.glScalef(0.65F, 0.65F, 0.65F);
+                    GL11.glRotatef(-180.0F, 0.0F, 1.0F, 0.0F);
+                }
+                GL11.glScalef(0.5F, 0.5F, 0.5F);
+                boolean previousInFrame = RenderItem.renderInFrame;
+                RenderItem.renderInFrame = true;
+                try {
+                    renderer.renderItem(IItemRenderer.ItemRenderType.ENTITY, stack, entity);
+                } finally {
+                    RenderItem.renderInFrame = previousInFrame;
+                }
+            } finally {
+                restoreHeldItemRenderState();
+                GL11.glPopMatrix();
+            }
+        }
+    }
+
+    /** The vanilla held-item GL state baseline; see the comment in renderArmWithItem for why it is restored here. */
+    private void applyHeldItemRenderState() {
+        GL11.glEnable(GL12.GL_RESCALE_NORMAL);
+        GL11.glDisable(GL11.GL_CULL_FACE);
+        GlStateManager.enableAlpha();
+        GlStateManager.alphaFunc(GL11.GL_GREATER, 0.1F);
+        GlStateManager.disableBlend();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+    }
+
+    private void restoreHeldItemRenderState() {
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        GL11.glDisable(GL12.GL_RESCALE_NORMAL);
+        GL11.glEnable(GL11.GL_CULL_FACE);
+    }
+
+    /**
      * 手部渲染方法
      * @param bones 对应的骨骼列表 (左手或右手)
      * @param isMainHand 是否为主手 (用于镜像处理)
@@ -146,8 +234,6 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         // R-04：所有状态改动都放进 try/finally——物品渲染（MinecraftForgeClient/RenderBlocks）对畸形物品
         // 可能抛错，一旦漏掉 pop/回滚会让后续整帧的矩阵与剔除状态错乱。
         try {
-            GL11.glEnable(GL12.GL_RESCALE_NORMAL);
-            GL11.glDisable(GL11.GL_CULL_FACE);
             // 原版 1.7.10 手持物品的渲染状态（RenderPlayer.renderEquippedItems:313-414 就是在这些状态
             // 下调用 ItemRenderer.renderItem 的）：实体渲染期间 alpha test 一直是开着的
             // （RendererLivingEntity.doRender:163 在每个渲染 pass 前 glEnable(GL_ALPHA_TEST)，
@@ -159,10 +245,7 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
             // 世界里画成一整片方片（透明像素写出贴图 alpha-0 处残留的 RGB），HUD 纸娃娃烘进 FBO 时则写成
             // alpha 0 的洞、透出天空。dev-1.20.1 的物品层不写这些，因为 1.20 的 ItemInHandRenderer 用
             // RenderType，每次绘制都自带 alpha 测试状态（见 .agent/phase56-held-item-alpha-state.md）。
-            GlStateManager.enableAlpha();
-            GlStateManager.alphaFunc(GL11.GL_GREATER, 0.1F);
-            GlStateManager.disableBlend();
-            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+            applyHeldItemRenderState();
             if (!isVanilla) {
                 GL11.glScalef(0.7F, 0.7F, 0.7F);
             }
@@ -172,14 +255,16 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
                 GL11.glFrontFace(GL11.GL_CW); // 修正镜像导致的面剔除反转
             }
 
-            doRenderItem(entity, stack);
+            if (isMainHand && TACZCompat.isGun(stack)) {
+                renderTacGunInUpstreamHandFrame(entity, stack);
+            } else {
+                doRenderItem(entity, stack);
+            }
         } finally {
             if (!isMainHand) {
                 GL11.glFrontFace(GL11.GL_CCW);
             }
-            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-            GL11.glDisable(GL12.GL_RESCALE_NORMAL);
-            GL11.glEnable(GL11.GL_CULL_FACE);
+            restoreHeldItemRenderState();
             GL11.glPopMatrix();
         }
     }
@@ -194,6 +279,29 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         RenderUtils.translateToPivotPoint(lastBone);
         RenderUtils.rotateMatrixAroundBone(lastBone);
         RenderUtils.scaleMatrixForBone(lastBone);
+    }
+
+    /**
+     * Draws a <b>main-hand</b> TacZ gun in third person in the upstream YSM 1.20 hand frame.
+     *
+     * <p>
+     * The vanilla 1.7.10 path this port replaces ({@code RenderPlayer#renderEquippedItems} + {@code ForgeHooksClient})
+     * is what TacZ's 1.7.10 {@code IItemRenderer} compensates against: it right-multiplies
+     * {@code inv(F_1.7.10)·F_1.20} and that only cancels when the caller really is vanilla {@code RenderPlayer}. The
+     * port's own calibrated item transforms (see {@link #doRenderItem}) are tuned for the YSM hand frame and are not
+     * that frame, so the compensation left the gun at a {@code T(1.25,-0.27,-0.22)} offset with a rotation - the
+     * "gun floating in front of the chest" symptom. This method applies upstream YSM's own frame
+     * ({@code CustomPlayerItemInHandLayer.java:68-70}: locator → {@code T(0,-1/16,-0.1)} → {@code Rx(-90)}, then
+     * {@code ItemRenderer}'s unconditional {@code T(-0.5,-0.5,-0.5)}) and pre-multiplies the inverse compensation, so
+     * the gun ends up exactly in that frame. Derivation and numeric check:
+     * {@code TacCompatInner#mainhandGunFrameFix()} / {@code tmp/_probe/TacGunFrameProbe.java}.
+     */
+    private void renderTacGunInUpstreamHandFrame(EntityLivingBase entity, ItemStack stack) {
+        GL11.glTranslatef(0.0F, -0.0625F, -0.1F);
+        GL11.glRotatef(-90.0F, 1.0F, 0.0F, 0.0F);
+        GL11.glTranslatef(-0.5F, -0.5F, -0.5F);
+        GL11.glMultMatrix(TACZCompat.mainhandGunFrameFix());
+        itemRenderer.renderItem(entity, stack, 0);
     }
 
     private void doRenderItem(EntityLivingBase entity, ItemStack itemInHand) {
@@ -259,3 +367,4 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         }
     }
 }
+

@@ -23,6 +23,8 @@ public class ConditionManager {
     // pack's per-vehicle and per-passenger clips could never play.
     public static Map<ResourceLocation, ConditionalVehicle> VEHICLE = Maps.newHashMap();
     public static Map<ResourceLocation, ConditionalPassenger> PASSENGER = Maps.newHashMap();
+    /** Upstream keeps one {@code ConditionTAC} per entity's manager ({@code ConditionManager.java:13} there); here one per animation file id. */
+    public static Map<ResourceLocation, ConditionTAC> TAC = Maps.newHashMap();
 
     /**
      * Registers one animation name of the model proper with every classifier that may later ask for it.
@@ -43,6 +45,7 @@ public class ConditionManager {
         ARMOR.putIfAbsent(id, new ConditionArmor());
         VEHICLE.putIfAbsent(id, new ConditionalVehicle());
         PASSENGER.putIfAbsent(id, new ConditionalPassenger());
+        TAC.putIfAbsent(id, new ConditionTAC());
 
         ConditionalSwing conditionalSwing = SWING.get(id);
         ConditionalSwing conditionalSwingOffhand = SWING_OFFHAND.get(id);
@@ -53,6 +56,7 @@ public class ConditionManager {
         ConditionArmor conditionArmor = ARMOR.get(id);
         ConditionalVehicle conditionalVehicle = VEHICLE.get(id);
         ConditionalPassenger conditionalPassenger = PASSENGER.get(id);
+        ConditionTAC conditionTAC = TAC.get(id);
 
         conditionalSwing.addTest(name);
         conditionalSwingOffhand.addTest(name);
@@ -63,6 +67,7 @@ public class ConditionManager {
         conditionArmor.addTest(name);
         conditionalVehicle.addTest(name);
         conditionalPassenger.addTest(name);
+        conditionTAC.addTest(name);
 
         // A-07: a name that is a condition name but has no route through any of the classifiers above would be
         // dropped silently; report each (model, name) once, with the reason. A name the model merely inherited from
@@ -99,6 +104,7 @@ public class ConditionManager {
         ARMOR.clear();
         VEHICLE.clear();
         PASSENGER.clear();
+        TAC.clear();
         ConditionNameDiagnostics.clear();
     }
 
@@ -146,5 +152,14 @@ public class ConditionManager {
     /** The passenger classifier for one model, or {@code null} before the model registers any name. */
     public static ConditionalPassenger getPassenger(ResourceLocation id) {
         return PASSENGER.get(id);
+    }
+
+    /**
+     * The TacZ per-gun override classifier for one animation file, or {@code null} before the model registers any
+     * name. Upstream keeps the instance on the entity's {@code ConditionManager} ({@code ConditionManager.java:13,58-60}
+     * there); this port keys it by the same animation-file id as every other classifier here.
+     */
+    public static ConditionTAC tacFor(ResourceLocation animationFileId) {
+        return TAC.get(animationFileId);
     }
 }

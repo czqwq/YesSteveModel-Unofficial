@@ -7,7 +7,7 @@ repositories { handler ->
     maven {
         url 'https://jitpack.io'
         content {
-            includeGroup 'com.github.OpenYSM'
+            includeGroup 'com.github.czqwq'
         }
     }
 

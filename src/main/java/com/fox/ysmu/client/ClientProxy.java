@@ -42,6 +42,9 @@ public class ClientProxy extends CommonProxy {
         // The earliest client-only entry point: record the client thread here so the model manager's off-thread
         // install guard is meaningful from mod init, not only from the first resource reload or tick.
         ClientModelManager.markClientThread();
+        // Optional-mod adapters that contribute Molang bindings must be initialized before registerVariables below:
+        // the TacZ adapter replaces the nine ctrl.tac_* defaults with live values (upstream's CtrlBinding shape).
+        com.fox.ysmu.client.compat.tacz.TACZCompat.init();
         com.fox.ysmu.client.compat.AngelicaPbrCompat.init();
         // 必须先注册 Molang 钩子：GeckoLibCache.getInstance() 首次调用即构造
         // MolangParser（new MolangParser() 内执行 doCoreRemaps），ysm.*/ctrl.*/query.*
@@ -69,6 +72,8 @@ public class ClientProxy extends CommonProxy {
         // 注册可选模组依赖检测。当控制器使用某模组的变量（如 ctrl.tac_*），
         // 但该模组未加载时，运行时自动跳过对应控制器。
         // (reference branch ClientProxy.java:37-60)
+        // TacZ 的 1.7.10 移植（github.com/czqwq/TacZ）真实存在：装了就由 client/compat/tacz 适配器提供
+        // ctrl.tac_* 的值与动画通道；没装时这里的检测让引用这些变量的控制器整条跳过。
         com.fox.ysmu.client.animation.controller.ModDependencyRegistry.register(
             new com.fox.ysmu.client.animation.controller.ModDependency("tacz",
                 "ctrl.tac_"));

@@ -181,6 +181,16 @@ public class Animation implements Serializable {
      * {@code ;}-separated statements of the entry together), which is also upstream's shape: one conditionless
      * program per instruction keyframe, not one per statement.
      *
+     * <p><b>Whole-entry parse failure falls back to statement-by-statement parsing.</b> Upstream's instruction
+     * keyframe carries an {@code IValue[]} - one value per statement - and its executor evaluates each value on its
+     * own ({@code AnimationProtoMapper.java:77-87} -> {@code InstructionKeyFrameExecutor.java:18-35}), so one
+     * statement that does not parse costs only that statement. This engine's {@code MolangParser#parseExpression}
+     * instead throws for the whole text as soon as one statement fails, which made a single marker statement discard
+     * every assignment in the entry: shipped packs use bare {@code [} / {@code ]} section markers inside timeline
+     * entries (Furina's {@code parallel0} is 365 statements with such markers), and that silently killed the whole
+     * physics block. The fallback reproduces the old per-statement executor (and upstream's array shape): the
+     * statements that parse are kept as separate programs at the same start tick, the ones that do not are skipped.
+     *
      * <p>Called once per animation by whichever path uses it first - both animation builders warm it during the
      * model bake - so the cost is paid once per animation per model install instead of once per keyframe dispatch.
      */
@@ -194,12 +204,39 @@ public class Animation implements Serializable {
         }
         List<EventKeyFrame<MolangExpression>> parsed = new ArrayList<>(source.size());
         for (EventKeyFrame<String> keyFrame : source) {
-            MolangExpression program = keyFrame == null ? null : parseQuietly(parser, keyFrame.getEventData());
-            Double startTick = keyFrame == null ? null : keyFrame.getStartTick();
-            parsed.add(
-                new EventKeyFrame<>(
-                    startTick == null ? 0.0D : startTick,
-                    program == null ? MolangParser.ZERO : program));
+            if (keyFrame == null) {
+                parsed.add(new EventKeyFrame<>(0.0D, MolangParser.ZERO));
+                continue;
+            }
+            double startTick = keyFrame.getStartTick();
+            MolangExpression program = parseQuietly(parser, keyFrame.getEventData());
+            if (program != null) {
+                parsed.add(new EventKeyFrame<>(startTick, program));
+                continue;
+            }
+            // One bad statement must not discard the entry's other statements; see the javadoc above.
+            List<String> statements;
+            try {
+                statements = MolangParser.splitStatements(keyFrame.getEventData());
+            } catch (Exception failure) {
+                statements = java.util.Collections.emptyList();
+            }
+            boolean any = false;
+            for (String statement : statements) {
+                String trimmed = statement.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                MolangExpression statementProgram = parseQuietly(parser, trimmed);
+                if (statementProgram == null) {
+                    continue;
+                }
+                parsed.add(new EventKeyFrame<>(startTick, statementProgram));
+                any = true;
+            }
+            if (!any) {
+                parsed.add(new EventKeyFrame<>(startTick, MolangParser.ZERO));
+            }
         }
         // Program list first, source list second: a reader that sees the new source must see the matching programs.
         this.parsedInstructionKeyframes = parsed;

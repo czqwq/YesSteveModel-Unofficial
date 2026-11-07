@@ -24,6 +24,10 @@ dependencies {
     shadowImplementation("com.fasterxml.jackson.core:jackson-databind:2.9.0")
     shadowImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.9.0")
     compileOnly("it.unimi.dsi:fastutil:8.5.18")
+
+    //Optional Addon
+    devOnlyNonPublishable("com.github.czqwq:TacZ:1.0:dev")
+    compileOnly("com.github.czqwq:TacZ:1.0:dev")
 }
 
 @SuppressWarnings('GrMethodMayBeStatic')
