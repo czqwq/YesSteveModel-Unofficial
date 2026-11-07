@@ -3,10 +3,10 @@ package software.bernie.geckolib3.geo.render.built;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import javax.annotation.Nullable;
 
@@ -34,8 +34,16 @@ public class GeoModel implements Serializable {
      * part in serialisation would either change the cache ABI or come back {@code null} from an entry written before
      * it existed; a transient one is simply absent from both old and new streams, so the bytes on disk are
      * unchanged and every deserialised model can answer the same query.
+     * <p>
+     * Concurrent because the accessors are on the per-frame draw path (head rotation, head/hand layers) and the
+     * builder for the map is another renderer's model: a plain map guarded by {@code synchronized} was a lock on
+     * every lookup, which is the defensive synchronization upstream removed from its hot paths in
+     * {@code b844fed3} ("细化热路径并发契约，消除防御性同步").
      */
-    private transient volatile Map<String, List<GeoBone>> locatorGroups;
+    private transient volatile ConcurrentMap<String, List<GeoBone>> locatorGroups;
+
+    /** {@link #locatorGroupRoots(String)} results, keyed like {@link #locatorGroups}. */
+    private transient volatile ConcurrentMap<String, List<GeoBone>> locatorRootGroups;
 
     public boolean hasTopLevelBone(String name) {
         return topLevelBones.stream()
@@ -102,23 +110,22 @@ public class GeoModel implements Serializable {
         if (baseName == null || baseName.isEmpty()) {
             return Collections.emptyList();
         }
-        Map<String, List<GeoBone>> groups = this.locatorGroups;
+        ConcurrentMap<String, List<GeoBone>> groups = this.locatorGroups;
         if (groups == null) {
-            groups = new HashMap<>();
+            groups = new ConcurrentHashMap<>();
             this.locatorGroups = groups;
         }
-        synchronized (groups) {
-            List<GeoBone> group = groups.get(baseName);
-            if (group == null) {
-                ArrayList<GeoBone> found = new ArrayList<>(2);
-                for (GeoBone topLevelBone : topLevelBones) {
-                    collectLocatorGroup(baseName, topLevelBone, found);
-                }
-                group = found.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(found);
-                groups.put(baseName, group);
-            }
+        List<GeoBone> group = groups.get(baseName);
+        if (group != null) {
             return group;
         }
+        ArrayList<GeoBone> found = new ArrayList<>(2);
+        for (GeoBone topLevelBone : topLevelBones) {
+            collectLocatorGroup(baseName, topLevelBone, found);
+        }
+        List<GeoBone> built = found.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(found);
+        group = groups.putIfAbsent(baseName, built);
+        return group != null ? group : built;
     }
 
     private static void collectLocatorGroup(String baseName, GeoBone bone, List<GeoBone> found) {
@@ -166,11 +173,23 @@ public class GeoModel implements Serializable {
      * @return the group's top-most bones in traversal order; empty if none
      */
     public List<GeoBone> locatorGroupRoots(String baseName) {
+        if (baseName == null || baseName.isEmpty()) {
+            return Collections.emptyList();
+        }
+        ConcurrentMap<String, List<GeoBone>> cachedRoots = this.locatorRootGroups;
+        if (cachedRoots == null) {
+            cachedRoots = new ConcurrentHashMap<>();
+            this.locatorRootGroups = cachedRoots;
+        }
+        List<GeoBone> roots = cachedRoots.get(baseName);
+        if (roots != null) {
+            return roots;
+        }
         List<GeoBone> group = locatorGroup(baseName);
         if (group.isEmpty()) {
             return group;
         }
-        ArrayList<GeoBone> roots = new ArrayList<>(group.size());
+        ArrayList<GeoBone> built = new ArrayList<>(group.size());
         for (GeoBone bone : group) {
             boolean nested = false;
             for (GeoBone ancestor = bone.parent; ancestor != null; ancestor = ancestor.parent) {
@@ -180,10 +199,12 @@ public class GeoModel implements Serializable {
                 }
             }
             if (!nested) {
-                roots.add(bone);
+                built.add(bone);
             }
         }
-        return Collections.unmodifiableList(roots);
+        roots = Collections.unmodifiableList(built);
+        List<GeoBone> previous = cachedRoots.putIfAbsent(baseName, roots);
+        return previous != null ? previous : roots;
     }
 
     private GeoBone getBoneRecursively(String name, GeoBone bone) {

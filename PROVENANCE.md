@@ -483,3 +483,14 @@ One additive engine accessor, made for the nested-head-locator regression (see
 |---|---|
 | `geo/render/built/GeoModel.java` | Added `locatorGroupRoots(String)`: the members of a locator group with no ancestor in the same group. The three humanoid consumers (`CustomPlayerModel#codeAnimation`, `CustomPlayerHeadLayer`, `CustomPlayerItemInHandLayer`) use it instead of `locatorGroup`, so a nested group member (`Head3` under `Head` in LaPluma) inherits the transform once instead of twice. Additive: `locatorGroup` and every existing call site keep their behaviour; the index is built from `topLevelBones` like the group accessor and stays out of the serialised geometry stream. Recorded as a deliberate refinement of upstream's literal per-member loop in `.agent/divergences.md`. |
 
+## 2026-11-07 hot-path round: engine edits
+
+Two lock removals on per-frame paths, made after reviewing upstream's `b844fed3` ("细化热路径并发契约，消除
+防御性同步", 2026-11-01) - the port had the same class of defensive synchronization, not the same code. See
+`.agent/phase69-upstream-sep21-to-nov01-triage.md`.
+
+| file | change |
+|---|---|
+| `geo/render/built/GeoModel.java` | Locator-group index is a `ConcurrentMap` instead of a `HashMap` guarded by `synchronized` on every lookup, and `locatorGroupRoots` results are cached in their own transient concurrent map. The accessors sit on the per-frame draw path (head rotation, head/hand layers) and the group build can belong to another renderer's model, so the lock was pure overhead; construction is `putIfAbsent`-idempotent and both maps remain transient, so the serialised geometry stream is unchanged. |
+| `core/keyframe/AnimationPoint.java` | The point pool is a `ThreadLocal<ArrayDeque>` instead of one static list guarded by `synchronized`. Obtain/recycle happens a few times per bone channel per animation update (the hottest evaluation path) and a point never crosses a thread between obtain and recycle, so the monitor was unnecessary. Same `POOL_MAX_SIZE` bound, now per thread. |
+

@@ -5,7 +5,7 @@
 
 package software.bernie.geckolib3.core.keyframe;
 
-import java.util.ArrayList;
+import java.util.ArrayDeque;
 
 import com.eliotlash.mclib.math.IValue;
 
@@ -89,7 +89,15 @@ public class AnimationPoint {
     // ---- Object pooling ----
 
     private static final int POOL_MAX_SIZE = 2048;
-    private static final ArrayList<AnimationPoint> POOL = new ArrayList<>(POOL_MAX_SIZE);
+
+    /**
+     * Per-thread pool. It used to be one static list guarded by {@code synchronized}: obtaining and recycling a point
+     * happens a few times per bone channel per animation update, i.e. on the hottest evaluation path, so that lock was
+     * paid every time for a guarantee nothing needed - a point is obtained, read and recycled by the same update. This
+     * is the same cleanup upstream made in {@code b844fed3} ("消除防御性同步"): the access is thread-confined by
+     * construction, so no monitor is required.
+     */
+    private static final ThreadLocal<ArrayDeque<AnimationPoint>> POOL = ThreadLocal.withInitial(ArrayDeque::new);
 
     /** Obtain an AnimationPoint from the pool, or create new if pool is empty. */
     public static AnimationPoint obtain(KeyFrame<IValue> keyframe, double currentTick,
@@ -119,22 +127,18 @@ public class AnimationPoint {
     }
 
     private static AnimationPoint take() {
-        synchronized (POOL) {
-            if (!POOL.isEmpty()) {
-                return POOL.remove(POOL.size() - 1);
-            }
-        }
-        return new AnimationPoint();
+        AnimationPoint pooled = POOL.get()
+            .pollLast();
+        return pooled != null ? pooled : new AnimationPoint();
     }
 
     /** Return this AnimationPoint to the pool for reuse. */
     public void recycle() {
-        synchronized (POOL) {
-            if (POOL.size() < POOL_MAX_SIZE) {
-                // 只需断开引用（值字段每帧都会被 obtain 覆盖）。
-                this.keyframe = null;
-                POOL.add(this);
-            }
+        ArrayDeque<AnimationPoint> pool = POOL.get();
+        if (pool.size() < POOL_MAX_SIZE) {
+            // 只需断开引用（值字段每帧都会被 obtain 覆盖）。
+            this.keyframe = null;
+            pool.addLast(this);
         }
     }
 
