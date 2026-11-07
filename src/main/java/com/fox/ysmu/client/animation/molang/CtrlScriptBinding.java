@@ -8,6 +8,7 @@ import net.minecraft.util.ResourceLocation;
 import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.AnimationManager;
 
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
@@ -133,9 +134,30 @@ public final class CtrlScriptBinding {
         return file != null && file.getAnimation(animationName) != null;
     }
 
+    /**
+     * {@code ctrl.<state>}: is the main controller currently playing that state.
+     * <p>
+     * A script gets the answer from its own {@link Frame} (the caller already read the cache for it). Animation-file
+     * MoLang (keyframes, {@code blend_weight}, {@code anim_speed}, timelines) runs outside a script, where the
+     * {@link #CURRENT} frame does not exist - but upstream's binding is a context variable, not a script one
+     * ({@code CtrlBinding.java:129} registers every state as {@code livingEntityVar}, and
+     * {@code CtrlBinding.java:136-141} answers from the animatable's {@code StateTracker#getMainAnimationCache()}), so
+     * it answers there too. This port keeps that cache in {@code AnimationManager.mainAnimationCache}; the frame's
+     * subject is the one {@link MolangFrameContext} published. Without this fallback every {@code ctrl.walk} in an
+     * animation file reads 0, which zeroes e.g. Furina's {@code "blend_weight": "ysm.second_order('walk',ctrl.walk,...)"}
+     * on the walk clip - the state machine selects the walk clip and the engine then blends it in at weight 0.
+     */
     private static boolean isMainState(String stateName) {
         Frame frame = CURRENT.get();
-        return frame != null && stateName.equals(frame.mainState);
+        if (frame != null) {
+            return stateName.equals(frame.mainState);
+        }
+        EntityPlayer player = MolangFrameContext.getPlayer();
+        if (player == null) {
+            return false;
+        }
+        AnimationManager manager = AnimationManager.getInstance();
+        return manager != null && stateName.equals(manager.mainStateOf(player));
     }
 
     /** Reads a string argument back out of {@link MolangStringPool}; a missing one falls back, so a script cannot throw. */

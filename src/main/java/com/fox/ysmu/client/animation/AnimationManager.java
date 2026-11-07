@@ -391,8 +391,8 @@ public final class AnimationManager {
 
     /**
      * The main controller's currently selected state, per player - upstream's {@code HumanoidStateTracker}
-     * main-animation cache, which its {@code ctrl.<state>} script queries test against
-     * ({@code CtrlBinding#testCondition}).
+     * main-animation cache, which its {@code ctrl.<state>} queries test against
+     * ({@code CtrlBinding#testCondition}, {@code client/animation/molang/CtrlBinding.java:136-141}).
      * <p>
      * Written by {@link #predicateMain} and read by the scripts of the controllers registered before `main`
      * (`pre_parallel`, `vehicle`, `pre_main`), so those see the previous frame's value. Upstream has the same
@@ -408,8 +408,16 @@ public final class AnimationManager {
         }
     }
 
+    /**
+     * The main controller's current state name for {@code player}, or {@code null} when no state matched this frame.
+     * <p>
+     * Upstream's {@code StateTracker#getMainAnimationCache()} read path: the {@code ctrl.<state>} binding answers from
+     * it for <em>every</em> MoLang evaluation, not only while a pack script runs
+     * ({@code client/animation/molang/CtrlBinding.java:129,136-141}). The script path passes its own copy in
+     * {@code CtrlScriptBinding.Frame}; animation-file expressions have no frame and read this instead.
+     */
     @Nullable
-    private String mainStateOf(EntityPlayer player) {
+    public String mainStateOf(EntityPlayer player) {
         return mainAnimationCache.get(player.getUniqueID());
     }
 
