@@ -27,7 +27,7 @@ dependencies {
 
     //Optional Addon
     devOnlyNonPublishable("com.github.czqwq:TacZ:1.0:dev")
-    compileOnly("com.github.czqwq:TacZ:1.0:dev")
+    compileOnly("com.github.czqwq:TacZ:1.0:dev") {transitive=false}
 }
 
 @SuppressWarnings('GrMethodMayBeStatic')
