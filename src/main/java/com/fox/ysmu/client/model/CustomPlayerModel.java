@@ -250,6 +250,11 @@ public class CustomPlayerModel extends AnimatedGeoModel {
      * {@code client/entity/CustomHumanoidEntity.java:68-89} adds {@code headPitch}/{@code netHeadYaw} to each member of
      * {@code model.locatorGroup(head)}. The port used to take the single exact-named {@code Head}, so an extra head kept
      * its bind rotation and did not follow the camera.
+     * <p>
+     * Only the group's <b>top-most</b> members are rotated ({@link GeoModel#locatorGroupRoots}): a member that is a
+     * descendant of another member already inherits that member's rotation, so rotating it again applies the camera
+     * twice. LaPluma's {@code Head3} sits under {@code FaceHead} under {@code Head} and is exactly that case - rotating
+     * every member made the head misalign when turning it.
      */
     private static final String HEAD_LOCATOR_GROUP = "Head";
 
@@ -263,7 +268,7 @@ public class CustomPlayerModel extends AnimatedGeoModel {
         // resolved once here and guarded (the group accessor lives on the model).
         GeoModel currentModel = getCurrentModel();
         if (currentModel != null) {
-            List<GeoBone> heads = currentModel.locatorGroup(HEAD_LOCATOR_GROUP);
+            List<GeoBone> heads = currentModel.locatorGroupRoots(HEAD_LOCATOR_GROUP);
             if (!heads.isEmpty()) {
                 float headPitch = (float) Math.toRadians(data.headPitch);
                 float headYaw = (float) Math.toRadians(

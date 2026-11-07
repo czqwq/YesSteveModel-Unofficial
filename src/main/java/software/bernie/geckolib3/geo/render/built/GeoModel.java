@@ -148,6 +148,44 @@ public class GeoModel implements Serializable {
         return boneName.equals(baseName);
     }
 
+    /**
+     * The top-most members of one locator group: the members that have no ancestor in the same group.
+     * <p>
+     * Use this instead of {@link #locatorGroup(String)} whenever the caller <em>transforms or draws</em> at each
+     * member: a bone's own transform already moves its descendants, so applying the same transform to a nested member
+     * applies it twice. That is not hypothetical - the LaPluma pack has {@code Head3} under {@code FaceHead} under
+     * {@code Head}, so a per-member head rotation made {@code Head3} follow the camera twice and the head visibly
+     * misaligned when turning (regression from the "rotate every locator group member" change). Upstream's literal
+     * per-member loop ({@code CustomHumanoidEntity.java:68-89}) has the same double-apply for a nested member; this
+     * accessor keeps the intent of that change - numbered extra heads such as {@code Head2} declared as siblings or
+     * top-level bones still rotate - while applying the transform once per root.
+     * <p>
+     * A group with no nesting returns the same list {@link #locatorGroup(String)} does.
+     *
+     * @param baseName group name without a numeric suffix, e.g. {@code "Head"} or {@code "LeftHandLocator"}
+     * @return the group's top-most bones in traversal order; empty if none
+     */
+    public List<GeoBone> locatorGroupRoots(String baseName) {
+        List<GeoBone> group = locatorGroup(baseName);
+        if (group.isEmpty()) {
+            return group;
+        }
+        ArrayList<GeoBone> roots = new ArrayList<>(group.size());
+        for (GeoBone bone : group) {
+            boolean nested = false;
+            for (GeoBone ancestor = bone.parent; ancestor != null; ancestor = ancestor.parent) {
+                if (group.contains(ancestor)) {
+                    nested = true;
+                    break;
+                }
+            }
+            if (!nested) {
+                roots.add(bone);
+            }
+        }
+        return Collections.unmodifiableList(roots);
+    }
+
     private GeoBone getBoneRecursively(String name, GeoBone bone) {
         if (bone.name.equals(name)) {
             return bone;

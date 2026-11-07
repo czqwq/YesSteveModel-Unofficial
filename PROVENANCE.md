@@ -473,3 +473,13 @@ controller asks for a name the current file does not define. Whether a name exis
 the frame; during the deferred window the old per-frame print would repeat the same line. No behaviour other than the
 number of log lines changes.
 
+## 2026-11-07 bug-fix round: engine edit
+
+One additive engine accessor, made for the nested-head-locator regression (see
+`.agent/phase67-default-inheritance-and-nested-head-locators.md`; the other half of that round was a host-side
+`defaultAnimationFile` id fix, not an engine change):
+
+| file | change |
+|---|---|
+| `geo/render/built/GeoModel.java` | Added `locatorGroupRoots(String)`: the members of a locator group with no ancestor in the same group. The three humanoid consumers (`CustomPlayerModel#codeAnimation`, `CustomPlayerHeadLayer`, `CustomPlayerItemInHandLayer`) use it instead of `locatorGroup`, so a nested group member (`Head3` under `Head` in LaPluma) inherits the transform once instead of twice. Additive: `locatorGroup` and every existing call site keep their behaviour; the index is built from `topLevelBones` like the group accessor and stays out of the serialised geometry stream. Recorded as a deliberate refinement of upstream's literal per-member loop in `.agent/divergences.md`. |
+

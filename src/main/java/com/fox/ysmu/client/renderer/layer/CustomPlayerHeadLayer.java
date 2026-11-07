@@ -55,6 +55,11 @@ public class CustomPlayerHeadLayer<T extends EntityLivingBase & IAnimatable> ext
      * ({@code tmp/YesSteveModel-dev-1.20/.../client/renderer/layer/CustomPlayerHeadLayer.java:26-50}: the
      * {@code visitLocatorGroup(PlayerLocator.get().head, ...)} callback at {@code :44} runs once per locator), and this
      * port used to take only the exact-named {@code Head}.
+     * <p>
+     * Only the group's top-most members are drawn at ({@link GeoModel#locatorGroupRoots}): a nested member already
+     * moves with its ancestor, so drawing the head-slot item there as well would draw it twice - LaPluma's
+     * {@code Head3} under {@code Head} is exactly that case (and the same double-apply made the head misalign when
+     * turning, see {@code CustomPlayerModel#codeAnimation}).
      */
     private static final String HEAD_LOCATOR_GROUP = "Head";
 
@@ -80,9 +85,10 @@ public class CustomPlayerHeadLayer<T extends EntityLivingBase & IAnimatable> ext
         if (geoModel == null) {
             return;
         }
-        // Every member of the group, like upstream's visitLocatorGroup; empty means the model has no head locator at
-        // all, which is the same "draw nothing" the single exact-name lookup answered before.
-        List<GeoBone> headBones = geoModel.locatorGroup(HEAD_LOCATOR_GROUP);
+        // The group's top-most members, like upstream's visitLocatorGroup but without double-drawing a nested member;
+        // empty means the model has no head locator at all, which is the same "draw nothing" the single exact-name
+        // lookup answered before.
+        List<GeoBone> headBones = geoModel.locatorGroupRoots(HEAD_LOCATOR_GROUP);
         if (headBones.isEmpty()) {
             return;
         }

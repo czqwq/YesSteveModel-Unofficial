@@ -104,6 +104,10 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
      * nothing per frame; a model with several locators resolves each chain through
      * {@code IGeoRenderer#getPathFromRoot}. An empty group falls back to that same chain, so a geometry built by
      * another {@code IGeoBuilder} behaves exactly as before.
+     * <p>
+     * Only the group's top-most members are drawn at ({@link GeoModel#locatorGroupRoots}): a member nested under
+     * another member already inherits its ancestor's transform, so drawing the stack there too would duplicate the
+     * item at an offset (the same rule the head rotation/layer follow).
      *
      * @param locatorGroup group base name without the numeric suffix; {@code LeftHandLocator} is the off hand and
      *                     {@code RightHandLocator} the main hand, matching upstream's {@code PlayerLocator}
@@ -113,7 +117,7 @@ public class CustomPlayerItemInHandLayer<T extends EntityLivingBase & IAnimatabl
         if (stack == null || stack.getItem() == null) {
             return;
         }
-        List<GeoBone> locators = geoModel.locatorGroup(locatorGroup);
+        List<GeoBone> locators = geoModel.locatorGroupRoots(locatorGroup);
         if (locators.isEmpty() || (locators.size() == 1 && !fallbackChain.isEmpty())) {
             // No group at all, or the single member is the exact-named locator GeoBuilder already chained.
             renderArmWithItem(entity, stack, fallbackChain, isMainHand, isVanilla);
