@@ -519,3 +519,12 @@ YSM's compat layer compiles against; the 72 MB dev jar (which carries all assets
 - Licence: TacZ is MIT (`LICENSE`, Copyright (c) 2026 czqwq); the subset is redistributed here under the same terms.
 - See `.agent/phase71-tacz-compat.md` for the adapter itself and `.agent/divergences.md` for the 1.7.10 substitutions.
 
+
+## 2026-11-11 loop-type round: engine edit
+
+One engine edit made while fixing a model switch that changed a shared clip's loop type for the rest of the session
+(see `.agent/phase75-loop-type-carried-across-animation-files.md`; no host-side change):
+
+| file | change |
+|---|---|
+| `core/controller/AnimationController.java` | `refreshCurrentAnimation` no longer copies the replaced animation object's `loop` onto the object the name re-resolves to after the animation-file answer changed; it re-applies only the loop type the controller itself asked for (new `requestedLoopType`, read from the current builder's `RawAnimation`) and otherwise keeps the new file's authored loop. The host's per-domain default fallback inserts the built-in default's `Animation` instances into every model's file by reference, so the copy wrote one model's loop onto a clip every other model inherits: `AK_特蕾西娅` re-played the `hold_mainhand:pickaxe` raise every 2.5 s after a model switch (authored `hold_on_last_frame`) until the game restarted. Upstream has no counterpart - each render target owns its animation store and a switch never hands A's object to B - so this removes a port-specific defect rather than diverging from upstream. Verified with `tmp/_probe/LoopCarryProbe.java` against the real `AnimationController#process`: pre-fix the shared clip became `LOOP`, post-fix it keeps `HOLD_ON_LAST_FRAME` and an explicit `PLAY_ONCE` request is still re-applied after the switch. |

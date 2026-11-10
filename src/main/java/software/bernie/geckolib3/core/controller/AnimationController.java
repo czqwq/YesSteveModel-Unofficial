@@ -33,6 +33,7 @@ import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.builder.ILoopType.EDefaultLoopTypes;
+import software.bernie.geckolib3.core.builder.RawAnimation;
 import software.bernie.geckolib3.core.easing.EasingManager;
 import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -829,6 +830,26 @@ public class AnimationController<T extends IAnimatable> {
      * <p>
      * A model that cannot name its animation file ({@link IAnimatableModelProvider} not implemented → {@code null}
      * answer) keeps the previous uncached per-frame lookup, so the engine stays usable without that interface.
+     *
+     * <p>
+     * <b>The loop type is re-derived, never carried over.</b> The loop of the animation being replaced belongs to the
+     * file that animation came from; the resolved object belongs to the file the animatable answers with now. Those are
+     * two different files whenever the answer changes (a model switch, or the host answering with the built-in default
+     * while a newly selected model is still pending), and the loop must not travel between them. Only the controller's
+     * own request is re-applied ({@link #requestedLoopType}); a play call that left the choice to the file
+     * ({@code AnimationBuilder#addAnimation(String)} stores a {@code null} loop type) keeps whatever the new file
+     * authored.
+     *
+     * <p>
+     * Carrying it over was not cosmetic. The host's per-domain default fallback inserts the <em>same</em>
+     * {@code Animation} instance into every model's file
+     * ({@code ClientModelManager#registerAnimations}, the built-in default's clips are inherited by reference), so
+     * writing the previous file's loop onto that instance changed the clip's loop for every model for the rest of the
+     * session. Reported symptom: a {@code hold_mainhand:pickaxe} authored {@code hold_on_last_frame} (raise the tool,
+     * then hold) started wrapping around and re-playing the raise every 2.5 s after a model switch - a model whose own
+     * clip of the same name loops (e.g. 芙宁娜v3.14's {@code arm.animation.json} stub is {@code "loop": true}) had just
+     * been played, and the switch resolved the name against the built-in default's file. Restarting the game restored
+     * the authored loop, which is what made it look intermittent. Probe: {@code tmp/_probe/LoopCarryProbe.java}.
      */
     private void refreshCurrentAnimation(IAnimatableModel<T> model) {
         Animation current = this.currentAnimation;
@@ -840,14 +861,36 @@ public class AnimationController<T extends IAnimatable> {
         Animation animation = model.getAnimation(current.animationName, this.animatable);
         // Cross-model fallback removed — see setAnimation() for rationale.
         if (animation != null) {
-            ILoopType loop = current.loop;
             this.currentAnimation = animation;
-            this.currentAnimation.loop = loop;
+            // Only the controller's own explicit request may override the file's authored loop; see the note above.
+            ILoopType requested = requestedLoopType(current.animationName);
+            if (requested != null) {
+                this.currentAnimation.loop = requested;
+            }
         }
         // Remember the resolution even when the name is currently unknown: a missing name only becomes known once the
         // file answer changes (and a model switch also hands a different animation object through setAnimation).
         this.resolvedAnimation = this.currentAnimation;
         this.resolvedAnimationLocation = location;
+    }
+
+    /**
+     * The loop type this controller's current playlist explicitly asks for, or {@code null} when it leaves the choice
+     * to the animation file.
+     *
+     * <p>
+     * {@code setAnimation} applies the same override while it builds the playlist; this is the re-apply path for a
+     * re-resolve, so a clip the caller asked to play once keeps playing once even if the animation file answer changed
+     * mid-clip. The first playlist entry with that name is the one that was resolved - the legacy controllers this
+     * matters for always pass a single-entry builder.
+     */
+    private ILoopType requestedLoopType(String animationName) {
+        for (RawAnimation raw : this.currentAnimationBuilder.getRawAnimationList()) {
+            if (raw.animationName != null && raw.animationName.equals(animationName)) {
+                return raw.loopType;
+            }
+        }
+        return null;
     }
 
     /**
