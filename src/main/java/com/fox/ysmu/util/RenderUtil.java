@@ -48,11 +48,36 @@ import software.bernie.geckolib3.util.GeoStats;
 @SuppressWarnings("all")
 public final class RenderUtil {
 
+    /**
+     * The lightmap coordinate every GUI entity draw pins itself to: 240/240, the full-bright texel of the 16x16
+     * lightmap. Upstream's GUI previews pass the same value as packed light ({@code 0xf000f0}); the coordinate is kept
+     * for the nested draws that ask the lightmap for it (vanilla's {@code GuiContainer} pins 240/240 before drawing its
+     * items for the same reason, {@code GuiContainer.java:105-107}), while this bracket leaves the lightmap unit itself
+     * disabled - see {@link #withGuiEntityLighting}.
+     */
     private static final float GUI_LIGHTMAP_BRIGHTNESS = 240.0F;
 
     /**
-     * Whether the diagnostic below reports. {@code -Dtlmd.gl.diag=true}, the same switch the port's own diagnostic
-     * uses, so one run answers for both sides.
+     * Runs one GUI entity draw (catalog tile, texture-screen preview, HUD paper doll, inventory player) with the
+     * fixed-function lighting state the host's own GUI uses, and restores the caller's state afterwards.
+     *
+     * <p>
+     * <b>The lightmap texture unit stays off, and that is the 1.7.10 form of upstream's full-bright GUI light.</b>
+     * Upstream draws every GUI entity with packed light {@code 0xf000f0}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../util/RenderUtil.java:184,377,429}), the lightmap's full-bright texel. On
+     * 1.20 that texel is white even under night vision: its lightmap only ever <i>brightens</i> for night vision
+     * ({@code LightTexture} lerps toward the normalized color only {@code if (max < 1)}) and clamps each channel
+     * afterwards. 1.7.10's {@code EntityRenderer.updateLightmap:908-928} normalizes unconditionally <b>before</b> the
+     * clamp at {@code :930-943}, so under night vision the full-bright texel is blue - measured on the vanilla
+     * formula: rgb(177,195,252) in daylight, rgb(147,170,252) at night. Enabling the unit at 240/240 therefore tinted
+     * the HUD paper doll and the inventory player blue, while the world model samples the player's own sky-light
+     * texel (white in daylight) and stayed normal.
+     *
+     * <p>
+     * The host's own GUI entity rendering uses no lightmap at all: {@code GuiInventory.func_147046_a:91-112} draws the
+     * player on {@code RenderHelper.enableStandardItemLighting()} alone and disables the lightmap unit at
+     * {@code :120-123}, and {@code GuiContainer.drawScreen:88-135} never enables it either. With the texel white the
+     * unit only multiplies by one, so dropping it changes no pixel outside night vision.
      */
     public static void withGuiEntityLighting(Runnable renderAction) {
         GuiEntityLightingState state = GuiEntityLightingState.capture();
@@ -60,7 +85,7 @@ public final class RenderUtil {
             GL11.glEnable(GL12.GL_RESCALE_NORMAL);
             GL11.glEnable(GL11.GL_COLOR_MATERIAL);
             GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
-            setLightmapTextureEnabled(true);
+            setLightmapTextureEnabled(false);
             OpenGlHelper.setLightmapTextureCoords(
                 OpenGlHelper.lightmapTexUnit,
                 GUI_LIGHTMAP_BRIGHTNESS,
