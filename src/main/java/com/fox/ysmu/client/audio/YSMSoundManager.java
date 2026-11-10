@@ -262,7 +262,16 @@ public final class YSMSoundManager {
         }
 
         // Step 2~4 — 命名空间音效（SoundHandler + LocalAssetProvider）
-        if (!soundName.contains(":")) return;
+        if (!soundName.contains(":")) {
+            // 无命名空间的音效名只可能是模型音效，而 Step 1 没找到；下面几步都不可能播它，于是这里曾经是整条
+            // 查找链上**唯一完全静默**的出口——登记表被错误边界清掉时正是这个症状（见 stopLevelPlayback）。
+            // 加了门的诊断行：只在 DebugSound 打开时输出，与上方入口行同一开关。
+            if (Config.DEBUG_SOUND) {
+                ysmu.LOG.info("[YSMU-SOUND] no model sound for '{}::{}' (registered model sounds: {})", modelKey,
+                    soundName, SOUND_SOURCES.size());
+            }
+            return;
+        }
 
         Minecraft mc = Minecraft.getMinecraft();
         SoundHandler handler = mc.getSoundHandler();
@@ -707,15 +716,38 @@ public final class YSMSoundManager {
         return SOUND_FILES.get(key);
     }
 
-    /** 清理注册的音效并停止播放 */
-    public static void clear() {
+    /**
+     * 世界边界（换维度 / 退出世界）：停掉正在播的声音并丢掉与实体绑定的播放记账，**保留**按模型登记的音效表
+     * （{@link #SOUND_SOURCES} / {@link #SOUND_FILES}）。
+     *
+     * <p><b>为什么这里不能清登记表。</b>1.7.10 的换维度在客户端就是一次世界卸载：
+     * {@code NetHandlerPlayClient.handleRespawn:988-1000} 建新 {@code WorldClient} 并调
+     * {@code Minecraft.loadWorld}，后者给旧世界 post {@code WorldEvent.Unload}（{@code Minecraft.java:2249-2253}），
+     * 于是 {@code CommonEventHandler#onWorldUnload} 在<em>每次换维度</em>都会跑。而登记表的生命周期是
+     * <b>连接</b>而不是世界，它只在模型同步时写入（{@code OpenYsmModelSyncClient:480} 的
+     * {@code registerModelSounds}，以及懒解密预暖 {@code ClientModelManager:3374} 的 {@code cacheModelSounds}），
+     * 换维度之后不会再有下一次同步把它填回来：清掉即本会话永久静音，只有重新登录（新同步）才恢复。
+     * 上游同样把模型音效资源挂在渲染目标上，世界卸载只退役这个世界里的 animatable
+     * （{@code client/event/EntityLoadEvent.java:63-74}），资源本身不动。
+     *
+     * <p><b>播放记账必须清</b>：音源属于旧世界的实体，{@code SOUND_KEYFRAME_LAST_TIME} 记的是
+     * 「这个持有者的这个控制器已经放过这条音效」，两者都随旧世界一起作废。
+     */
+    public static void stopLevelPlayback() {
         stopAll();
-        SOUND_SOURCES.clear();
-        SOUND_FILES.clear();
         // 防抖表以 model::owner::controller::sound 为键，平时只由 stopController/clearOwnerSlot 按 owner 清理；
         // 不在这里清空的话，本会话播放过的每个模型都会按「控制器 + 音效」留下一批条目直到进程结束。
-        // clear() 是断线/世界卸载/模型列表重置的共同出口，正是丢弃它们的时机。
         SOUND_KEYFRAME_LAST_TIME.clear();
+    }
+
+    /**
+     * 清理注册的音效并停止播放。这是<b>连接边界</b>出口（断线、模型列表被同步整体替换）——按模型登记的
+     * 音效表属于那些正在被丢掉的模型，所以一并作废。世界边界用 {@link #stopLevelPlayback}。
+     */
+    public static void clear() {
+        stopLevelPlayback();
+        SOUND_SOURCES.clear();
+        SOUND_FILES.clear();
         sndSystem = null;
         sndSystemSearched = false;
         sndManagerField = null;

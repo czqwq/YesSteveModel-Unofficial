@@ -130,8 +130,14 @@ public class CommonEventHandler {
         // 箭矢落地计时、自定义粒子都要清掉，否则它们会跟着进下一个世界（SOURCE CommonEventHandler.java:87-93，
         // 上游按"实体离开世界"逐个 reset）。1.7.10 没有实体离开事件，世界卸载是可用边界；这些表的键都是
         // entityId，而 entityId 在下一个世界会从同一数字段重新分配，因此不清理会被无关实体读到。
+        // 注意这里清的是**播放状态**，不是按模型登记的音效表：换维度在客户端就是一次世界卸载
+        // （NetHandlerPlayClient.handleRespawn:988-1000 → Minecraft.loadWorld:2249-2253 post WorldEvent.Unload），
+        // 而音效登记的生命周期是连接（只由模型同步写入，换维度不会再同步），在这里一并清掉会让本会话余下的
+        // 模型音效永久静音，且 playSound 对无命名空间的音效名是静默返回——即"没有日志、换个维度就再也听不到"。
+        // 上游同样只退役这个世界的 animatable（EntityLoadEvent.java:63-74），音效资源挂在渲染目标上不动。
+        // 详见 YSMSoundManager#stopLevelPlayback。
         if (event.world != null && event.world.isRemote) {
-            YSMSoundManager.clear();
+            YSMSoundManager.stopLevelPlayback();
             ProjectileControllerRuntime.clear();
             ProjectileTimelineRuntime.clear();
             VehicleControllerRuntime.clear();
