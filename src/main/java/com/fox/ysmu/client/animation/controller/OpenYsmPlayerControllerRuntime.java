@@ -120,6 +120,25 @@ public final class OpenYsmPlayerControllerRuntime {
                 detail.toString());
         }
         for (ControllerMatch match : matches) {
+            if (match.controller.implicitParallel) {
+                // Upstream implements the implicit parallel controllers as ParallelPredicate, whose body is
+                // playLoopAnimation(event, animationName) (client/animation/predicate/ParallelPredicate.java:18-20,
+                // controller built in client/controller/ParallelControllerDiscovery.java:70-79): the raw slot plays
+                // the clip in LOOP. Applying the synthesized state machine instead would hand the clip to the
+                // concurrent player, which issues it with the *authored* loop - physics clips are authored
+                // PLAY_ONCE (LaPluma's parallel3 is 0.0101 s) - so its timeline runs once and the v.* physics
+                // variables it writes freeze; the pre_main state machine then never sees v.ground_speed > 0 and the
+                // walk states can never be entered (the reported LaPluma walk regression). Leaving the match
+                // unapplied hands the frame back to AnimationManager#predicateParallel, whose playParallelIfPresent
+                // -> playLoopAnimation is exactly the upstream answer.
+                if (Config.DEBUG_CONTROLLER && allowDebugLog("CTRL-IMPLICIT-LOOP-" + geckoControllerName)) {
+                    ysmu.LOG.info(
+                        "[YSMU-CTRL] {} -> raw loop slot (upstream ParallelPredicate) for '{}'",
+                        geckoControllerName,
+                        match.controller.name);
+                }
+                continue;
+            }
             PlayState result = tryApplyController(event, player, animationId, geckoControllerName, match);
             if (result != null) {
                 return result;

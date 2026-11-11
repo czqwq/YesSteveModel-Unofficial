@@ -64,6 +64,20 @@ final class OpenYsmControllerDefinitions {
          *  在控制器解析阶段通过扫描条件和动画关键帧自动检测。
          *  运行时若集合中任一 mod 未加载，则跳过此控制器。 */
         final Set<String> modDependencies = new LinkedHashSet<>();
+        /**
+         * 该控制器不是模型 controller JSON 声明的，而是
+         * {@link OpenYsmAnimationControllerRegistry#synthesizeImplicitParallelControllers} 按动画名合成的
+         * {@code player.(pre_)parallelN}。
+         * <p>
+         * 上游这类控制器由 {@code ParallelPredicate} 实现，谓词就是
+         * {@code playLoopAnimation(event, animationName)}（{@code client/animation/predicate/ParallelPredicate.java:18-20}，
+         * 控制器本身来自 {@code ParallelControllerDiscovery.java:70-79}），即**用 LOOP 播原始片段**；它不是
+         * OpenYSM 的状态机。{@link OpenYsmPlayerControllerRuntime#tryApply} 因此不接管它，交回
+         * {@code AnimationManager#predicateParallel} 的 {@code playParallelIfPresent}（同样是 LOOP）。
+         * 用并发子控制器播它会把"作者写的 loop"当循环模式——物理片段通常是 PLAY_ONCE（LaPluma 的
+         * {@code parallel3} 长度 0.0101s），时间线只跑一遍，它写的 {@code v.*} 物理量随即冻结。
+         */
+        boolean implicitParallel;
 
         State getInitialState() {
             if (states.containsKey(initialState)) {

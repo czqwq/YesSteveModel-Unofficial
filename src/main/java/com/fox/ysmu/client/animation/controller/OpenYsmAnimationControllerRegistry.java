@@ -151,6 +151,12 @@ public final class OpenYsmAnimationControllerRegistry {
             Controller controller = new Controller();
             controller.name = controllerName;
             controller.initialState = state.name;
+            // Upstream's counterpart is not a state machine: ParallelControllerDiscovery builds the controller
+            // around ParallelPredicate, whose whole body is playLoopAnimation(event, animationName)
+            // (ParallelControllerDiscovery.java:70-79, predicate/ParallelPredicate.java:18-20). Marking the
+            // synthesized controller lets the runtime leave it to the raw slot path instead of playing the clip
+            // through a concurrent child, which would honour the authored loop (PLAY_ONCE for physics clips).
+            controller.implicitParallel = true;
             controller.states.put(state.name, state);
             set.controllers.put(controllerName, controller);
             if (com.fox.ysmu.Config.DEBUG_CONTROLLER) {
