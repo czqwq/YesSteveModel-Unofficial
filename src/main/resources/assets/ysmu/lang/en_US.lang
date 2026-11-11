@@ -480,7 +480,6 @@ commands.yes_steve_model.reset.done=Reset Molang variables for %s player(s).
 # commands.yes_steve_model.welcome.on / .off stays plain text with the rest, because the server prints it.
 commands.yes_steve_model.play.usage=  Usage: /ysm play <player|@a|@p> <animation|stop>
 commands.yes_steve_model.play.no_data=Cannot play animation: %s has no model data.
-commands.yes_steve_model.play.not_found=Animation %s not found in the current model of %s.
 commands.yes_steve_model.play.done=Play %s on %s player(s).
 commands.yes_steve_model.play.stopped=Stopped the animation on %s player(s).
 commands.yes_steve_model.molang.usage=  Usage: /ysm molang execute <player|@a|@p> <expression>

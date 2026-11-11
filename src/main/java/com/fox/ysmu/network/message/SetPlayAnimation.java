@@ -1,16 +1,11 @@
 package com.fox.ysmu.network.message;
 
 import net.minecraft.entity.player.EntityPlayerMP;
-import net.minecraft.util.ResourceLocation;
 
-import com.fox.ysmu.client.ClientModelManager;
-import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.util.DeferredWork;
-import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
-import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
@@ -40,12 +35,15 @@ import io.netty.buffer.ByteBuf;
  * The handler used to accept only {@code STOP <= id && id < 8}. A name cannot be bounded by a numeric range, so
  * {@link #isPlausibleAnimationName(String)} takes its place: non-empty, at most
  * {@link #MAX_ANIMATION_NAME_LENGTH} characters, no control characters, and never a {@code '#'}-prefixed category
- * marker (those name a sub-page, not an animation). On top of that the handler repeats the existence check
- * {@code YsmCommand.processPlay} already performs - only when the side can answer it, i.e. when the client's
- * animation store for the model can be read ({@link #modelDeclaresAnimation}) - so a name the server can prove missing
- * never reaches the EEP. On a dedicated server, and on any non-client thread, that store is unavailable, so the verdict
- * is left to the client, which refuses to send a name its model does not declare (see
- * {@code AnimationRouletteScreen#playEntry}).
+ * marker (those name a sub-page, not an animation). There is deliberately <b>no</b> server-side "does the model declare
+ * this name" check: the client is the only side that can answer it, and it already refuses to send a name its model
+ * does not declare ({@code AnimationRouletteScreen#playEntry} validates through
+ * {@code EntityAnimationApi#modelHasClip} before sending). Upstream's {@code PlayAnimationCommand.java:26-45} performs
+ * no name check either; a name nothing declares is simply skipped by the render path
+ * ({@code AnimationManager#playIfPresent}). The check this class used to repeat was dead code on every real path
+ * (both callers run on a server thread) and forced a client-class reference into a common packet class, which crashed
+ * dedicated servers - see {@code .agent/phase76-animation-store-port.md} "实机反馈修复" and F-1 in
+ * {@code .agent/review-uncommitted-2026-11-11.md}.
  */
 public class SetPlayAnimation implements IMessage {
 
@@ -97,10 +95,9 @@ public class SetPlayAnimation implements IMessage {
     }
 
     /**
-     * The shape test that replaces the old index bound. Deliberately about <em>shape</em>, not about whether the
-     * model declares the name: the server has no per-model extra-animation table (the manifest is parsed and cached
-     * into client payloads, not kept), so the "does this model have it" half is answered where it can be - the
-     * handler's model-declaration check below, and the client's send side.
+     * The shape test that replaces the old index bound. Deliberately about <em>shape</em>, not about whether the model
+     * declares the name: the server cannot answer that (see the class javadoc), so the send side and the render path
+     * are the two places that know the model, and a name nothing declares is skipped there.
      */
     static boolean isPlausibleAnimationName(String name) {
         if (name == null || name.isEmpty() || name.length() > MAX_ANIMATION_NAME_LENGTH) {
@@ -118,37 +115,6 @@ public class SetPlayAnimation implements IMessage {
             }
         }
         return true;
-    }
-
-    /**
-     * Whether a player's model declares an animation, answered only by a side that can answer it.
-     * <p>
-     * The answer comes from the client's per-model animation store
-     * ({@link ClientModelManager#animationStoreFor}), which is filled while models are parsed on the client. Anywhere
-     * the store cannot be read - a dedicated server, and any non-client thread, which includes the integrated
-     * server's - the accessor answers {@code null} and this returns {@code true} for everything: the client then
-     * declines to send a name its model does not declare. The {@code null} store keeps exactly the permissive answer
-     * the old {@code animFile == null} branch gave. Two callers share this one rule: this packet's handler (the
-     * roulette's play request) and {@code YsmCommand.processPlay} ({@code /ysm play <targets> <animation>}), which had
-     * the same six lines inline.
-     */
-    public static boolean modelDeclaresAnimation(ExtendedModelInfo eep, String name) {
-        if (eep == null) {
-            return true;
-        }
-        ResourceLocation modelId = eep.getModelId();
-        if (modelId == null) {
-            return true;
-        }
-        if (!FMLCommonHandler.instance().getSide().isClient()) {
-            // Dedicated server: the animation stores live in the client's classes, which a dedicated server does not
-            // have - loading ClientModelManager here throws NoClassDefFoundError (see .agent/phase76-animation-store-port.md,
-            // "实机反馈修复"). The client is the only side that can answer this question and it already checks before
-            // sending; upstream's PlayAnimationCommand does no name check either, so the server accepts and records it.
-            return true;
-        }
-        AnimationStore store = ClientModelManager.animationStoreFor(ModelIdUtil.getMainId(modelId));
-        return store == null || store.contains(name);
     }
 
     public static class Handler implements IMessageHandler<SetPlayAnimation, IMessage> {
@@ -172,7 +138,7 @@ public class SetPlayAnimation implements IMessage {
             return null;
         }
 
-        /** Server thread: validate the request against the sender's current model and record it. */
+        /** Server thread: record the request in the sender's EEP; the render path skips a name the model lacks. */
         private static void apply(EntityPlayerMP sender, String name) {
             try {
                 if (sender.isDead || sender.worldObj == null) {
@@ -190,10 +156,6 @@ public class SetPlayAnimation implements IMessage {
                     if (!name.isEmpty()) {
                         ysmu.LOG.warn("Ignoring YSM play-animation request with an unusable name (length={})", name.length());
                     }
-                    return;
-                }
-                if (!modelDeclaresAnimation(modelIdEEP, name)) {
-                    ysmu.LOG.info("Ignoring YSM play-animation request for '{}': the model does not declare it", name);
                     return;
                 }
                 modelIdEEP.playAnimation(name);

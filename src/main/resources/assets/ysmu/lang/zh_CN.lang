@@ -477,7 +477,6 @@ commands.yes_steve_model.reset.done=已重置 %s 个玩家的 Molang 变量.
 # commands.yes_steve_model.welcome.on / .off 仍按纯文本(由服务端输出) . 标点按仓库约定用 ASCII + 一个空格.
 commands.yes_steve_model.play.usage=  语法: /ysm play <玩家|@a|@p> <动画名|stop>
 commands.yes_steve_model.play.no_data=无法播放动画: %s 没有模型数据.
-commands.yes_steve_model.play.not_found=当前模型没有动画: %s (玩家 %s)
 commands.yes_steve_model.play.done=播放 %s 于 %s 名玩家.
 commands.yes_steve_model.play.stopped=已停止 %s 名玩家的动画.
 commands.yes_steve_model.molang.usage=  语法: /ysm molang execute <玩家|@a|@p> <表达式>

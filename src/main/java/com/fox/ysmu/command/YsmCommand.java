@@ -48,7 +48,6 @@ import com.fox.ysmu.network.message.S2CExecuteMolang;
 import com.fox.ysmu.network.message.S2CPlaySound;
 import com.fox.ysmu.network.message.S2CSetDebugOverlay;
 import com.fox.ysmu.network.message.SetModelAndTexture;
-import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.network.message.SetWelcomeConfig;
 import com.fox.ysmu.network.message.ShowBufferInfo;
 import com.fox.ysmu.network.message.SyncGamePath;
@@ -487,17 +486,19 @@ public class YsmCommand extends CommandBase {
      * and its body only touches the targets. The earlier port required the issuer to be a player because the
      * animation landed on them; the receipts now go to the command source.
      * <p>
-     * <b>The existence check</b> runs only on a side that can answer it: the answer comes from the client's per-model
-     * animation stores ({@link SetPlayAnimation#modelDeclaresAnimation}), which are filled while the client parses
-     * models, so on a dedicated server - and on the integrated server's own thread, where the store accessor refuses to
-     * answer - the verdict is left to the client. The reference's own comment ({@code :215-219}) says the same. A name
-     * is therefore rejected only where the stores can be read, and otherwise the client skips a missing animation
-     * safely instead of failing ({@link SetPlayAnimation#modelDeclaresAnimation} is the same rule, used by the
-     * roulette packet's handler).
+     * <b>No existence check</b> - the client is the only side that can answer "does this model declare that name": the
+     * roulette validates on the client before sending ({@code AnimationRouletteScreen#sendPlayRequest} ->
+     * {@code EntityAnimationApi#modelHasClip}), while this command performs no check at all (upstream's
+     * {@code PlayAnimationCommand.java:26-45} performs none either) and the render path skips a name the model does not
+     * declare ({@code AnimationManager#playIfPresent}). The old server-side check was dead code on every real path
+     * (both callers run on a server thread, where the client store cannot be read) and forced a client-class reference
+     * into a common packet class, which crashed dedicated servers - see
+     * {@code .agent/phase76-animation-store-port.md} "实机反馈修复" and F-1 in
+     * {@code .agent/review-uncommitted-2026-11-11.md}.
      * <p>
-     * <b>The receipts are a port addition</b> (upstream answers nothing at all): one refusal line per target and one
-     * summary line, in the same shape {@code /ysm auth} and {@code /ysm model set} use. Every key is {@code %s}-only,
-     * because {@code ChatComponentTranslation} refuses other conversions on 1.7.10.
+     * <b>The receipts are a port addition</b> (upstream answers nothing at all): one summary line, in the same shape
+     * {@code /ysm auth} and {@code /ysm model set} use. Every key is {@code %s}-only, because
+     * {@code ChatComponentTranslation} refuses other conversions on 1.7.10.
      */
     private void processPlay(ICommandSender sender, String[] args) {
         if (args.length < 3) {
@@ -521,14 +522,6 @@ public class YsmCommand extends CommandBase {
                 sender.addChatMessage(
                     new ChatComponentTranslation(
                         "commands.yes_steve_model.play.no_data",
-                        target.getCommandSenderName()));
-                continue;
-            }
-            if (!stop && !SetPlayAnimation.modelDeclaresAnimation(eep, animName)) {
-                sender.addChatMessage(
-                    new ChatComponentTranslation(
-                        "commands.yes_steve_model.play.not_found",
-                        animName,
                         target.getCommandSenderName()));
                 continue;
             }
@@ -770,10 +763,10 @@ public class YsmCommand extends CommandBase {
      * plus {@code "stop"}, and nothing at all on a dedicated server
      * ({@code event/CommandRegistry.java:41-56}). This port has no single default render target accessor to read, and
      * its command names arbitrary targets whose models can differ, so the set is every animation name the client's
-     * animation stores know - {@code ClientModelManager#allAnimationNames}, which is the store replacement for walking
-     * {@code GeckoLibCache}'s merged files and includes the built-in default's names through each store's fallback -
-     * plus {@link #PLAY_STOP}. That accessor answers clientside only, so the list degrades to just {@code "stop"} on a
-     * dedicated server, exactly as upstream's does. Sorted, so the suggestion order is stable.
+     * animation stores know - {@code ClientModelManager#allAnimationNames}, the union over every installed model store
+     * (each including the built-in default's names through its fallback pointer) - plus {@link #PLAY_STOP}. That
+     * accessor answers clientside only, so the list degrades to just {@code "stop"} on a dedicated server, exactly as
+     * upstream's does. Sorted, so the suggestion order is stable.
      */
     static List<String> playAnimationSuggestions() {
         Set<String> names = new TreeSet<>();

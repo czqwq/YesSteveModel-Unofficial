@@ -583,7 +583,7 @@ public class AnimationRouletteScreen extends GuiScreen {
     }
 
     /**
-     * The client-side half of the "a name no model declares must not reach the EEP" gate.
+     * The client-side gate that keeps "a name no model declares" out of the EEP.
      * <p>
      * The EEP is broadcast to every tracking client and each of them asks the engine to play whatever it holds, every
      * frame; a name the model does not declare makes {@code AnimationController#setAnimation} take its early return

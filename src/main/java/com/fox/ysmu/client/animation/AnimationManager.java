@@ -254,9 +254,8 @@ public final class AnimationManager {
                 event.getController()
                     .markNeedsReload();
             }
-            // The name comes from the EEP, which the *server* writes and broadcasts (`SetPlayAnimation`, whose handler
-            // can only check a name where its own GeckoLibCache has an animation table - never on a dedicated server,
-            // the asymmetry `YsmCommand.processPlay` documents - and the `/ysm play` subcommand), so on this side it can
+            // The name comes from the EEP, which the *server* writes and broadcasts (`SetPlayAnimation` and the
+            // `/ysm play` subcommand, both of which record a name without any existence check), so on this side it can
             // name a clip this model does not declare: the player switched models while the animation was playing.
             // Handing such a name over drives AnimationController#setAnimation into its "Could not load animation:
             // <name>. Is it missing?" branch once per frame and leaves the controller without a fallback - the same

@@ -39,15 +39,15 @@ import software.bernie.geckolib3.core.builder.ILoopType;
  * themselves only have meaning on the client that renders the entity.
  * <p>
  * D-A6: these entry points are effective on the client only, and a server-side call is silently ineffective -
- * it never throws. Nothing here sends a packet and every registry the clip methods touch is a client-side
- * structure ({@code EntityClips}, plus the engine's {@code GeckoLibCache}), so on a dedicated server a pushed
- * clip is stored but no renderer reads it, the read-backs ({@link #getEntityClip(EntityLivingBase)} and
- * {@link #getEntityClipLoop(EntityLivingBase)}) answer from that same server-side map, and
- * {@link #modelHasClip(EntityLivingBase, String)} answers {@code false} from the engine's empty animation cache
- * (the engine constructs that cache lazily, so it does not throw). {@link #parseLoop(String)} is the exception:
- * it only maps a name onto an engine enum and touches no client state, so it works on either side. In single
- * player the integrated server and the client share one JVM, which is why a common-side call from a host there
- * does take effect locally - push clips from the client that renders the entity.
+ * it never throws. Nothing here sends a packet and every structure the clip methods touch is a client-side one:
+ * {@code EntityClips} for the pushed clip, and the per-model animation stores ({@link #modelHasClip}) - so on a
+ * dedicated server a pushed clip is stored but no renderer reads it, the read-backs
+ * ({@link #getEntityClip(EntityLivingBase)} and {@link #getEntityClipLoop(EntityLivingBase)}) answer from that same
+ * server-side map, and {@link #modelHasClip(EntityLivingBase, String)} answers {@code false} because the store lookup
+ * is physically guarded (the stores live in the client's classes, which a dedicated server cannot even load).
+ * {@link #parseLoop(String)} is the exception: it only maps a name onto an engine enum and touches no client state, so
+ * it works on either side. In single player the integrated server and the client share one JVM, which is why a
+ * common-side call from a host there does take effect locally - push clips from the client that renders the entity.
  */
 public final class EntityAnimationApi {
 
@@ -139,8 +139,9 @@ public final class EntityAnimationApi {
      * is not an error - YSMU falls back to locomotion - but asking first keeps the two renderers agreeing on
      * which clip is showing.
      * <p>
-     * D-A6: client-effective only. The animation files live in the engine's {@code GeckoLibCache} on the client,
-     * and the engine builds that cache lazily, so a server-side call answers {@code false} instead of throwing.
+     * D-A6: client-effective only. The clip names live in the client's per-model animation stores; a dedicated
+     * server cannot load those classes at all, so {@link #animationStoreForModel} answers {@code null} there (behind
+     * an explicit physical-side guard) and this returns {@code false} instead of throwing.
      */
     public static boolean modelHasClip(EntityLivingBase entity, String clip) {
         if (entity == null || clip == null || clip.isEmpty()) {
