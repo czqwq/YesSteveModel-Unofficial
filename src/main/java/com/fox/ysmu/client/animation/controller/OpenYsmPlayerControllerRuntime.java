@@ -31,6 +31,7 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Con
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.ControllerSet;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.State;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Transition;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.ysmu;
 
@@ -39,7 +40,6 @@ import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
-import software.bernie.geckolib3.file.AnimationFile;
 
 public final class OpenYsmPlayerControllerRuntime {
 
@@ -397,8 +397,14 @@ public final class OpenYsmPlayerControllerRuntime {
         return PlayState.CONTINUE;
     }
 
-    /** Port-only stride matching stays a shared outer rate. Per-clip anim_speed is evaluated
-     * by each child, never multiplied into the parent using the first entry's expression. */
+    /**
+     * Port-only stride matching stays a shared outer rate. Per-clip anim_speed is evaluated by each child, never
+     * multiplied into the parent using the first entry's expression.
+     * <p>
+     * Reads the model's {@link AnimationStore}, like the rest of this class: {@link MovementSpeedMatcher} asks the store
+     * for the clip and reads its cycle length and {@code anim_speed} from it, so the store's per-model ownership and its
+     * built-in-default fallback apply here too.
+     */
     private static void applyPlaybackSpeed(AnimationEvent<CustomPlayerEntity> event, EntityPlayer player,
         String geckoControllerName, String animationName) {
         // 总开关先短路：关闭时（默认）这条路径不做任何玩家/动画文件查询。
@@ -406,11 +412,11 @@ public final class OpenYsmPlayerControllerRuntime {
             return;
         }
         ResourceLocation animId = event.getAnimatable().getAnimation();
-        AnimationFile file = animId == null ? null : ClientModelManager.animationFileFor(animId);
+        AnimationStore store = animId == null ? null : ClientModelManager.animationStoreFor(animId);
         boolean isBody = MAIN_CONTROLLER.equals(geckoControllerName)
             || com.fox.ysmu.util.ControllerUtils.OPENYSM_PRE_MAIN_CONTROLLER.equals(geckoControllerName);
         double stride = isBody ? MovementSpeedMatcher.computeMultiplier(player, animationName,
-            MovementSpeedMatcher.DEFAULT_PROVIDER, MovementSpeedMatcher.cycleSeconds(file, animationName)) : 1d;
+            MovementSpeedMatcher.DEFAULT_PROVIDER, MovementSpeedMatcher.cycleSeconds(store, animationName)) : 1d;
         event.getController().setAnimationSpeed(stride);
         // Each child evaluates its own anim_speed; the first clip must not set every child's multiplier.
     }
@@ -578,16 +584,17 @@ public final class OpenYsmPlayerControllerRuntime {
     }
 
     private static boolean animationExists(ResourceLocation animationId, String animationName) {
-        // Installs the model's animations on first use; going straight to the cache would report a controller's
+        // Installs the model's animations on first use; going straight to the store map would report a controller's
         // animation as missing for a model that simply has not been drawn yet.
-        AnimationFile file = ClientModelManager.animationFileFor(animationId);
-        // 用 getAnimation() 判断存在性（而非直接查 map），使内置 "empty" 兜底也能命中：
+        AnimationStore store = ClientModelManager.animationStoreFor(animationId);
+        // 用 get() 判断存在性（而非 contains()），使内置 "empty" 兜底也能命中：
         // 否则 空闲 等引用 "empty" 的状态会被过滤为无动画，回到 all_animations_finished
         // 误判的旧 bug 路径。（SOURCE OpenYsmPlayerControllerRuntime.java:706-711 —— SOURCE 把
         // 这一步从 containsKey 改成 getAnimation，是 YsmBuiltinAnimations 兜底生效的另一半；
         // 少了它，加载期丢弃模型自定义 "empty" 之后 containsKey("empty") 恒为 false，
-        // 引用 empty 的控制器状态会被判成"缺动画"。）
-        if (file == null || file.getAnimation(animationName) == null) {
+        // 引用 empty 的控制器状态会被判成"缺动画"。AnimationStore 保留同一不对称：
+        // get 在未定义时交出内置空操作片段，contains 只认声明过的名字。）
+        if (store == null || store.get(animationName) == null) {
             OpenYsmAnimationControllerRegistry.warnOnce(
                 "missing-animation:" + animationId + ":" + animationName,
                 "OpenYSM controller selected missing animation " + animationName + " for " + animationId);

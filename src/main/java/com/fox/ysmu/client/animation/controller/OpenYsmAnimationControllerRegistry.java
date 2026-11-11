@@ -21,6 +21,7 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Nam
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.State;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Transition;
 import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.ysmu;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -28,7 +29,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import software.bernie.geckolib3.core.builder.Animation;
-import software.bernie.geckolib3.file.AnimationFile;
 
 public final class OpenYsmAnimationControllerRegistry {
 
@@ -120,12 +120,11 @@ public final class OpenYsmAnimationControllerRegistry {
         }
         // Upstream maps the matched name to its Animation through
         // `resourceAdapter.getAnimations(model, assets)`
-        // (ParallelControllerDiscovery.java:45/66); the file installed for this
-        // animation id is the port's counterpart of that map, so the emptiness
-        // question is asked of it. Null means "this name has no Animation here"
-        // (a caller that passed names without an installed file, e.g. a unit
-        // test), which is not the same as "declared and empty", so it synthesises.
-        AnimationFile animationFile = ClientModelManager.animationFileFor(animationId);
+        // (ParallelControllerDiscovery.java:45/66); the store installed for this animation id is the port's
+        // counterpart of that map, so the emptiness question is asked of it. Null means "this id has no store here"
+        // (a caller that passed names without an installed file, e.g. a unit test), which is not the same as
+        // "declared and empty", so it synthesises.
+        AnimationStore store = ClientModelManager.animationStoreFor(animationId);
         for (String animationName : animationNames) {
             if (animationName == null) {
                 continue;
@@ -134,8 +133,8 @@ public final class OpenYsmAnimationControllerRegistry {
             if (!matcher.matches()) {
                 continue;
             }
-            if (animationFile != null) {
-                Animation animation = animationFile.animations.get(animationName);
+            if (store != null) {
+                Animation animation = store.get(animationName);
                 if (animation != null && animation.isEmpty()) {
                     continue;
                 }

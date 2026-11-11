@@ -9,6 +9,7 @@ import com.eliotlash.mclib.math.IValue;
 import com.eliotlash.mclib.math.functions.Function;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationManager;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 
 import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
@@ -16,7 +17,6 @@ import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangStringPool;
-import software.bernie.geckolib3.file.AnimationFile;
 
 /**
  * The {@code ctrl.*} script API an OpenYSM pack script may use, and the mapping from its return value to a play state.
@@ -118,20 +118,21 @@ public final class CtrlScriptBinding {
     /**
      * Whether the animation file the controller will read actually declares {@code animationName}.
      * <p>
-     * The port's own existence check, and it reuses the lookup {@code OpenYsmPlayerControllerRuntime#animationExists}
-     * already uses ({@code client/animation/controller/OpenYsmPlayerControllerRuntime.java:367-384}): install the
-     * model's animations first, then {@code AnimationFile#getAnimation} - not {@code containsKey} - so the engine's
-     * built-in fallbacks ({@code software/bernie/geckolib3/file/AnimationFile.java:28-37}) answer for the names they
-     * serve.
+     * The port's own existence check, and it reuses the lookup
+     * {@code OpenYsmPlayerControllerRuntime#animationExists} already uses
+     * ({@code client/animation/controller/OpenYsmPlayerControllerRuntime.java:580-597}): install the model's animations
+     * first, then the store's {@link AnimationStore#get} - not {@link AnimationStore#contains} - so the engine's
+     * built-in fallbacks ({@code software/bernie/geckolib3/file/AnimationFile.java:28-37}, kept by
+     * {@code client/animation/store/AnimationStore.java}) answer for the names they serve.
      */
     public static boolean animationFileContains(@Nullable ResourceLocation animationId, @Nullable String animationName) {
         if (animationId == null || animationName == null || animationName.isEmpty()) {
             return false;
         }
-        // Installs the model's animations on first use; going straight to the cache would report a clip as missing for
-        // a model that simply has not been drawn yet - the same reason animationExists asks through this entry point.
-        AnimationFile file = ClientModelManager.animationFileFor(animationId);
-        return file != null && file.getAnimation(animationName) != null;
+        // Installs the model's animations on first use; going straight to the store map would report a clip as missing
+        // for a model that simply has not been drawn yet - the same reason animationExists asks through this entry point.
+        AnimationStore store = ClientModelManager.animationStoreFor(animationId);
+        return store != null && store.get(animationName) != null;
     }
 
     /**

@@ -268,9 +268,7 @@ public class CustomPlayerEntity implements IAnimatable, IMolangPhysicsScope {
 
     public ResourceLocation getAnimation() {
         ResourceLocation animationFile = getAnimationFileId();
-        if (animationFile != null && GeckoLibCache.getInstance()
-            .getAnimations()
-            .containsKey(animationFile)) {
+        if (animationFile != null && ClientModelManager.isAnimationStoreInstalled(animationFile)) {
             return animationFile;
         }
         return CustomPlayerModel.DEFAULT_MAIN_ANIMATION;

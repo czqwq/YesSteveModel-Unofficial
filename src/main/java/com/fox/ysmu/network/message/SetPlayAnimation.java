@@ -3,18 +3,19 @@ package com.fox.ysmu.network.message;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
+import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.network.ByteBufUtils;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
 import cpw.mods.fml.common.network.simpleimpl.MessageContext;
 import io.netty.buffer.ByteBuf;
-import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
  * Asks the server to play one named extra animation of the sender's model, or to stop the current one.
@@ -40,10 +41,11 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * {@link #isPlausibleAnimationName(String)} takes its place: non-empty, at most
  * {@link #MAX_ANIMATION_NAME_LENGTH} characters, no control characters, and never a {@code '#'}-prefixed category
  * marker (those name a sub-page, not an animation). On top of that the handler repeats the existence check
- * {@code YsmCommand.processPlay} already performs - only when the side can answer it, i.e. when this JVM's
- * {@code GeckoLibCache} has the model's animation table - so a name the server can prove missing never reaches the
- * EEP. On a dedicated server that table is empty, so the verdict is left to the client, which refuses to send a name
- * its model does not declare (see {@code AnimationRouletteScreen#playEntry}).
+ * {@code YsmCommand.processPlay} already performs - only when the side can answer it, i.e. when the client's
+ * animation store for the model can be read ({@link #modelDeclaresAnimation}) - so a name the server can prove missing
+ * never reaches the EEP. On a dedicated server, and on any non-client thread, that store is unavailable, so the verdict
+ * is left to the client, which refuses to send a name its model does not declare (see
+ * {@code AnimationRouletteScreen#playEntry}).
  */
 public class SetPlayAnimation implements IMessage {
 
@@ -98,7 +100,7 @@ public class SetPlayAnimation implements IMessage {
      * The shape test that replaces the old index bound. Deliberately about <em>shape</em>, not about whether the
      * model declares the name: the server has no per-model extra-animation table (the manifest is parsed and cached
      * into client payloads, not kept), so the "does this model have it" half is answered where it can be - the
-     * handler's {@code GeckoLibCache} check below, and the client's send side.
+     * handler's model-declaration check below, and the client's send side.
      */
     static boolean isPlausibleAnimationName(String name) {
         if (name == null || name.isEmpty() || name.length() > MAX_ANIMATION_NAME_LENGTH) {
@@ -121,10 +123,14 @@ public class SetPlayAnimation implements IMessage {
     /**
      * Whether a player's model declares an animation, answered only by a side that can answer it.
      * <p>
-     * {@code GeckoLibCache}'s animation table is filled while models are parsed on the client, so on a dedicated
-     * server it is empty and this answers {@code true} for everything - the client then declines to send a name its
-     * model does not declare. Two callers share this one rule: this packet's handler (the roulette's play request) and
-     * {@code YsmCommand.processPlay} ({@code /ysm play <targets> <animation>}), which had the same six lines inline.
+     * The answer comes from the client's per-model animation store
+     * ({@link ClientModelManager#animationStoreFor}), which is filled while models are parsed on the client. Anywhere
+     * the store cannot be read - a dedicated server, and any non-client thread, which includes the integrated
+     * server's - the accessor answers {@code null} and this returns {@code true} for everything: the client then
+     * declines to send a name its model does not declare. The {@code null} store keeps exactly the permissive answer
+     * the old {@code animFile == null} branch gave. Two callers share this one rule: this packet's handler (the
+     * roulette's play request) and {@code YsmCommand.processPlay} ({@code /ysm play <targets> <animation>}), which had
+     * the same six lines inline.
      */
     public static boolean modelDeclaresAnimation(ExtendedModelInfo eep, String name) {
         if (eep == null) {
@@ -134,10 +140,15 @@ public class SetPlayAnimation implements IMessage {
         if (modelId == null) {
             return true;
         }
-        AnimationFile animFile = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(ModelIdUtil.getMainId(modelId));
-        return animFile == null || animFile.animations.containsKey(name);
+        if (!FMLCommonHandler.instance().getSide().isClient()) {
+            // Dedicated server: the animation stores live in the client's classes, which a dedicated server does not
+            // have - loading ClientModelManager here throws NoClassDefFoundError (see .agent/phase76-animation-store-port.md,
+            // "实机反馈修复"). The client is the only side that can answer this question and it already checks before
+            // sending; upstream's PlayAnimationCommand does no name check either, so the server accepts and records it.
+            return true;
+        }
+        AnimationStore store = ClientModelManager.animationStoreFor(ModelIdUtil.getMainId(modelId));
+        return store == null || store.contains(name);
     }
 
     public static class Handler implements IMessageHandler<SetPlayAnimation, IMessage> {

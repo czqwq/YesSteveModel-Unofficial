@@ -9,12 +9,12 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.AnimationRegister;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.util.ModelIdUtil;
 
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import software.bernie.geckolib3.core.builder.Animation;
-import software.bernie.geckolib3.file.AnimationFile;
 
 /**
  * What the model-selection GUI should animate for a model, mirroring upstream's per-card player resources.
@@ -128,7 +128,7 @@ public final class ModelPreviewRegistry {
         if (modelId == null || name == null || name.isEmpty()) {
             return null;
         }
-        AnimationFile file = ClientModelManager.animationFileFor(ModelIdUtil.getMainId(modelId));
-        return file == null ? null : file.getAnimation(name);
+        AnimationStore store = ClientModelManager.animationStoreFor(ModelIdUtil.getMainId(modelId));
+        return store == null ? null : store.get(name);
     }
 }

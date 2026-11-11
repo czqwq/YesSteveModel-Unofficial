@@ -10,6 +10,7 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.animation.molang.MolangInstructionExecutor;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.Animation;
@@ -18,7 +19,6 @@ import software.bernie.geckolib3.core.keyframe.EventKeyFrame;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
 import software.bernie.geckolib3.resource.GeckoLibCache;
-import software.bernie.geckolib3.file.AnimationFile;
 
 /**
  * Dispatches the {@code timeline} instructions of a projectile's active animations - the {@code ysm.particle(...)} a
@@ -98,13 +98,14 @@ public final class ProjectileTimelineRuntime {
      *
      * @param entityId the projectile entity id (state isolation)
      * @param animId the projectile's animation id, i.e. the {@code files.projectiles} entry
-     * @param file that animation's {@link AnimationFile}
+     * @param animationStore that animation set's own store, whose {@code get(name)} replaces the
+     *        {@code AnimationFile#animations} lookup this runtime used to receive a file for
      * @param activeAnims the names active this frame; the order only affects dispatch order
      * @param ageInTicks the entity's age including the partial tick
      */
-    public static void dispatch(int entityId, ResourceLocation animId, AnimationFile file, List<String> activeAnims,
-        double ageInTicks) {
-        if (animId == null || file == null || activeAnims == null || activeAnims.isEmpty()) {
+    public static void dispatch(int entityId, ResourceLocation animId, AnimationStore animationStore,
+        List<String> activeAnims, double ageInTicks) {
+        if (animId == null || animationStore == null || activeAnims == null || activeAnims.isEmpty()) {
             return;
         }
         String stateKey = key(entityId, animId);
@@ -113,7 +114,7 @@ public final class ProjectileTimelineRuntime {
         String namesKey = String.join(",", activeAnims);
         Program program = namesKey.equals(state.namesKey) && state.program != null
             ? state.program
-            : buildProgram(file, activeAnims, GeckoLibCache.getInstance().parser);
+            : buildProgram(animationStore, activeAnims, GeckoLibCache.getInstance().parser);
         state.namesKey = namesKey;
         state.program = program;
 
@@ -186,14 +187,14 @@ public final class ProjectileTimelineRuntime {
         }
     }
 
-    private static Program buildProgram(AnimationFile file, List<String> activeAnims, MolangParser parser) {
+    private static Program buildProgram(AnimationStore animationStore, List<String> activeAnims, MolangParser parser) {
         List<TimelineEventScheduler.Contributor> contributors = new ArrayList<>();
         StringBuilder key = new StringBuilder();
         // The longest period, used as a fallback for an animation whose own period cannot be derived; without it a
         // contributor with period 0 would fire its events exactly once.
         double longest = 0.0d;
         for (String name : activeAnims) {
-            Animation animation = file.animations.get(name);
+            Animation animation = animationStore.get(name);
             if (animation == null || animation.customInstructionKeyframes == null
                 || animation.customInstructionKeyframes.isEmpty()) {
                 continue;
@@ -201,7 +202,7 @@ public final class ProjectileTimelineRuntime {
             longest = Math.max(longest, OpenYsmPlayerControllerRuntime.playbackLengthTicks(animation));
         }
         for (String name : activeAnims) {
-            Animation animation = file.animations.get(name);
+            Animation animation = animationStore.get(name);
             if (animation == null || animation.customInstructionKeyframes == null
                 || animation.customInstructionKeyframes.isEmpty()) {
                 continue;

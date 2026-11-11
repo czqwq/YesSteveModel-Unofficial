@@ -19,6 +19,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ChatComponentTranslation;
 import net.minecraft.util.ResourceLocation;
 
+import cpw.mods.fml.common.FMLCommonHandler;
+
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.DirectoryFileFilter;
 import org.apache.commons.io.filefilter.FileFileFilter;
@@ -27,6 +29,7 @@ import org.apache.commons.lang3.time.StopWatch;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.api.ModelAuthorization;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.compat.ServerUtilitiesCompat;
 import com.fox.ysmu.eep.ExtendedAuthModels;
 import com.fox.ysmu.eep.ExtendedModelInfo;
@@ -52,9 +55,6 @@ import com.fox.ysmu.network.message.SyncGamePath;
 import com.fox.ysmu.network.sync.OpenYsmModelSyncServer;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
-
-import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public class YsmCommand extends CommandBase {
 
@@ -487,12 +487,13 @@ public class YsmCommand extends CommandBase {
      * and its body only touches the targets. The earlier port required the issuer to be a player because the
      * animation landed on them; the receipts now go to the command source.
      * <p>
-     * <b>The existence check</b> runs only on a side that can answer it: {@code GeckoLibCache}'s animation table is
-     * filled by the client while it parses models, so on a dedicated server it is empty. The reference's own comment
-     * ({@code :215-219}) says the same. The check therefore rejects a name only when the table has the target's model
-     * at all (integrated server / single player) and otherwise leaves the verdict to the client, which skips a
-     * missing animation safely instead of failing ({@link SetPlayAnimation#modelDeclaresAnimation} is the same rule,
-     * used by the roulette packet's handler).
+     * <b>The existence check</b> runs only on a side that can answer it: the answer comes from the client's per-model
+     * animation stores ({@link SetPlayAnimation#modelDeclaresAnimation}), which are filled while the client parses
+     * models, so on a dedicated server - and on the integrated server's own thread, where the store accessor refuses to
+     * answer - the verdict is left to the client. The reference's own comment ({@code :215-219}) says the same. A name
+     * is therefore rejected only where the stores can be read, and otherwise the client skips a missing animation
+     * safely instead of failing ({@link SetPlayAnimation#modelDeclaresAnimation} is the same rule, used by the
+     * roulette packet's handler).
      * <p>
      * <b>The receipts are a port addition</b> (upstream answers nothing at all): one refusal line per target and one
      * summary line, in the same shape {@code /ysm auth} and {@code /ysm model set} use. Every key is {@code %s}-only,
@@ -768,19 +769,20 @@ public class YsmCommand extends CommandBase {
      * Upstream suggests {@code CommandRegistry.ALL_ANIMATIONS}: the local default render target's animation names
      * plus {@code "stop"}, and nothing at all on a dedicated server
      * ({@code event/CommandRegistry.java:41-56}). This port has no single default render target accessor to read, and
-     * its command names arbitrary targets whose models can differ, so the set is every animation name this JVM's
-     * {@code GeckoLibCache} holds plus {@link #PLAY_STOP}; a dedicated server's table is empty, so the list degrades
-     * to just {@code "stop"} exactly as upstream's does. Sorted, so the suggestion order is stable.
+     * its command names arbitrary targets whose models can differ, so the set is every animation name the client's
+     * animation stores know - {@code ClientModelManager#allAnimationNames}, which is the store replacement for walking
+     * {@code GeckoLibCache}'s merged files and includes the built-in default's names through each store's fallback -
+     * plus {@link #PLAY_STOP}. That accessor answers clientside only, so the list degrades to just {@code "stop"} on a
+     * dedicated server, exactly as upstream's does. Sorted, so the suggestion order is stable.
      */
     static List<String> playAnimationSuggestions() {
         Set<String> names = new TreeSet<>();
         names.add(PLAY_STOP);
-        for (AnimationFile file : GeckoLibCache.getInstance()
-            .getAnimations()
-            .values()) {
-            if (file != null && file.animations != null) {
-                names.addAll(file.animations.keySet());
-            }
+        // The animation stores are client-only classes: a dedicated server cannot load ClientModelManager at all
+        // (NoClassDefFoundError, see .agent/phase76-animation-store-port.md "实机反馈修复"), so its completion offers just
+        // stop - which is what a dedicated server effectively had before, since it has no client store to read.
+        if (FMLCommonHandler.instance().getSide().isClient()) {
+            names.addAll(ClientModelManager.allAnimationNames());
         }
         return new ArrayList<>(names);
     }

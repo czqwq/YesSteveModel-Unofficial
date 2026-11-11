@@ -41,6 +41,7 @@ import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime;
 import com.fox.ysmu.client.animation.controller.VehicleControllerRuntime.VehicleState;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.client.render.ModelFailureNotifier;
@@ -57,7 +58,6 @@ import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.molang.RemoteAnimationVariables;
 import software.bernie.geckolib3.core.processor.IBone;
-import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.geo.IGeoRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
@@ -507,11 +507,12 @@ public final class VehicleRenderer {
      */
     private static void tickAnimation(Entity entity, GeoModel model, ResourceLocation geoId,
         ResourceLocation modelId, float partialTicks, double x, double y, double z, float yaw, float pitch) {
-        AnimationFile animationFile = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(geoId);
-        if (animationFile == null || animationFile.animations == null) {
-            // Nothing to sample, so the geometry stays in its bind pose.
+        // The vehicle's own animation store, keyed by its sub-model id and holding only that set's clips
+        // (ClientModelManager#installSubModelAnimationStores) - the store replacement for the whole-file read this used
+        // to do. No store means the set is not installed yet, which is the missing file it used to be: nothing to
+        // sample, so the geometry stays in its bind pose.
+        AnimationStore animationStore = ClientModelManager.animationStoreFor(geoId);
+        if (animationStore == null) {
             return;
         }
         double ageInTicks = entity.ticksExisted + partialTicks;
@@ -556,10 +557,10 @@ public final class VehicleRenderer {
             // rate-limited dump of its own, while the selection is already logged by VehicleControllerRuntime behind
             // DebugController.
             ArrowProjectileRenderer
-                .applyActiveAnimations(model, animationFile, activeAnimations, clockOrigins, ageInTicks, false);
+                .applyActiveAnimations(model, animationStore, activeAnimations, clockOrigins, ageInTicks, false);
             // The timeline has to run after the bones are written: an instruction may read this frame's pose through
             // ysm.bone_pivot_abs(...).
-            dispatchTimeline(entity, geoId, animationFile, activeAnimations, ageInTicks, model, x, y, z, yaw, pitch);
+            dispatchTimeline(entity, geoId, animationStore, activeAnimations, ageInTicks, model, x, y, z, yaw, pitch);
         } finally {
             MolangFrameContext.end();
             restoreVariables(published);
@@ -583,7 +584,7 @@ public final class VehicleRenderer {
      * A 1.7.10 vehicle never enters that processing, so the port's standalone dispatcher is its counterpart - the same
      * reason the projectile path needed one.</p>
      */
-    private static void dispatchTimeline(Entity entity, ResourceLocation geoId, AnimationFile animationFile,
+    private static void dispatchTimeline(Entity entity, ResourceLocation geoId, AnimationStore animationStore,
         List<String> activeAnimations, double ageInTicks, GeoModel model, double x, double y, double z, float yaw,
         float pitch) {
         Entity previousEntity = ParticleEffectUtil.getCurrentEntity();
@@ -596,7 +597,7 @@ public final class VehicleRenderer {
             ProjectileTimelineRuntime.dispatch(
                 entity.getEntityId(),
                 geoId,
-                animationFile,
+                animationStore,
                 activeAnimations,
                 ageInTicks);
         } catch (Throwable failure) {

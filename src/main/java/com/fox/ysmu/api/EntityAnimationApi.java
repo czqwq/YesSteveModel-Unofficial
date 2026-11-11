@@ -8,8 +8,11 @@ import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
+import cpw.mods.fml.common.FMLCommonHandler;
+
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.data.EntityClips;
 import com.fox.ysmu.data.EntityModelData;
 import com.fox.ysmu.data.NPCData;
@@ -18,7 +21,6 @@ import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.ILoopType;
-import software.bernie.geckolib3.file.AnimationFile;
 
 /**
  * Client-side animation entry point for entities YSMU renders but does not own the animation logic for.
@@ -144,16 +146,22 @@ public final class EntityAnimationApi {
         if (entity == null || clip == null || clip.isEmpty()) {
             return false;
         }
-        AnimationFile file = animationFileForModel(mainIdFor(entity));
-        return file != null && file.animations.containsKey(clip);
+        AnimationStore store = animationStoreForModel(mainIdFor(entity));
+        return store != null && store.contains(clip);
     }
 
     /**
-     * The animation file a clip is looked up in for this model: the model's own when it has one, the built-in
-     * default otherwise.
+     * The animation store a clip is looked up in for this model: the model's own when it has one, the built-in
+     * default's otherwise.
      * <p>
-     * The fallback is not cosmetic. {@code CustomPlayerEntity.getAnimation()} answers with the built-in default
-     * while a model has no animation file of its own, and the engine then plays the default's clips. An answer about
+     * The model's own store already answers for the built-in default through its fallback pointer
+     * ({@code client/animation/store/AnimationStore#contains} is local <em>or</em> fallback), so this is the same
+     * set of names the merged animation file used to hold for this model, asked without the copy. The second rung is
+     * for the entity whose model id this client does not know at all: the old lookup answered out of the default's
+     * file there, and the answer must keep coming from the same place.
+     * <p>
+     * The fallback is not cosmetic: {@code CustomPlayerEntity.getAnimation()} answers with the built-in default while
+     * a model has no animation file of its own, and the engine then plays the default's clips. An answer about
      * "does this model define clip X" that skipped the same fallback would disagree with what actually plays, which
      * is exactly what a host mod uses this to decide.
      * <p>
@@ -162,10 +170,16 @@ public final class EntityAnimationApi {
      * immediately and must not see a transient "no file" for a model the client already owns.
      */
     @Nullable
-    static AnimationFile animationFileForModel(@Nullable ResourceLocation mainId) {
+    static AnimationStore animationStoreForModel(@Nullable ResourceLocation mainId) {
+        if (!FMLCommonHandler.instance().getSide().isClient()) {
+            // D-A6: the stores live in the client's classes, which a dedicated server cannot load at all
+            // (NoClassDefFoundError, see .agent/phase76-animation-store-port.md "实机反馈修复"). Answering "no store"
+            // keeps this entry point's documented server-side contract: effective on the client only, never throws.
+            return null;
+        }
         ClientModelManager.ensureAnimationsImmediately(mainId);
-        AnimationFile own = ClientModelManager.animationFileFor(mainId);
-        return own != null ? own : ClientModelManager.animationFileFor(defaultAnimationId());
+        AnimationStore own = ClientModelManager.animationStoreFor(mainId);
+        return own != null ? own : ClientModelManager.animationStoreFor(defaultAnimationId());
     }
 
     /**
@@ -198,10 +212,10 @@ public final class EntityAnimationApi {
     /**
      * The main model id of the entity's model, or {@code null} when this client has no model id for it.
      * <p>
-     * Only the id: the file it resolves to, and the built-in default that stands in when it resolves to nothing, are
-     * {@link #animationFileForModel}'s business. The model's own id is returned even before its animations have been
-     * built, because {@code ClientModelManager.animationFileFor} builds them on request; answering with the built-in
-     * default instead would make a host mod look for its clips in the wrong file.
+     * Only the id: the store it resolves to, and the built-in default that stands in when it resolves to nothing, are
+     * {@link #animationStoreForModel}'s business. The model's own id is returned even before its animations have been
+     * built, because {@code ClientModelManager.animationStoreFor} builds them on request; answering with the built-in
+     * default instead would make a host mod look for its clips in the wrong store.
      */
     @Nullable
     private static ResourceLocation mainIdFor(EntityLivingBase entity) {

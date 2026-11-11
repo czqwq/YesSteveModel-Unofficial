@@ -24,6 +24,35 @@ public class Animation implements Serializable {
     private static final long serialVersionUID = 42L;
     public String animationName;
     public Double animationLength;
+    /**
+     * The loop type this clip was <b>authored</b> with: parse-time data, never written by playback.
+     *
+     * <p>
+     * Upstream's animation definitions are immutable - here the field {@code final}
+     * ({@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/builder/Animation.java:19}) -
+     * and a play call's loop override is kept on the playback object instead: {@code AnimationPlayer} stores
+     * {@code loopTypeOverride != null ? loopTypeOverride : animation.loop} in {@code nextAnim}
+     * ({@code .../core/controller/AnimationPlayer.java:139-165}), copies it into its own {@code currentLoopType}
+     * ({@code :83,461}) and {@code process} branches on that field ({@code :195,240,249}). The port's controller
+     * keeps the same per-playback state ({@code AnimationController#currentLoopType()}).
+     *
+     * <p>
+     * The field is <em>not</em> {@code final} here because it belongs to a Java-serialised graph: {@code Animation}
+     * is written and read by {@code BakedAnimationCache}, and a deserialised instance is built without running
+     * {@link #Animation()}, so a final field could not be restored. It is also what the parsers assign
+     * ({@code JsonAnimationUtils:368} for JSON clips, {@code RawAnimationBuilder:97} for binary ones). Immutability is
+     * therefore a playback-side contract rather than a compiler-enforced one: nothing on the playback path may assign
+     * this field.
+     *
+     * <p>
+     * Writing it during playback was a shipped defect. The host inserts the built-in default model's {@code Animation}
+     * instances into every model's file <em>by reference</em> ({@code ClientModelManager#registerAnimations}), so one
+     * model's play override changed that clip's loop for every model inheriting it, for the rest of the session: a
+     * {@code hold_mainhand:pickaxe} authored {@code hold_on_last_frame} re-played its "raise the tool" motion every
+     * 2.5 s after a model switch, until the game restarted. See
+     * {@code .agent/phase75-loop-type-carried-across-animation-files.md} and
+     * {@code tmp/_probe/ImmutableLoopProbe.java}.
+     */
     public ILoopType loop;
     /** YSMU: Bedrock-style per-animation custom time advance (anim_time_update).
      *  Molang expression evaluated each frame that returns the animation time

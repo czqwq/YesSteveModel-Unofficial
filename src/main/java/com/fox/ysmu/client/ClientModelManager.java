@@ -43,6 +43,11 @@ import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.client.animation.AnimationDomain;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
+import com.fox.ysmu.client.animation.store.AnimationBinder;
+import com.fox.ysmu.client.animation.store.AnimationStore;
+import com.fox.ysmu.client.animation.store.DefaultAnimationStores;
+import com.fox.ysmu.client.animation.store.JsonAnimationBinder;
+import com.fox.ysmu.client.animation.store.StructuredAnimationBinder;
 import com.fox.ysmu.client.animation.controller.ModDependency;
 import com.fox.ysmu.client.animation.controller.ModDependencyRegistry;
 import com.fox.ysmu.client.animation.controller.OpenYsmAnimationControllerRegistry;
@@ -52,7 +57,6 @@ import com.fox.ysmu.client.animation.molang.MolangScriptRegistry;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
 import com.fox.ysmu.client.compat.AngelicaPbrCompat;
 import com.fox.ysmu.client.model.AnimationPayload;
-import com.fox.ysmu.client.model.BakedAnimationCache;
 import com.fox.ysmu.client.model.PreparedAnimations;
 import com.fox.ysmu.client.model.BakedGeometryCache;
 import com.fox.ysmu.client.model.CustomPlayerModel;
@@ -306,21 +310,6 @@ public class ClientModelManager {
     public static final String VEHICLE_KEY_PREFIX = ModelData.VEHICLE_KEY_PREFIX;
     /** The key prefix a bridged vehicle animation-controller file uses. */
     private static final String VEHICLE_CONTROLLER_KEY_PREFIX = "vehicle_ctrl_";
-    /**
-     * The built-in default model's animations for the main domain, i.e. the fallback a model's own set is completed
-     * from. Upstream resolves the fallback per domain ({@code defaultAnimations.fallback(domain)},
-     * {@code ModelRenderTargetLoader.java:376}), so the first-person domain has its own entry below.
-     */
-    public static AnimationFile DEFAULT_ANIMATION_FILE = new AnimationFile();
-    /**
-     * The built-in default model's {@code fp_arm} set, the fallback for the first-person domain.
-     * <p>
-     * {@code builtin/default/animations/fp.arm.animation.json} declares {@code parallel0..7} with no bones at all,
-     * which is the control case for the domain split: as long as the default's own {@code main} clips are merged into
-     * the main domain only, those stubs can no longer replace the built-in {@code parallel0}/{@code parallel1} that
-     * drive the default model's eyes and ribbon.
-     */
-    public static AnimationFile DEFAULT_FIRST_PERSON_ANIMATION_FILE = new AnimationFile();
     public static List<String> CACHE_MD5 = Collections.synchronizedList(Lists.newArrayList());
     public static volatile byte[] PASSWORD;
     public static volatile UUID PASSWORD_UUID;
@@ -503,6 +492,51 @@ public class ClientModelManager {
      * catalog.
      */
     private static final Map<ResourceLocation, PreparedAnimations> PREPARED_ANIMATIONS = Maps.newConcurrentMap();
+
+    /**
+     * The per-model animation stores, keyed by the animation-file id an animatable answers with
+     * ({@code CustomPlayerEntity#getAnimation}: the model's {@code main} id for the body and its {@code arm} id for the
+     * first-person domain), or {@code null} for a model that has not been installed yet.
+     *
+     * <p>
+     * This is upstream's ownership rule: a model's clips belong to that model's store, and a name the model does not
+     * define is answered by the store's <b>fallback pointer</b> to the built-in default model's pinned store
+     * ({@code tmp/YesSteveModel-dev-1.20/.../model/resource/client/PlayerModelResources.java:17-28},
+     * {@code AnimationStore.java:26-33}; the fallback is the one eager, shared-by-reference set,
+     * {@code DefaultAnimationRuntime.java:11,25-47}). The port used to merge the default model's {@code Animation}
+     * instances into every model's file instead, which is what let one model's playback change another model's clip
+     * (see {@code .agent/phase75-loop-type-carried-across-animation-files.md}); with the store, a name the model does
+     * not define never enters its own map at all.
+     *
+     * <p>
+     * Client thread only, like the engine cache it replaces: every writer ({@link #registerAnimations},
+     * {@link #releaseEngineCaches}) and every reader (the engine's animation lookup, which runs on the render thread of
+     * the client thread's frame) is on that thread. The default model's pinned stores in {@link DefaultAnimationStores}
+     * are deliberately <b>not</b> in this map: they outlive the connection, exactly as the default's animation files are
+     * kept by {@link #releaseEngineCaches}.
+     */
+    private static final Map<ResourceLocation, AnimationStore> ANIMATION_STORES = Maps.newHashMap();
+
+    /**
+     * A thread-safe mirror of {@link #allAnimationNames()}, refreshed by the client thread whenever the store map
+     * changes.
+     *
+     * <p>
+     * Port-specific, for a 1.7.10 limitation: command tab completion runs on the integrated server's thread, while the
+     * stores belong to the client thread (they are plain maps written by the render/install path). Reading them from
+     * that other thread would be a data race, so the client thread publishes an immutable name set instead and the
+     * completion reads that. Upstream's 1.20 command completes from server-side model metadata and has no such
+     * cross-thread store read; there is no upstream shape to copy for the 1.7.10 single-JVM split.
+     */
+    private static volatile Set<String> INSTALLED_ANIMATION_NAMES = Collections.emptySet();
+
+    /**
+     * A thread-safe mirror of the animation-file ids that currently have a store, for the same 1.7.10 cross-thread
+     * reason as {@link #INSTALLED_ANIMATION_NAMES}: {@code CustomPlayerEntity#getAnimation} asks "is my own animation
+     * file installed?" from paths that are not guaranteed to be the client thread, and the answer picks the id the
+     * animatable reports (its own, or the built-in default's while the model is still pending).
+     */
+    private static volatile Set<ResourceLocation> INSTALLED_ANIMATION_STORE_IDS = Collections.emptySet();
 
     /**
      * Models whose animation bundle is currently being built on the loader thread; see
@@ -1652,16 +1686,11 @@ public class ClientModelManager {
      */
     static void deferAnimations(ResourceLocation modelId, ModelData data) {
         ResourceLocation mainId = ModelIdUtil.getMainId(modelId);
-        // Anything already installed under either of this model's animation ids belongs to the payload being replaced,
-        // so it goes first: readers that ask CustomPlayerEntity.getAnimation() without installing first (the id-only
-        // users in AnimationManager) would otherwise act on the previous payload's file until the new one happens to
-        // be installed. Both ids, because the payload is installed as one file per domain
-        // ({@link AnimationDomain}); leaving the first-person file behind would keep the previous pack's arm clips.
-        for (String domain : AnimationDomain.ALL) {
-            GeckoLibCache.getInstance()
-                .getAnimations()
-                .remove(AnimationDomain.animationFileId(modelId, domain));
-        }
+        // Anything already installed for this model belongs to the payload being replaced, so it goes first: readers
+        // that ask CustomPlayerEntity.getAnimation() without installing first (the id-only users in AnimationManager)
+        // would otherwise act on the previous payload's store until the new one happens to be installed. Closing the
+        // stores covers both domains and the model's projectile/vehicle sub-model stores.
+        releaseAnimationStores(mainId);
         AnimationPayload payload = AnimationPayload.of(data);
         if (payload.isEmpty()) {
             // This payload declares no animations of its own, so the model is meant to fall back to the built-in
@@ -1723,31 +1752,209 @@ public class ClientModelManager {
     }
 
     /**
-     * The animation file for a model, installing that model's animations first if they are still parked.
+     * The animation store an animatable's animation-file id resolves to, installing that model's animations first if
+     * they are still parked.
+     *
      * <p>
-     * Every reader of {@code GeckoLibCache.getAnimations()} that wants to *use* a file should come through here
-     * rather than reaching into the cache, because since animations are installed on first use an entry is only
-     * present once something has already asked for it. A reader that skips this step sees "this model has no
-     * animations" for a model that simply has not been drawn yet, which is how a non-player animatable would end up
-     * never installing its own animations at all: the state predicates would answer "no such animation" forever and
-     * the engine lookup that installs them would never be reached.
+     * The id is what an animatable answers with as its animation file ({@code CustomPlayerEntity#getAnimation}): the
+     * model's {@code main} id for the body, its {@code arm} id for the first-person arm
+     * ({@link AnimationDomain#isFirstPersonId}). The parent model id - and therefore the id whose parked payload has to
+     * be installed - is derived from it, so the first-person arm does not need its own install path.
+     *
+     * <p>
+     * The built-in default is made the store's fallback <b>before</b> any model store is created: its pinned stores are
+     * replaced (never mutated) when they are published, so a store created earlier would keep the empty
+     * pre-publication fallback for the rest of the session. That is why the default model is installed eagerly at
+     * startup ({@link #loadDefaultModel}); upstream has the same ordering requirement and the same answer - the default
+     * target is the one eager set ({@code .agent/perf-audit-memory.md:268-270},
+     * {@code ModelRenderTargetLoader.java:370-374}). Should the default be unavailable, this answers {@code null} and
+     * the caller keeps its "no animations" answer, which is what it gave before this method existed.
+     *
+     * <p>
+     * The built-in default's own ids answer its pinned store directly: those stores outlive the connection, so unlike a
+     * model store they are never closed or dropped by {@link #releaseEngineCaches}.
+     *
+     * @param animationFileId an animatable's animation-file id
+     * @return the store, or {@code null} when it cannot be created (not the client thread, model not known yet, or the
+     *         built-in default has not been published)
      */
     @Nullable
-    public static AnimationFile animationFileFor(@Nullable ResourceLocation mainId) {
-        if (mainId == null) {
+    public static AnimationStore animationStoreFor(@Nullable ResourceLocation animationFileId) {
+        if (animationFileId == null || !isClientThread()) {
+            // The store map is written by the client thread's install, and EntityAnimationApi is reachable from the
+            // server thread; reading it there would be a read concurrent with that write.
             return null;
         }
+        if (isDefaultModelId(animationFileId)) {
+            ensureDefaultAnimationStores();
+            return DefaultAnimationStores.instance()
+                .store(
+                    AnimationDomain.isFirstPersonId(animationFileId) ? AnimationDomain.FIRST_PERSON
+                        : AnimationDomain.MAIN);
+        }
+        AnimationStore store = ANIMATION_STORES.get(animationFileId);
+        if (store != null) {
+            return store;
+        }
+        ensureDefaultAnimationStores();
+        ensureAnimations(ModelIdUtil.getMainId(ModelIdUtil.getParentModelId(animationFileId)));
+        return ANIMATION_STORES.get(animationFileId);
+    }
+
+    /**
+     * Every animation name any installed store knows, for the command completion that used to walk the engine cache's
+     * files.
+     *
+     * <p>
+     * This includes the built-in default's names through the model stores' fallback pointer (the store's {@code names()}
+     * is local plus fallback, like upstream's {@code AnimationStore#keySet}, {@code AnimationStore.java:237-259}), so a
+     * model that inherits a clip still offers it in the suggestion list - exactly what the old merged files answered.
+     *
+     * <p>
+     * Safe from any thread: on the client thread it computes the answer from the stores, everywhere else it answers the
+     * client thread's last published {@link #INSTALLED_ANIMATION_NAMES snapshot} (1.7.10 command completion runs on the
+     * integrated server's thread). A dedicated server has no client stores at all, so its snapshot is empty - the same
+     * answer the old engine-cache read gave there.
+     */
+    public static Set<String> allAnimationNames() {
         if (!isClientThread()) {
-            // The engine's animation cache is a plain map written by the client thread's install, and this method is
-            // reachable from EntityAnimationApi, which a host mod may call from the server thread. Reading it there
-            // would be a read concurrent with that write, so the answer is the one the caller got before installation
-            // became lazy - and the one that API documents for a server-side call.
-            return null;
+            return INSTALLED_ANIMATION_NAMES;
         }
-        ensureAnimations(mainId);
-        return GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(mainId);
+        Set<String> names = new LinkedHashSet<>();
+        for (AnimationStore store : ANIMATION_STORES.values()) {
+            names.addAll(store.names());
+        }
+        for (String domain : AnimationDomain.ALL) {
+            names.addAll(DefaultAnimationStores.instance().store(domain).names());
+        }
+        return names;
+    }
+
+    /**
+     * Republishes the cross-thread mirrors after a change to {@link #ANIMATION_STORES} or the pinned default stores;
+     * see {@link #INSTALLED_ANIMATION_NAMES} and {@link #INSTALLED_ANIMATION_STORE_IDS}. Client thread only, called from
+     * the store lifecycle points.
+     */
+    private static void refreshInstalledAnimationNames() {
+        INSTALLED_ANIMATION_NAMES = Collections.unmodifiableSet(new LinkedHashSet<>(allAnimationNames()));
+        Set<ResourceLocation> ids = new LinkedHashSet<>(ANIMATION_STORES.keySet());
+        for (String domain : AnimationDomain.ALL) {
+            ResourceLocation defaultModelId = new ResourceLocation(ysmu.MODID, BUILT_IN_DEFAULT_MODEL);
+            ids.add(AnimationDomain.animationFileId(defaultModelId, domain));
+        }
+        INSTALLED_ANIMATION_STORE_IDS = Collections.unmodifiableSet(ids);
+    }
+
+    /**
+     * Whether an animatable's animation-file id currently has a store; safe from any thread (answers the client
+     * thread's last published mirror, see {@link #INSTALLED_ANIMATION_STORE_IDS}).
+     *
+     * <p>
+     * This is the "is my own file installed?" question {@code CustomPlayerEntity#getAnimation} asks: while the answer is
+     * no, the animatable reports the built-in default's animation id so the engine keeps drawing the default clips until
+     * the model's own store exists - the same substitution the merged-file lookup used to drive.
+     */
+    public static boolean isAnimationStoreInstalled(@Nullable ResourceLocation animationFileId) {
+        return animationFileId != null && INSTALLED_ANIMATION_STORE_IDS.contains(animationFileId);
+    }
+
+    /**
+     * Installs the built-in default model's animations if that has not happened yet, so its pinned stores exist before
+     * any model store captures them as a fallback; see {@link #animationStoreFor}.
+     *
+     * <p>
+     * The default is normally installed eagerly by {@link #loadDefaultModel}; this covers the paths that reach a store
+     * first (a client that disabled the eager install, a reload that dropped it, or an API call before startup finished)
+     * and is a two-boolean check once it has run.
+     */
+    private static void ensureDefaultAnimationStores() {
+        DefaultAnimationStores stores = DefaultAnimationStores.instance();
+        if (stores.isPublished(AnimationDomain.MAIN) && stores.isPublished(AnimationDomain.FIRST_PERSON)) {
+            return;
+        }
+        ensureAnimations(ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, BUILT_IN_DEFAULT_MODEL)));
+    }
+
+    /**
+     * Publishes one payload's per-domain stores from the payload's own binders.
+     *
+     * <p>
+     * Called before the default model's clips are merged into the legacy files: the store must hold only the model's
+     * <b>own</b> clips, because a name it does not define is answered by the fallback store, not by a copy. The
+     * fallback is the built-in default's pinned store for the same domain - upstream's per-domain fallback
+     * ({@code ModelRenderTargetLoader.java:375-379}, {@code DefaultAnimationKey.java:36-38}) - and the built-in default
+     * model's own stores have none (they <em>are</em> the fallback).
+     *
+     * <p>
+     * Each binder holds the payload's file (its parsed JSON tree, or the binary channel's structures) and binds one
+     * clip on demand - upstream's per-animation {@code AnimationSource}/{@code AnimationBinder} seam
+     * ({@code AnimationStore.java:48-108,338-341}), collapsed into one binder per payload file because the port's
+     * payload carries whole files. The legacy merged files are still built next to this for the readers that have not
+     * been migrated yet; removing them is the last step of {@code .agent/plan-animation-store-port.md} M3.
+     */
+    private static void installAnimationStores(ResourceLocation id, ResourceLocation baseId,
+        Map<String, List<AnimationBinder>> bindersByDomain, Map<String, Set<String>> binderNamesByDomain) {
+        boolean builtInDefault = isDefaultModelId(id);
+        if (builtInDefault) {
+            // The default model's own ids resolve to the pinned stores (see animationStoreFor), so it needs no lazy store
+            // of its own: building one would hold a second copy of its source for the whole session and nothing reads it.
+            return;
+        }
+        ensureDefaultAnimationStores();
+        DefaultAnimationStores pinned = DefaultAnimationStores.instance();
+        for (String domain : AnimationDomain.ALL) {
+            List<AnimationBinder> binders = bindersByDomain.get(domain);
+            AnimationBinder binder = name -> {
+                // Payload order, later file wins - the override rule the old merged file applied, so a store answers the
+                // clip that file would have answered.
+                for (int i = binders.size() - 1; i >= 0; i--) {
+                    Animation bound = binders.get(i)
+                        .bind(name);
+                    if (bound != null) {
+                        return bound;
+                    }
+                }
+                return null;
+            };
+            // A domain the default does not publish yet gets no fallback rather than a pointer to the store that is
+            // about to be replaced; a model whose own store has no fallback simply answers its own names until the
+            // default is published (which the eager default install makes happen before any synced model registers).
+            AnimationStore fallback = !pinned.isPublished(domain) ? null : pinned.store(domain);
+            ANIMATION_STORES.put(
+                AnimationDomain.animationFileId(baseId, domain),
+                AnimationStore.lazy(binderNamesByDomain.get(domain), binder, fallback));
+        }
+        refreshInstalledAnimationNames();
+    }
+
+    /**
+     * Publishes a store for every projectile/vehicle sub-model id this payload installed, with no fallback.
+     *
+     * <p>
+     * A sub-entity's animation set is registered under its own id because a pack's arrow set and its player set both
+     * define {@code parallel0} (see the routing comment in {@link #registerAnimations}), so it must not inherit the
+     * player's clips either - upstream's projectile and vehicle targets have their own stores and no default source
+     * either. Like the per-domain stores these hold binders and bind per clip on demand.
+     */
+    private static void installSubModelAnimationStores(Map<ResourceLocation, List<AnimationBinder>> subModelBinders,
+        Map<ResourceLocation, Set<String>> subModelNames) {
+        for (Map.Entry<ResourceLocation, List<AnimationBinder>> entry : subModelBinders.entrySet()) {
+            List<AnimationBinder> binders = entry.getValue();
+            AnimationBinder binder = name -> {
+                for (int i = binders.size() - 1; i >= 0; i--) {
+                    Animation bound = binders.get(i)
+                        .bind(name);
+                    if (bound != null) {
+                        return bound;
+                    }
+                }
+                return null;
+            };
+            ANIMATION_STORES.put(
+                entry.getKey(),
+                AnimationStore.lazy(subModelNames.get(entry.getKey()), binder, null));
+        }
+        refreshInstalledAnimationNames();
     }
 
     /**
@@ -1912,9 +2119,7 @@ public class ClientModelManager {
             || !hasReloadableClientCache(mainId)) {
             return;
         }
-        if (GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(mainId) == null) {
+        if (!isAnimationStoreInstalled(mainId)) {
             com.fox.ysmu.client.asset.AssetManager.anim(mainId)
                 .get();
         } else {
@@ -1951,12 +2156,51 @@ public class ClientModelManager {
             return;
         }
         try {
+            // The eviction that triggered this apply dropped the model's stores; closing the stale ones first means a
+            // re-install never leaves two live stores for one id (upstream closes a target's stores when it is cleaned,
+            // ModelRenderTarget.java:136-143).
+            releaseAnimationStores(mainId);
             registerAnimations(mainId, animations);
         } catch (Throwable failure) {
             // Same guard as ensureAnimations': the payload is the freshly re-read one, so a failure here leaves the
             // model on the built-in default fallback rather than taking down the client thread's task queue.
             ysmu.LOG.warn("Failed to re-register animations for model {}", mainId, failure);
         }
+    }
+
+    /**
+     * Closes and forgets one model's animation stores: the two per-domain stores plus every projectile/vehicle
+     * sub-model store that belongs to it.
+     *
+     * <p>
+     * Client thread only. Called by the eviction seam ({@code client/asset/provider/AnimationProvider#release}) when a
+     * model's animation payload is released, and before a re-install. The built-in default's pinned stores are never
+     * touched - they outlive every connection and are the fallback of every model store (upstream never releases the
+     * default target, {@code ClientModelRenderTargetManager.java:620-632}).
+     */
+    public static void releaseAnimationStores(@Nullable ResourceLocation mainId) {
+        if (mainId == null || !isClientThread()) {
+            return;
+        }
+        ResourceLocation baseId = ModelIdUtil.getParentModelId(mainId);
+        List<ResourceLocation> released = new ArrayList<>();
+        for (Map.Entry<ResourceLocation, AnimationStore> entry : ANIMATION_STORES.entrySet()) {
+            ResourceLocation animationFileId = entry.getKey();
+            if (isDefaultModelId(animationFileId)) {
+                continue;
+            }
+            if (animationFileId.equals(mainId) || animationFileId.equals(ModelIdUtil.getArmId(baseId))
+                || ModelIdUtil.getParentModelId(animationFileId)
+                    .equals(baseId)) {
+                entry.getValue()
+                    .close();
+                released.add(animationFileId);
+            }
+        }
+        for (ResourceLocation animationFileId : released) {
+            ANIMATION_STORES.remove(animationFileId);
+        }
+        refreshInstalledAnimationNames();
     }
 
     /**
@@ -2487,20 +2731,26 @@ public class ClientModelManager {
      */
     private static void registerAnimations(ResourceLocation id, AnimationPayload payload,
         @Nullable PreparedAnimations prepared) {
-        Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
-            .getAnimations();
         // A model's animation sets are split into *domains*, which is upstream's shape: the `fp_arm` set is the
         // first-person arm's own set and every other set belongs to the model proper
         // (DefaultAnimationKey.java:36-38 maps a `player` target's `fp_arm` set to `player/first-person` and
         // everything else to `player/main`; ModelRenderTargetLoader.java:243-253 collects the files into exactly
-        // those two groups and bakes one animation store each). Installing one file per domain instead of one file
-        // for the whole payload is what stops a later set from redefining an earlier set's clip: with a single
-        // namespace, `fp_arm`'s `parallel0` (arms only, 0.2 s) replaced `main`'s (the model's body bones, 1.0 s) for
-        // every pack that ships a real first-person set, and the built-in default's own `parallel0`/`parallel1` were
-        // replaced by the empty `parallel0..7` stubs of its `fp.arm.animation.json`.
-        Map<String, AnimationFile> filesByDomain = new LinkedHashMap<>();
+        // those two groups and bakes one animation store each). One store per domain instead of one file for the whole
+        // payload is what stops a later set from redefining an earlier set's clip: with a single namespace, `fp_arm`'s
+        // `parallel0` (arms only, 0.2 s) replaced `main`'s (the model's body bones, 1.0 s) for every pack that ships a
+        // real first-person set, and the built-in default's own `parallel0`/`parallel1` were replaced by the empty
+        // `parallel0..7` stubs of its `fp.arm.animation.json`.
+        //
+        // The store binders, one list per domain in payload order (a later file's clip of the same name wins, which is
+        // the rule the old merged file applied) plus the names they declare. These are what let a store bind one clip at
+        // a time from the payload instead of holding a whole eagerly built file: upstream's per-animation
+        // `AnimationSource`/`AnimationBinder` seam (AnimationStore.java:48-108,338-341), collapsed into one binder per
+        // payload file because the port's payload carries whole files.
+        Map<String, List<AnimationBinder>> bindersByDomain = new LinkedHashMap<>();
+        Map<String, Set<String>> binderNamesByDomain = new LinkedHashMap<>();
         for (String domain : AnimationDomain.ALL) {
-            filesByDomain.put(domain, new AnimationFile());
+            bindersByDomain.put(domain, new ArrayList<>());
+            binderNamesByDomain.put(domain, new LinkedHashSet<>());
         }
         Map<String, byte[]> controllerFiles = new LinkedHashMap<>();
         // 动画名 → 该动画**自身** JSON 引用到的可选模组 modId 集合，注册控制器后交给
@@ -2509,19 +2759,22 @@ public class ClientModelManager {
         Map<String, Set<String>> animToModIds = new LinkedHashMap<>();
         // A projectile sub-entity's animation and controller files must NOT merge into the player's single animation
         // namespace: a pack's arrow animation set and its player set both define `parallel0`, and merging them lets
-        // one overwrite the other for whichever is drawn second. Each projectile therefore gets its own AnimationFile
-        // registered under its own sub-model id, which is what the projectile renderer looks up.
+        // one overwrite the other for whichever is drawn second. Each projectile therefore gets its own store under its
+        // own sub-model id, which is what the projectile renderer looks up.
         ResourceLocation baseId = ModelIdUtil.getParentModelId(id);
         Map<ResourceLocation, byte[]> projectileControllerFiles = new LinkedHashMap<>();
         Map<ResourceLocation, byte[]> vehicleControllerFiles = new LinkedHashMap<>();
+        // The sub-entity stores' binders, keyed by the sub-model id; they have no fallback (never default-merged).
+        Map<ResourceLocation, List<AnimationBinder>> subModelBinders = new LinkedHashMap<>();
+        Map<ResourceLocation, Set<String>> subModelNames = new LinkedHashMap<>();
         MolangParser parser = GeckoLibCache.getInstance().parser;
         for (String key : payload.keys()) {
             // The binary channel carries this file as structures; the client builds the engine objects directly
             // (RawAnimationBuilder) instead of re-emitting and re-parsing the JSON text it used to produce.
             RawYsmModel.RawAnimationFile structured = payload.structured(key);
             if (structured != null) {
-                registerStructuredAnimationFile(id, baseId, key, structured, payload.identity(), parser,
-                    filesByDomain, animations, animToModIds, prepared);
+                registerStructuredAnimationFile(id, baseId, key, structured, animToModIds, bindersByDomain,
+                    binderNamesByDomain, subModelBinders, subModelNames, parser, prepared);
                 continue;
             }
             byte[] entryBytes = payload.bytes(key);
@@ -2537,9 +2790,10 @@ public class ClientModelManager {
                 ResourceLocation projectileId = ModelIdUtil
                     .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
                 projectileControllerFiles.put(projectileId, bytes);
-                // Give the id an AnimationFile of its own even when the animation arrives in a separate entry: the
-                // renderer returns early - and draws the bind pose - when this lookup misses.
-                animations.computeIfAbsent(projectileId, ignored -> new AnimationFile());
+                // Give the id a store of its own even when the animation arrives in a separate entry: the renderer
+                // returns early - and draws the bind pose - when this lookup misses.
+                subModelBinders.computeIfAbsent(projectileId, ignored -> new ArrayList<>());
+                subModelNames.computeIfAbsent(projectileId, ignored -> new LinkedHashSet<>());
                 continue;
             }
             if (key
@@ -2552,8 +2806,8 @@ public class ClientModelManager {
                 }
                 ResourceLocation projectileId = ModelIdUtil
                     .getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
-                AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
-                animations.put(projectileId, preparedFile != null ? preparedFile : projectileAnimationFile(bytes, projectileId));
+                addJsonSubModelBinder(subModelBinders, subModelNames, projectileId, key,
+                    clipTextsFor(prepared, key, bytes, id), parser);
                 continue;
             }
             // The vehicle family, same two branches and same reason as the projectile ones above: a pack's boat set
@@ -2570,7 +2824,8 @@ public class ClientModelManager {
                 }
                 ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
                 vehicleControllerFiles.put(vehicleId, bytes);
-                animations.computeIfAbsent(vehicleId, ignored -> new AnimationFile());
+                subModelBinders.computeIfAbsent(vehicleId, ignored -> new ArrayList<>());
+                subModelNames.computeIfAbsent(vehicleId, ignored -> new LinkedHashSet<>());
                 continue;
             }
             if (key
@@ -2582,17 +2837,13 @@ public class ClientModelManager {
                     continue;
                 }
                 ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
-                // Same parser as the projectile branch: it is "one sub-entity's own animation file, never merged into
-                // the player's namespace", which is exactly what a vehicle needs too. Only its name and its log line
-                // say projectile.
-                AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
-                animations.put(vehicleId, preparedFile != null ? preparedFile : projectileAnimationFile(bytes, vehicleId));
+                addJsonSubModelBinder(subModelBinders, subModelNames, vehicleId, key,
+                    clipTextsFor(prepared, key, bytes, id), parser);
                 continue;
             }
-            // Each file's bytes are decoded and parsed exactly once: that one JsonObject both answers "is this a
-            // controller file?" and feeds the animation conversion. The previous shape parsed every file whose name
-            // was not a controller name twice, because a probe parsed it to look for `animation_controllers` and the
-            // conversion then parsed the same text again - 28.7 MB of JSON parsed twice over the reference catalog.
+            // Each file's bytes are decoded and parsed exactly once: that one tree both answers "is this a controller
+            // file?" and is split into the per-clip texts the store binds from. The previous shape parsed every file
+            // whose name was not a controller name twice - 28.7 MB of JSON parsed twice over the reference catalog.
             if (YsmControllerResources.isControllerResource(key)) {
                 controllerFiles.put(key, entryBytes);
                 continue;
@@ -2601,27 +2852,22 @@ public class ClientModelManager {
             if (bytes == null || bytes.length == 0) {
                 continue;
             }
-            JsonObject jsonObject;
-            try {
-                jsonObject = GsonHelper
-                    .fromJson(ysmu.GSON, new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
-            } catch (Exception e) {
-                ysmu.LOG.warn(
-                    "Failed to parse animation file {} for model {}: {}: {}",
-                    key,
-                    id,
-                    e.getClass()
-                        .getSimpleName(),
-                    Objects.requireNonNullElse(e.getMessage(), ""));
-                continue;
-            }
-            if (jsonObject == null) {
-                continue;
-            }
-            if (jsonObject.has("animation_controllers")) {
+            if (prepared != null && prepared.isControllerFile(key)) {
                 controllerFiles.put(key, bytes);
                 continue;
             }
+            Map<String, String> clipTexts = clipTextsFor(prepared, key, bytes, id);
+            if (clipTexts == null) {
+                continue;
+            }
+            // The store's lazy binder for this file: it holds each clip's own JSON text, so the store binds one clip
+            // per name on demand (upstream's per-animation source; the text is what the mod scan below already needs).
+            String domain = AnimationDomain.ofAnimationSet(key);
+            JsonAnimationBinder binder = JsonAnimationBinder.fromClipTexts(key, clipTexts, parser);
+            bindersByDomain.get(domain)
+                .add(binder);
+            binderNamesByDomain.get(domain)
+                .addAll(binder.names());
             // 逐动画扫描关键帧 Molang 表达式里对可选模组控制变量（如 ctrl.tac_hold_gun）的引用：
             // 控制器的 animation 条目可能只是裸动画名、自己不带任何 condition，引用藏在动画关键帧里。
             // 逐动画（而不是逐文件）是必须的：某个模型的 main.animation.json 里只有 sneak/sneaking
@@ -2629,14 +2875,9 @@ public class ClientModelManager {
             // 于是 tacz 未加载时 pre_parallel_0 控制器被整体跳过（衣服/表情永不播放）。
             // (reference branch ClientModelManager.java:1073-1115)
             if (prepared == null) {
-                for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
-                    JsonElement animationJsonElement = animationEntry.getValue();
-                    if (animationJsonElement == null || !animationJsonElement.isJsonObject()) {
-                        continue;
-                    }
-                    String animationJson = animationJsonElement.toString();
+                for (Map.Entry<String, String> animationEntry : clipTexts.entrySet()) {
                     for (ModDependency dependency : ModDependencyRegistry.getAll()) {
-                        if (dependency.matches(animationJson)) {
+                        if (dependency.matches(animationEntry.getValue())) {
                             animToModIds.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
                                 .add(dependency.getModId());
                         }
@@ -2650,29 +2891,23 @@ public class ClientModelManager {
                         .addAll(modEntry.getValue());
                 }
             }
-            AnimationFile preparedFile = prepared == null ? null : prepared.file(key);
-            AnimationFile parsedFile = preparedFile != null ? preparedFile
-                : cachedAnimationFile(payload.identity(), key, entryBytes, jsonObject);
-            mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), parsedFile);
         }
-        // Each domain is completed from the built-in default model's *same* domain, upstream's per-domain fallback
-        // (`defaultAnimations.fallback(domain)`, ModelRenderTargetLoader.java:375-379): a name the model defines
-        // itself always wins, and a name it does not falls back to the default's clip for that domain.
-        // Which names came from that fallback is remembered, because a name the model merely inherits is not this
-        // model's to report: the built-in default model's own registration reports it once, and without this every
-        // model that inherits an unclassifiable default clip (`hold_mainhand:lance` on all 22 wine_fox models, for
-        // one) would warn about content its own files never mention.
-        Map<String, Set<String>> inheritedFromDefault = new LinkedHashMap<>();
-        for (String domain : AnimationDomain.ALL) {
-            AnimationFile target = filesByDomain.get(domain);
-            Set<String> inherited = new LinkedHashSet<>();
-            defaultAnimationFile(domain).animations.forEach((name, action) -> {
-                if (!target.animations.containsKey(name)) {
-                    target.putAnimation(name, action);
-                    inherited.add(name);
-                }
-            });
-            inheritedFromDefault.put(domain, inherited);
+        // The per-model stores are built from the payload's binders: a name the model does not define is answered by
+        // the store's fallback pointer to the built-in default's pinned store, not by a copy.
+        installAnimationStores(id, baseId, bindersByDomain, binderNamesByDomain);
+        // A projectile or vehicle sub-model keeps its own animation namespace (see the routing above), so it gets its
+        // own store too - with no fallback, because those ids were never default-merged.
+        installSubModelAnimationStores(subModelBinders, subModelNames);
+        // The built-in default model's clips are the system's one eager, shared set: every other model's store points at
+        // these pinned stores instead of copying their clips (upstream's DefaultAnimationRuntime, published "only after
+        // a default target has fully bound its animations"). Publishing before the condition registration below also
+        // gives the default's own registration a store to read its names from - its ids resolve to the pinned stores.
+        if (isDefaultModelId(id)) {
+            for (String domain : AnimationDomain.ALL) {
+                DefaultAnimationStores.instance()
+                    .publish(domain, eagerAnimationFile(bindersByDomain.get(domain), binderNamesByDomain.get(domain)));
+            }
+            refreshInstalledAnimationNames();
         }
         // Condition names are registered per domain, under the id that domain's animatable reads, which is upstream's
         // two-store split (`ModelRenderTargetAssembler.java:53-60`: the player's own names into `conditionManager`, the
@@ -2680,27 +2915,33 @@ public class ClientModelManager {
         // model's `main` id and the first-person arm's with the model's `arm` id
         // (`ConditionManager#armorFor`), so each table must hold exactly its own domain's names - a name the `fp_arm`
         // set declares is not a name the body's armor controller may play.
-        filesByDomain.get(AnimationDomain.MAIN)
-            .animations.forEach((name, animation) -> {
+        //
+        // The names come from the store: `names()` is the model's own clips plus the fallback's (the built-in
+        // default's), and `localNames()` is exactly the model's own set. The split matters because a name the model
+        // merely inherits is not this model's to report: the built-in default model's own registration reports it once,
+        // and without the split every model inheriting an unclassifiable default clip (`hold_mainhand:lance` on all 22
+        // wine_fox models) would warn about content its own files never mention.
+        AnimationStore mainStore = registrationStore(AnimationDomain.animationFileId(baseId, AnimationDomain.MAIN));
+        if (mainStore != null) {
+            Set<String> ownNames = mainStore.localNames();
+            for (String name : mainStore.names()) {
                 try {
-                    ConditionManager.addTest(
-                        id,
-                        name,
-                        !inheritedFromDefault.get(AnimationDomain.MAIN)
-                            .contains(name));
+                    ConditionManager.addTest(id, name, ownNames.contains(name));
                 } catch (Exception e) {
                     ysmu.LOG.warn("Failed to register animation condition {} for model {}", name, id, e);
                 }
-            });
+            }
+        }
         ResourceLocation firstPersonId = AnimationDomain.animationFileId(baseId, AnimationDomain.FIRST_PERSON);
-        filesByDomain.get(AnimationDomain.FIRST_PERSON)
-            .animations.forEach((name, animation) -> {
+        AnimationStore firstPersonStore = registrationStore(firstPersonId);
+        if (firstPersonStore != null) {
+            Set<String> ownNames = firstPersonStore.localNames();
+            for (String name : firstPersonStore.names()) {
                 try {
                     com.fox.ysmu.client.animation.condition.FPArmConditionManager.addTest(
                         firstPersonId,
                         name,
-                        !inheritedFromDefault.get(AnimationDomain.FIRST_PERSON)
-                            .contains(name));
+                        ownNames.contains(name));
                 } catch (Exception e) {
                     ysmu.LOG.warn(
                         "Failed to register first-person animation condition {} for model {}",
@@ -2708,12 +2949,17 @@ public class ClientModelManager {
                         firstPersonId,
                         e);
                 }
-            });
+            }
+        }
+        // The animation set the controller registry validates its states against: both domains' effective names (the
+        // model's own plus the built-in default's through the store fallback), which is exactly what the old merged
+        // files held.
         Set<String> installedAnimationNames = new LinkedHashSet<>();
         for (String domain : AnimationDomain.ALL) {
-            AnimationFile file = filesByDomain.get(domain);
-            installedAnimationNames.addAll(file.animations.keySet());
-            animations.put(AnimationDomain.animationFileId(baseId, domain), file);
+            AnimationStore store = registrationStore(AnimationDomain.animationFileId(baseId, domain));
+            if (store != null) {
+                installedAnimationNames.addAll(store.names());
+            }
         }
         // The reference gates controller registration on the model actually declaring controller files
         // (REF ClientModelManager.java:690 `if (!bundle.controllerFiles.isEmpty())`). Without that gate every
@@ -2772,42 +3018,156 @@ public class ClientModelManager {
         ysmu.LOG.info(
             "YSM client registered animations for {}: count={}",
             id,
-            filesByDomain.get(AnimationDomain.MAIN).animations.size());
+            installedAnimationNames.size());
     }
 
     /**
-     * Installs one animation file that arrived as structures instead of JSON text - the OpenYSM binary channel.
+     * The store a model's registration reads names from: its own store, or - for the built-in default model's ids - the
+     * pinned store it was just published as. The default deliberately has no lazy store of its own (nothing would read
+     * it: {@link #animationStoreFor} answers its ids from {@link DefaultAnimationStores}), so this is the one place that
+     * has to look at both.
+     */
+    @Nullable
+    private static AnimationStore registrationStore(ResourceLocation animationFileId) {
+        AnimationStore store = ANIMATION_STORES.get(animationFileId);
+        if (store != null) {
+            return store;
+        }
+        if (isDefaultModelId(animationFileId)) {
+            return DefaultAnimationStores.instance()
+                .store(
+                    AnimationDomain.isFirstPersonId(animationFileId) ? AnimationDomain.FIRST_PERSON
+                        : AnimationDomain.MAIN);
+        }
+        return null;
+    }
+
+    /**
+     * Builds the eager clip set for the built-in default model's pinned store.
      *
      * <p>
-     * Same routing as the byte branch of {@link #registerAnimations}: a sub-entity's set stays under its own id (a
-     * pack's arrow set and its player set both define {@code parallel0}, so merging would let one overwrite the other),
-     * everything else merges into its {@link AnimationDomain}. The mod-dependency scan that runs off the animation text
-     * on the JSON side runs off {@link com.fox.ysmu.client.animation.RawAnimationBuilder#modScanText} here - the same
-     * expression strings, without the JSON punctuation that no dependency pattern can name.
+     * The default is the one set upstream binds up front ({@code DefaultAnimationRuntime.java:11,25-47};
+     * {@code ModelRenderTargetLoader.java:370-374}); every other store holds binders and binds on demand. The binders are
+     * the payload's own, so this is the only place the default's clips are built - its own lazy store binds the few
+     * clips it actually plays.
      */
+    private static AnimationFile eagerAnimationFile(List<AnimationBinder> binders, Set<String> names) {
+        AnimationFile file = new AnimationFile();
+        for (String name : names) {
+            for (int i = binders.size() - 1; i >= 0; i--) {
+                try {
+                    Animation animation = binders.get(i)
+                        .bind(name);
+                    if (animation != null) {
+                        file.putAnimation(name, animation);
+                        break;
+                    }
+                } catch (Exception failure) {
+                    ysmu.LOG.warn("Failed to build built-in default animation {}", name, failure);
+                    break;
+                }
+            }
+        }
+        return file;
+    }
+
     /**
-     * Parses one animation set from JSON bytes, reusing a cached parse when one exists.
-     * <p>
-     * The digest is taken over the exact bytes being parsed, so the cache cannot answer for a different payload.
+     * The per-clip JSON text of one payload file: the loader thread's prepared texts when it has them, otherwise the
+     * bytes are parsed here and split into clip texts immediately. {@code null} means the file could not be parsed and
+     * is skipped, which is the containment the old whole-file install gave an unbuildable file.
      */
+    @Nullable
+    private static Map<String, String> clipTextsFor(@Nullable PreparedAnimations prepared, String key, byte[] bytes,
+        ResourceLocation id) {
+        if (prepared != null) {
+            Map<String, String> clips = prepared.clips(key);
+            if (clips != null) {
+                return clips;
+            }
+        }
+        JsonObject tree = parseJsonObject(key, bytes, id);
+        return tree == null ? null : clipTextsOf(tree);
+    }
+
+    /** Splits one parsed animation file into each clip's own JSON text, in file order. */
+    private static Map<String, String> clipTextsOf(JsonObject tree) {
+        Map<String, String> clips = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonElement> entry : JsonAnimationUtils.getAnimations(tree)) {
+            JsonElement element = entry.getValue();
+            if (element != null) {
+                clips.put(entry.getKey(), element.toString());
+            }
+        }
+        return clips;
+    }
+
+    /** Parses one animation file, reporting a malformed file once exactly as the old whole-file install did. */
+    @Nullable
+    private static JsonObject parseJsonObject(String key, byte[] bytes, ResourceLocation id) {
+        try {
+            return GsonHelper.fromJson(ysmu.GSON, new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
+        } catch (Exception e) {
+            ysmu.LOG.warn(
+                "Failed to parse animation file {} for model {}: {}: {}",
+                key,
+                id,
+                e.getClass()
+                    .getSimpleName(),
+                Objects.requireNonNullElse(e.getMessage(), ""));
+            return null;
+        }
+    }
+
     /**
-     * Builds every animation set of one parked payload on the loader thread.
+     * Adds one sub-entity's lazy binder (and the names it declares) to the per-sub-model store being built; a file that
+     * could not be parsed leaves the store declared-but-empty, which is the bind-pose answer the old empty file gave.
+     */
+    private static void addSubModelBinder(Map<ResourceLocation, List<AnimationBinder>> binders,
+        Map<ResourceLocation, Set<String>> names, ResourceLocation subModelId, AnimationBinder binder,
+        Set<String> declaredNames) {
+        binders.computeIfAbsent(subModelId, ignored -> new ArrayList<>())
+            .add(binder);
+        names.computeIfAbsent(subModelId, ignored -> new LinkedHashSet<>())
+            .addAll(declaredNames);
+    }
+
+    /** The JSON form of {@link #addSubModelBinder}; a file that failed to parse declares the id with no clips. */
+    private static void addJsonSubModelBinder(Map<ResourceLocation, List<AnimationBinder>> binders,
+        Map<ResourceLocation, Set<String>> names, ResourceLocation subModelId, String key,
+        @Nullable Map<String, String> clipTexts, MolangParser parser) {
+        binders.computeIfAbsent(subModelId, ignored -> new ArrayList<>());
+        names.computeIfAbsent(subModelId, ignored -> new LinkedHashSet<>());
+        if (clipTexts == null) {
+            return;
+        }
+        JsonAnimationBinder binder = JsonAnimationBinder.fromClipTexts(key, clipTexts, parser);
+        addSubModelBinder(binders, names, subModelId, binder, binder.names());
+    }
+
+    /**
+     * Parses every animation set of one parked payload into per-clip JSON text on the loader thread.
+     *
      * <p>
-     * Pure CPU only: no engine cache writes, no condition/controller registration - those stay in
-     * {@link #registerAnimations} on the client thread. The result is what makes the first draw of a model cheap.
+     * Pure CPU only: no engine objects, no cache writes, no condition/controller registration - those stay in
+     * {@link #registerAnimations} on the client thread. Each clip's own text is what a store's
+     * {@link com.fox.ysmu.client.animation.store.JsonAnimationBinder} re-parses when it binds that one clip, so this
+     * moves the expensive whole-file Gson parse off the client thread while the per-clip Molang/keyframe building stays
+     * lazy. The tree itself is dropped here: keeping it would cost ~10x its text and a store must keep its source alive
+     * (`.agent/verify-animation-store.md` §3.3). Structured (OpenYSM binary) payloads need no preparation: their
+     * {@code RawAnimationFile} is already the raw per-clip form.
      */
     private static void prepareAnimations(ResourceLocation mainId, AnimationPayload payload) {
         try {
-            MolangParser parser = GeckoLibCache.getInstance().parser;
-            Map<String, AnimationFile> files = new LinkedHashMap<>();
+            Map<String, Map<String, String>> clips = new LinkedHashMap<>();
+            Set<String> controllerFiles = new LinkedHashSet<>();
             Map<String, Map<String, Set<String>>> mods = new LinkedHashMap<>();
             for (String key : payload.keys()) {
                 if (YsmControllerResources.isControllerResource(key)) {
+                    controllerFiles.add(key);
                     continue;
                 }
                 RawYsmModel.RawAnimationFile structured = payload.structured(key);
                 if (structured != null) {
-                    files.put(key, buildStructuredAnimationFile(payload.identity(), key, structured, parser));
                     Map<String, Set<String>> perAnimation = new LinkedHashMap<>();
                     scanStructuredModIds(structured, perAnimation);
                     if (!perAnimation.isEmpty()) {
@@ -2826,10 +3186,14 @@ public class ClientModelManager {
                 } catch (Exception malformed) {
                     continue;
                 }
-                if (jsonObject == null || jsonObject.has("animation_controllers")) {
+                if (jsonObject == null) {
                     continue;
                 }
-                files.put(key, cachedAnimationFile(payload.identity(), key, bytes, jsonObject));
+                if (jsonObject.has("animation_controllers")) {
+                    controllerFiles.add(key);
+                    continue;
+                }
+                Map<String, String> clipTexts = new LinkedHashMap<>();
                 Map<String, Set<String>> perAnimation = new LinkedHashMap<>();
                 for (Map.Entry<String, JsonElement> animationEntry : JsonAnimationUtils.getAnimations(jsonObject)) {
                     JsonElement element = animationEntry.getValue();
@@ -2837,6 +3201,7 @@ public class ClientModelManager {
                         continue;
                     }
                     String animationJson = element.toString();
+                    clipTexts.put(animationEntry.getKey(), animationJson);
                     for (ModDependency dependency : ModDependencyRegistry.getAll()) {
                         if (dependency.matches(animationJson)) {
                             perAnimation.computeIfAbsent(animationEntry.getKey(), ignored -> new LinkedHashSet<>())
@@ -2844,18 +3209,19 @@ public class ClientModelManager {
                         }
                     }
                 }
+                clips.put(key, clipTexts);
                 if (!perAnimation.isEmpty()) {
                     mods.put(key, perAnimation);
                 }
             }
             if (PENDING_ANIMATIONS.get(mainId) != payload) {
-                // The payload was installed (or replaced) while this build ran; the client thread has already built
-                // what it needs and keeping this bundle would only hold a second copy of the graph.
+                // The payload was installed (or replaced) while this parse ran; the client thread has already built
+                // what it needs and keeping this bundle would only hold a second copy of the texts.
                 return;
             }
-            PREPARED_ANIMATIONS.put(mainId, new PreparedAnimations(payload, files, mods));
+            PREPARED_ANIMATIONS.put(mainId, new PreparedAnimations(payload, clips, controllerFiles, mods));
         } catch (Throwable failure) {
-            // Preparation is an optimisation: the client thread still builds on demand. Record the failure so
+            // Preparation is an optimisation: the client thread still parses on demand. Record the failure so
             // ensureAnimations stops waiting for a bundle that will never arrive and installs inline.
             ANIMATION_PREPARATION_FAILED.add(mainId);
             ysmu.LOG.warn("YSM client could not prepare animations for {}; building them on demand", mainId, failure);
@@ -2879,60 +3245,29 @@ public class ClientModelManager {
         }
     }
 
-    /** Builds one structured animation set, reusing a cached parse when the cache is enabled. */
-    private static AnimationFile buildStructuredAnimationFile(@Nullable String identity, String key,
-        RawYsmModel.RawAnimationFile file, MolangParser parser) {
-        String digest = identity != null && BakedAnimationCache.isEnabled()
-            ? com.fox.ysmu.client.animation.RawAnimationBuilder.structureDigest(file) : null;
-        AnimationFile built = digest == null ? null : BakedAnimationCache.load(identity, key, digest);
-        if (built != null) {
-            return built;
-        }
-        built = com.fox.ysmu.client.animation.RawAnimationBuilder.toAnimationFile(file, parser);
-        if (digest != null) {
-            BakedAnimationCache.store(identity, key, digest, built);
-        }
-        return built;
-    }
-    private static AnimationFile cachedAnimationFile(@Nullable String identity, String key, byte[] bytes,
-        JsonObject jsonObject) {
-        boolean caching = identity != null && BakedAnimationCache.isEnabled();
-        String digest = caching ? com.fox.ysmu.util.Md5Utils.md5Hex(bytes) : null;
-        if (digest != null) {
-            AnimationFile cached = BakedAnimationCache.load(identity, key, digest);
-            if (cached != null) {
-                ysmu.LOG.info("YSM animation cache hit {} ({} animations)", key, cached.animations.size());
-                return cached;
-            }
-        }
-        AnimationFile parsed = animationFileFromJson(jsonObject);
-        if (digest != null) {
-            BakedAnimationCache.store(identity, key, digest, parsed);
-        }
-        return parsed;
-    }
+    /**
+     * Routes one animation file that arrived as structures instead of JSON text - the OpenYSM binary channel.
+     *
+     * <p>
+     * Same routing as the byte branch of {@link #registerAnimations}: a sub-entity's set stays under its own id (a
+     * pack's arrow set and its player set both define {@code parallel0}, so merging would let one overwrite the other),
+     * everything else becomes a binder of its {@link AnimationDomain}. The mod-dependency scan that runs off the
+     * animation text on the JSON side runs off {@link com.fox.ysmu.client.animation.RawAnimationBuilder#modScanText}
+     * here - the same expression strings, without the JSON punctuation that no dependency pattern can name.
+     */
     private static void registerStructuredAnimationFile(ResourceLocation id, ResourceLocation baseId, String key,
-        RawYsmModel.RawAnimationFile file, @Nullable String identity, MolangParser parser,
-        Map<String, AnimationFile> filesByDomain, Map<ResourceLocation, AnimationFile> animations,
-        Map<String, Set<String>> animToModIds, @Nullable PreparedAnimations prepared) {
-        AnimationFile built = prepared == null ? null : prepared.file(key);
-        if (built == null) {
-            try {
-                built = buildStructuredAnimationFile(identity, key, file, parser);
-            } catch (Throwable failure) {
-                // Same containment as the JSON branch: one unbuildable file costs that file, not the model's
-                // animations.
-                ysmu.LOG.warn("Failed to build animation file {} for model {}", key, id, failure);
-                return;
-            }
-        }
+        RawYsmModel.RawAnimationFile file, Map<String, Set<String>> animToModIds,
+        Map<String, List<AnimationBinder>> bindersByDomain, Map<String, Set<String>> binderNamesByDomain,
+        Map<ResourceLocation, List<AnimationBinder>> subModelBinders, Map<ResourceLocation, Set<String>> subModelNames,
+        MolangParser parser, @Nullable PreparedAnimations prepared) {
         if (key.startsWith(PROJECTILE_KEY_PREFIX)) {
             String matchId = key.substring(PROJECTILE_KEY_PREFIX.length());
             if (matchId.isEmpty()) {
                 return;
             }
             ResourceLocation projectileId = ModelIdUtil.getSubModelId(baseId, PROJECTILE_KEY_PREFIX + matchId);
-            animations.put(projectileId, built);
+            StructuredAnimationBinder binder = new StructuredAnimationBinder(key, file, parser);
+            addSubModelBinder(subModelBinders, subModelNames, projectileId, binder, binder.names());
             return;
         }
         if (key.startsWith(VEHICLE_KEY_PREFIX)) {
@@ -2941,7 +3276,8 @@ public class ClientModelManager {
                 return;
             }
             ResourceLocation vehicleId = ModelIdUtil.getSubModelId(baseId, VEHICLE_KEY_PREFIX + matchId);
-            animations.put(vehicleId, built);
+            StructuredAnimationBinder binder = new StructuredAnimationBinder(key, file, parser);
+            addSubModelBinder(subModelBinders, subModelNames, vehicleId, binder, binder.names());
             return;
         }
         if (prepared != null) {
@@ -2952,94 +3288,22 @@ public class ClientModelManager {
             }
         } else {
             // Scan into the caller's map (the helper above builds into a scratch map for the preparation path).
-            java.util.Map<String, Set<String>> scanned = new LinkedHashMap<>();
+            Map<String, Set<String>> scanned = new LinkedHashMap<>();
             scanStructuredModIds(file, scanned);
             for (Map.Entry<String, Set<String>> modEntry : scanned.entrySet()) {
                 animToModIds.computeIfAbsent(modEntry.getKey(), ignored -> new LinkedHashSet<>())
                     .addAll(modEntry.getValue());
             }
         }
-        mergeAnimationFile(filesByDomain.get(AnimationDomain.ofAnimationSet(key)), built);
+        // The store's lazy binder for this file: the structures are the payload's own form, so binding one clip on
+        // demand is a direct RawAnimationBuilder call and the store never has to hold a whole built file.
+        String domain = AnimationDomain.ofAnimationSet(key);
+        StructuredAnimationBinder binder = new StructuredAnimationBinder(key, file, parser);
+        bindersByDomain.get(domain)
+            .add(binder);
+        binderNamesByDomain.get(domain)
+            .addAll(binder.names());
     }
-
-    /**
-     * The built-in default model's animations for one domain; see {@link AnimationDomain}.
-     * <p>
-     * The authoritative copy is the one <em>installed</em> under the default model's own animation id, so a model
-     * registered after the built-in default (which is every synced model: the default is loaded eagerly at client
-     * start) inherits the fallback from the same objects the engine plays. Before that registration has happened, the
-     * static fields below are empty, which is also the right answer: there is no default to inherit from yet.
-     * <p>
-     * Reading the installed copy is what removes the duplicate parse this method used to cause: {@code loadDefaultModel}
-     * parsed every default animation file once into these fields and then {@code registerAll} parsed the same bytes
-     * again to install them (129 ms on the client thread for the built-in pack).
-     * <p>
-     * <b>The id passed to {@link AnimationDomain#animationFileId} is a model id, not a main id.</b> That helper appends
-     * the sub-name itself ({@code animationFileId(modelId, MAIN) == getMainId(modelId)}), so a main id here produced
-     * {@code ysmu:default/main/main} - a lookup that could never hit. Since the same change stopped filling the static
-     * fields below, that made the fallback empty for <em>every</em> installed model: a model whose own files are
-     * complete was unaffected, while one that relies on inherited clips lost them - the built-in
-     * {@code misc/4_default_controllers} model, whose own animation set only has {@code sneak}/{@code parallel*} and
-     * inherits {@code walk}/{@code run}/{@code idle}, had no locomotion animation at all (regression introduced by
-     * {@code ecd2e3d}, "Build models from binary structures and add bake caches").
-     */
-    private static AnimationFile defaultAnimationFile(String domain) {
-        ResourceLocation defaultModelId = new ResourceLocation(ysmu.MODID, "default");
-        AnimationFile installed = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(AnimationDomain.animationFileId(defaultModelId, domain));
-        if (installed != null && !installed.animations.isEmpty()) {
-            return installed;
-        }
-        return AnimationDomain.isFirstPerson(domain) ? DEFAULT_FIRST_PERSON_ANIMATION_FILE : DEFAULT_ANIMATION_FILE;
-    }
-
-    /** One projectile's animation file, parsed and never merged into the player's namespace. */
-    private static AnimationFile projectileAnimationFile(byte[] bytes, ResourceLocation projectileId) {
-        try {
-            JsonObject jsonObject = GsonHelper
-                .fromJson(ysmu.GSON, new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
-            return jsonObject == null ? new AnimationFile() : animationFileFromJson(jsonObject);
-        } catch (Exception e) {
-            ysmu.LOG.warn(
-                "Failed to parse projectile animation for {}: {}: {}",
-                projectileId,
-                e.getClass()
-                    .getSimpleName(),
-                Objects.requireNonNullElse(e.getMessage(), ""));
-            return new AnimationFile();
-        }
-    }
-
-    /**
-     * Converts every animation in one already-parsed animation file.
-     * <p>
-     * This is the expensive half - one {@code KeyFrame} per channel per keyframe time, each carrying a MoLang
-     * expression - which is why the file is parsed once by the caller and only the resulting object is handed here.
-     */
-    private static AnimationFile animationFileFromJson(JsonObject jsonObject) {
-        AnimationFile animationFile = new AnimationFile();
-        MolangParser parser = GeckoLibCache.getInstance().parser;
-        for (Map.Entry<String, JsonElement> entry : JsonAnimationUtils.getAnimations(jsonObject)) {
-            String animationName = entry.getKey();
-            Animation animation;
-            try {
-                Map.Entry<String, JsonElement> animEntry = JsonAnimationUtils.getAnimation(jsonObject, animationName);
-                animation = JsonAnimationUtils.deserializeJsonToAnimation(animEntry, parser);
-                attachAnimSpeed(animation, animEntry);
-                animationFile.putAnimation(animationName, animation);
-            } catch (Exception e) {
-                ysmu.LOG.warn(
-                    "Failed to register animation {}: {}: {}",
-                    animationName,
-                    e.getClass()
-                        .getSimpleName(),
-                    Objects.requireNonNullElse(e.getMessage(), ""));
-            }
-        }
-        return animationFile;
-    }
-
     /**
      * YSMU: 把模型动画 JSON 的 {@code anim_speed}（逐动画播放倍率，数字或 MoLang 表达式）与
      * {@code anim_time_update}（自定义时间推进）挂到引擎 {@link Animation#animSpeed} /
@@ -3076,15 +3340,10 @@ public class ClientModelManager {
         }
     }
 
-    private static AnimationFile mergeAnimationFile(AnimationFile main, AnimationFile other) {
-        other.animations.forEach(main::putAnimation);
-        return main;
-    }
-
     public static void loadDefaultModel() {
         // M1/D7:内置 default 现在是 config/ysmu/builtin/default 下的现代 ysm.json 包，config/ysmu/custom 只是用户
         // 自己的根目录，新装机器上并没有 custom/default；仅按旧位置读会让这个方法在全新安装上直接抛
-        // FileNotFoundException，DEFAULT_ANIMATION_FILE 于是永远是空的。形状照 SOURCE
+        // FileNotFoundException，内置 default 于是完全不可用。形状照 SOURCE
         // ClientModelManager:1319-1348：先试旧布局，再回退到内置包。
         ModelData data = null;
         try {
@@ -3116,10 +3375,15 @@ public class ClientModelManager {
             // other model asks for it. The identity is a constant: the content is the jar's own built-in default, so
             // it cannot change without a mod update - which the baked-cache ABI tag already includes.
             //
-            // The per-domain fallback tables are NOT filled here any more: registerAll -> registerAnimations installs
-            // these very files into the engine cache, and defaultAnimationFile reads them from there. Parsing them
-            // here as well only parsed the same bytes twice (see defaultAnimationFile).
+            // The built-in default's clips are published as the pinned per-domain stores every other model's store
+            // falls back to (see installAnimationStores and DefaultAnimationStores); the eager install below is what
+            // creates them.
             ClientModelManager.registerAll(data, "b:default", true);
+            // Eager, and the only eager animation set: every other model's store falls back to these pinned stores, so
+            // they have to exist before any model store is created (see animationStoreFor). Upstream's default target
+            // is likewise the one set that is fully bound up front (ModelRenderTargetLoader.java:370-374,
+            // .agent/perf-audit-memory.md:268-270); everything else binds per clip on demand.
+            ensureAnimationsImmediately(ModelIdUtil.getMainId(new ResourceLocation(ysmu.MODID, "default")));
         } else {
             ysmu.LOG.warn("Failed to load default model from any format");
         }
@@ -3606,10 +3870,14 @@ public class ClientModelManager {
      */
     private static void releaseEngineCaches() {
         AnimationData.disposeAll();
-        Map<ResourceLocation, AnimationFile> animations = GeckoLibCache.getInstance()
-            .getAnimations();
-        animations.keySet()
-            .removeIf(id -> !isDefaultModelId(id));
+        // The model stores hold the clips the engine cache used to hold, so they close with the connection; the built-in
+        // default's pinned stores stay (upstream closes a target's stores when the target is cleaned and never the
+        // default's, ModelRenderTarget.java:136-143).
+        for (AnimationStore store : ANIMATION_STORES.values()) {
+            store.close();
+        }
+        ANIMATION_STORES.clear();
+        refreshInstalledAnimationNames();
         Map<ResourceLocation, GeoModel> geoModels = GeckoLibCache.getInstance()
             .getGeoModels();
         List<GeoModel> released = new ArrayList<>();

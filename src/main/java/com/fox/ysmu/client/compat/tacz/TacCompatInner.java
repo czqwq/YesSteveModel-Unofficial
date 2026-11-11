@@ -21,6 +21,7 @@ import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.YsmBuiltinAnimations;
 import com.fox.ysmu.client.animation.condition.ConditionManager;
 import com.fox.ysmu.client.animation.condition.ConditionTAC;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.layer.CustomPlayerItemInHandLayer;
 import com.tacz.guns.api.TimelessAPI;
@@ -34,7 +35,6 @@ import software.bernie.geckolib3.core.PlayState;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
-import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 
 /**
@@ -351,8 +351,8 @@ final class TacCompatInner {
     private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
         CustomPlayerEntity animatable = event.getAnimatable();
         ClientModelManager.ensureAnimations(animatable.getMainModel());
-        AnimationFile file = ClientModelManager.animationFileFor(animatable.getAnimation());
-        return file != null && file.animations.containsKey(animationName);
+        AnimationStore store = ClientModelManager.animationStoreFor(animatable.getAnimation());
+        return store != null && store.contains(animationName);
     }
 
     private static PlayState playAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName,

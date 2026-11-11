@@ -82,14 +82,12 @@ public final class AnimationProvider implements AssetProvider<ResourceLocation, 
             return;
         }
         ResourceLocation baseId = ModelIdUtil.getParentModelId(mainId);
-        for (String domain : AnimationDomain.ALL) {
-            GeckoLibCache.getInstance()
-                .getAnimations()
-                .remove(AnimationDomain.animationFileId(baseId, domain));
-        }
-        // 引擎侧：绑定了这两份文件的动画数据必须松开对 KeyFrame 图的引用，否则 DROP_HEAP 只搬走了
-        // GeckoLibCache 里的登记项，堆并没有真的释放（参考 provider/AnimationProvider.java:40 只做
-        // mainId，本仓两个 domain 各绑各的，见类 javadoc 第 3 条）。
+        // 释放这一模型自己的动画存储（两个 domain + 它的 projectile/vehicle 子模型），内置 default 的 pinned store 不动
+        // ——上游在目标被清理时关闭它的 store、从不释放 default（ModelRenderTarget.java:136-143）。
+        ClientModelManager.releaseAnimationStores(mainId);
+        // 引擎侧：绑定了这两份文件的动画数据必须松开对 KeyFrame 图的引用，否则 DROP_HEAP 只搬走了 store 里的登记项，
+        // 堆并没有真的释放（参考 provider/AnimationProvider.java:40 只做 mainId，本仓两个 domain 各绑各的，见类
+        // javadoc 第 3 条）。
         AnimationData.releaseAnimationFile(mainId);
         AnimationData.releaseAnimationFile(ModelIdUtil.getArmId(baseId));
         // 参考 provider/AnimationProvider.java:41：让控制器丢掉按旧文件解析出来的片段，

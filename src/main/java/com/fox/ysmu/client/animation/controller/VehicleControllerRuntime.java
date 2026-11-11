@@ -11,12 +11,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ActiveAnimation;
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ImplicitAnimationSelector;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.ysmu;
-
-import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
  * The animations a <b>vehicle</b> sub-entity plays, in the shape upstream's {@code VehicleControllerCollection} gives
@@ -155,11 +154,12 @@ public final class VehicleControllerRuntime {
      */
     private static void selectCodedAnimations(int entityId, ResourceLocation animId, List<ActiveAnimation> result,
         Set<String> managedAnims, double ageInTicks, VehicleState state) {
-        AnimationFile file = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animId);
-        if (file == null || file.animations == null) {
-            // Nothing to select, so the geometry stays in its bind pose.
+        // The vehicle's own animation store, one per vehicle sub-model id and holding only that set's clips
+        // (ClientModelManager#installSubModelAnimationStores) - the store replacement for the whole-file read this used
+        // to do. No store is the old null file: the set is not installed yet, so nothing is selected and the geometry
+        // stays in its bind pose.
+        AnimationStore store = ClientModelManager.animationStoreFor(animId);
+        if (store == null) {
             return;
         }
 
@@ -167,17 +167,17 @@ public final class VehicleControllerRuntime {
         // vehicle.pre_parallel0..7 (VehicleControllerCollection.java:27-28): the family that runs before main, so the
         // lowest priority. The port's player path registers the same family (CustomPlayerEntity.java:70-71).
         for (int i = 0; i < MAX_PARALLEL_SLOT; i++) {
-            addIfPresent(selected, file, managedAnims, "pre_parallel" + i);
+            addIfPresent(selected, store, managedAnims, "pre_parallel" + i);
         }
         // vehicle.main: water first, then ground, then fly - one of the three, never two.
-        addIfPresent(selected, file, managedAnims, state.inWater ? "water" : state.onGround ? "ground" : "fly");
+        addIfPresent(selected, store, managedAnims, state.inWater ? "water" : state.onGround ? "ground" : "fly");
         // vehicle.move.
-        addIfPresent(selected, file, managedAnims, state.moving ? "forward" : "idle");
+        addIfPresent(selected, store, managedAnims, state.moving ? "forward" : "idle");
         // vehicle.ride.
-        addIfPresent(selected, file, managedAnims, state.hasRide ? "has_ride" : "not_ride");
+        addIfPresent(selected, store, managedAnims, state.hasRide ? "has_ride" : "not_ride");
         // vehicle.parallel0..7, the highest priority.
         for (int i = 0; i < MAX_PARALLEL_SLOT; i++) {
-            addIfPresent(selected, file, managedAnims, "parallel" + i);
+            addIfPresent(selected, store, managedAnims, "parallel" + i);
         }
 
         CodedState coded = STATES.computeIfAbsent(entityId + "|" + animId, ignored -> new CodedState());
@@ -210,12 +210,12 @@ public final class VehicleControllerRuntime {
      * Adds {@code name} when the model declares it and no JSON controller already owns it, keeping the list free of
      * duplicates so a name cannot be sampled twice with two different clock origins.
      */
-    private static void addIfPresent(List<String> selected, AnimationFile file, Set<String> managedAnims,
+    private static void addIfPresent(List<String> selected, AnimationStore store, Set<String> managedAnims,
         String name) {
         if (managedAnims.contains(name) || selected.contains(name)) {
             return;
         }
-        if (file.animations.containsKey(name)) {
+        if (store.contains(name)) {
             selected.add(name);
         }
     }

@@ -13,17 +13,17 @@ import net.minecraft.util.ResourceLocation;
 import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.AnimationEntry;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Controller;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.ControllerSet;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.State;
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Transition;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.molang.LazyVariable;
 import software.bernie.geckolib3.core.molang.MolangParser;
-import software.bernie.geckolib3.file.AnimationFile;
-import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
  * The controller state machines of a <b>sub-entity</b> - a projectile (an arrow, a trident, a thrown item) or a
@@ -287,29 +287,32 @@ public final class ProjectileControllerRuntime {
      */
     private static List<ActiveAnimation> selectImplicitAnimations(ResourceLocation animId, ProjectileState state,
         List<ActiveAnimation> result, Set<String> managedAnims) {
-        AnimationFile animFile = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animId);
-        if (animFile == null || animFile.animations == null) {
+        // The sub-entity's own animation store: one store per projectile/vehicle id, holding only that set's clips
+        // (ClientModelManager#installSubModelAnimationStores). It replaces the whole-file read this used to do on the
+        // engine cache's animation map - the same names answer, now bound one clip at a time and owned by the
+        // sub-entity (upstream's per-target AnimationStore, `.agent/plan-animation-store-port.md`). A null store is
+        // the old null file: this set is not installed yet, so nothing is selected.
+        AnimationStore store = ClientModelManager.animationStoreFor(animId);
+        if (store == null) {
             return result;
         }
 
         // Low priority: flight, then ground. High priority: fire, then water. Later wins on a shared bone.
-        addIfPresent(result, animFile, state.inAir, "air");
-        addIfPresent(result, animFile, state.inGround, "ground");
-        addIfPresent(result, animFile, state.onFire, "fire");
-        addIfPresent(result, animFile, state.inWater, "water");
+        addIfPresent(result, store, state.inAir, "air");
+        addIfPresent(result, store, state.inGround, "ground");
+        addIfPresent(result, store, state.onFire, "fire");
+        addIfPresent(result, store, state.inWater, "water");
 
         // The parallel family always plays, and a higher number wins.
         for (int i = 0; i < MAX_PARALLEL_SLOT; i++) {
-            addIfPresent(result, animFile, true, "parallel" + i);
+            addIfPresent(result, store, true, "parallel" + i);
         }
 
         // Anything else is neither a state animation, a parallel slot, nor controller-managed, so it is not on the
         // projectile's animation list. The old "play everything" behaviour is exactly where the stacking came from.
         // With DebugController on they are listed, so a model that really depends on a non-standard spelling shows up.
         if (Config.DEBUG_CONTROLLER) {
-            for (String name : animFile.animations.keySet()) {
+            for (String name : store.names()) {
                 if (containsName(result, name) || managedAnims.contains(name) || isKnownImplicitAnimation(name)) {
                     continue;
                 }
@@ -345,12 +348,12 @@ public final class ProjectileControllerRuntime {
         return digits.length() == 1 && digits.charAt(0) >= '0' && digits.charAt(0) < '0' + MAX_PARALLEL_SLOT;
     }
 
-    private static void addIfPresent(List<ActiveAnimation> result, AnimationFile animFile, boolean condition,
+    private static void addIfPresent(List<ActiveAnimation> result, AnimationStore store, boolean condition,
         String animationName) {
         if (!condition || containsName(result, animationName)) {
             return;
         }
-        if (animFile.animations.containsKey(animationName)) {
+        if (store.contains(animationName)) {
             // Not a controller animation, so it is timed from the entity's birth.
             result.add(new ActiveAnimation(animationName, 0.0d));
         }
@@ -933,11 +936,17 @@ public final class ProjectileControllerRuntime {
         return Math.abs(left - right) < 0.000001d;
     }
 
+    /**
+     * Whether the sub-entity's own animation set declares {@code animationName}.
+     *
+     * <p>The old rule was {@code AnimationFile#animations#containsKey} on an installed file - absent when the set was
+     * not installed yet, which a controller state reads as "no such clip, do not play it". A store that does not exist
+     * yet is therefore the same absence, not a permissive answer: unlike the player path's
+     * {@code AnimationManager#hasAnimation}, nothing here decides STOP-vs-play.
+     */
     private static boolean animationExists(ResourceLocation animId, String animationName) {
-        AnimationFile file = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animId);
-        return file != null && file.animations.containsKey(animationName);
+        AnimationStore store = ClientModelManager.animationStoreFor(animId);
+        return store != null && store.contains(animationName);
     }
 
     private static RuntimeState getOrCreateState(int entityId, ResourceLocation animId, String controllerName) {

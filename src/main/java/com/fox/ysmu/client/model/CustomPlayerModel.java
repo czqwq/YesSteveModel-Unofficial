@@ -12,6 +12,7 @@ import net.minecraft.util.ResourceLocation;
 
 import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.animation.RemotePlayerAnimationQueries;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.ClientProxy;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -145,13 +146,23 @@ public class CustomPlayerModel extends AnimatedGeoModel {
      */
     @Override
     public Animation getAnimation(String name, IAnimatable animatable) {
-        if (animatable instanceof CustomPlayerEntity customPlayer) {
-            // Keyed on the requested model, not on getAnimation() or getMainModel(): both answer with the built-in
-            // default until this model is a ready target (animation install included), so asking them first would
-            // install the default's payload instead of this model's.
-            ClientModelManager.ensureAnimations(customPlayer.getRequestedMainModel());
+        if (!(animatable instanceof CustomPlayerEntity customPlayer)) {
+            // Only the port's player animatables have a store; the engine's generic lookup (the old GeckoLibCache map)
+            // no longer holds animation files, so anything else answers absence.
+            return null;
         }
-        return super.getAnimation(name, animatable);
+        // Keyed on the requested model, not on getAnimation() or getMainModel(): both answer with the built-in
+        // default until this model is a ready target (animation install included), so asking them first would
+        // install the default's payload instead of this model's.
+        ClientModelManager.ensureAnimations(customPlayer.getRequestedMainModel());
+        // The store owns the clips: this model's own set first, then the built-in default's pinned store as the
+        // fallback (upstream's per-target stores plus the shared default source, PlayerModelResources.java:17-28 and
+        // DefaultAnimationRuntime.java:11,25-47). A name this model does not define therefore never enters its own map,
+        // which is what makes one model's playback unable to affect another model's clip. While the model's own store
+        // does not exist yet, `getAnimation()` answers the built-in default's animation id (CustomPlayerEntity), so the
+        // engine keeps drawing the default clips exactly as it did when the lookup read the merged file.
+        AnimationStore store = ClientModelManager.animationStoreFor(customPlayer.getAnimation());
+        return store == null ? null : store.get(name);
     }
 
     /**

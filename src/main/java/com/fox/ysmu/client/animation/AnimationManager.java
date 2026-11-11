@@ -31,6 +31,7 @@ import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackFunctionScript;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.compat.tacz.TACZCompat;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -43,11 +44,11 @@ import com.google.common.collect.Lists;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import software.bernie.geckolib3.core.IAnimatable;
 import software.bernie.geckolib3.core.PlayState;
+import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.builder.AnimationBuilder;
 import software.bernie.geckolib3.core.builder.ILoopType;
 import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
-import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 public final class AnimationManager {
@@ -132,8 +133,11 @@ public final class AnimationManager {
      * <p>
      * 与参考的一处必要差异：参考直接取
      * {@code GeckoLibCache.getInstance().getAnimations().get(animId)}，因为它的动画在注册期就装好了；
-     * 本仓的动画是按模型懒安装的（{@code ClientModelManager.animationFileFor} 才安装），
+     * 本仓的动画是按模型懒安装的（{@code ClientModelManager.animationStoreFor} 才安装），
      * 所以先 {@code ensureAnimations(mainModel)} 再取，否则会拿到内置 default 的文件。
+     * <p>
+     * 这条路径把模型自己的 {@link AnimationStore} 交给 {@link MovementSpeedMatcher#applyPlaybackSpeed}（读周期
+     * 时长与 {@code anim_speed}），该类的参数同样是 {@code AnimationStore}，所以继承名由 store 的 fallback 提供。
      */
     private static void applyPlaybackSpeed(AnimationEvent<?> event, String animationName) {
         // 总开关先短路：关闭时（默认）这条路径不做任何玩家/动画文件查询。
@@ -151,9 +155,9 @@ public final class AnimationManager {
         }
         ClientModelManager.ensureAnimations(animatable.getMainModel());
         ResourceLocation animId = animatable.getAnimation();
-        AnimationFile file = animId == null ? null : ClientModelManager.animationFileFor(animId);
+        AnimationStore store = animId == null ? null : ClientModelManager.animationStoreFor(animId);
         MovementSpeedMatcher.applyPlaybackSpeed(event.getController(), player, animationName,
-            com.fox.ysmu.util.ControllerUtils.MAIN_CONTROLLER.equals(event.getController().getName()), file);
+            com.fox.ysmu.util.ControllerUtils.MAIN_CONTROLLER.equals(event.getController().getName()), store);
     }
 
     public void register(AnimationState state) {
@@ -189,7 +193,7 @@ public final class AnimationManager {
      * {@code PlayState.STOP}（SOURCE {@code client/animation/AnimationManager.java:852-855}，判定在
      * {@code :740-746}），注释写明理由就是 "Skip if the animation doesn't exist in the model's file to avoid
      * GeckoLib's System.out.printf spam ("Could not load animation: ...")"（SOURCE {@code :822-823}）。
-     * 本仓的等价判定是 {@link #hasAnimation}（先 {@code ensureAnimationFile} 安装懒加载的动画文件，再查表），
+     * 本仓的等价判定是 {@link #hasAnimation}（先 {@code ensureAnimationStore} 安装懒加载的动画，再问 store），
      * 所以这里复用它，没有新机制。
      *
      * <p>
@@ -532,9 +536,10 @@ public final class AnimationManager {
             // 绝大多数模型没有任何 .molang 脚本：一次 map 查询就退出，不做后面的动画表查询。
             return null;
         }
-        AnimationFile animFile = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(animId);
+        // The model's own clips plus the built-in default's through the store's fallback - the same set the merged file
+        // held, asked through the store the rest of the animation path now reads (see
+        // AnimationManager#ensureAnimationStore).
+        AnimationStore store = ClientModelManager.animationStoreFor(animId);
         com.fox.ysmu.client.animation.molang.AnimationControlResult result =
             com.fox.ysmu.client.animation.molang.AnimationControlScripts.evaluate(animId, slot, () -> {
                 EntityPlayer player = animatable.getPlayer();
@@ -549,8 +554,7 @@ public final class AnimationManager {
             return null;
         }
         com.fox.ysmu.client.animation.molang.AnimationControlResult.LoopType scriptLoop = result.loopType();
-        ControlScriptDecision decision = decideControlScript(result, animFile == null ? null : animFile.animations,
-            null, animId, slot);
+        ControlScriptDecision decision = decideControlScript(result, store, null, animId, slot);
         if (decision == null) {
             return null;
         }
@@ -645,14 +649,14 @@ public final class AnimationManager {
      */
     @Nullable
     static ControlScriptDecision decideControlScript(
-        com.fox.ysmu.client.animation.molang.AnimationControlResult result,
-        java.util.Map<String, ?> animations, @Nullable String fallbackName, ResourceLocation animId, String slot) {
+        com.fox.ysmu.client.animation.molang.AnimationControlResult result, @Nullable AnimationStore store,
+        @Nullable String fallbackName, ResourceLocation animId, String slot) {
         if (result == null) {
             return null;
         }
         com.fox.ysmu.client.animation.molang.AnimationControlResult.Action action = result.action();
         String name = result.animationName();
-        if (animations != null && name != null && !animations.containsKey(name)) {
+        if (store != null && name != null && !store.contains(name)) {
             // 脚本算出了一个模型里不存在的动画：不覆盖（否则看起来像"动画丢了"）。
             if (Config.DEBUG_CONTROLLER && LOGGED_CONTROL_SCRIPT.add(animId + "|" + slot + "|missing")) {
                 com.fox.ysmu.ysmu.LOG.info(
@@ -797,31 +801,38 @@ public final class AnimationManager {
      * had not been registered yet.
      */
     private static boolean definesAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
-        AnimationFile file = ensureAnimationFile(event);
-        return file == null || file.animations.containsKey(animationName);
+        AnimationStore store = ensureAnimationStore(event);
+        return store == null || store.contains(animationName);
     }
 
     /**
-     * The animation file for this event, installing the model's animations first if they are still parked.
+     * The animation store for this event, installing the model's animations first if they are still parked.
      * <p>
      * A model's animations are installed on first use rather than at registration, and both of the lookups below
      * *decide* whether anything will ever ask the engine for an animation: {@link #hasAnimation} gates the non-player
      * locomotion states, so a model whose animations were never installed would answer "no" to every state, select
      * nothing, and never reach the engine lookup that would have installed them. Asking here closes that loop.
+     * <p>
+     * The store answers for this model's own clips <em>and</em>, through its fallback pointer, for the built-in
+     * default's - the same set the merged animation file held after the default was inserted into it, without the
+     * copy ({@code client/animation/store/AnimationStore.java}, {@code ClientModelManager#animationStoreFor}).
+     * {@link AnimationStore#contains} keeps the old map test's answer exactly, including the {@code empty} asymmetry:
+     * the built-in no-op clip is answered by {@link AnimationStore#get} but is not a declared name, which is what these
+     * checks have always asked.
      */
     @Nullable
-    private static AnimationFile ensureAnimationFile(AnimationEvent<CustomPlayerEntity> event) {
+    private static AnimationStore ensureAnimationStore(AnimationEvent<CustomPlayerEntity> event) {
         CustomPlayerEntity animatable = event.getAnimatable();
         // Keyed on the model: getAnimation() answers with the built-in default until this model's own animations
         // exist, so resolving the animation id first would install the wrong model's payload.
         ClientModelManager.ensureAnimations(animatable.getMainModel());
-        return ClientModelManager.animationFileFor(getAnimationId(event));
+        return ClientModelManager.animationStoreFor(getAnimationId(event));
     }
 
     /** Whether the model backing this animation event actually defines the named animation. */
     private static boolean hasAnimation(AnimationEvent<CustomPlayerEntity> event, String animationName) {
-        AnimationFile file = ensureAnimationFile(event);
-        return file != null && file.animations.containsKey(animationName);
+        AnimationStore store = ensureAnimationStore(event);
+        return store != null && store.contains(animationName);
     }
 
     private static void warnMissingState(String animationName, AnimationEvent<CustomPlayerEntity> event) {
@@ -1206,9 +1217,9 @@ public final class AnimationManager {
      * 所以这里必须就地加长。
      */
     private static PlayState playBlockingAnimation(AnimationEvent<CustomPlayerEntity> event, String fallbackAnim) {
-        AnimationFile file = ensureAnimationFile(event);
-        if (file != null) {
-            software.bernie.geckolib3.core.builder.Animation animation = file.getAnimation(fallbackAnim);
+        AnimationStore store = ensureAnimationStore(event);
+        if (store != null) {
+            Animation animation = store.get(fallbackAnim);
             if (animation != null) {
                 animation.animationLength = 2.0;
             }
@@ -1247,10 +1258,10 @@ public final class AnimationManager {
             return playLoopAnimation(event, conditionalAnimation);
         }
 
-        AnimationFile animationFile = ensureAnimationFile(event);
+        AnimationStore store = ensureAnimationStore(event);
         String slotName = ConditionArmor.getSlotNameFromIndex(slotIndex);
         String defaultName = slotName + ":default";
-        if (animationFile != null && animationFile.animations.containsKey(defaultName)) {
+        if (store != null && store.contains(defaultName)) {
             return playAnimation(event, defaultName, ILoopType.EDefaultLoopTypes.LOOP);
         }
         return PlayState.STOP;

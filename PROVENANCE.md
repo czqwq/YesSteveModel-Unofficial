@@ -528,3 +528,19 @@ One engine edit made while fixing a model switch that changed a shared clip's lo
 | file | change |
 |---|---|
 | `core/controller/AnimationController.java` | `refreshCurrentAnimation` no longer copies the replaced animation object's `loop` onto the object the name re-resolves to after the animation-file answer changed; it re-applies only the loop type the controller itself asked for (new `requestedLoopType`, read from the current builder's `RawAnimation`) and otherwise keeps the new file's authored loop. The host's per-domain default fallback inserts the built-in default's `Animation` instances into every model's file by reference, so the copy wrote one model's loop onto a clip every other model inherits: `AK_特蕾西娅` re-played the `hold_mainhand:pickaxe` raise every 2.5 s after a model switch (authored `hold_on_last_frame`) until the game restarted. Upstream has no counterpart - each render target owns its animation store and a switch never hands A's object to B - so this removes a port-specific defect rather than diverging from upstream. Verified with `tmp/_probe/LoopCarryProbe.java` against the real `AnimationController#process`: pre-fix the shared clip became `LOOP`, post-fix it keeps `HOLD_ON_LAST_FRAME` and an explicit `PLAY_ONCE` request is still re-applied after the switch. |
+
+## 2026-11-11 animation-storage round: engine edit
+
+One engine edit, the first milestone of porting upstream's per-model animation storage
+(`.agent/plan-animation-store-port.md`, M1; the storage itself is host-side and not an engine change). Upstream's
+definitions are immutable - `Animation.loop` is `public final LoopType loop`
+(`tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/builder/Animation.java:19`) - and the loop a
+play call asks for is kept on the playback object: `AnimationPlayer#setAnimation(name, loopTypeOverride)` resolves the
+clip and stores `override != null ? override : animation.loop` in its own `nextAnim`/`currentLoopType`
+(`.../core/controller/AnimationPlayer.java:77-84,139-165,461`), which `process` branches on (`:195,240,249`). The
+vendored GeckoLib 3 controller wrote the override onto the `Animation` instead.
+
+| file | change |
+|---|---|
+| `core/controller/AnimationController.java` | Removed the three `animation.loop = ...` writes (`setAnimation`, `setAnimationPreservingTick`, phase75's re-apply in `refreshCurrentAnimation`). The played loop type is now per-controller state (`currentLoopType` + the two identities it is derived from, `currentLoopType()`), re-derived only when the current animation or the play request changes, and read by `processCurrentAnimation`'s PLAY_ONCE/HOLD/repeat decisions; `releaseAnimationResources` drops it with the animation it describes. This makes a shared definition read-only during playback, which is what lets the host share the built-in default model's clips by reference as a store fallback. Phase75's behaviour is strictly stronger, not regressed: nothing is written, and an explicit request still wins over the file's authored loop. Verified with `tmp/_probe/ImmutableLoopProbe.java` (definition keeps its authored loop, controller still plays PLAY_ONCE, Java-serialisation round trip unchanged) and `tmp/_probe/LoopCarryProbe.java` (both scenarios PASS). |
+| `core/builder/Animation.java` | Javadoc on `loop` only: parse-time authored value, never written by playback; records why it cannot be `final` here (the definition is Java-serialised by the host's `BakedAnimationCache`, which restores it without running the constructor) and points at the phase75 incident. No field, type or serialisation-stream change. |

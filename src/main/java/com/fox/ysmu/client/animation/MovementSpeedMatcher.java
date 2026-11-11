@@ -10,13 +10,13 @@ import net.minecraft.util.MathHelper;
 import org.apache.commons.lang3.StringUtils;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.controller.AnimationController;
 import software.bernie.geckolib3.core.molang.MolangParser;
 import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
-import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
@@ -234,15 +234,15 @@ public final class MovementSpeedMatcher {
     }
 
     /**
-     * 从模型动画文件读取指定动画的周期时长（秒）。返回 <= 0 表示未知（动画缺失或没有长度）。
+     * 从模型动画存储读取指定动画的周期时长（秒）。返回 <= 0 表示未知（动画缺失或没有长度）。
      *
-     * @param file          模型动画文件（可为 null）
+     * @param store         模型动画存储（可为 null；读的就是该模型自己的 store，继承名由 fallback 提供）
      * @param animationName 动画名
      * @return 周期秒数（GeckoLib animationLength 是 tick，÷20 转秒）
      */
-    public static double cycleSeconds(AnimationFile file, String animationName) {
-        if (file != null && animationName != null) {
-            Animation anim = file.getAnimation(animationName);
+    public static double cycleSeconds(AnimationStore store, String animationName) {
+        if (store != null && animationName != null) {
+            Animation anim = store.get(animationName);
             if (anim != null && anim.animationLength != null && anim.animationLength > 0.0d) {
                 return anim.animationLength / 20.0d;
             }
@@ -260,11 +260,11 @@ public final class MovementSpeedMatcher {
      * 模型作者写出 {@code 0/0} 这类表达式时 NaN/Infinity 会让整条时钟变成 NaN。
      * 参考分支没有这一步（它直接 {@code Math.max(0d, value)}，NaN 会穿透）。
      */
-    public static double animSpeedFor(AnimationFile file, String animationName, MolangParser parser) {
-        if (file == null || animationName == null) {
+    public static double animSpeedFor(AnimationStore store, String animationName, MolangParser parser) {
+        if (store == null || animationName == null) {
             return 1.0d;
         }
-        Animation anim = file.getAnimation(animationName);
+        Animation anim = store.get(animationName);
         if (anim == null || anim.animSpeed == null || anim.animSpeed.isEmpty()) {
             return 1.0d;
         }
@@ -310,10 +310,10 @@ public final class MovementSpeedMatcher {
      * @param player           玩家；null（GUI 预览实体）时不干预
      * @param animationName    正在播放的动画名；空白视为不缩放
      * @param isBodyController 是否主身体控制器——防滑步仅对主身体控制器生效
-     * @param file             模型动画文件（可 null）
+     * @param store            模型动画存储（可 null）
      */
     public static void applyPlaybackSpeed(AnimationController<?> ctrl, EntityPlayer player,
-        String animationName, boolean isBodyController, AnimationFile file) {
+        String animationName, boolean isBodyController, AnimationStore store) {
         if (!isEnabled()) {
             return;
         }
@@ -323,11 +323,11 @@ public final class MovementSpeedMatcher {
         double strideMultiplier = 1.0d;
         // 防滑步：仅主身体控制器按真实速度缩放（设计速度 = 步幅 / 周期）
         if (isBodyController) {
-            double cycleSeconds = cycleSeconds(file, animationName);
+            double cycleSeconds = cycleSeconds(store, animationName);
             strideMultiplier = computeMultiplier(player, animationName, DEFAULT_PROVIDER, cycleSeconds);
         }
         // anim_speed：模型作者逐动画播放倍率
-        double animSpeed = animSpeedFor(file, animationName, GeckoLibCache.getInstance().parser);
+        double animSpeed = animSpeedFor(store, animationName, GeckoLibCache.getInstance().parser);
         // 最终倍率 = anim_speed × 防滑步倍率
         ctrl.animationSpeed = finite(strideMultiplier * animSpeed);
     }

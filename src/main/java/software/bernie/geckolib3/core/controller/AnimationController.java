@@ -151,6 +151,19 @@ public class AnimationController<T extends IAnimatable> {
     /** The object the last successful resolution produced; see {@link #refreshCurrentAnimation}. */
     private Animation resolvedAnimation;
 
+    /**
+     * The loop type being played, or {@code null} while nothing plays; see {@link #currentLoopType()}.
+     *
+     * <p>
+     * Upstream keeps this as per-playback state on the player ({@code currentLoopType}) instead of on the definition:
+     * {@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/controller/AnimationPlayer.java:83,461}.
+     */
+    private ILoopType currentLoopType;
+    /** The playing animation {@link #currentLoopType} describes; see {@link #currentLoopType()}. */
+    private Animation currentLoopTypeAnimation;
+    /** The play request {@link #currentLoopType} was derived from; see {@link #currentLoopType()}. */
+    private AnimationBuilder currentLoopTypeRequest;
+
     /** Authored entry descriptors contain activation, not a sequential playlist. */
     public static final class ConcurrentAnimation {
         public final String name;
@@ -505,9 +518,10 @@ public class AnimationController<T extends IAnimatable> {
                                 reportMissingAnimation(rawAnimation.animationName);
                                 encounteredError.set(true);
                             }
-                            if (animation != null && rawAnimation.loopType != null) {
-                                animation.loop = rawAnimation.loopType;
-                            }
+                            // The play call's loop type is kept as playback state, never written onto the definition
+                            // (upstream AnimationPlayer.java:139-165,461) - see currentLoopType(). The host shares the
+                            // built-in default's Animation instances across models, so writing one here changed the
+                            // clip for every model that inherits it.
                             return animation;
                         })
                         .collect(Collectors.toCollection(LinkedList::new));
@@ -563,9 +577,7 @@ public class AnimationController<T extends IAnimatable> {
                     reportMissingAnimation(rawAnimation.animationName);
                     encounteredError.set(true);
                 }
-                if (animation != null && rawAnimation.loopType != null) {
-                    animation.loop = rawAnimation.loopType;
-                }
+                // As in setAnimation(): the requested loop type stays playback state, see currentLoopType().
                 return animation;
             })
             .collect(Collectors.toCollection(LinkedList::new));
@@ -832,17 +844,17 @@ public class AnimationController<T extends IAnimatable> {
      * answer) keeps the previous uncached per-frame lookup, so the engine stays usable without that interface.
      *
      * <p>
-     * <b>The loop type is re-derived, never carried over.</b> The loop of the animation being replaced belongs to the
-     * file that animation came from; the resolved object belongs to the file the animatable answers with now. Those are
-     * two different files whenever the answer changes (a model switch, or the host answering with the built-in default
-     * while a newly selected model is still pending), and the loop must not travel between them. Only the controller's
-     * own request is re-applied ({@link #requestedLoopType}); a play call that left the choice to the file
-     * ({@code AnimationBuilder#addAnimation(String)} stores a {@code null} loop type) keeps whatever the new file
-     * authored.
+     * <b>The loop type is re-derived per playback, never written onto a definition.</b> Which loop type is played is
+     * decided by {@link #currentLoopType()} from two things that both belong to this side of the boundary: the play
+     * request this controller was given, and the loop the resolved object was authored with. Nothing here assigns
+     * {@link Animation#loop}. That matters because the loop of the animation being replaced belongs to the file that
+     * animation came from, while the resolved object belongs to the file the animatable answers with now - two
+     * different files whenever the answer changes (a model switch, or the host answering with the built-in default
+     * while a newly selected model is still pending).
      *
      * <p>
-     * Carrying it over was not cosmetic. The host's per-domain default fallback inserts the <em>same</em>
-     * {@code Animation} instance into every model's file
+     * Copying the replaced object's loop across was not cosmetic. The host's per-domain default fallback inserts the
+     * <em>same</em> {@code Animation} instance into every model's file
      * ({@code ClientModelManager#registerAnimations}, the built-in default's clips are inherited by reference), so
      * writing the previous file's loop onto that instance changed the clip's loop for every model for the rest of the
      * session. Reported symptom: a {@code hold_mainhand:pickaxe} authored {@code hold_on_last_frame} (raise the tool,
@@ -861,12 +873,9 @@ public class AnimationController<T extends IAnimatable> {
         Animation animation = model.getAnimation(current.animationName, this.animatable);
         // Cross-model fallback removed — see setAnimation() for rationale.
         if (animation != null) {
+            // The resolved object is used as the file authored it: the loop type the controller plays is its own
+            // state (currentLoopType()), so a re-resolve cannot write anything onto a definition shared between models.
             this.currentAnimation = animation;
-            // Only the controller's own explicit request may override the file's authored loop; see the note above.
-            ILoopType requested = requestedLoopType(current.animationName);
-            if (requested != null) {
-                this.currentAnimation.loop = requested;
-            }
         }
         // Remember the resolution even when the name is currently unknown: a missing name only becomes known once the
         // file answer changes (and a model switch also hands a different animation object through setAnimation).
@@ -879,10 +888,10 @@ public class AnimationController<T extends IAnimatable> {
      * to the animation file.
      *
      * <p>
-     * {@code setAnimation} applies the same override while it builds the playlist; this is the re-apply path for a
-     * re-resolve, so a clip the caller asked to play once keeps playing once even if the animation file answer changed
-     * mid-clip. The first playlist entry with that name is the one that was resolved - the legacy controllers this
-     * matters for always pass a single-entry builder.
+     * This is upstream's {@code loopTypeOverride} argument of {@code AnimationPlayer#setAnimation(String, LoopType)}
+     * ({@code AnimationPlayer.java:139}), read back from the play request the controller was given - the engine's
+     * {@link AnimationBuilder} carries it per {@link RawAnimation}. The first playlist entry with that name is the one
+     * that was resolved - the legacy controllers this matters for always pass a single-entry builder.
      */
     private ILoopType requestedLoopType(String animationName) {
         for (RawAnimation raw : this.currentAnimationBuilder.getRawAnimationList()) {
@@ -891,6 +900,43 @@ public class AnimationController<T extends IAnimatable> {
             }
         }
         return null;
+    }
+
+    /**
+     * The loop type played for {@link #currentAnimation}, or {@code null} while nothing plays.
+     *
+     * <p>
+     * Upstream shape: the loop of the playing animation is playback state, and the definition is never touched.
+     * {@code Animation.loop} is {@code final}
+     * ({@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/builder/Animation.java:19}); a
+     * play call stores {@code loopTypeOverride != null ? loopTypeOverride : animation.loop} in {@code nextAnim}
+     * ({@code .../core/controller/AnimationPlayer.java:139-165}); {@code loadNextAnim} copies that first element into
+     * {@code currentLoopType} ({@code :461}); {@code process} branches on {@code currentLoopType} ({@code :195,240,249}).
+     * This method is that state for the vendored controller: the controller's own request
+     * ({@link #requestedLoopType}) wins, and the loop the file authored answers otherwise.
+     *
+     * <p>
+     * <b>Why the two identities are cached.</b> Both inputs are replaced, never mutated: a play request always installs
+     * a new {@link #currentAnimationBuilder} identity ({@code setAnimation} and {@code setAnimationPreservingTick} -
+     * every caller, host or engine, builds a fresh builder), and a queue advance always installs a new
+     * {@link #currentAnimation} identity. Those are exactly the two "re-resolve only when the inputs change" checks
+     * {@link #refreshCurrentAnimation} makes for the animation object itself.
+     */
+    private ILoopType currentLoopType() {
+        Animation current = this.currentAnimation;
+        if (current == null) {
+            this.currentLoopType = null;
+            this.currentLoopTypeAnimation = null;
+            this.currentLoopTypeRequest = null;
+            return null;
+        }
+        if (current != this.currentLoopTypeAnimation || this.currentAnimationBuilder != this.currentLoopTypeRequest) {
+            ILoopType requested = requestedLoopType(current.animationName);
+            this.currentLoopTypeAnimation = current;
+            this.currentLoopTypeRequest = this.currentAnimationBuilder;
+            this.currentLoopType = requested != null ? requested : current.loop;
+        }
+        return this.currentLoopType;
     }
 
     /**
@@ -1449,6 +1495,9 @@ public class AnimationController<T extends IAnimatable> {
     private void processCurrentAnimation(double tick, double actualTick, MolangParser parser,
         boolean crashWhenCantFindBone) {
         assert currentAnimation != null;
+        // Upstream AnimationPlayer:83,461: the loop type played is the playback's own state, not the definition's.
+        // Read once so every decision below describes the same playback.
+        ILoopType playedLoopType = currentLoopType();
         boolean wrappedThisFrame = false;
         this.syncReportedThisFrame = false;
         // YSMU: anim_time_update — 逐动画自定义时间推进（Bedrock 风格）。
@@ -1498,7 +1547,7 @@ public class AnimationController<T extends IAnimatable> {
         // Preserve the evaluated pre-wrap position: raw wall-time deltas are not
         // equivalent when anim_time_update or animationSpeed changes.
         double timelineUnwrappedTick = tick;
-        if (bedrockPlayer && !beginningHold && currentAnimation.loop == EDefaultLoopTypes.PLAY_ONCE
+        if (bedrockPlayer && !beginningHold && playedLoopType == EDefaultLoopTypes.PLAY_ONCE
             && tick >= currentAnimation.animationLength) {
             // AnimationPlayer:163-168,286-313: once enters ending at >= and immediately reports finished.
             currentAnimationFinished = true;
@@ -1516,9 +1565,9 @@ public class AnimationController<T extends IAnimatable> {
         // opt in so a PLAY_ONCE is not stopped before its strict completion boundary is reached.
         if (bedrockCompletionBoundary ? tick > currentAnimation.animationLength
             : tick >= currentAnimation.animationLength) {
-            if (currentAnimation.loop == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
+            if (playedLoopType == EDefaultLoopTypes.HOLD_ON_LAST_FRAME) {
                 tick = Math.max(0.0D, currentAnimation.animationLength);
-            } else if (!currentAnimation.loop.isRepeatingAfterEnd()) {
+            } else if (!playedLoopType.isRepeatingAfterEnd()) {
                 processKeyFrameEvents(currentAnimation.animationLength, parser);
                 resetEventKeyFrames();
                 // YSMU: report the terminal tick before the state leaves Running, so a
@@ -1736,6 +1785,10 @@ public class AnimationController<T extends IAnimatable> {
         // Drop the resolved-animation cache with the animation it describes; the next play resolves afresh.
         resolvedAnimation = null;
         resolvedAnimationLocation = null;
+        // Same for the played loop type: it identifies the animation being released and must not keep it alive.
+        currentLoopType = null;
+        currentLoopTypeAnimation = null;
+        currentLoopTypeRequest = null;
         lastAnimTimeAnimation = null;
         lastAnimTimeTick = -1;
         lastActualTick = -1;

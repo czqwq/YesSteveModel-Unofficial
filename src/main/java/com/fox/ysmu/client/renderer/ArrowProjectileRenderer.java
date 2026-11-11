@@ -25,6 +25,7 @@ import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.Acti
 import com.fox.ysmu.client.animation.controller.ProjectileControllerRuntime.ProjectileState;
 import com.fox.ysmu.client.animation.controller.ProjectileTimelineRuntime;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
+import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.particle.ParticleEffectUtil;
 import com.fox.ysmu.client.render.ModelFailureNotifier;
 import com.fox.ysmu.util.IProjectileModelArrow;
@@ -47,7 +48,6 @@ import software.bernie.geckolib3.core.molang.MolangStringPool;
 import software.bernie.geckolib3.core.processor.IBone;
 import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
 import software.bernie.geckolib3.core.util.MathUtil;
-import software.bernie.geckolib3.file.AnimationFile;
 import software.bernie.geckolib3.geo.IGeoRenderer;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
@@ -338,11 +338,12 @@ public final class ArrowProjectileRenderer {
     private static void applyProjectileAnimations(GeoModel model, EntityArrow arrow, float partialTicks,
         ResourceLocation projectileGeoId, ResourceLocation modelId, String arrowType, double renderX, double renderY,
         double renderZ, float interpYaw, float interpPitch) {
-        AnimationFile animationFile = GeckoLibCache.getInstance()
-            .getAnimations()
-            .get(projectileGeoId);
-        if (animationFile == null || animationFile.animations == null) {
-            // Nothing to sample, so the geometry stays in its bind pose.
+        // The projectile's own animation store: one store per projectile sub-model id, holding only that set's clips
+        // (ClientModelManager#installSubModelAnimationStores). It is the store replacement for the whole-file read this
+        // used to do; a missing store is the missing file it used to be - the set is not installed yet, so there is
+        // nothing to sample and the geometry stays in its bind pose.
+        AnimationStore animationStore = ClientModelManager.animationStoreFor(projectileGeoId);
+        if (animationStore == null) {
             return;
         }
 
@@ -439,14 +440,14 @@ public final class ArrowProjectileRenderer {
             return;
         }
 
-        applyActiveAnimations(model, animationFile, activeAnimations, clockOrigins, ageInTicks, debugThisTick);
+        applyActiveAnimations(model, animationStore, activeAnimations, clockOrigins, ageInTicks, debugThisTick);
 
         // The timeline has to run after the bones are written: a model's instruction may read this frame's pose
         // through ysm.bone_pivot_abs(...).
         dispatchProjectileTimelines(
             arrow,
             projectileGeoId,
-            animationFile,
+            animationStore,
             activeAnimations,
             ageInTicks,
             model,
@@ -478,8 +479,8 @@ public final class ArrowProjectileRenderer {
      * </ol>
      */
     private static void dispatchProjectileTimelines(EntityArrow arrow, ResourceLocation projectileGeoId,
-        AnimationFile animationFile, List<String> activeAnimations, double ageInTicks, GeoModel model, double renderX,
-        double renderY, double renderZ, float interpYaw, float interpPitch) {
+        AnimationStore animationStore, List<String> activeAnimations, double ageInTicks, GeoModel model,
+        double renderX, double renderY, double renderZ, float interpYaw, float interpPitch) {
         Entity previousEntity = ParticleEffectUtil.getCurrentEntity();
         ParticleEffectUtil.setCurrentEntity(arrow);
         ParticleEffectUtil.beginProjectileTransform(renderX, renderY, renderZ, interpYaw, interpPitch);
@@ -488,7 +489,7 @@ public final class ArrowProjectileRenderer {
             ProjectileTimelineRuntime.dispatch(
                 arrow.getEntityId(),
                 projectileGeoId,
-                animationFile,
+                animationStore,
                 activeAnimations,
                 ageInTicks);
         } catch (Throwable failure) {
@@ -516,16 +517,30 @@ public final class ArrowProjectileRenderer {
      * <p>This overload samples every animation against the entity's age (origin 0); the render path uses the
      * clock-origin overload below so a controller state animation is timed from its state entry.</p>
      */
-    static void applyActiveAnimations(GeoModel model, AnimationFile animationFile, List<String> activeAnimations,
+    static void applyActiveAnimations(GeoModel model, AnimationStore animationStore, List<String> activeAnimations,
         double ageInTicks, boolean debugThisTick) {
-        applyActiveAnimations(model, animationFile, activeAnimations, Collections.emptyMap(), ageInTicks, debugThisTick);
+        applyActiveAnimations(
+            model,
+            animationStore,
+            activeAnimations,
+            Collections.emptyMap(),
+            ageInTicks,
+            debugThisTick);
     }
 
-    /** As above, with each animation's clock origin; a missing origin means origin 0 (the entity's age). */
-    static void applyActiveAnimations(GeoModel model, AnimationFile animationFile, List<String> activeAnimations,
+    /**
+     * As above, with each animation's clock origin; a missing origin means origin 0 (the entity's age).
+     *
+     * <p>
+     * The clips come from the sub-entity's own {@link AnimationStore} rather than from an
+     * {@code AnimationFile#animations} map: {@code get(name)} is that map's {@code get} with the store's own
+     * ownership and laziness, and a name the set does not define still answers {@code null} here, so the
+     * skip-the-bone-list behaviour is unchanged.
+     */
+    static void applyActiveAnimations(GeoModel model, AnimationStore animationStore, List<String> activeAnimations,
         Map<String, Double> clockOrigins, double ageInTicks, boolean debugThisTick) {
         for (String animationName : activeAnimations) {
-            Animation animation = animationFile.animations.get(animationName);
+            Animation animation = animationStore.get(animationName);
             if (animation == null || animation.boneAnimations == null) {
                 continue;
             }
