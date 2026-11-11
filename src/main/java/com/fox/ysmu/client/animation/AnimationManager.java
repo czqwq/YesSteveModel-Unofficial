@@ -31,6 +31,7 @@ import com.fox.ysmu.client.animation.molang.CtrlScriptBinding;
 import com.fox.ysmu.client.animation.molang.MolangFrameContext;
 import com.fox.ysmu.client.animation.molang.PackFunctionScript;
 import com.fox.ysmu.client.animation.molang.PackUserFunctions;
+import com.fox.ysmu.client.animation.store.AnimationResolution;
 import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.compat.tacz.TACZCompat;
 import com.fox.ysmu.ysmu;
@@ -107,6 +108,9 @@ public final class AnimationManager {
         return playAnimation(event, animationName, ILoopType.EDefaultLoopTypes.LOOP);
     }
 
+    /** Throttle for {@link #logPlaybackDecision}; one line per controller+clip per second. */
+    private static final Map<String, Long> PLAYBACK_DEBUG_LAST = new ConcurrentHashMap<>();
+
     @NotNull
     private static <P extends IAnimatable> PlayState playAnimation(AnimationEvent<P> event, String animationName,
         ILoopType loopType) {
@@ -115,6 +119,7 @@ public final class AnimationManager {
         applyPlaybackSpeed(event, animationName);
         event.getController()
             .setAnimation(new AnimationBuilder().addAnimation(animationName, loopType));
+        logPlaybackDecision(event, animationName, loopType);
         return PlayState.CONTINUE;
     }
 
@@ -123,7 +128,57 @@ public final class AnimationManager {
         applyPlaybackSpeed(event, animationName);
         event.getController()
             .setAnimation(new AnimationBuilder().addAnimation(animationName));
+        logPlaybackDecision(event, animationName, null);
         return PlayState.CONTINUE;
+    }
+
+    /**
+     * One diagnostic line per second for the controller that drives the body, so an animation that "does not play" can
+     * be told apart from one that plays the wrong clip, one that resolves through the built-in default fallback, and
+     * one whose tick never advances. Gated by {@code Config.DEBUG_CONTROLLER} (same switch as {@code [YSMU-CTRL]}).
+     */
+    private static void logPlaybackDecision(AnimationEvent<?> event, String animationName, @Nullable ILoopType loopType) {
+        if (!Config.DEBUG_CONTROLLER || event == null || event.getController() == null) {
+            return;
+        }
+        AnimationController<?> controller = event.getController();
+        String controllerName = controller.getName();
+        if (!"main_controller".equals(controllerName)) {
+            return;
+        }
+        String tag = controllerName + "|" + animationName;
+        long now = System.currentTimeMillis();
+        Long last = PLAYBACK_DEBUG_LAST.get(tag);
+        if (last != null && now - last < 1000L) {
+            return;
+        }
+        PLAYBACK_DEBUG_LAST.put(tag, now);
+        String source = "?";
+        Animation clip = null;
+        if (event.getAnimatable() instanceof CustomPlayerEntity customPlayer) {
+            AnimationStore store = ClientModelManager.animationStoreFor(customPlayer.getAnimation());
+            if (store != null) {
+                AnimationResolution resolution = store.resolve(animationName);
+                clip = resolution.animation();
+                source = clip == null ? "absent" : resolution.fallback() ? "default-fallback" : "own";
+            }
+        }
+        EntityPlayer player = event.getAnimatable() instanceof CustomPlayerEntity customPlayer
+            ? customPlayer.getPlayer()
+            : null;
+        ysmu.LOG.info(
+            "[YSMU-ANIM] {} -> '{}' loop={} source={} len={} bones={} tick={} state={} limbSwing={} sneaking={} onGround={}",
+            controllerName,
+            animationName,
+            loopType,
+            source,
+            clip == null ? "-" : clip.animationLength,
+            clip == null || clip.boneAnimations == null ? "-" : clip.boneAnimations.size(),
+            controller.getSyncTick(),
+            controller.getAnimationState(),
+            event.getLimbSwingAmount(),
+            player != null && player.isSneaking(),
+            player != null && player.onGround);
     }
 
     /**

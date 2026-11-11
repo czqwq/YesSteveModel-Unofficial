@@ -1837,31 +1837,42 @@ public final class OpenYsmControllerExpressionEvaluator {
             if (player.ridingEntity != null && player.ridingEntity.isEntityAlive()) {
                 return false;
             }
-            if ("idle".equals(name)) {
-                return !hasNonIdleControllerState();
-            }
-            return isControllerStateDirect(name);
+            // Upstream's answer is "is this the *selected* main state", not "does this state's own predicate hold":
+            // CtrlBinding#testCondition (client/animation/molang/CtrlBinding.java:136-174) walks its condition table in
+            // priority order, caches the first match and compares the queried name against that cache. Answering each
+            // predicate independently is a different question and it broke Furina's moving sneak: `walk`'s predicate is
+            // true while crouch-walking, so a controller expression `ctrl.walk` selected the pack's walk state, while
+            // the animation file's own `ctrl.walk` (answered from the main-state cache) was false - the walk clip's
+            // `blend_weight` then evaluated to 0 and the engine still emitted its bone pose, overriding the sneak
+            // clip's bent legs with the rest pose (tilted body, straight floating legs, no motion).
+            return name.equals(selectedControllerState());
         }
 
-        private boolean hasNonIdleControllerState() {
-            return isControllerStateDirect("death")
-                || isControllerStateDirect("sleep")
-                || isControllerStateDirect("swim")
-                || isControllerStateDirect("climb")
-                || isControllerStateDirect("climbing")
-                || isControllerStateDirect("ladder_up")
-                || isControllerStateDirect("ladder_stillness")
-                || isControllerStateDirect("ladder_down")
-                || isControllerStateDirect("fly")
-                // A-04 registered this one; a glide is as much "not idle" as a flight is.
-                || isControllerStateDirect("elytra_fly")
-                || isControllerStateDirect("swim_stand")
-                || isControllerStateDirect("attacked")
-                || isControllerStateDirect("jump")
-                || isControllerStateDirect("sneak")
-                || isControllerStateDirect("sneaking")
-                || isControllerStateDirect("run")
-                || isControllerStateDirect("walk");
+        /**
+         * The main state this actor's legacy predicates select, using upstream's {@code CtrlBinding} priority order
+         * ({@code client/animation/molang/CtrlBinding.java:51-72}: the list below is that registration order, which is
+         * the same order the port's {@code AnimationManager} registers its states in). {@code idle} is the fallback,
+         * exactly as its always-true LOWEST predicate makes it upstream.
+         */
+        /**
+         * Upstream {@code CtrlBinding} condition registration order
+         * ({@code client/animation/molang/CtrlBinding.java:51-72}): the HIGHEST group first, then HIGH, NORMAL, LOW.
+         * The port registers the same states in the same priority groups
+         * ({@code AnimationRegister#registerDamageJumpSneakStates}/{@code #registerMovementStates} and friends), so
+         * this is the order the first match has to use. {@code riptide} is not in the list: 1.7.10 has no riptide
+         * state, and the port registers none.
+         */
+        private static final String[] CONTROLLER_STATE_PRIORITY_ORDER = { "death", "sleep", "swim", "climb",
+            "climbing", "ladder_up", "ladder_stillness", "ladder_down", "fly", "elytra_fly", "swim_stand", "attacked",
+            "jump", "sneak", "sneaking", "run", "walk" };
+
+        private String selectedControllerState() {
+            for (String candidate : CONTROLLER_STATE_PRIORITY_ORDER) {
+                if (isControllerStateDirect(candidate)) {
+                    return candidate;
+                }
+            }
+            return "idle";
         }
 
         private boolean isControllerStateDirect(String name) {
@@ -1872,7 +1883,7 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return player.isPlayerSleeping();
             }
             if ("swim".equals(name)) {
-                return player.isInWater() && Math.abs(event.getLimbSwingAmount()) > 0.05f;
+                return player.isInWater() && limbSwingAmount() > 0.05f;
             }
             if ("climb".equals(name) || "climbing".equals(name)) {
                 return player.isOnLadder();
@@ -1913,7 +1924,7 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return isJumping();
             }
             if ("sneak".equals(name)) {
-                return isOnGround() && player.isSneaking() && Math.abs(event.getLimbSwingAmount()) > 0.05f;
+                return isOnGround() && player.isSneaking() && limbSwingAmount() > 0.05f;
             }
             if ("sneaking".equals(name)) {
                 return isOnGround() && player.isSneaking();
@@ -1922,7 +1933,7 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return isOnGround() && player.isSprinting();
             }
             if ("walk".equals(name)) {
-                return isOnGround() && event.getLimbSwingAmount() > 0.05f;
+                return isOnGround() && limbSwingAmount() > 0.05f;
             }
             return false;
         }

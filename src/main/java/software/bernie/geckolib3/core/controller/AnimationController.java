@@ -1329,13 +1329,21 @@ public class AnimationController<T extends IAnimatable> {
                 if (concurrentFoldedSeen.add(boneName)) {
                     concurrentFoldedOrder.add(boneName);
                 }
-                if (holder.applies) {
+                // A child whose blend weight evaluates to zero contributes nothing: its pose must not be emitted at
+                // all, otherwise the fold would hand this controller an identity (rest) pose for every bone the clip
+                // touches and overwrite the pose the earlier controllers just produced. That is what a pack's
+                // `blend_weight: ysm.second_order('walk',ctrl.walk,...)` turns into while `ctrl.walk` is false
+                // (upstream AnimationPlayer:318 uses the weight to scale this player's contribution, zero meaning
+                // none), and it is how a 0-weight walk clip flattened a crouch pose to a tilted body with straight
+                // legs.
+                double contribution = weight * fade;
+                if (holder.applies && contribution > 0) {
                     for (int channel = 0; channel < 3; channel++) {
-                        if (raw[channel][3] == 0 || ending && fade == 0) continue;
+                        if (raw[channel][3] == 0) continue;
                         for (int axis = 0; axis < 3; axis++) {
                             values[channel][axis] = channel == 2
-                                ? values[channel][axis] * (1 + (raw[channel][axis] - 1) * weight * fade)
-                                : values[channel][axis] + raw[channel][axis] * weight * fade;
+                                ? values[channel][axis] * (1 + (raw[channel][axis] - 1) * contribution)
+                                : values[channel][axis] + raw[channel][axis] * contribution;
                         }
                         values[channel][3] = 1;
                     }
