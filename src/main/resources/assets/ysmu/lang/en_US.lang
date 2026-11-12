@@ -43,6 +43,7 @@ gui.yes_steve_model.config.disable_self_hands=Prevents rendering of self player'
 gui.yes_steve_model.config.disable_projectile_model=Prevents rendering of projectile model
 gui.yes_steve_model.config.disable_vehicle_model=Prevents rendering of vehicle model
 gui.yes_steve_model.config.disable_player_render=Disable extra player render
+gui.yes_steve_model.config.hud_position=HUD paperdoll position
 gui.yes_steve_model.config.sound_volume=Animation Sound Volume:
 gui.yes_steve_model.config.gui_enhancements=Enable GUI enhancements (foreground/background textures, GUI animations)
 gui.yes_steve_model.config.render_wearable=Render external wearable models (backpack/copter/jetpack)

@@ -2,13 +2,27 @@ package com.fox.ysmu.client.gui;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.client.ClientEventHandler;
-import com.fox.ysmu.util.RenderUtil;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
 import org.lwjgl.input.Keyboard;
 
 import java.util.List;
 
+/**
+ * HUD paperdoll position/scale/yaw config screen.
+ * <p>
+ * The paperdoll this configures is the real HUD element: while this screen is open the HUD overlay keeps drawing it
+ * (see {@code ClientEventHandler#onRenderScreen}) on the every-frame path, and every drag writes through to
+ * {@link Config} immediately, so the doll follows the cursor live. The screen itself only draws the guide frame,
+ * anchors and the hotkey hints; it no longer draws a second preview of the doll (the upstream reference's shape,
+ * {@code client/gui/ExtraPlayerConfigScreen.java:96-135}, which hides its HUD and previews inside the screen -
+ * {@code ExtraPlayerScreen.java:24-26}). The owner asked for the GT5 power-goggles behaviour instead (drag the real
+ * HUD, see {@code .agent/phase77-hud-position-entry.md}).
+ * <p>
+ * Entry points: the YSM settings screen's HUD position button ({@code ConfigScreen}, which passes itself as
+ * {@link #parent} so Esc returns there) and the {@code Alt + P} keybinding (opened from the world, Esc closes to the
+ * game). Values are persisted on close by {@link #onGuiClosed()}.
+ */
 public class ExtraPlayerConfigScreen extends GuiScreen {
     private static final char RESET_KEY = 'r';
     /** CU-09: 与 Config.PLAYER_SCALE 声明的范围（8.0..360.0）一致，避免拖拽产生 0/负值。 */
@@ -25,7 +39,15 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
     private static final int RIGHT_MOUSE_BUTTON = 1;
     private int lastMouseX;
 
+    /** Screen to return to on Esc, or {@code null} when opened from the world (the keybinding path). */
+    private final GuiScreen parent;
+
     public ExtraPlayerConfigScreen() {
+        this(null);
+    }
+
+    public ExtraPlayerConfigScreen(GuiScreen parent) {
+        this.parent = parent;
         this.posX = Config.PLAYER_POS_X;
         this.posY = Config.PLAYER_POS_Y;
         this.scale = (float) Config.PLAYER_SCALE;
@@ -121,18 +143,6 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
         String followStatus = I18n.format(followKey);
         int followColor = Config.HUD_FOLLOW_MODE == Config.HUD_FOLLOW_VANILLA ? 0xFFFFFF : 0x55FF55;
         this.drawString(fontRendererObj, followStatus, 15, height - 10, followColor);
-
-        if (this.mc.thePlayer != null) {
-            // The same frame partial tick the HUD overlay passes, so the doll on this screen poses like the real one.
-            RenderUtil.renderPlayerEntity(
-                this.mc.thePlayer,
-                this.posX,
-                this.posY,
-                this.scale,
-                this.yawOffset,
-                50,
-                this.mc.timer.renderPartialTicks);
-        }
     }
 
 
@@ -185,6 +195,21 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
             this.yawOffset += (dragX * 2);
         }
         this.lastMouseX = mouseX;
+        // Live write-through: the HUD overlay keeps drawing the real doll behind this screen (see the class javadoc),
+        // and it reads Config every frame - without this the doll would only jump to the new spot when the screen
+        // closes.
+        syncConfig();
+    }
+
+    /**
+     * Writes the in-progress values through to {@link Config} so the live HUD follows the drag. The final clamp +
+     * {@code Config.save()} still happen in {@link #onGuiClosed()}, which is also where the values become permanent.
+     */
+    private void syncConfig() {
+        Config.PLAYER_POS_X = clampPos(this.posX, this.width);
+        Config.PLAYER_POS_Y = clampPos(this.posY, this.height);
+        Config.PLAYER_SCALE = clampScale(this.scale);
+        Config.PLAYER_YAW_OFFSET = this.yawOffset;
     }
 
     /** CU-09: 与 {@code Config.PLAYER_SCALE} 声明的范围（8.0..360.0）保持一致。 */
@@ -209,12 +234,19 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
 
     @Override
     protected void keyTyped(char typedChar, int keyCode) {
+        if (keyCode == Keyboard.KEY_ESCAPE && this.parent != null) {
+            // Opened from the YSM settings screen: Esc goes back there instead of straight to the game. The switch
+            // runs this screen's onGuiClosed first, so the values are still persisted.
+            this.mc.displayGuiScreen(this.parent);
+            return;
+        }
         boolean isAltDown = Keyboard.isKeyDown(Keyboard.KEY_LMENU) || Keyboard.isKeyDown(Keyboard.KEY_RMENU);
         if (Character.toLowerCase(typedChar) == RESET_KEY && isAltDown) {
             this.posX = 10;
             this.posY = 10;
             this.scale = 40;
             this.yawOffset = 5;
+            syncConfig();
         }
         // Toggle the HUD paperdoll FBO cache (row 44), the reference's 'C' binding
         // (client/gui/ExtraPlayerConfigScreen.java:189-193). Written back to Config here and persisted by
@@ -250,10 +282,7 @@ public class ExtraPlayerConfigScreen extends GuiScreen {
     @Override
     public void onGuiClosed() {
         // CU-09: 关闭时再钳制一次，保证写回 Config 的值始终合法（Config.sync* 也会钳制）。
-        Config.PLAYER_POS_X = clampPos(this.posX, this.width);
-        Config.PLAYER_POS_Y = clampPos(this.posY, this.height);
-        Config.PLAYER_SCALE = clampScale(this.scale);
-        Config.PLAYER_YAW_OFFSET = this.yawOffset;
+        syncConfig();
         Config.save();
     }
 }

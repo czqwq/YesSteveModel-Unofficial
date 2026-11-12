@@ -154,6 +154,17 @@ public class HudPreviewCache {
 
     private long lastFrameNanos;
     private float smoothFrameDeltaMs = 16.0F; // start at ~60fps
+    /**
+     * Render every frame instead of honouring the refresh-rate policy, for the HUD position config screen.
+     * <p>
+     * Port-specific (owner-defined): while {@code ExtraPlayerConfigScreen} is open the real HUD is what the player
+     * drags, so it has to follow the drag immediately. The normal policy is capped at {@link #HUD_MIN_HZ} (5 Hz) for
+     * cheap frames, which would make the doll trail the cursor by up to 200 ms. This is the same code path as
+     * {@code Config.GUI_HUD_PREVIEW_CACHE = false} — render straight to the screen, no FBO — but driven by the screen
+     * rather than by the user's cache switch, so the switch keeps its meaning. Cleared by the caller on the next HUD
+     * frame after the screen closes.
+     */
+    private boolean forceLive;
     /** Smoothed cost of one full preview re-render, in ms, measured around
      *  {@link RenderUtil#renderPlayerEntity}. First sample seeds it directly. */
     private float smoothRenderCostMs = 0.0F;
@@ -353,6 +364,15 @@ public class HudPreviewCache {
     }
 
     /**
+     * Forces the every-frame path ({@link #forceLive}) on or off. Called once per HUD frame by
+     * {@code ClientEventHandler#onRenderScreen}, which sets it from "is the HUD position config screen open".
+     * See {@link #forceLive} for why the screen needs it.
+     */
+    public void setForceLive(boolean value) {
+        this.forceLive = value;
+    }
+
+    /**
      * Release the off-screen FBO and forget what was baked into it.
      * <p>
      * Nothing else frees this cache's {@link FboCache}: the instance is a client-wide static
@@ -402,7 +422,10 @@ public class HudPreviewCache {
         // it, so holding it is holding a full-size framebuffer for a texture no frame reads. It is idempotent
         // (delete() null-checks), and the switch going back on re-creates it through checkAndResize, which returns
         // true for a null FBO and therefore bakes the frame it comes back on.
-        if (!Config.GUI_HUD_PREVIEW_CACHE) {
+        //
+        // forceLive rides the same branch for the HUD position config screen (see the field's javadoc): the player
+        // is dragging the real HUD there, so it must be re-rendered every frame rather than served from the FBO.
+        if (!Config.GUI_HUD_PREVIEW_CACHE || forceLive) {
             stats.cacheEnabled = false;
             delete();
             RenderUtil.renderPlayerEntity(player, posX, posY, (float) scale, (float) yawOffset, -500, partialTicks);

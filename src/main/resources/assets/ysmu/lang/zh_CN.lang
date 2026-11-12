@@ -41,6 +41,7 @@ gui.yes_steve_model.config.disable_self_hands=阻止渲染玩家自身手臂
 gui.yes_steve_model.config.disable_projectile_model=阻止渲染自定义投掷物模型
 gui.yes_steve_model.config.disable_vehicle_model=阻止渲染自定义载具模型
 gui.yes_steve_model.config.disable_player_render=禁用额外玩家渲染
+gui.yes_steve_model.config.hud_position=HUD纸娃娃位置
 gui.yes_steve_model.config.sound_volume=动画音量：
 gui.yes_steve_model.config.gui_enhancements=启用选择界面增强(前景/背景纹理/选择界面动画)
 gui.yes_steve_model.config.render_wearable=渲染其他模组背部模型(背包/直升机/喷气背包)

@@ -18,6 +18,14 @@ import net.minecraft.client.resources.I18n;
  */
 public class ConfigScreen extends GuiScreen {
     private static final int PAGE_COUNT = 2;
+    /**
+     * Port-specific (owner-defined): id of the HUD paperdoll position entry. Opens {@link ExtraPlayerConfigScreen},
+     * the existing drag/scale/yaw config screen, which now moves the real HUD live (see that class and
+     * {@code .agent/phase77-hud-position-entry.md}). Upstream has no such button - its only entries are the
+     * keybinding and the Android pause-screen wrench ({@code client/gui/AndroidCompat.java:41}) - so this follows the
+     * owner's request and GT5 power-goggles' HUD-position UX.
+     */
+    private static final int HUD_POSITION_BUTTON_ID = 21;
 
     private final PlayerModelScreen parent;
     private int page = 0;
@@ -54,6 +62,10 @@ public class ConfigScreen extends GuiScreen {
             addCheckbox(16, x + 5, y + 25 + i++ * 22, "disable_projectile_model", Config.DISABLE_PROJECTILE_MODEL);
             addCheckbox(17, x + 5, y + 25 + i++ * 22, "disable_vehicle_model",  Config.DISABLE_VEHICLE_MODEL);
             addCheckbox(5,  x + 5, y + 25 + i++ * 22, "disable_player_render",   Config.DISABLE_PLAYER_RENDER);
+            // HUD 纸娃娃位置设置（移植特有入口，owner 定义；GT5 能源护目镜式的拖拽定位）。
+            // 打开 ExtraPlayerConfigScreen：复用现有拖拽/缩放/偏航界面，但显示并实时拖动真实 HUD。
+            this.buttonList.add(new FlatColorButton(HUD_POSITION_BUTTON_ID, x + 5, y + 25 + i++ * 22, 400, 20,
+                I18n.format("gui.yes_steve_model.config.hud_position")));
             addCheckbox(8,  x + 5, y + 25 + i++ * 22, "gui_enhancements",        Config.GUI_ENHANCEMENTS);
             // 预览刷新：点击循环离散值（0-4），文本置中与其他点击项一致
             this.buttonList.add(new FlatColorButton(9, x + 5, y + 25 + i++ * 22, 400, 20,
@@ -103,6 +115,9 @@ public class ConfigScreen extends GuiScreen {
             case 99:
                 page = (page + 1) % PAGE_COUNT;
                 this.initGui();
+                break;
+            case HUD_POSITION_BUTTON_ID:
+                this.mc.displayGuiScreen(new ExtraPlayerConfigScreen(this));
                 break;
             case 1: case 2: case 3: case 4: case 5: case 8: case 16: case 17:
                 actionPage0(button);

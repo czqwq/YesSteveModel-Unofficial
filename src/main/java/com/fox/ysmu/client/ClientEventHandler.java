@@ -455,12 +455,22 @@ public class ClientEventHandler {
      * frame, which is why {@code HudPreviewCache#HUD_MIN_HZ} is 5 Hz rather than the reference's 12 Hz — below 12 fps
      * that floor beat the frame rate and disabled the FBO cache entirely. The rate policy, the
      * {@code DISABLE_PLAYER_RENDER} switch and {@code GUI_HUD_PREVIEW_CACHE} (config screen, {@code C}) still govern
-     * how often it runs; nothing here overrides them.
+     * how often it runs. The one deliberate exception is {@link ExtraPlayerConfigScreen}: while it is open the doll is
+     * the thing being dragged, so this method draws it regardless of the switch and on the every-frame path (see the
+     * inline comment below and {@code HudPreviewCache#setForceLive}).
      */
     @SubscribeEvent
     public static void onRenderScreen(RenderGameOverlayEvent.Pre event) {
         if (event.type != RenderGameOverlayEvent.ElementType.HOTBAR) return;
-        if (Config.DISABLE_PLAYER_RENDER) {
+        Minecraft mc = Minecraft.getMinecraft();
+        // Port-specific (owner-defined): the HUD position config screen is a live drag of the *real* paperdoll, so
+        // while it is open the HUD is drawn even if the player switched it off — otherwise there would be nothing to
+        // position. The screen also forces the every-frame path (see HudPreviewCache#setForceLive) so the doll follows
+        // the cursor instead of the 5 Hz refresh floor. Upstream keeps its HUD hidden while its config screen is open
+        // and draws a preview inside the screen instead (ExtraPlayerScreen.java:24-26); the owner chose the GT5
+        // power-goggles behaviour (drag the real HUD) over that shape.
+        boolean configuringHud = mc.currentScreen instanceof ExtraPlayerConfigScreen;
+        if (Config.DISABLE_PLAYER_RENDER && !configuringHud) {
             // The paperdoll is switched off for this session/world, so the cache's framebuffer is VRAM nothing will
             // read again: release it here rather than keeping a full-size colour+depth buffer allocated until the
             // process exits. Idempotent (FboCache#delete null-checks) and one GL delete on the first frame after the
@@ -468,10 +478,8 @@ public class ClientEventHandler {
             hudPreviewCache.delete();
             return;
         }
-        Minecraft mc = Minecraft.getMinecraft();
         EntityPlayer player = mc.thePlayer;
         if (player == null) return;
-        if (mc.currentScreen instanceof ExtraPlayerConfigScreen) return;
         // Covered by a full-screen YSMU GUI: mark the cache dirty instead of baking a paperdoll nobody can see.
         // See hudIsCoveredByScreen for the reference's measurement and the reasoning.
         if (hudIsCoveredByScreen(mc.currentScreen)) {
@@ -484,6 +492,7 @@ public class ClientEventHandler {
         float yawOffset = (float) Config.PLAYER_YAW_OFFSET;
         // CU-11: EXTRA_PLAYER 必须在 finally 里复位，否则渲染异常会让它永久为 true，
         // 之后世界内的自身渲染也会被当成 GUI 预览（渲染到 0,0,0 并走 GUI 光照）。
+        hudPreviewCache.setForceLive(configuringHud);
         EXTRA_PLAYER = true;
         try {
             // Row 44: the paperdoll goes through the FBO cache rather than the full pipeline every frame
