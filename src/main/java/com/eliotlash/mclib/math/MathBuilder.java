@@ -275,6 +275,48 @@ public class MathBuilder {
         return null;
     }
 
+    /**
+     * Resolves a unary plus ({@code +x}) by dropping the sign, which is what a plus at operand position means in
+     * Molang.
+     * <p>
+     * {@code breakdownChars} only folds {@code -} into the token behind it; a {@code +} always reaches the symbol
+     * list as a standalone operator, so an expression that writes a leading plus anywhere - the shape in the wild is a
+     * keyframe literal such as {@code -20+math.sin(+query.anim_time*23)*0.5} - used to reach
+     * {@link #parseSymbols} as {@code [+, query.anim_time, *, 23]}. The operator search then finds the binary
+     * {@code *}, recurses into the empty left-hand side of the {@code +} and throws
+     * {@code "no operator found in expression: []"}; the caller drops the whole animation over it (the 二阶堂希罗 pack's
+     * {@code pre_parallel3} - the clip that scales its {@code beijing} background group to 0 - was lost that way, so
+     * the model permanently showed a wall behind the player).
+     * <p>
+     * Upstream's parser has a token for it and parses it as the identity:
+     * {@code case PLUS: lexer.next(); return parseCompoundExpression(lexer, UnaryExpression.Op.PLUS.precedence());}
+     * ({@code tmp/YesSteveModel-dev-1.20/.../molang/parser/MolangParserImpl.java:153-155}, with
+     * {@code UnaryExpression.Op.PLUS} at the unary precedence
+     * {@code .../parser/ast/UnaryExpression.java:104}). The port already vendors that parser for {@code .molang}
+     * scripts ({@code software/bernie/geckolib3/molang/parser/MolangParserImpl.java:153-155}); the character-level
+     * parser below is what animation keyframes and keyframe conditions go through, so it needs the same case. Dropping
+     * the sign reproduces the identity: a unary plus binds tighter than every binary operator, so what is left after
+     * it is combined by the surrounding machinery exactly as upstream's {@code (+a)*b} would be.
+     */
+    private IValue parseLeadingUnaryPlus(List<Object> symbols) throws Exception {
+        int size = symbols.size();
+        for (int i = 0; i < size; i++) {
+            if (!"+".equals(symbols.get(i))) {
+                continue;
+            }
+            boolean operandPosition = i == 0
+                || (this.isOperator(symbols.get(i - 1)) || ",".equals(symbols.get(i - 1)));
+            if (!operandPosition || i + 1 >= size) {
+                continue;
+            }
+            List<Object> spliced = new ArrayList<>(size - 1);
+            spliced.addAll(symbols.subList(0, i));
+            spliced.addAll(symbols.subList(i + 1, size));
+            return this.parseSymbols(spliced);
+        }
+        return null;
+    }
+
     @SuppressWarnings("unchecked")
     public IValue parseSymbols(List<Object> symbols) throws Exception {
         // 一元负号：`breakdownChars` 只在 token 直接跟在负号后面时把两者合进同一个 buffer
@@ -287,6 +329,14 @@ public class MathBuilder {
         // `-!v.x` / `!-v.x` 是单个 token、不进入本方法。
         // 上游没有这个形状：它有自己的词法器与 Pratt 解析（molang/parser/MolangParserImpl.java），
         // 一元负号是 UnaryExpression（:156-158），不依赖字符级合并。
+        // 一元正号：`breakdownChars` 不会把 `+` 折进后面的 token（只有 `-` 会），所以 `+q.x` 在符号表里是
+        // `[+, q.x]`——二元运算符搜索会在 `+` 左侧递归到空表，抛 "no operator found in expression: []"，
+        // 上层于是丢掉整条动画。上游对它有专门的 token（MolangParserImpl.java:153-155），这里按同样的
+        // 恒等语义去掉符号。放在一元负号之前：`-+a` / `+-a` 先去掉 `+` 再走负号路径。
+        IValue leadingPlus = parseLeadingUnaryPlus(symbols);
+        if (leadingPlus != null) {
+            return leadingPlus;
+        }
         IValue leadingMinus = parseLeadingUnaryMinus(symbols);
         if (leadingMinus != null) {
             return leadingMinus;

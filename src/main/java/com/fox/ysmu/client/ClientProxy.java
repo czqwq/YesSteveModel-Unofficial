@@ -121,6 +121,9 @@ public class ClientProxy extends CommonProxy {
         // registering a client-side "ysm" would swallow every /ysm call before it could reach the server.
         // CommandYsmClient's javadoc carries the 1.7.10 alias/name rationale.
         ClientCommandHandler.instance.registerCommand(new CommandYsmClient());
+        // Developer-only auto-capture harness (flat world -> select models -> screenshots -> exit). Inert unless
+        // YSMU_DEBUG_CAPTURE is set in the client process; see ModelDebugCapture's javadoc for the variables.
+        com.fox.ysmu.client.debug.ModelDebugCapture.startIfEnabled();
     }
 
     /**
