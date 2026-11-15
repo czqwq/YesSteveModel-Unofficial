@@ -1488,17 +1488,21 @@ public class YsmCommand extends CommandBase {
     /**
      * Writes one operator-forced selection and publishes it - the port of upstream's
      * {@code SessionProtocolHandler.applyCommandSelection} ({@code
-     * tmp/YesSteveModel-dev-1.20/.../network/forge/SessionProtocolHandler.java:343-366}), which stores the selection
+     * tmp/YesSteveModel-dev-1.20/.../network/forge/SessionProtocolHandler.java:423-442}), which stores the selection
      * with {@code persistence.setCommandSelection(modelId, textureId, ignoreGrants && !intrinsicDefault)}
-     * ({@code :362-363}) and then stops any pending animation request ({@code :364}).
+     * ({@code :438-441}) and then stops a pending animation request <b>only when the model id actually changed</b>
+     * ({@code :438-442}: the previous id is read before the write, then
+     * {@code if (!Objects.equals(previousModelId, persistence.getModelId())) persistence.stopAnimation(player)}).
      * <p>
      * The port's write/publish funnel for a selection is {@link SetModelAndTexture#applySelection} - it also drops a
      * stale NPC override and rewrites the vehicle this player owns, which upstream does from its own model-update path
      * ({@code event/CapabilityEvent.java:198-211}); the forced flag is then the one
      * {@link ExtendedModelInfo#setCommandSelection} call, so {@code ignoresGrantsFor} reads exactly what the operator
-     * asked for. The trailing grant publication is this port's split channel (upstream publishes the accepted
-     * selection over its session, {@code ControlHandler.applyAcceptedModelSelection}); the packet is the only way the
-     * target's client learns its restricted/granted sets here.
+     * asked for. That funnel carries upstream's conditional stop itself (see its javadoc), which is why this path must
+     * not stop the animation on its own: an unconditional stop here would also kill a playing emote for a texture-only
+     * change, which upstream leaves running. The trailing grant publication is this port's split channel (upstream
+     * publishes the accepted selection over its session, {@code ControlHandler.applyAcceptedModelSelection}); the
+     * packet is the only way the target's client learns its restricted/granted sets here.
      *
      * @return whether the target had a model table to write to; a target without one is skipped, not fatal, the same
      *         way upstream's {@code ifPresent} chain ({@code ModelCommand.java:80-95}) does nothing at all for it
@@ -1511,14 +1515,15 @@ public class YsmCommand extends CommandBase {
             return false;
         }
         SetModelAndTexture.applySelection(target, modelId, textureId);
-        // Upstream :362-363: {@code ignoreGrants && !intrinsicDefault}. The intrinsic default can never ignore grants
+        // Upstream :438-441: {@code ignoreGrants && !intrinsicDefault}. The intrinsic default can never ignore grants
         // (ServerModelSession.java:388-391 refuses to hold such an authority), and every reset path writes the flag
         // false for it, so a forced selection of the default model must not leave the exception behind either.
         info.setCommandSelection(
             modelId,
             textureId,
             ignoreGrants && !modelId.equals(ExtendedModelInfo.defaultModelId()));
-        info.stopAnimation();
+        // No stopAnimation here: the funnel above carries upstream's conditional stop (:438-442), which fires for a
+        // model-id change and leaves a texture-only change playing - see the javadoc.
         ModelGrantSync.send(target);
         return true;
     }

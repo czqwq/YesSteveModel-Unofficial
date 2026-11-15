@@ -13,6 +13,7 @@ import net.minecraft.util.MathHelper;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.AnimationRegister;
 import com.fox.ysmu.client.animation.RemotePlayerMotionStates;
 import com.fox.ysmu.client.animation.condition.InnerClassify;
@@ -20,6 +21,7 @@ import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.BackhandCompat;
 import com.fox.ysmu.compat.BlockingCompat;
 import com.fox.ysmu.compat.EtFuturumCompat;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 
 import software.bernie.geckolib3.core.builder.Animation;
 import software.bernie.geckolib3.core.event.predicate.AnimationEvent;
@@ -1704,12 +1706,25 @@ public final class OpenYsmControllerExpressionEvaluator {
         }
 
         /**
-         * Whether this actor is playing an external animation - the source of {@code ctrl.playing_extra_animation}.
+         * Whether this actor is really playing an external animation - the source of
+         * {@code ctrl.playing_extra_animation}.
          *
          * <p>Same store {@code AnimationManager.predicateCap} plays from ({@code eep.getAnimation()} guarded by
-         * {@code eep.isPlayAnimation()}, {@code AnimationManager.java:207-218}), so the condition and the hand-over
-         * cannot disagree about whether an EEP animation is lit - the "one name, two stores" defect class A-03 fixed
-         * for {@code v.*}.
+         * {@code eep.isPlayAnimation()}, {@code AnimationManager.java:293-326}), so the condition and the hand-over
+         * cannot disagree about <em>which name</em> is lit - the "one name, two stores" defect class A-03 fixed
+         * for {@code v.*}. The hand-over itself already refuses a name the model does not declare
+         * ({@code playIfPresent}, {@code AnimationManager.java:1420-1440}); this method asks the same question before
+         * it calls a request "playing", which is where upstream asks it too.
+         *
+         * <p>Upstream rejects the unplayable name at the request site, {@code CustomPlayerEntity#playExtraAnimation}
+         * ({@code client/entity/CustomPlayerEntity.java:91-103}): the name and {@code isPlayingExtraAnimation} are set
+         * only when {@code getAnimation(animationName) != null}, and the flag is cleared otherwise. This port cannot
+         * reject it there: the EEP name is written by the server ({@code SetPlayAnimation}, {@code /ysm play}) and
+         * survives a client-side model switch, so the name the flag accompanies can belong to the previous model.
+         * Answering the flag alone then held this condition true forever, which shut the pack's
+         * {@code 空闲 -> 待机} gate - {@code 待机} carries the pose and {@code 空闲} is a 0-bone clip, so the model
+         * stayed in its bind pose. {@link AnimationManager#canPlayExtraAnimation} asks upstream's question against the
+         * one store this port has (its javadoc covers the conservative "no answer yet" case).
          *
          * <p>Upstream gates the same fact on the cap controller not being IDLE
          * ({@code CtrlBinding.java:112-117} {@code entity.isPlayingExtraAnimation() &&
@@ -1723,8 +1738,16 @@ public final class OpenYsmControllerExpressionEvaluator {
                 // Detached evaluation (the unit-test path, and a preview that has no player): no EEP to read.
                 return false;
             }
-            com.fox.ysmu.eep.ExtendedModelInfo eep = com.fox.ysmu.eep.ExtendedModelInfo.get(player);
-            return eep != null && eep.isPlayAnimation();
+            ExtendedModelInfo eep = ExtendedModelInfo.get(player);
+            if (eep == null || !eep.isPlayAnimation()) {
+                return false;
+            }
+            if (event == null) {
+                // A `.molang` script condition carries no animatable, so there is no model whose clip list could
+                // answer "can this name play": keep the flag-only answer instead of turning a live request into false.
+                return true;
+            }
+            return AnimationManager.canPlayExtraAnimation(event, eep.getAnimation());
         }
 
         private double ysmValue(String name) {
@@ -1915,7 +1938,18 @@ public final class OpenYsmControllerExpressionEvaluator {
                 return EtFuturumCompat.isElytraFlying(player);
             }
             if ("swim_stand".equals(name)) {
-                return player.isInWater();
+                // A-08: upstream gates this on `isInWater() && !entity.onGround()`
+                // (client/animation/molang/CtrlBinding.java:63, Priority.NORMAL). The ground half is not cosmetic in
+                // 1.7.10: standing on the bottom of a shallow puddle has `onGround` true, so answering from
+                // `isInWater()` alone selected `swim_stand` here while the coded main table - which carries the same
+                // rule from the port's own A-08 fix (AnimationRegister.java:135-140) - fell through to `idle`, and the
+                // pack's `idle` is a 0-bone stub: the model stayed in its bind pose (the reported A-pose).
+                //
+                // The ground half is this class's `isOnGround()` (`:2061-2063`), the same delegation `ctrl.sneak`,
+                // `ctrl.sneaking`, `ctrl.run` and `ctrl.walk` below already use, so a remote player is answered through
+                // RemotePlayerMotionStates and the expression and the coded table cannot disagree again. This was the
+                // last name in this chain still answering without the ground term.
+                return player.isInWater() && !isOnGround();
             }
             if ("attacked".equals(name)) {
                 return player.hurtTime > 0;

@@ -19,6 +19,8 @@ import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
 import cpw.mods.fml.common.network.simpleimpl.MessageContext;
 import io.netty.buffer.ByteBuf;
 
+import java.util.Objects;
+
 public class SetModelAndTexture implements IMessage {
 
     private String modelId;
@@ -129,11 +131,43 @@ public class SetModelAndTexture implements IMessage {
      * whose model is no longer authorized - the same split upstream has between its packet handler and
      * {@code AuthCommand}'s reset, both funnelling into {@code ControlHandler.applyAcceptedModelSelection}
      * ({@code network/forge/ControlHandler.java:206-230}).
+     * <p>
+     * A <b>model</b> change also drops whatever extra animation the player had playing: the persisted name outlives the
+     * model that declared it and this side cannot tell whether the new one declares it, which is upstream's reason for
+     * stopping the animation on a FULL state update ({@code network/forge/PlayerStateHandler.java:318-326}). A
+     * texture-only change leaves it alone - the model, hence its animation vocabulary, is the same one.
      */
     public static void applySelection(EntityPlayerMP sender, ResourceLocation modelLoc, ResourceLocation textureLoc) {
         ExtendedModelInfo modelInfo = ExtendedModelInfo.get(sender);
         if (modelInfo != null) {
+            // Read before the write: setModelAndTexture overwrites the id (ExtendedModelInfo.java:72).
+            ResourceLocation previousModelId = modelInfo.getModelId();
             modelInfo.setModelAndTexture(modelLoc, textureLoc);
+            // Stopping the extra animation is part of upstream's FULL player-state update
+            // (tmp/YesSteveModel-dev-1.20/.../network/forge/PlayerStateHandler.java:318-326: an explicit "stopped"
+            // section at :319-320, and with no animation section at all `capability.stopExtraAnimation()` at :325), and
+            // a change of the authoritative model is exactly what forces that update:
+            // PlayerStateReportPlanner.java:111-123 sets `animationId = ""` and `needsFull = true` when the model hash
+            // differs, so the name never survives a model switch. Dropping it is the only thing this side can do: the
+            // persisted EEP carries the old name across models and the server cannot answer "does the new model declare
+            // this clip" (the same argument as SetPlayAnimation's class javadoc:38-43), so the name must not be
+            // validated here, it must be cleared. A leftover name is not cosmetic either - the flag it is paired with
+            // backs `ctrl.playing_extra_animation` in the controller-condition path, so a clip the new model does not
+            // declare keeps the model off its idle/walk state (an A-pose) until the player moves - the movement half
+            // that masked this (client/ClientEventHandler.java:651-665).
+            // Only a model-id change clears, which is upstream's own form of its write funnel: it reads the id before
+            // the write and stops only when the id moved - `var previousModelId = persistence.getModelId();
+            // persistence.setCommandSelection(...); if (!Objects.equals(previousModelId, persistence.getModelId()))
+            // persistence.stopAnimation(player);` (SessionProtocolHandler.java:438-442). A texture-only change
+            // therefore keeps playing, which is right: the model, hence its animation vocabulary, is the same one.
+            // The client still judges the name again before it plays it - AnimationManager#predicateCap hands it to
+            // playIfPresent (client/animation/AnimationManager.java:312-323), which answers STOP for a name that model
+            // does not declare. No new state is introduced here: both writer methods mark the EEP dirty, and the
+            // existing per-tick drain publishes the whole EEP, this flag included
+            // (event/CommonEventHandler.java:543-549 -> SyncModelInfo).
+            if (!Objects.equals(previousModelId, modelInfo.getModelId())) {
+                modelInfo.stopAnimation();
+            }
         }
         // The renderer lets an NPC override win over the player's own selection, so an explicit self
         // selection must drop any stale override for the same player or the picker looks broken.

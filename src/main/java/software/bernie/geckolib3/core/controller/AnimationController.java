@@ -173,11 +173,39 @@ public class AnimationController<T extends IAnimatable> {
             this.applies = applies;
         }
     }
+    /**
+     * 并发子控制器，以及它要解析的 clip 名和"上一次解析时模型给出的答案"；见 {@link #retryConcurrentAnimation}。
+     *
+     * <p>上游的池化播放器由状态机每次状态变化重新发请求
+     * （{@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/controller/BedrockAnimationController.java:315-340}），
+     * 并且 {@code process} 每次开头都重试一个"不稳定"的请求（{@code AnimationPlayer#retryAnimation}，
+     * {@code .../geckolib3/core/controller/AnimationPlayer.java:181,599-602}）。是否不稳定由解析结果自己回答：
+     * {@code setAnimation} 把 {@code resolution.cacheable()} 存进 {@code stableRequest}（{@code :154}），
+     * 而"上一次解析是缺席"会把它重新置为不稳定（{@code invalidateAnimationSource}，{@code :593-597}），
+     * 所以解析失败的请求每帧都会被重新发起。这个类只保存重试所需的两个字段，没有宿主可见的新状态。
+     */
     private static final class ConcurrentPlayer<A extends IAnimatable> {
         final AnimationController<A> controller;
+        /** 该子控制器要解析的 clip 名（{@link #setConcurrentAnimations} 的条目名）。 */
+        final String animationName;
+        /** 上一次解析该名字时模型的动画文件答案，见 {@link #animationFileLocation}；可为 null。 */
+        Object resolvedLocation;
+        /** 模型不能命名动画文件（答案恒为 null）时剩下的重试次数；见 {@link #retryConcurrentAnimation}。 */
+        int unnamedRetriesLeft = CONCURRENT_UNNAMED_RETRIES;
         boolean applies = true;
-        ConcurrentPlayer(AnimationController<A> controller) { this.controller = controller; }
+        ConcurrentPlayer(AnimationController<A> controller, String animationName) {
+            this.controller = controller;
+            this.animationName = animationName;
+        }
     }
+
+    /**
+     * 模型不能命名动画文件时，一个并发子控制器最多重试解析多少次。
+     * <p>
+     * 能命名文件的模型（{@link IAnimatableModelProvider}）按答案变化重试，没有次数上限；不能命名的模型没有可
+     * 比对的东西，只能在有界窗口里重试，之后回到修复前的"解析一次"行为。
+     */
+    private static final int CONCURRENT_UNNAMED_RETRIES = 100;
 
     public void setConcurrentAnimations(Object stateKey, List<ConcurrentAnimation> entries,
         BlendTransition transition, double absoluteTick) {
@@ -191,12 +219,16 @@ public class AnimationController<T extends IAnimatable> {
             concurrentStartTick = absoluteTick;
             concurrentTransition = transition;
             concurrentSnapshots.clear();
+            // 这次创建里模型给出的动画文件答案（"这个 clip 名现在怎么解析"），与子控制器无关，问一次就够。
+            // 它是 retryConcurrentAnimation 的基线：只有答案变了，这个名字才可能已经解析得出来。
+            Object locationAtCreation = entries.isEmpty() ? null : animationFileLocation(getModel(animatable));
             for (ConcurrentAnimation entry : entries) {
                 ConcurrentPlayer<T> holder = new ConcurrentPlayer<>(new AnimationController<>(animatable, name, 0,
                     event -> {
                         event.getController().useBedrockCompletionBoundary(true);
                         return PlayState.CONTINUE;
-                    }));
+                    }), entry.name);
+                holder.resolvedLocation = locationAtCreation;
                 holder.controller.bedrockPlayer = true;
                 holder.controller.endingLength = transitionLengthTicks;
                 holder.controller.soundListener = soundListener;
@@ -206,7 +238,7 @@ public class AnimationController<T extends IAnimatable> {
                 holder.controller.timelinePlaybackListener = timelinePlaybackListener;
                 holder.controller.setAnimation(new AnimationBuilder().addAnimation(entry.name));
                 if (holder.controller.currentAnimation == null && holder.controller.animationQueue.isEmpty()) {
-                    // AnimationPlayer:75,124-142: unresolved entry stays IDLE with finished=true.
+                    // AnimationPlayer:481-498（resetToIdle）：解析缺席时留在 IDLE，并如实报告 finished=true。
                     holder.controller.currentAnimationFinished = true;
                 }
                 concurrentPlayers.add(holder);
@@ -1242,6 +1274,51 @@ public class AnimationController<T extends IAnimatable> {
         }
     }
 
+    /**
+     * 并发子控制器在上一次解析缺席后重新发起同一个请求；{@link #processConcurrent} 每帧、每个未解析的子控制器
+     * 执行一次（在 {@code child.process} 之前，所以同一帧就能开始播放）。
+     *
+     * <p><b>为什么需要它。</b>{@link #setConcurrentAnimations} 只在状态变化时创建子控制器并 {@code setAnimation}
+     * 一次；{@link #setAnimation} 在 clip 解析失败时提前返回（不发队列、不更新 {@code currentAnimationBuilder}），
+     * 而 {@code process} 只在 {@code currentAnimation != null} 时刷新动画。于是宿主把模型动画 store 的安装推迟到
+     * loader 线程（{@code ClientModelManager#ensureAnimations}）的那几帧里创建的子控制器会一直停在 IDLE，
+     * {@code post_main} 不输出骨骼，可见结果就是包作者的待机/走路片段从未播放（站立 A-Pose、走路无动作，
+     * 而 run 有编码主控制器的真片段兜底所以正常）。
+     *
+     * <p><b>上游形状。</b>{@code AnimationPlayer#process} 每次开头调 {@code retryAnimation()}
+     * （{@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/geckolib3/core/controller/AnimationPlayer.java:181,599-602}）：
+     * 请求被记在 {@code lastSetAnim}（{@code :139-153}），只有"稳定"的请求才不重试——稳定与否由解析结果给出
+     * （{@code stableRequest = resolution.cacheable()}，{@code :154}），而一次缺席会让它变回不稳定
+     * （{@code invalidateAnimationSource}，{@code :593-597}）。这里问的是同一件事的移植版：模型对"这个 clip 名
+     * 怎么解析"的答案由它给出的动画文件决定（{@link #animationFileLocation}，宿主在模型自己的动画 store 安装前
+     * 一律回答内置 default，装好后回答包自己的文件），所以答案变了才重试——答案没变时再问一次只会得到同一个
+     * null，那正是上游"稳定请求不重试"的含义。不能命名文件的模型没有可比的答案，按
+     * {@link #CONCURRENT_UNNAMED_RETRIES} 的有界次数重试。
+     *
+     * <p><b>失败时保持的契约。</b>仍解析不出来时子控制器保持 IDLE 且 {@code currentAnimationFinished = true}
+     * （{@code AnimationPlayer.java:481-498} 的 {@code resetToIdle}），与创建时一致。
+     */
+    private void retryConcurrentAnimation(ConcurrentPlayer<T> holder) {
+        AnimationController<T> child = holder.controller;
+        if (child.currentAnimation != null || !child.animationQueue.isEmpty()) return;
+        // 不能命名文件的模型重试窗口用尽后连模型都不问：getModel 对未注册的 animatable 每次都会打一行警告。
+        if (holder.resolvedLocation == null && holder.unnamedRetriesLeft <= 0) return;
+        IAnimatableModel<T> model = getModel(this.animatable);
+        Object location = model == null ? null : animationFileLocation(model);
+        if (location != null) {
+            if (Objects.equals(location, holder.resolvedLocation)) return;
+        } else {
+            if (holder.unnamedRetriesLeft <= 0) return;
+            holder.unnamedRetriesLeft--;
+        }
+        holder.resolvedLocation = location;
+        child.setAnimation(new AnimationBuilder().addAnimation(holder.animationName));
+        if (child.currentAnimation == null && child.animationQueue.isEmpty()) {
+            // AnimationPlayer:481-498（resetToIdle）：仍未解析的条目留在 IDLE，并如实把"已结束"报给状态机。
+            child.currentAnimationFinished = true;
+        }
+    }
+
     private void processConcurrent(double tick, AnimationEvent<T> event, Map<String, IBone> bones,
         HashMap<String, Pair<IBone, BoneSnapshot>> snapshots, MolangParser parser, boolean crash) {
         createInitialQueues(bones);
@@ -1254,6 +1331,8 @@ public class AnimationController<T extends IAnimatable> {
         resetConcurrentFolded();
         for (ConcurrentPlayer<T> holder : concurrentPlayers) {
             AnimationController<T> child = holder.controller;
+            // 上一次解析缺席时，若模型"怎么解析这个名字"的答案已经变了，就在本帧的 process 之前重试。
+            retryConcurrentAnimation(holder);
             child.emitting = holder.applies && !beginning;
             child.beginningHold = beginning;
             double speed = getAnimationSpeed();

@@ -3,6 +3,8 @@ package com.fox.ysmu.client.debug;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
@@ -11,17 +13,22 @@ import net.minecraft.util.ScreenShotHelper;
 import net.minecraft.world.WorldSettings;
 import net.minecraft.world.WorldType;
 
+import com.fox.ysmu.api.EntityAnimationApi;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.store.AnimationStore;
+import com.fox.ysmu.client.gui.AnimationRouletteScreen;
+import com.fox.ysmu.client.gui.ConfigScreen;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SetModelAndTexture;
+import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
+import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
@@ -48,6 +55,16 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * or {@code blue.png}, a prefix is enough); the model's first texture is used when unset.</li>
  * <li>{@code YSMU_DEBUG_BONES} - optional comma-separated bone names whose scale/position/rotation/hidden state is
  * dumped next to every screenshot (case sensitive, e.g. {@code beijing,mingpai}).</li>
+ * <li>{@code YSMU_DEBUG_FEATURES} - optional {@code 0}/{@code false} disables the feature checks described below
+ * (enabled by default). They exist because the failures this port keeps producing are "the pose is the bind pose"
+ * and "the wheel/settings screen does not open", which a photo of one frame cannot tell from "the model is fine".
+ * The checks are: (1) <b>early pose</b> - on the very first drawn frame after selection, measure how far the applied
+ * pose is from the geometry's bind pose and then walk for a few ticks and measure whether any bone channel actually
+ * changes; this is the regression window that made a standing player show the bind pose while the model's animation
+ * store was still installing; (2) <b>roulette</b> - open the real {@link AnimationRouletteScreen} and screenshot it,
+ * then play one of its playable root entries through the real {@link AnimationRouletteScreen#activateRootSlot(int)}
+ * path (client -> server {@link SetPlayAnimation} -> sync -> cap controller) and check the EEP flag, the animation
+ * name and that the pose moves; (3) <b>settings</b> - open the real {@link ConfigScreen} and screenshot it.</li>
  * </ul>
  *
  * <p>Flow: main menu -&gt; delete the harness's own save folder -&gt; create a superflat creative world -&gt; for each
@@ -73,6 +90,7 @@ public final class ModelDebugCapture {
     private static final String ENV_MODELS = "YSMU_DEBUG_MODELS";
     private static final String ENV_TEXTURE = "YSMU_DEBUG_TEXTURE";
     private static final String ENV_BONES = "YSMU_DEBUG_BONES";
+    private static final String ENV_FEATURES = "YSMU_DEBUG_FEATURES";
 
     /** The save folder the harness owns, so a run never touches a human's world. */
     private static final String WORLD_FOLDER = "ysmu_debug_capture";
@@ -105,6 +123,7 @@ public final class ModelDebugCapture {
     private final String[] models;
     private final String texture;
     private final String[] bones;
+    private final boolean features;
     private final Minecraft mc = Minecraft.getMinecraft();
 
     private int state;
@@ -118,11 +137,26 @@ public final class ModelDebugCapture {
     private ResourceLocation modelId;
     private ResourceLocation mainId;
 
-    private ModelDebugCapture(File outputDir, String[] models, String texture, String[] bones) {
+    /** A screen the harness itself opened; {@link #tick()} must not close it while this is positive. */
+    private int screenHoldTicks;
+    /** Early pose check (see the class javadoc): phase counter and its saved samples. */
+    private int earlyPhase;
+    private boolean earlyDone;
+    private double[] earlyPose;
+    private int[] earlyBoneCount;
+    /** Feature sweep (roulette / emote / settings): phase counter and its saved samples. */
+    private int featureStep;
+    private double[] featurePose;
+    private String wheelAnimation;
+    private int wheelSlot = -1;
+    private String featureResult = "";
+
+    private ModelDebugCapture(File outputDir, String[] models, String texture, String[] bones, boolean features) {
         this.outputDir = outputDir;
         this.models = models;
         this.texture = texture;
         this.bones = bones;
+        this.features = features;
     }
 
     /** Registers the harness if {@code YSMU_DEBUG_CAPTURE} is set; does nothing otherwise. */
@@ -138,16 +172,20 @@ public final class ModelDebugCapture {
         String[] models = splitEnv(ENV_MODELS);
         String[] bones = splitEnv(ENV_BONES);
         String texture = System.getenv(ENV_TEXTURE);
+        String featureEnv = System.getenv(ENV_FEATURES);
+        boolean features = featureEnv == null || !("0".equals(featureEnv.trim())
+            || "false".equalsIgnoreCase(featureEnv.trim()));
         ysmu.LOG.info(
-            "[YSMU-DEBUG] auto capture enabled: dir={} models={} texture={} bones={}",
+            "[YSMU-DEBUG] auto capture enabled: dir={} models={} texture={} bones={} features={}",
             outputDir,
             models.length == 0 ? "<current selection>" : String.join(",", models),
             texture,
-            bones.length == 0 ? "<none>" : String.join(",", bones));
+            bones.length == 0 ? "<none>" : String.join(",", bones),
+            features);
         Minecraft.getMinecraft().gameSettings.pauseOnLostFocus = false;
         FMLCommonHandler.instance()
             .bus()
-            .register(new ModelDebugCapture(outputDir, models, texture, bones));
+            .register(new ModelDebugCapture(outputDir, models, texture, bones, features));
     }
 
     private static String[] splitEnv(String name) {
@@ -181,7 +219,10 @@ public final class ModelDebugCapture {
 
     private void tick() {
         // A screen opening on its own (the loading overlay, chat, ...) would freeze the capture; keep the world visible.
-        if (mc.theWorld != null && mc.thePlayer != null && mc.currentScreen != null) {
+        // A screen the harness opened itself (the feature checks) is kept for its screenshot window instead.
+        if (screenHoldTicks > 0) {
+            screenHoldTicks--;
+        } else if (mc.theWorld != null && mc.thePlayer != null && mc.currentScreen != null) {
             mc.displayGuiScreen(null);
         }
         ticks++;
@@ -219,6 +260,12 @@ public final class ModelDebugCapture {
                 break;
             case 3:
                 takeShots();
+                break;
+            case 4:
+                earlyChecks();
+                break;
+            case 5:
+                featureSweep();
                 break;
             default:
                 break;
@@ -271,19 +318,23 @@ public final class ModelDebugCapture {
             }
             return;
         }
-        if (ClientModelManager.isModelReady(modelId) && ticks > 100) {
-            if (!isDrawnModel()) {
-                // Ready means the geometry/texture/animation target exists; the renderer installs it on its next draw and
-                // only then stops falling back to the built-in default. Capture the first frame after that switch, or
-                // the first screenshot shows the default model instead of the one that was asked for.
-                if (ticks % 200 == 0) {
-                    ysmu.LOG.info("[YSMU-DEBUG] {} is ready but not drawn yet; waiting for the switch", modelId);
-                }
+        if (ClientModelManager.isModelReady(modelId) && isDrawnModel()) {
+            if (features && !earlyDone) {
+                // The interesting window: the model is drawn but its animation store may still be installing. That is
+                // exactly where the concurrent children used to be created with an unresolvable clip and never
+                // retried, which left the standing/walking pose at the bind pose. Measure before doing anything else.
+                ysmu.LOG.info("[YSMU-DEBUG] model {} is ready and drawn; running the early pose checks", modelId);
+                earlyPhase = 0;
+                earlyPose = null;
+                state = 4;
+                ticks = 0;
                 return;
             }
-            ysmu.LOG.info("[YSMU-DEBUG] model {} is ready and drawn, capturing", modelId);
-            dumpState();
-            enterShots();
+            if (earlyDone || ticks > 100) {
+                ysmu.LOG.info("[YSMU-DEBUG] model {} is ready and drawn, capturing", modelId);
+                dumpState();
+                enterShots();
+            }
             return;
         }
         if (ticks % 200 == 0) {
@@ -387,6 +438,15 @@ public final class ModelDebugCapture {
         mainId = null;
         shotIndex = 0;
         modelWait = 0;
+        earlyPhase = 0;
+        earlyDone = false;
+        earlyPose = null;
+        featureStep = 0;
+        featurePose = null;
+        wheelAnimation = null;
+        wheelSlot = -1;
+        featureResult = "";
+        screenHoldTicks = 0;
         if (models.length == 0) {
             return;
         }
@@ -451,10 +511,342 @@ public final class ModelDebugCapture {
             exitGame();
             return;
         }
+        if (features) {
+            featureStep = 0;
+            featurePose = null;
+            wheelAnimation = null;
+            wheelSlot = -1;
+            featureResult = "";
+            state = 5;
+            ticks = 0;
+            return;
+        }
+        advanceModel();
+    }
+
+    /** Moves the capture on to the next requested model. */
+    private void advanceModel() {
         modelIndex++;
         startModel();
         state = 2;
         ticks = 0;
+    }
+
+    /**
+     * The early pose checks, run on the first frame the selected model is actually drawn (see the class javadoc):
+     * measure the idle pose against the bind pose (a bind pose here is the A-pose defect), then walk for a few ticks
+     * and check that bone channels actually move (a frozen pose here is the "walking without leg animation" defect).
+     */
+    private void earlyChecks() {
+        GeoModel model = geometry();
+        if (model == null) {
+            ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] no geometry for {} during the early checks; skipping", mainId);
+            earlyDone = true;
+            state = 2;
+            ticks = 0;
+            return;
+        }
+        switch (earlyPhase) {
+            case 0:
+                if (ticks >= 3) {
+                    earlyPose = capturePose(model);
+                    int posed = logPose("early-idle", model);
+                    featureResult = "earlyIdlePosedBones=" + posed;
+                    earlyPhase = 1;
+                    ticks = 0;
+                }
+                break;
+            case 1:
+                // Two walk ticks to get past the state machine's 待机 -> 空闲 -> 走路前进 transit, then sample while the
+                // blend_weight filter is still ramping (it takes ~10 ticks to become fully visible), so a dead
+                // 走路前进 child shows as a bind pose here.
+                KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), true);
+                if (ticks >= 16) {
+                    earlyPose = capturePose(model);
+                    earlyPhase = 2;
+                    ticks = 0;
+                }
+                break;
+            case 2:
+                if (ticks >= 2) {
+                    double[] later = capturePose(model);
+                    KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+                    logPose("early-walk", model);
+                    int moved = countChanged(earlyPose, later, 0.005d);
+                    ysmu.LOG.info(
+                        "[YSMU-DEBUG][FEATURE] early-walk bonesMoved={} (0 = frozen walk pose, the walk layer never emitted)",
+                        moved);
+                    featureResult = featureResult + " earlyWalkBonesMoved=" + moved;
+                    saveNamedShot("model" + modelIndex + "_early_walk.png");
+                    earlyDone = true;
+                    state = 2;
+                    ticks = 0;
+                }
+                break;
+            default:
+                earlyDone = true;
+                state = 2;
+                ticks = 0;
+                break;
+        }
+    }
+
+    /**
+     * The feature sweep, run after the camera shots of a model: one of the roulette's playable root entries played
+     * through the real wheel path (client -&gt; server packet -&gt; sync -&gt; cap controller), then the real roulette
+     * screen and the real settings screen. The animation check runs <em>first and with no screen open</em>: opening a
+     * GUI pauses the integrated server, and a play request sent into that window would be checked before the server
+     * has ticked - the first version of this sweep did exactly that and reported a false negative on one model. Each
+     * step screenshots what it exercised and logs a PASS-style line, because a single still of a static model cannot
+     * tell a working emote from a dropped one.
+     */
+    private void featureSweep() {
+        switch (featureStep) {
+            case 0:
+                if (mainId == null || mc.thePlayer == null) {
+                    finishFeatures();
+                    return;
+                }
+                if (!chooseWheelAnimation()) {
+                    ysmu.LOG.info(
+                        "[YSMU-DEBUG][FEATURE] model {} declares no playable wheel entry; the emote check is skipped",
+                        modelId);
+                    featureResult = featureResult + " emote=skip";
+                    featureStep = 4;
+                    ticks = 0;
+                    break;
+                }
+                ysmu.LOG.info(
+                    "[YSMU-DEBUG][FEATURE] playing wheel slot {} ('{}') through the real wheel path",
+                    wheelSlot,
+                    wheelAnimation);
+                AnimationRouletteScreen.activateRootSlot(wheelSlot);
+                featureStep = 1;
+                ticks = 0;
+                break;
+            case 1:
+                if (ticks == 2 || ticks == 5 || ticks == 9 || ticks == 13) {
+                    ExtendedModelInfo eep = ExtendedModelInfo.get(mc.thePlayer);
+                    ysmu.LOG.info(
+                        "[YSMU-DEBUG][FEATURE] emote-wait t={} flag={} name={}",
+                        ticks,
+                        eep != null && eep.isPlayAnimation(),
+                        eep == null ? null : eep.getAnimation());
+                }
+                if (ticks >= 14) {
+                    featurePose = capturePose(geometry());
+                    featureStep = 2;
+                    ticks = 0;
+                }
+                break;
+            case 2:
+                if (ticks >= 2) {
+                    GeoModel model = geometry();
+                    double[] later = capturePose(model);
+                    int moved = countChanged(featurePose, later, 0.005d);
+                    ExtendedModelInfo eep = ExtendedModelInfo.get(mc.thePlayer);
+                    boolean flagOn = eep != null && eep.isPlayAnimation();
+                    String playing = eep == null ? null : eep.getAnimation();
+                    boolean nameOk = wheelAnimation != null && wheelAnimation.equals(playing);
+                    logPose("emote", model);
+                    ysmu.LOG.info(
+                        "[YSMU-DEBUG][FEATURE] emote '{}' flagOn={} eepName={} nameMatches={} bonesMoved={}",
+                        wheelAnimation,
+                        flagOn,
+                        playing,
+                        nameOk,
+                        moved);
+                    saveNamedShot("model" + modelIndex + "_emote.png");
+                    NetworkHandler.CHANNEL.sendToServer(SetPlayAnimation.stop());
+                    if (eep != null) {
+                        eep.stopAnimation();
+                    }
+                    featureResult = featureResult + " emote" + (flagOn && nameOk ? "=OK" : "=FAIL")
+                        + " emoteBonesMoved=" + moved;
+                    featureStep = 4;
+                    ticks = 0;
+                }
+                break;
+            case 4:
+                ysmu.LOG.info("[YSMU-DEBUG][FEATURE] opening the roulette screen");
+                mc.displayGuiScreen(new AnimationRouletteScreen());
+                screenHoldTicks = 6;
+                featureStep = 5;
+                ticks = 0;
+                break;
+            case 5:
+                if (ticks >= 5) {
+                    saveNamedShot("model" + modelIndex + "_roulette.png");
+                    mc.displayGuiScreen(null);
+                    featureStep = 6;
+                    ticks = 0;
+                }
+                break;
+            case 6:
+                ysmu.LOG.info("[YSMU-DEBUG][FEATURE] opening the settings screen");
+                mc.displayGuiScreen(new ConfigScreen(null));
+                screenHoldTicks = 6;
+                featureStep = 7;
+                ticks = 0;
+                break;
+            case 7:
+                if (ticks >= 5) {
+                    saveNamedShot("model" + modelIndex + "_settings.png");
+                    mc.displayGuiScreen(null);
+                    featureStep = 8;
+                    ticks = 0;
+                }
+                break;
+            case 8:
+                finishFeatures();
+                break;
+            default:
+                finishFeatures();
+                break;
+        }
+    }
+
+    /** Logs the feature summary of one model and moves on. */
+    private void finishFeatures() {
+        mc.displayGuiScreen(null);
+        screenHoldTicks = 0;
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] summary model={} display='{}' roulette=OK settings=OK{}",
+            modelId,
+            modelId == null ? null : ModelIdUtil.getModelDisplayName(modelId),
+            featureResult);
+        advanceModel();
+    }
+
+    /** Picks the first root wheel entry that is a playable animation, as the wheel itself would check it. */
+    private boolean chooseWheelAnimation() {
+        if (mc.thePlayer == null) {
+            return false;
+        }
+        Map<String, String> entries = AnimationRouletteScreen.wheelEntriesFor(modelId);
+        if (entries.isEmpty()) {
+            return false;
+        }
+        int index = 0;
+        for (Map.Entry<String, String> entry : entries.entrySet()) {
+            String key = entry.getKey();
+            if (key != null && !key.startsWith("#") && EntityAnimationApi.modelHasClip(mc.thePlayer, key)) {
+                wheelSlot = index;
+                wheelAnimation = key;
+                return true;
+            }
+            index++;
+        }
+        return false;
+    }
+
+    /** The engine geometry of the currently captured model, or {@code null}. */
+    private GeoModel geometry() {
+        return mainId == null ? null
+            : GeckoLibCache.getInstance()
+                .getGeoModels()
+                .get(mainId);
+    }
+
+    /** Every bone of the model in traversal order. */
+    private static List<GeoBone> flatten(GeoModel model) {
+        List<GeoBone> bones = new ArrayList<>();
+        for (GeoBone bone : model.topLevelBones) {
+            bones.add(bone);
+            flatten(bone, bones);
+        }
+        return bones;
+    }
+
+    private static void flatten(GeoBone bone, List<GeoBone> out) {
+        for (GeoBone child : bone.childBones) {
+            out.add(child);
+            flatten(child, out);
+        }
+    }
+
+    /** Rotation XYZ + position XYZ of every bone, for the "did anything move" comparison. */
+    private static double[] capturePose(GeoModel model) {
+        if (model == null) {
+            return new double[0];
+        }
+        List<GeoBone> bones = flatten(model);
+        double[] pose = new double[bones.size() * 6];
+        for (int i = 0; i < bones.size(); i++) {
+            GeoBone bone = bones.get(i);
+            int offset = i * 6;
+            pose[offset] = bone.getRotationX();
+            pose[offset + 1] = bone.getRotationY();
+            pose[offset + 2] = bone.getRotationZ();
+            pose[offset + 3] = bone.getPositionX();
+            pose[offset + 4] = bone.getPositionY();
+            pose[offset + 5] = bone.getPositionZ();
+        }
+        return pose;
+    }
+
+    /** Number of channels whose value changed between two poses, or -1 when the poses are not comparable. */
+    private static int countChanged(double[] before, double[] after, double epsilon) {
+        if (before == null || after == null || before.length != after.length) {
+            return -1;
+        }
+        int changed = 0;
+        for (int i = 0; i < before.length; i++) {
+            if (Math.abs(before[i] - after[i]) > epsilon) {
+                changed++;
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * Logs how far the current pose is from the geometry's bind pose. A pose that is still the bind pose on every bone
+     * is the A-pose symptom; a model whose idle clip happens to equal its bind pose would show the same numbers, which
+     * is why this is a log line next to the screenshot rather than a hard failure.
+     */
+    private static int logPose(String label, GeoModel model) {
+        if (model == null) {
+            ysmu.LOG.info("[YSMU-DEBUG][FEATURE] {}: no geometry", label);
+            return -1;
+        }
+        List<GeoBone> bones = flatten(model);
+        int posed = 0;
+        int missing = 0;
+        double total = 0;
+        for (GeoBone bone : bones) {
+            BoneSnapshot initial = bone.getInitialSnapshot();
+            if (initial == null) {
+                missing++;
+                continue;
+            }
+            double deviation = Math.abs(bone.getRotationX() - initial.rotationValueX)
+                + Math.abs(bone.getRotationY() - initial.rotationValueY)
+                + Math.abs(bone.getRotationZ() - initial.rotationValueZ)
+                + Math.abs(bone.getPositionX() - initial.positionOffsetX)
+                + Math.abs(bone.getPositionY() - initial.positionOffsetY)
+                + Math.abs(bone.getPositionZ() - initial.positionOffsetZ);
+            if (deviation > 0.01d) {
+                posed++;
+            }
+            total += deviation;
+        }
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] {}: posedBones={}/{} bindDeviationSum={} initialSnapshotMissing={}",
+            label,
+            posed,
+            bones.size() - missing,
+            String.format(Locale.ROOT, "%.4f", total),
+            missing);
+        return posed;
+    }
+
+    private void saveNamedShot(String name) {
+        try {
+            ScreenShotHelper.saveScreenshot(outputDir, name, mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+            ysmu.LOG.info("[YSMU-DEBUG] screenshot {}", name);
+        } catch (Throwable failure) {
+            ysmu.LOG.error("[YSMU-DEBUG] screenshot failed", failure);
+        }
     }
 
     private void enterCaptureCamera() {

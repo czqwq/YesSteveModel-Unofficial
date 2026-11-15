@@ -889,6 +889,39 @@ public final class AnimationManager {
         return store != null && store.contains(animationName);
     }
 
+    /**
+     * Whether {@code event}'s model can actually play the extra-animation request {@code name} - the test upstream runs
+     * before it lights its flag: {@code client/entity/CustomPlayerEntity#playExtraAnimation}
+     * ({@code tmp/YesSteveModel-dev-1.20 .../client/entity/CustomPlayerEntity.java:91-103}) only assigns the name and
+     * sets {@code isPlayingExtraAnimation} when {@code getAnimation(animationName) != null}, and clears the flag
+     * otherwise.
+     *
+     * <p>The caller is {@code OpenYsmControllerExpressionEvaluator#isPlayingExtraAnimation}, i.e. the source of
+     * {@code ctrl.playing_extra_animation}. That flag is written by the <em>server</em> ({@code SetPlayAnimation},
+     * {@code /ysm play}) and is never cleared when the client switches models, so it can accompany a name the current
+     * model does not declare. Answering the flag alone then claimed an extra animation was playing for ever, which shut
+     * the packs' {@code 空闲 -> 待机} gate ({@code 待机} holds the idle pose, {@code 空闲} is a 0-bone clip) and left the
+     * model in its bind pose.
+     *
+     * <p>Answering through {@link #hasAnimation} - the same existence test {@link #playParallelIfPresent} and
+     * {@code playIfPresent} use, so the condition and the hand-over answer alike - makes "no answer available yet" a
+     * conservative {@code false}: while the model's animations are still parked nothing is claimed, and the answer
+     * turns true by itself on the frame the store is installed, so this can never be wrong for longer than the model
+     * takes to load. A blank name is not a request at all, and an animatable that is not this port's player entity has
+     * no model to ask, so both are {@code false}.
+     */
+    public static boolean canPlayExtraAnimation(@Nullable AnimationEvent<?> event, @Nullable String name) {
+        if (event == null || StringUtils.isBlank(name)) {
+            return false;
+        }
+        if (!(event.getAnimatable() instanceof CustomPlayerEntity)) {
+            return false;
+        }
+        @SuppressWarnings("unchecked")
+        AnimationEvent<CustomPlayerEntity> playerEvent = (AnimationEvent<CustomPlayerEntity>) event;
+        return hasAnimation(playerEvent, name);
+    }
+
     private static void warnMissingState(String animationName, AnimationEvent<CustomPlayerEntity> event) {
         String key = getAnimationId(event) + "|" + animationName;
         if (!REPORTED_MISSING_STATES.add(key)) {
