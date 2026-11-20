@@ -25,6 +25,9 @@ public final class ClientRoamingKeys {
     /** Model id -> roaming key. */
     private static final Map<ResourceLocation, Integer> KEYS = new ConcurrentHashMap<>();
 
+    /** Model id -> the content hash the key was derived from; empty string when the payload carried none. */
+    private static final Map<ResourceLocation, String> CONTENT_HASHES = new ConcurrentHashMap<>();
+
     private ClientRoamingKeys() {}
 
     /**
@@ -39,6 +42,11 @@ public final class ClientRoamingKeys {
             return;
         }
         KEYS.put(modelId, ModelRoamingKey.of(modelHashHex, modelId.toString()));
+        // The identity the config-action wire compares is the same content hash the roaming key is derived from: the
+        // client has no other model digest (upstream compares the config identity its server-side Settings proto
+        // recomputes, network/forge/ExpressionProtocol.java:55-70, and .agent/model-config-upstream-research.md §2.7
+        // maps that to RawProperties.sha256). File it beside the key rather than deriving it again at the call site.
+        CONTENT_HASHES.put(modelId, modelHashHex == null ? "" : modelHashHex);
     }
 
     /**
@@ -67,8 +75,25 @@ public final class ClientRoamingKeys {
         return modelId != null && KEYS.containsKey(modelId);
     }
 
+    /**
+     * 该模型的内容身份（{@code RawProperties.sha256}），用于 config 动作报文里的 {@code identity} 字段；没有载荷哈希时
+     * 返回空串（{@code ""} 在 wire 上表示"不校验身份"，与 {@code ConfigDeclarations.identity()} 同一口径）。
+     * <p>
+     * 上游接收端比对的是本地 module 的共享语义身份（{@code network/forge/ClientControlHandler.java:112-120}、
+     * {@code ExpressionProtocol.java:36-45}）。1.7.10 侧能覆盖"模型内容"这一项的就是这个哈希，它也正是 roaming key
+     * 的来源（{@link #accept}），所以同一份事实不另存。
+     */
+    public static String contentHashFor(@Nullable ResourceLocation modelId) {
+        if (modelId == null) {
+            return "";
+        }
+        String hash = CONTENT_HASHES.get(modelId);
+        return hash == null ? "" : hash;
+    }
+
     /** Drops every remembered key, for a resource reload or a server change. */
     public static void clear() {
         KEYS.clear();
+        CONTENT_HASHES.clear();
     }
 }

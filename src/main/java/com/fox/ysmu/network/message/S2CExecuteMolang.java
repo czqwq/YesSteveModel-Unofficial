@@ -1,5 +1,7 @@
 package com.fox.ysmu.network.message;
 
+import java.nio.charset.StandardCharsets;
+
 import com.fox.ysmu.client.animation.molang.RemoteMolangExecution;
 import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.ysmu;
@@ -24,26 +26,36 @@ import io.netty.buffer.ByteBuf;
  * expression and hands it to that player's animatable with {@code allowEmitting = true}, ignoring ids that are not
  * players.</p>
  *
- * <h3>Bounds</h3>
- * {@link #MAX_TARGETS} and {@link C2SSubmitRouletteExpression#MAX_EXPRESSION_LENGTH} are upstream's two limits
- * ({@code ControlHandler.java:51,53}); the expression bytes travel through the same length-prefixed, validated
- * codec the roulette channel uses ({@code C2SSubmitRouletteExpression.readExpression}), so a hostile payload cannot
- * ask for a large allocation.
+ * <h3>Bounds and codec</h3>
+ * {@link #MAX_TARGETS} and {@link #MAX_EXPRESSION_LENGTH} are upstream's two limits
+ * ({@code network/forge/ControlHandler.java:51,53}). The expression travels as an int length followed by UTF-8 bytes;
+ * the decoder checks the declared length against {@code readableBytes()} <i>before</i> reading, which is the N-10 rule
+ * in {@code network/NetworkHandler.java:98-107} (a throwing decoder is a disconnect in FML, so a malformed payload
+ * decodes to "nothing to do"). The codec used to live in {@code C2SSubmitRouletteExpression}, which phase78 deletes
+ * together with its raw-source channel; this packet keeps its own copy because it is the only remaining wire user of
+ * that shape - upstream's command is unrelated to the removed expression channel.
  *
  * <h3>Divergence recorded</h3>
  * Upstream's consumer runs the expression through {@code PlayerAnimatableCapability#executeMolangExp}, which queues
  * it into that entity's {@code AnimationProcessor} and runs it in the entity's live Molang scope; this port's
- * equivalent is {@code client/roaming/ModelFormExecution} (the same call the roulette echo uses, itself ported from
- * the same {@code ControlHandler}). {@code PacketEvalMolang} is <em>not</em> reused for it: that one prints the
- * result into the local player's chat and evaluates outside any entity scope, which is what
- * {@code /ysm debug eval} wants and what this command must not do. Both paths share the one
- * {@code GeckoLibCache.parser}, and nothing here is gated on {@code Config.DEBUG_MOLANG_OVERLAY} - upstream's command
- * is ordinary administration, not debug tooling.
+ * equivalent is {@code client/roaming/ModelFormExecution} with an explicit {@code Target.WORLD} request: the request is
+ * consumed only by the real world animatable (never by a GUI preview with the same owner+model, which is a port-only
+ * shape - phase78 removed the settings screen from that class). {@code PacketEvalMolang} is <em>not</em> reused for it:
+ * that one prints the result into the local player's chat and evaluates outside any entity scope, which is what
+ * {@code /ysm debug eval} wants and what this command must not do. Both paths share the one {@code GeckoLibCache.parser},
+ * and nothing here is gated on {@code Config.DEBUG_MOLANG_OVERLAY} - upstream's command is ordinary administration, not
+ * debug tooling.
  */
 public class S2CExecuteMolang implements IMessage {
 
     /** Upstream's {@code ControlHandler.MAX_MOLANG_TARGETS} ({@code network/forge/ControlHandler.java:51}). */
     public static final int MAX_TARGETS = 1024;
+
+    /** Upstream's {@code ControlHandler.MAX_EXPRESSION_LENGTH} ({@code network/forge/ControlHandler.java:53}), in chars. */
+    public static final int MAX_EXPRESSION_LENGTH = 4096;
+
+    /** Allocation bound for the decoder: a Java char is at most four UTF-8 bytes. */
+    private static final int MAX_UTF8_BYTES = MAX_EXPRESSION_LENGTH * 4;
 
     private String expression;
     private int[] targets = new int[0];
@@ -72,7 +84,7 @@ public class S2CExecuteMolang implements IMessage {
             for (int i = 0; i < count; i++) {
                 this.targets[i] = buf.readInt();
             }
-            this.expression = C2SSubmitRouletteExpression.readExpression(buf);
+            this.expression = readExpression(buf);
         } catch (RuntimeException e) {
             ysmu.LOG.warn("Ignoring malformed YSM molang packet: {}", e.toString());
             this.targets = new int[0];
@@ -87,7 +99,7 @@ public class S2CExecuteMolang implements IMessage {
         for (int id : ids) {
             buf.writeInt(id);
         }
-        C2SSubmitRouletteExpression.writeExpression(buf, this.expression);
+        writeExpression(buf, this.expression);
     }
 
     /** The Molang source to run, or {@code null} when the payload was unusable. */
@@ -98,6 +110,33 @@ public class S2CExecuteMolang implements IMessage {
     /** The entity ids the command named; empty when the payload was unusable. */
     public int[] targets() {
         return this.targets;
+    }
+
+    /** Reads the int-length-prefixed UTF-8 expression; {@code null} when the length or the text is unusable. */
+    private static String readExpression(ByteBuf buf) {
+        if (buf.readableBytes() < 4) {
+            return null;
+        }
+        int length = buf.readInt();
+        if (length < 0 || length > MAX_UTF8_BYTES || length > buf.readableBytes()) {
+            return null;
+        }
+        String text = buf.toString(buf.readerIndex(), length, StandardCharsets.UTF_8);
+        buf.skipBytes(length);
+        return valid(text) ? text : null;
+    }
+
+    /** Writes the int length and the UTF-8 bytes; an invalid expression is written as an empty one. */
+    private static void writeExpression(ByteBuf buf, String expression) {
+        byte[] bytes = valid(expression) ? expression.getBytes(StandardCharsets.UTF_8) : new byte[0];
+        buf.writeInt(bytes.length);
+        buf.writeBytes(bytes);
+    }
+
+    /** Whether an expression is one the command accepts: non-blank and within upstream's char bound. */
+    private static boolean valid(String expression) {
+        return expression != null && !expression.trim()
+            .isEmpty() && expression.length() <= MAX_EXPRESSION_LENGTH;
     }
 
     public static class Handler implements IMessageHandler<S2CExecuteMolang, IMessage> {

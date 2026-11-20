@@ -13,7 +13,9 @@ import java.nio.file.attribute.BasicFileAttributes;
 import org.jetbrains.annotations.NotNull;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.data.ConfigDeclarations;
 import com.fox.ysmu.data.ModelData;
+import com.fox.ysmu.data.WheelDeclarations;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.model.resource.RawYsmModelAdapter;
 import com.fox.ysmu.model.resource.YSMBinaryDeserializer;
@@ -112,10 +114,13 @@ public final class OpenYsmFormat {
             }
             ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, modelId);
             ServerModelInfo info = ModelCacheWriter.write(data);
+            // phase78：服务端设置声明快照（只留 button id/form 类型/label 名）与登记一起交出，服务端 config 动作
+            // 授权与 roaming modelKey 校验都用它；来源就是模型自己的 ysm.json 声明，客户端读的是同一份。
+            ConfigDeclarations declarations = ConfigDeclarations.from(WheelDeclarations.from(raw.properties).values());
             if (info != null) {
                 // 第 6 项：唯一登记入口的第一次调用（legacy 半边）。拿到 17 载荷后同一来源会再登记一次＝补齐，
                 // 不产生冲突（见 ServerModelManager.registerModel 的 javadoc 第 4 条）。
-                ServerModelManager.registerModel(modelId, info, null, display, rootPath);
+                ServerModelManager.registerModel(modelId, info, null, display, rootPath, declarations);
             }
             // M-01:二进制同步缓存只序列化已烘焙的 bones/cubes/faces,不能用 isBridgeable 做门控
             // ——它对散件模型因 sourceJson != null 恒 true,会写出一个几何为空的缓存。
@@ -125,12 +130,12 @@ public final class OpenYsmFormat {
                     display,
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
                     RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
-                ModelIndexCache.remember(source, modelId, info, null);
+                ModelIndexCache.remember(source, modelId, info, null, declarations);
                 return;
             }
             OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
-            ServerModelManager.registerModel(modelId, info, syncInfo, display, rootPath);
-            ModelIndexCache.remember(source, modelId, info, syncInfo);
+            ServerModelManager.registerModel(modelId, info, syncInfo, display, rootPath, declarations);
+            ModelIndexCache.remember(source, modelId, info, syncInfo, declarations);
         } catch (Exception | LinkageError e) {
             // S-02:类加载/链接期错误(缺类、版本不匹配)也应按"跳过并 warn"处理,而不是中断整次扫描。
             ysmu.LOG.warn("Failed to load OpenYSM folder model {}", display, e);
@@ -187,9 +192,12 @@ public final class OpenYsmFormat {
                 }
                 ModelData data = RawYsmModelAdapter.toLegacyModelData(raw, modelId);
                 ServerModelInfo info = ModelCacheWriter.write(data);
+                // phase78：同 folder 路径，服务端声明快照与登记一起交出（.ysm 二进制的 properties 随 footer 到达）。
+                ConfigDeclarations declarations = ConfigDeclarations
+                    .from(WheelDeclarations.from(raw.properties).values());
                 if (info != null) {
                     // 第 6 项：唯一登记入口（先 legacy 半边，拿到 17 载荷后同一来源补齐）。
-                    ServerModelManager.registerModel(modelId, info, null, file, rootPath);
+                    ServerModelManager.registerModel(modelId, info, null, file, rootPath, declarations);
                 }
                 if (!RawYsmModelAdapter.isBinaryPayloadBridgeable(raw)) {
                     ysmu.LOG.warn(
@@ -197,12 +205,12 @@ public final class OpenYsmFormat {
                         file,
                         RawYsmModelAdapter.countBakedFaces(raw.mainEntity.mainModel),
                         RawYsmModelAdapter.countBakedFaces(raw.mainEntity.armModel));
-                    ModelIndexCache.remember(source, modelId, info, null);
+                    ModelIndexCache.remember(source, modelId, info, null, declarations);
                     return;
                 }
                 OpenYsmSyncInfo syncInfo = ModelCacheWriter.writeOpenYsm(raw, modelId);
-                ServerModelManager.registerModel(modelId, info, syncInfo, file, rootPath);
-                ModelIndexCache.remember(source, modelId, info, syncInfo);
+                ServerModelManager.registerModel(modelId, info, syncInfo, file, rootPath, declarations);
+                ModelIndexCache.remember(source, modelId, info, syncInfo, declarations);
             }
         } catch (UnsupportedOperationException e) {
             ysmu.LOG.warn("Unsupported OpenYSM binary model {}: {}", file, e.getMessage(), e);

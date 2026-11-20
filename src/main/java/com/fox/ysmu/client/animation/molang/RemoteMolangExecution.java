@@ -63,9 +63,11 @@ public final class RemoteMolangExecution {
             if (modelId == null) {
                 continue;
             }
-            // `() -> true` as the liveness test: ModelFormExecution already drops a request whose owner left this
-            // world or died, which is the whole of what it checks for the local form path too (ModelConfigScreen:580).
-            ModelFormExecution.submit(player, modelId, expression, null, () -> true);
+            // WORLD: upstream's executeMolangExp runs against the player's own capability/runtime, never against a GUI
+            // preview. The port's preview animatables share the render entry point, so the request must say which kind of
+            // animatable may consume it - otherwise a detached preview with the same owner+model (a catalog tile, or the
+            // settings screen's preview) could execute an admin expression off-screen (phase78 audit RC-6).
+            ModelFormExecution.submit(player, modelId, expression, ModelFormExecution.Target.WORLD, null, () -> true);
         }
     }
 }

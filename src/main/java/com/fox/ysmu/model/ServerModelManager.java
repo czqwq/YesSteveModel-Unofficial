@@ -20,6 +20,8 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
 
+import javax.annotation.Nullable;
+
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
@@ -27,7 +29,9 @@ import org.apache.commons.io.FileUtils;
 
 import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
+import com.fox.ysmu.data.ConfigDeclarations;
 import com.fox.ysmu.data.EncryptTools;
+import com.fox.ysmu.data.WheelDeclarations;
 import com.fox.ysmu.model.catalog.CatalogAccess;
 import com.fox.ysmu.model.catalog.CatalogRootKind;
 import com.fox.ysmu.model.format.BuiltinModelIndex;
@@ -113,6 +117,20 @@ public final class ServerModelManager {
     public static final Map<String, ServerModelInfo> CACHE_NAME_INFO = new ConcurrentHashMap<>();
     public static final Map<String, OpenYsmSyncInfo> OPEN_YSM_SYNC_INFO = new ConcurrentHashMap<>();
     /**
+     * 服务端保存的模型设置声明快照（phase78），键与 {@link #CACHE_NAME_INFO} 相同（内部 id）。
+     * <p>
+     * 上游服务端手里有每个模型的已验证 {@code Settings}，于是能在转发 config 动作前回答"这个 button/form/label 是否
+     * 由该模型声明"（{@code network/forge/ControlHandler.java:216-226,277-293}），roaming 上报也能用
+     * {@code roamingHash} 校验 modelKey（{@code network/forge/PlayerStateHandler.java:271-286}）。1.7.10 没有那层
+     * upstream's validated model view，所以扫描器把模型自身声明的同一份内容（{@link ConfigDeclarations}
+     * 快照）随 {@link #registerModel} 交进来。它由 {@link WheelDeclarations} 重建，不作为独立磁盘
+     * 格式，只随 {@code ModelIndexCache} 持久化。
+     * <p>
+     * reload 期间重建、被网络线程读取，所以与上面两张表一样用并发容器；内容只在赢家登记时写入（同名冲突仍由
+     * {@link #claim} 裁决）。
+     */
+    public static final Map<String, ConfigDeclarations> CONFIG_DECLARATIONS = new ConcurrentHashMap<>();
+    /**
      * 包根（含 {@code ysm-pack.json} 的目录）的清单与封面，键是带尾斜杠的层级（例如 {@code wine_fox/}）。
      * 它让客户端的文件夹格子能显示包自己的名字、描述和封面，而不是目录名 + 通用图标；和
      * {@link #CACHE_NAME_INFO} 一样在 reload 期间重建、被网络线程读取，所以用并发容器。
@@ -150,6 +168,37 @@ public final class ServerModelManager {
         }
         String internalFullId = ModelIdUtil.getInternalModelId(modelId.toString());
         return CACHE_NAME_INFO.containsKey(internalFullId);
+    }
+
+    /**
+     * 该模型的服务端设置声明快照；服务端没有该模型（未知 id / 只在客户端本地注册的模型）时返回 {@code null}。
+     * <p>
+     * 拼写规范化与 {@link #hasModel(ResourceLocation)} / {@link #isBuiltinModel(ResourceLocation)} 完全同一套：
+     * 调用方拿到的可能是裸磁盘名、{@code ysmu:} 全名或 {@code _name_<hex>} 内部 id，所以四种拼法都试一遍再回答
+     * "没有"。这也是 contract §6.1 的要求：同一个 id 的三种拼写不能得到三种答案。
+     * <p>
+     * 返回登记表里那份声明快照；调用方按只读约定使用（{@code accepts}/{@code identity}/{@code roamingKey} 都是只读
+     * 查询）。
+     */
+    @Nullable
+    public static ConfigDeclarations configDeclarationsFor(@Nullable ResourceLocation modelId) {
+        if (modelId == null) {
+            return null;
+        }
+        String path = modelId.getResourcePath();
+        ConfigDeclarations declarations = CONFIG_DECLARATIONS.get(path);
+        if (declarations != null) {
+            return declarations;
+        }
+        declarations = CONFIG_DECLARATIONS.get(modelId.toString());
+        if (declarations != null) {
+            return declarations;
+        }
+        declarations = CONFIG_DECLARATIONS.get(ModelIdUtil.getInternalModelId(path));
+        if (declarations != null) {
+            return declarations;
+        }
+        return CONFIG_DECLARATIONS.get(ModelIdUtil.getInternalModelId(modelId.toString()));
     }
 
     /**
@@ -298,6 +347,9 @@ public final class ServerModelManager {
         CACHE_NAME_INFO.clear();
         OPEN_YSM_SYNC_INFO.clear();
         PACKS.clear();
+        // phase78: 声明快照与服务端登记同生共死。reload 会重建整张表；索引命中路径会重新交进同一份声明
+        // （ModelIndexCache 持久化了它），所以清空不会让命中与完整路径分叉。
+        CONFIG_DECLARATIONS.clear();
         // 第 6 项：来源表与冲突计数与登记表同生共死，每轮 reload 从零开始（上游每次选记录都重建一份 Selection）。
         MODEL_SOURCES.clear();
         PACK_SOURCES.clear();
@@ -409,9 +461,10 @@ public final class ServerModelManager {
      * @param syncInfo 17 通道载荷，可为 {@code null}
      * @param source 磁盘来源（模型目录或 {@code .ysm} 文件）
      * @param scanRoot 来源所属扫描根（{@link #CUSTOM}、{@link #AUTH} 或 {@link #BUILT}）
+     * @param declarations 模型自带的设置声明快照；可为 {@code null}（"这次调用没有声明可存"，等价于该赢家没有声明）
      */
     public static void registerModel(String modelId, ServerModelInfo info, OpenYsmSyncInfo syncInfo, Path source,
-        Path scanRoot) {
+        Path scanRoot, @Nullable ConfigDeclarations declarations) {
         if (modelId == null || info == null || source == null) {
             return;
         }
@@ -426,6 +479,22 @@ public final class ServerModelManager {
         } else {
             OPEN_YSM_SYNC_INFO.remove(modelId);
         }
+        // 声明与登记同生共死、且只存赢家的那份：赢家没有声明时清掉（reload 开始时整表已清空，这里是同一轮内
+        // "OpenYSM 先 legacy 半边、再补 17 载荷"两次调用都带同一份声明的防御）。
+        if (declarations != null) {
+            CONFIG_DECLARATIONS.put(modelId, declarations);
+        } else {
+            CONFIG_DECLARATIONS.remove(modelId);
+        }
+    }
+
+    /**
+     * 旧签名（不含声明快照）：等价于 {@code registerModel(..., (ConfigDeclarations) null)}，保留给尚未接上声明的
+     * 调用方与既有用例；生产扫描器与索引命中路径都走带声明的新重载。
+     */
+    public static void registerModel(String modelId, ServerModelInfo info, OpenYsmSyncInfo syncInfo, Path source,
+        Path scanRoot) {
+        registerModel(modelId, info, syncInfo, source, scanRoot, null);
     }
 
     /**

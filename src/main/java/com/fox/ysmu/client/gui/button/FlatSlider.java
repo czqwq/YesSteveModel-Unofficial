@@ -27,9 +27,10 @@ import org.lwjgl.opengl.GL11;
  * places ({@code step 0.1} -> one decimal, {@code 0.05} -> two). The old display was always {@code %.2f}, so an
  * integral step read "2.00" where upstream reads "2".</li>
  * </ul>
- * The callback fires only when the quantised value actually changes, so a drag does not spam the server
- * ({@code ForgeSlider:150-160} applies on change too). See {@code .agent/phase15-roaming-variables.md}, Milestone 5,
- * and {@code .agent/phase64-model-config-screen-review.md}.
+ * The callback fires once on release, and only if the quantised value actually changed - the same commit point as
+ * upstream's {@code ForgeSlider#applyValue} reached from {@code AbstractSliderButton#onRelease} - so dragging the knob
+ * does not send one network action per pixel. See {@code .agent/phase15-roaming-variables.md}, Milestone 5,
+ * {@code .agent/phase64-model-config-screen-review.md} and {@code .agent/phase78-review.md} (RK-2).
  */
 public class FlatSlider extends GuiButton {
 
@@ -42,6 +43,18 @@ public class FlatSlider extends GuiButton {
 
     private float value;
     private boolean dragging;
+    /**
+     * Whether the knob moved since the press and the callback has not fired yet.
+     * <p>
+     * <b>Release-only submission (phase78 review RK-2).</b> Upstream's slider is a {@code ForgeSlider}, whose commit
+     * point is {@code AbstractSliderButton#applyValue} - that is called by {@code onRelease}, not by {@code onDrag}
+     * ({@code tmp/YesSteveModel-dev-1.20} builds a {@code FlatSlider extends ForgeSlider} at
+     * {@code client/gui/AnimationRouletteScreen.java:369-386}; the 1.20 Forge source is
+     * {@code net.minecraftforge.client.gui.widget.ForgeSlider}, whose {@code onDrag} only moves the knob and
+     * {@code applyValue} is reached from {@code onRelease}). Our callback is the equivalent of {@code applyValue}, so it
+     * fires once on release; firing it on every drag step sent one {@code C2SConfigAction} per quantised pixel.
+     */
+    private boolean changedDuringDrag;
 
     /** Receives the new value every time the user moves the knob to a different quantised position. */
     public interface SliderCallback {
@@ -111,6 +124,7 @@ public class FlatSlider extends GuiButton {
             return false;
         }
         this.dragging = true;
+        this.changedDuringDrag = false;
         applyMouse(mouseX);
         return true;
     }
@@ -122,8 +136,17 @@ public class FlatSlider extends GuiButton {
         }
     }
 
-    /** Called by the owning screen from {@code mouseMovedOrUp}. */
+    /**
+     * Called by the owning screen from {@code mouseMovedOrUp}: commits the value exactly once, the way
+     * {@code AbstractSliderButton#onRelease} reaches {@code applyValue} (see {@link #changedDuringDrag}).
+     */
     public void mouseReleased(int mouseX, int mouseY) {
+        if (this.dragging && this.changedDuringDrag) {
+            this.changedDuringDrag = false;
+            if (this.callback != null) {
+                this.callback.onValueChanged(this, this.value);
+            }
+        }
         this.dragging = false;
     }
 
@@ -141,10 +164,8 @@ public class FlatSlider extends GuiButton {
             return;
         }
         this.value = next;
+        this.changedDuringDrag = true;
         updateDisplayString();
-        if (this.callback != null) {
-            this.callback.onValueChanged(this, next);
-        }
     }
 
     private void updateDisplayString() {

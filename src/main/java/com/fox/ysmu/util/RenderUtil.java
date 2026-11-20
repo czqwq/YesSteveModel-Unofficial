@@ -416,7 +416,16 @@ public final class RenderUtil {
             false);
     }
 
-    /** Screen-owned form preview. Only its fake player is posed; the world owner supplies roaming identity. */
+    /**
+     * 设置面板里的表单预览：<b>只是画布</b>。被摆姿势的是它自己的假查询玩家；{@code owner} 只用来选定读取哪个玩家的
+     * {@code v.roaming.*} 命名空间（{@link CustomGuiPlayerEntity#getMolangVariables} 在预览模型 == 该玩家当前模型时
+     * 直接读引擎里真实作用域的只读快照，phase78）。
+     * <p>
+     * <b>它不再是读写上下文。</b>旧实现把面板的读/写程序排进 {@code ModelFormExecution}，由本预览的渲染 pass 消费，
+     * 于是设置只落在假玩家作用域、世界角色收不到、重开面板回退（{@code .agent/model-config-bug-audit.md} RC-1）。
+     * phase78 起面板的读写都走 {@code client/roaming/ConfigActionRuntime}（读：本地玩家真实 {@code (entity, model)}
+     * 作用域同步求值；写：类型化动作交服务端校验后广播，各端在该玩家真实作用域执行本地程序），本方法只负责把模型画出来。
+     */
     public static boolean renderFormPreview(int x, int y, int scale, EntityPlayer owner,
         ResourceLocation modelId, ResourceLocation textureId, CustomGuiPlayerEntity preview) {
         return renderEntityInInventory(x, y, scale, owner, modelId, textureId, false, false, preview, null, false);

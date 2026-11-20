@@ -18,6 +18,7 @@ import org.apache.commons.io.filefilter.FileFileFilter;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 
+import com.fox.ysmu.data.ConfigDeclarations;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.resource.LegacyInfo;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -71,11 +72,12 @@ public final class FolderFormat {
                     if (ModelIndexCache.restoreIfHit(source, modelId)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
-                    ServerModelInfo info = cacheModel(dir, modelId);
-                    if (info != null) {
+                    BakedModel baked = cacheModel(dir, modelId);
+                    if (baked != null) {
                         // 第 6 项：唯一登记入口（显式来源优先级 + 同名冲突日志），不再是裸 put。
-                        registerModel(modelId, info, null, dir, rootPath);
-                        ModelIndexCache.remember(source, modelId, info, null);
+                        // phase78：设置声明快照与登记一起交出，服务端 config 动作/roaming 校验要用它。
+                        registerModel(modelId, baked.info, null, dir, rootPath, baked.declarations);
+                        ModelIndexCache.remember(source, modelId, baked.info, null, baked.declarations);
                     }
                     return FileVisitResult.SKIP_SUBTREE;
                 }
@@ -119,7 +121,7 @@ public final class FolderFormat {
         return hasMainModelFile && hasArmModelFile && hasTextureFile;
     }
 
-    private static ServerModelInfo cacheModel(Path modelPath, String modelId) {
+    private static BakedModel cacheModel(Path modelPath, String modelId) {
         return cacheModel(modelPath, modelId, modelPath);
     }
 
@@ -131,14 +133,17 @@ public final class FolderFormat {
      *
      * @param displayPath 日志里显示的来源（ZIP 传 {@code .zip} 文件，不把暂存目录名写进日志）
      */
-    static ServerModelInfo cacheExtractedFolderModel(Path modelPath, String modelId, Path displayPath) {
+    static BakedModel cacheExtractedFolderModel(Path modelPath, String modelId, Path displayPath) {
         return cacheModel(modelPath, modelId, displayPath == null ? modelPath : displayPath);
     }
 
-    private static ServerModelInfo cacheModel(Path modelPath, String modelId, Path displayPath) {
+    private static BakedModel cacheModel(Path modelPath, String modelId, Path displayPath) {
         try {
             ModelData data = getModelDataFromPath(modelPath, modelId);
-            return ModelCacheWriter.write(data);
+            ServerModelInfo info = ModelCacheWriter.write(data);
+            // 声明快照与登记来自同一个 ModelData；legacy 平铺模型没有 ysm.json，所以这里通常是空声明
+            // （无 button，sha256 为空），roaming key 于是回落到 id 派生的那一个，与客户端一致。
+            return new BakedModel(info, ConfigDeclarations.from(data.getWheelDeclarations().values()));
         } catch (Exception | LinkageError e) {
             // M-16/M-18:统一日志,且单个模型失败不影响其余模型。
             ysmu.LOG.warn("Failed to cache legacy folder model {}", displayPath, e);

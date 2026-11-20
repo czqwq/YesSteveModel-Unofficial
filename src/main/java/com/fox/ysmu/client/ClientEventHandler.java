@@ -9,6 +9,7 @@ import com.fox.ysmu.client.audio.YSMSoundManager;
 import com.fox.ysmu.client.gui.ConfigScreen;
 import com.fox.ysmu.client.gui.DisclaimerScreen;
 import com.fox.ysmu.client.gui.ExtraPlayerConfigScreen;
+import com.fox.ysmu.client.gui.ModelConfigScreen;
 import com.fox.ysmu.client.gui.OpenModelFolderScreen;
 import com.fox.ysmu.client.gui.PlayerModelScreen;
 import com.fox.ysmu.client.gui.PlayerTextureScreen;
@@ -178,9 +179,9 @@ public class ClientEventHandler {
         tickExtraAnimationMovementStop();
         // Reference ClientEventHandler.java:134-137: drive existing password/entity waits without a pool worker.
         TickScheduler.client().runDueTasks();
-        // Report local roaming-variable changes (the model 模型设置 panel writes them). Done before the early return
-        // below, which only guards the one-shot model load. Cheap when nothing changed.
-        ClientRoamingSync.flushPending();
+        // Sample and report the local player's roaming-variable namespace (the model 模型设置 panel and animation scripts
+        // write v.roaming.* into the real scope). Same trigger as upstream: every client tick, not the settings screen.
+        ClientRoamingSync.tick();
         // Keep playing model sounds centred on the listener; see YSMSoundManager#updateSourcePositions. No-op when
         // nothing is playing.
         YSMSoundManager.updateSourcePositions();
@@ -526,7 +527,11 @@ public class ClientEventHandler {
             || screen instanceof PlayerTextureScreen
             || screen instanceof ConfigScreen
             || screen instanceof DisclaimerScreen
-            || screen instanceof OpenModelFolderScreen;
+            || screen instanceof OpenModelFolderScreen
+            // The settings screen paints a full-screen background too (drawDefaultBackground), so the paperdoll behind it
+            // can never be seen. It is also the one screen whose preview must not become an animatable that consumes
+            // queued world-model requests; skipping the HUD pass removes that path entirely (phase78 RC-6/RC-7.4).
+            || screen instanceof ModelConfigScreen;
     }
 
     /**
@@ -797,8 +802,11 @@ public class ClientEventHandler {
         RemotePlayerAnimationQueries.clear();
         RemotePlayerMotionStates.clear();
         RemoteAnimationVariables.clear();
-        // The roaming values belong to the server that just went away, and so do the pending reports for it.
+        // The roaming values belong to the server that just went away, and so does the reporter's baseline: the next
+        // connection starts its own FULL/DELTA cycle from scratch (upstream resets the planner on ClientSessionRuntime
+        // close, ClientProtocolGateway.resetWorld).
         ClientRoamingStore.clear();
+        ClientRoamingSync.reset();
         // The authorization facts belong to it as well: the next connection publishes its own restricted set and
         // grants, and until that packet arrives the lock display must stay off (ClientModelAccess.isEmpty()), which
         // clearing restores. Leaving them would lock tiles according to the previous server's rules.

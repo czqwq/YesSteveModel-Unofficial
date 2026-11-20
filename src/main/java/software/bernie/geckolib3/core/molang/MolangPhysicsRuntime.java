@@ -1,5 +1,7 @@
 package software.bernie.geckolib3.core.molang;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -130,6 +132,135 @@ public final class MolangPhysicsRuntime {
         // start from white, opaque and not emissive rather than from whatever the previous frame left behind.
         resetBoneRenderState(processor);
         CURRENT.set(new FrameContext(animatable.getMolangModelId(), state, processor));
+    }
+
+    /** {@code v.roaming.} 命名空间；见 {@link #clearRoamingVariables} 与 {@link #snapshotVariables}。 */
+    private static final String ROAMING_PREFIX = "v.roaming.";
+
+    /**
+     * 打开一个已存在（或新建）的 {@code (entity, modelId)} 作用域并设为当前，{@code close()} 恢复调用前的上下文。
+     * <p>
+     * <b>上游对照。</b> 上游的 per-installation Molang 内存是常驻的：每次模型安装新建一份
+     * {@code State}/{@code CompiledModuleInstance}（{@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/
+     * expression/aot/EntityExpressionRuntime.java:104-108,1372-1387}），GUI 的读程序同步在上面求值
+     * （{@code client/gui/AnimationRouletteScreen.java:230-258}），服务端授权后的 config 动作也在受试实体自己的
+     * 运行时里执行（{@code network/forge/ClientControlHandler.java:55-69,112-130} →
+     * {@code EntityExpressionRuntime.java:1147-1178}）。本引擎把同一份作用域做成了渲染期打开的表：
+     * {@link #begin}/{@link #end} 只在渲染 pass 内开窗（{@code :115-133,204-216}），所以 GUI 点击/网络回执在角色
+     * 不渲染时既读不到也写不进。
+     * <p>
+     * <b>移植特有理由（引擎架构）。</b> 这是给那个常驻语义补一个"按 {@code (entity, model)} 打开既有作用域"的短窗口，
+     * 不新建第二张表：与 {@link #begin} 共用 {@link #STATES} 与 {@link ScopeKey}，窗口内 {@link #getVariable}/
+     * {@link #setVariable}/{@link #syncToRuntimeState} 照常工作（{@code ScopedMolangVariable} 走的也是 {@link #CURRENT}）。
+     * <p>
+     * 与 {@link #begin} 的三处刻意差异，都是"这不是一帧渲染 pass"的直接推论：
+     * <ul>
+     * <li>不 {@link ScopeState#rotateDirty()}：两代脏集是渲染 pass 的记账（{@code :788-815}），在渲染之外旋转会把
+     * 上一 pass 的写集挪进 {@code dirtyPrevious}，下一次 pass 的控制器同步就会多拷一次；</li>
+     * <li>不 {@link #resetBoneRenderState}：逐骨骼渲染状态是给下一帧的表达式的初值，与这里无关；</li>
+     * <li>{@code processor} 为 {@code null}：{@code bone_*} 查询在无 processor 时返回中性值
+     * （{@code bone()}/{@code boneScale()} 的既有 null 分支），这正是上游"运行时不在渲染帧内"的等价形态。</li>
+     * </ul>
+     * 会像 {@link #begin} 一样把该实体的远端 roaming 变量铺进作用域：上游任何一次读到/写到运行时都看到当前 roaming 状态
+     * （{@code expression/aot/EntityExpressionRuntime.java:730-747} 的运行时引出），本仓的 GUI 读取发生在角色可能还没渲染
+     * 的时候，不铺就会把"服务端已下发的 roaming 值"读成 0。
+     * <p>
+     * 可嵌套（返回的句柄恢复打开前的上下文）。<b>只允许客户端线程调用</b>：{@link #CURRENT} 是 ThreadLocal，作用域表
+     * 是并发表，但调用方（GUI 读回、config 动作回执、roaming 采样）全部在客户端线程上。
+     */
+    public static Scope pushScope(EntityLivingBase entity, ResourceLocation modelId) {
+        ScopeState state = STATES.computeIfAbsent(ScopeKey.from(entity, modelId), ignored -> new ScopeState());
+        applyRemoteVariables(entity, state);
+        FrameContext context = new FrameContext(modelId, state, null);
+        Scope scope = new PushedScope(context, CURRENT.get());
+        CURRENT.set(context);
+        return scope;
+    }
+
+    /**
+     * {@link #pushScope} 的句柄：{@code close()} 恢复打开前的 {@link FrameContext}（无则移除）。实现
+     * {@link AutoCloseable}，配合 try-with-resources 使用时窗口不会因异常泄漏。
+     */
+    public interface Scope extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** 一次 {@link #pushScope} 的现场：打开前的上下文与本次打开的上下文。 */
+    private static final class PushedScope implements Scope {
+        private final FrameContext previous;
+        private final FrameContext opened;
+        private boolean closed;
+
+        private PushedScope(FrameContext opened, FrameContext previous) {
+            this.opened = opened;
+            this.previous = previous;
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            // 正常嵌套时 CURRENT 一定还是本次打开的上下文；内层 begin/end 会自行恢复到它。
+            if (CURRENT.get() == opened) {
+                if (previous == null) {
+                    CURRENT.remove();
+                } else {
+                    CURRENT.set(previous);
+                }
+            }
+        }
+    }
+
+    /**
+     * 当前作用域里 {@code v.*} 变量的只读快照（全名 → double）；无作用域或没有变量时返回空 map，绝不为 null。
+     * <p>
+     * 调用方：设置面板预览的 read-through（{@code CustomGuiPlayerEntity#getMolangVariables}）与 roaming 上报采样
+     * （{@code ClientRoamingSync#tick}）。上游对应物是"从受试实体的表达式运行时取值"
+     * （{@code EntityExpressionRuntime.java:743-747} 的实例内 scoped 变量；GUI 读 {@code AnimationRouletteScreen.java:
+     * 238-257}，上报采样 {@code network/forge/LocalPlayerStateReporter.java:70-88}）。这里刻意返回<b>副本</b>：
+     * 作用域表是渲染线程随时写的并发表，直接交出去会让调用方看到半帧状态。
+     * <p>
+     * 与 {@link #getLastFrameVariables()} 的区别：那是调试快照，只在 {@link #snapshotCaptureEnabled} 时由
+     * {@link #end()} 拷一次；这是随时可读的真实作用域视图，供功能路径使用。
+     */
+    public static Map<String, Double> snapshotVariables(EntityLivingBase entity, ResourceLocation modelId) {
+        ScopeState state = STATES.get(ScopeKey.from(entity, modelId));
+        if (state == null || state.variables.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, Double> snapshot = new HashMap<>();
+        for (Map.Entry<String, Double> entry : state.variables.entrySet()) {
+            if (entry.getKey() != null && entry.getKey()
+                .startsWith("v.")) {
+                snapshot.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return snapshot.isEmpty() ? Collections.emptyMap() : Collections.unmodifiableMap(snapshot);
+    }
+
+    /**
+     * 清掉当前作用域里所有 {@code v.roaming.*} 键，返回是否真的删掉了东西。
+     * <p>
+     * 调用方：{@code /ysm reset}/{@code /ysmclient reset} 的
+     * {@code OpenYsmPlayerControllerRuntime#resetUserRoamingVars}（移植特有边界，见那个方法）。上游 reset 清的是该实体
+     * roaming state 里由用户写入的值（{@code capability/RoamingVariableStore} 的命名空间），普通 {@code v.*} 与
+     * 逐骨骼状态不动——这里同样只删 roaming 命名空间，并让 {@code ClientRoamingSync} 的下一份 FULL 把清空后的全量
+     * 送给服务端（服务端是权威，见 {@code network/forge/PlayerStateHandler.java:331-332,353-357} 的"FULL 省略=
+     * 清空命名空间"语义）。
+     * <p>
+     * 只删值不动脏集：{@link #copyDirty} 对已删除的键读不到值会跳过，不会把清空前的老值再拷出去。
+     */
+    public static boolean clearRoamingVariables(EntityLivingBase entity, ResourceLocation modelId) {
+        ScopeState state = STATES.get(ScopeKey.from(entity, modelId));
+        if (state == null || state.variables.isEmpty()) {
+            return false;
+        }
+        return state.variables.keySet()
+            .removeIf(
+                key -> key != null && key.startsWith(ROAMING_PREFIX));
     }
 
     /**
@@ -371,9 +502,9 @@ public final class MolangPhysicsRuntime {
      * <p>
      * <b>增量同步（照 SOURCE 的脏集形态）。</b> SOURCE 遍历的是 {@code ScopeState} 的"本帧/上一帧脏集"，而不是
      * 整张作用域表，因为一帧要跑十来个控制器、每个都同步一次；本仓此前每控制器每帧整表遍历。现在
-     * {@link ScopeState} 也维护两代脏集：{@link ScopeState#rotateDirty()} 在每次 {@link #begin()} 把上一 pass 的
+     * {@link ScopeState} 也维护两代脏集：{@link ScopeState#rotateDirty()} 在每次 {@link #begin} 把上一 pass 的
      * 写入翻成"上一帧脏集"，本方法只拷贝这两代里出现过的键。写入点已集中（{@link #setVariable} 与
-     * {@link #begin()} 的两处种子），所以不需要在每个 Molang 赋值点埋钩子。实测：一份卡顿 tick 的 spark
+     * {@link #begin} 的两处种子），所以不需要在每个 Molang 赋值点埋钩子。实测：一份卡顿 tick 的 spark
      * profile 里 {@code syncToRuntimeState} 合计 ~304 ms，其中大半是这个每控制器整表 CHM 写入
      * （{@code ConcurrentHashMap.putVal} 是它的直接子节点）。
      */
@@ -754,7 +885,12 @@ public final class MolangPhysicsRuntime {
             }
         }
         FrameContext context = CURRENT.get();
-        return context == null ? null : context.processor.getBone(boneName);
+        // {@link #pushScope} 打开的窗口没有 processor：那不是一次渲染 pass，骨骼函数应按"没有骨骼"返回中性值
+        // （boneRotation/bonePosition/boneScale 的既有 null 分支），而不是 NPE。
+        if (context == null || context.processor == null) {
+            return null;
+        }
+        return context.processor.getBone(boneName);
     }
 
     private static final class FrameContext {
@@ -786,7 +922,7 @@ public final class MolangPhysicsRuntime {
      *
      * <p>
      * The two dirty sets are the write-side bookkeeping {@link #syncToRuntimeState} copies from: every write goes
-     * through {@link #putVariable}, which records the (canonical) key in {@link #dirtyCurrent}. {@link #begin()}
+     * through {@link #putVariable}, which records the (canonical) key in {@link #dirtyCurrent}. {@link #begin}
      * rotates them, so at a controller's sync time {@link #dirtyPrevious} holds the writes the last pass made (writes
      * happen after the predicates, so they are always one pass old) and {@link #dirtyCurrent} the seeds this pass just
      * wrote. Two buffers are swapped instead of allocating a set per pass.
@@ -794,7 +930,7 @@ public final class MolangPhysicsRuntime {
     private static final class ScopeState {
         private final MolangPhysicsState physics = new MolangPhysicsState();
         private final Map<String, Double> variables = new ConcurrentHashMap<>();
-        /** Keys written since the last {@link #begin()}; see the class comment. */
+        /** Keys written since the last {@link #begin}; see the class comment. */
         private Set<String> dirtyCurrent = new HashSet<>();
         /** Keys written in the pass before the current one; see the class comment. */
         private Set<String> dirtyPrevious = new HashSet<>();

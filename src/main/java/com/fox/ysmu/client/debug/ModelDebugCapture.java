@@ -1,12 +1,17 @@
 package com.fox.ysmu.client.debug;
 
 import java.io.File;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiButton;
+import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.ScreenShotHelper;
@@ -16,9 +21,16 @@ import net.minecraft.world.WorldType;
 import com.fox.ysmu.api.EntityAnimationApi;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.animation.store.AnimationStore;
+import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
 import com.fox.ysmu.client.gui.AnimationRouletteScreen;
 import com.fox.ysmu.client.gui.ConfigScreen;
+import com.fox.ysmu.client.gui.ModelConfigRegistry;
+import com.fox.ysmu.client.gui.ModelConfigScreen;
+import com.fox.ysmu.client.gui.button.ConfigCheckBox;
+import com.fox.ysmu.client.gui.button.FlatSlider;
+import com.fox.ysmu.client.roaming.ConfigActionRuntime;
 import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SetModelAndTexture;
 import com.fox.ysmu.network.message.SetPlayAnimation;
@@ -28,6 +40,7 @@ import com.fox.ysmu.ysmu;
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
 import software.bernie.geckolib3.geo.render.built.GeoModel;
@@ -65,6 +78,11 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * then play one of its playable root entries through the real {@link AnimationRouletteScreen#activateRootSlot(int)}
  * path (client -> server {@link SetPlayAnimation} -> sync -> cap controller) and check the EEP flag, the animation
  * name and that the pose moves; (3) <b>settings</b> - open the real {@link ConfigScreen} and screenshot it.</li>
+ * <li>{@code YSMU_DEBUG_SETTINGS} - optional; adds the model-settings-panel probe to the feature sweep: open the
+ * panel the wheel would open (the real {@code AnimationRouletteScreen#openConfig}), log why the screen would close
+ * itself, screenshot it, deliver a real mouse click to its first form widget and screenshot again after the server
+ * round trip. It exists to catch "the settings screen opens but its preview/widgets are dead", which no screenshot of
+ * a static model can see. Unset means the probe is inert even when the capture harness runs.</li>
  * </ul>
  *
  * <p>Flow: main menu -&gt; delete the harness's own save folder -&gt; create a superflat creative world -&gt; for each
@@ -91,6 +109,8 @@ public final class ModelDebugCapture {
     private static final String ENV_TEXTURE = "YSMU_DEBUG_TEXTURE";
     private static final String ENV_BONES = "YSMU_DEBUG_BONES";
     private static final String ENV_FEATURES = "YSMU_DEBUG_FEATURES";
+    /** Enables the per-model settings-panel probe (open the real settings screen, click a form widget, screenshot both). */
+    private static final String ENV_SETTINGS = "YSMU_DEBUG_SETTINGS";
 
     /** The save folder the harness owns, so a run never touches a human's world. */
     private static final String WORLD_FOLDER = "ysmu_debug_capture";
@@ -124,6 +144,7 @@ public final class ModelDebugCapture {
     private final String texture;
     private final String[] bones;
     private final boolean features;
+    private final boolean settingsProbe;
     private final Minecraft mc = Minecraft.getMinecraft();
 
     private int state;
@@ -150,13 +171,18 @@ public final class ModelDebugCapture {
     private String wheelAnimation;
     private int wheelSlot = -1;
     private String featureResult = "";
+    /** Settings-panel probe: the config entry the wheel would open, chosen so a real form widget exists. */
+    private int probeConfigIndex = -1;
+    private String probeButtonId;
 
-    private ModelDebugCapture(File outputDir, String[] models, String texture, String[] bones, boolean features) {
+    private ModelDebugCapture(File outputDir, String[] models, String texture, String[] bones, boolean features,
+        boolean settingsProbe) {
         this.outputDir = outputDir;
         this.models = models;
         this.texture = texture;
         this.bones = bones;
         this.features = features;
+        this.settingsProbe = settingsProbe;
     }
 
     /** Registers the harness if {@code YSMU_DEBUG_CAPTURE} is set; does nothing otherwise. */
@@ -175,17 +201,23 @@ public final class ModelDebugCapture {
         String featureEnv = System.getenv(ENV_FEATURES);
         boolean features = featureEnv == null || !("0".equals(featureEnv.trim())
             || "false".equalsIgnoreCase(featureEnv.trim()));
+        String settingsEnv = System.getenv(ENV_SETTINGS);
+        boolean settingsProbe = settingsEnv != null && !settingsEnv.trim()
+            .isEmpty()
+            && !"0".equals(settingsEnv.trim())
+            && !"false".equalsIgnoreCase(settingsEnv.trim());
         ysmu.LOG.info(
-            "[YSMU-DEBUG] auto capture enabled: dir={} models={} texture={} bones={} features={}",
+            "[YSMU-DEBUG] auto capture enabled: dir={} models={} texture={} bones={} features={} settingsProbe={}",
             outputDir,
             models.length == 0 ? "<current selection>" : String.join(",", models),
             texture,
             bones.length == 0 ? "<none>" : String.join(",", bones),
-            features);
+            features,
+            settingsProbe);
         Minecraft.getMinecraft().gameSettings.pauseOnLostFocus = false;
         FMLCommonHandler.instance()
             .bus()
-            .register(new ModelDebugCapture(outputDir, models, texture, bones, features));
+            .register(new ModelDebugCapture(outputDir, models, texture, bones, features, settingsProbe));
     }
 
     private static String[] splitEnv(String name) {
@@ -698,7 +730,34 @@ public final class ModelDebugCapture {
                 }
                 break;
             case 8:
-                finishFeatures();
+                if (!settingsProbe) {
+                    finishFeatures();
+                    return;
+                }
+                openSettingsProbe();
+                break;
+            case 9:
+                if (ticks >= 6) {
+                    settingsProbeOpenedShot();
+                }
+                break;
+            case 10:
+                if (ticks >= 12) {
+                    settingsProbeAfterShot();
+                }
+                break;
+            case 11:
+                openRadioProbe();
+                break;
+            case 12:
+                if (ticks >= 6) {
+                    radioProbeOpenedShot();
+                }
+                break;
+            case 13:
+                if (ticks >= 12) {
+                    radioProbeAfterShot();
+                }
                 break;
             default:
                 finishFeatures();
@@ -716,6 +775,347 @@ public final class ModelDebugCapture {
             modelId == null ? null : ModelIdUtil.getModelDisplayName(modelId),
             featureResult);
         advanceModel();
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // 模型设置屏探针（YSMU_DEBUG_SETTINGS=1）
+    //
+    // The regression this exists for: after the model-settings rework a click on a form widget (二阶堂希罗's 猫耳
+    // checkbox / [嘴巴差分] radio) appeared to do nothing and the settings screen's own preview stopped showing the
+    // change. The probe opens the screen exactly the way the roulette does (private AnimationRouletteScreen#openConfig),
+    // logs why the screen would close itself, screenshots it, then delivers a real mouse click to the first form widget
+    // the screen built and screenshots again after the server round trip. No production code is involved beyond the
+    // real click path.
+    // ----------------------------------------------------------------------------------------------------------------
+
+    /** Opens the settings panel of the entry the wheel would open (prefers a checkbox writing {@code v.m}). */
+    private void openSettingsProbe() {
+        if (modelId == null || mc.thePlayer == null) {
+            finishFeatures();
+            return;
+        }
+        boolean localModel = ConfigActionRuntime.isLocalModel(modelId);
+        List<RawYsmModel.ExtraAnimationButton> panels = ModelConfigRegistry.settingsButtonsFor(modelId);
+        Map<String, String> wheel = AnimationRouletteScreen.wheelEntriesFor(modelId);
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig precheck: model={} localModel={} hasSettings={} panels={} wheelEntries={}",
+            modelId,
+            localModel,
+            ModelConfigRegistry.hasSettings(modelId),
+            panels.size(),
+            wheel.size());
+        for (RawYsmModel.ExtraAnimationButton panel : panels) {
+            List<String> forms = new ArrayList<>();
+            for (RawYsmModel.ConfigForm form : panel.forms) {
+                forms.add(form.type + ":" + form.defaultValue + " labels=" + (form.labels == null ? 0 : form.labels.size()));
+            }
+            ysmu.LOG.info("[YSMU-DEBUG][FEATURE] modelConfig panel '{}' forms={}", panel.id, forms);
+        }
+        logConfigSnapshot("before-open");
+
+        probeConfigIndex = chooseSettingsEntry(wheel);
+        if (probeConfigIndex < 0) {
+            ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] modelConfig: the wheel declares no config entry to open");
+            featureResult = featureResult + " modelConfig=skip";
+            finishFeatures();
+            return;
+        }
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig opening wheel slot {} (button='{}') through AnimationRouletteScreen#openConfig",
+            probeConfigIndex,
+            probeButtonId);
+        mc.displayGuiScreen(new AnimationRouletteScreen());
+        screenHoldTicks = 120;
+        invokePrivate(mc.currentScreen, "openConfig", new Class<?>[] { int.class }, probeConfigIndex);
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig after openConfig: screen={} (localModel={})",
+            screenName(),
+            localModel);
+        featureStep = 9;
+        ticks = 0;
+    }
+
+    /** Screenshot of the settings screen, its internal state, then a real mouse click on its first form widget. */
+    private void settingsProbeOpenedShot() {
+        saveNamedShot("model" + modelIndex + "_modelconfig.png");
+        GuiScreen screen = mc.currentScreen;
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig screen={} preview={} panels={} forms={} routes={}",
+            screenName(),
+            screen instanceof ModelConfigScreen && readField(screen, "formPreview") != null,
+            screen instanceof ModelConfigScreen ? sizeOf(readField(screen, "panels")) : -1,
+            screen instanceof ModelConfigScreen ? sizeOf(readField(screen, "visibleForms")) : -1,
+            screen instanceof ModelConfigScreen ? sizeOf(readField(screen, "formRoutes")) : -1);
+        if (screen instanceof ModelConfigScreen) {
+            ysmu.LOG.info("[YSMU-DEBUG][FEATURE] modelConfig click -> {}", clickFirstFormWidget(screen));
+        } else {
+            ysmu.LOG.warn(
+                "[YSMU-DEBUG][FEATURE] modelConfig: openConfig did not leave a ModelConfigScreen (screen={})",
+                screenName());
+        }
+        screenHoldTicks = 120;
+        featureStep = 10;
+        ticks = 0;
+    }
+
+    /** Screenshot after the click's server round trip and the values this model's forms target. */
+    private void settingsProbeAfterShot() {
+        saveNamedShot("model" + modelIndex + "_modelconfig_after.png");
+        logConfigSnapshot("after-click");
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig end: screen={} localModel={}",
+            screenName(),
+            ConfigActionRuntime.isLocalModel(modelId));
+        featureResult = featureResult + " modelConfig=OK";
+        // The checkbox path is verified; the user's other report is a radio ("切换表情"), which the per-frame read-back
+        // used to snap back to the old selection. Run the same probe on a panel that declares a radio.
+        featureStep = 11;
+        ticks = 0;
+        screenHoldTicks = 0;
+    }
+
+    /** Opens the first config panel whose button declares a radio, so a real label click can be delivered. */
+    private void openRadioProbe() {
+        mc.displayGuiScreen(null);
+        Map<String, String> wheel = AnimationRouletteScreen.wheelEntriesFor(modelId);
+        int index = chooseRadioEntry(wheel);
+        if (index < 0) {
+            ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe: no radio panel to open");
+            featureResult = featureResult + " radio=skip";
+            finishFeatures();
+            return;
+        }
+        ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe opening wheel slot {} through openConfig", index);
+        mc.displayGuiScreen(new AnimationRouletteScreen());
+        screenHoldTicks = 120;
+        invokePrivate(mc.currentScreen, "openConfig", new Class<?>[] { int.class }, index);
+        ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe after openConfig: screen={}", screenName());
+        featureStep = 12;
+        ticks = 0;
+    }
+
+    private void radioProbeOpenedShot() {
+        saveNamedShot("model" + modelIndex + "_modelconfig_radio.png");
+        GuiScreen screen = mc.currentScreen;
+        ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe screen={} forms={}", screenName(), sizeOf(
+            screen instanceof ModelConfigScreen ? readField(screen, "visibleForms") : null));
+        if (screen instanceof ModelConfigScreen) {
+            // The second radio label: the first is the current/default selection, so clicking it would be a no-op.
+            ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe click -> {}", clickNthFormWidget(screen, 1));
+        }
+        screenHoldTicks = 120;
+        featureStep = 13;
+        ticks = 0;
+    }
+
+    private void radioProbeAfterShot() {
+        saveNamedShot("model" + modelIndex + "_modelconfig_radio_after.png");
+        logConfigSnapshot("after-radio-click");
+        ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe end: screen={}", screenName());
+        featureResult = featureResult + " radio=OK";
+        finishFeatures();
+    }
+
+    /** First root wheel entry whose button declares a radio with at least two labels. */
+    private int chooseRadioEntry(Map<String, String> wheel) {
+        List<Map.Entry<String, String>> entries = new ArrayList<>(wheel.entrySet());
+        int limit = Math.min(entries.size(), 12);
+        for (int index = 0; index < limit; index++) {
+            String value = entries.get(index)
+                .getValue();
+            if (value == null || !value.startsWith("#")) {
+                continue;
+            }
+            RawYsmModel.ExtraAnimationButton button = ModelConfigRegistry.buttonFor(modelId, value.substring(1));
+            if (button == null || button.forms == null) {
+                continue;
+            }
+            for (RawYsmModel.ConfigForm form : button.forms) {
+                if ("radio".equalsIgnoreCase(form.type) && form.labels != null && form.labels.size() >= 2) {
+                    return index;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** The first root wheel entry that opens a config panel with a form, preferring one that writes {@code v.m}. */
+    private int chooseSettingsEntry(Map<String, String> wheel) {
+        List<Map.Entry<String, String>> entries = new ArrayList<>(wheel.entrySet());
+        int firstConfig = -1;
+        int radioConfig = -1;
+        int limit = Math.min(entries.size(), 12);
+        for (int index = 0; index < limit; index++) {
+            String value = entries.get(index)
+                .getValue();
+            if (value == null || !value.startsWith("#")) {
+                continue;
+            }
+            RawYsmModel.ExtraAnimationButton button = ModelConfigRegistry.buttonFor(modelId, value.substring(1));
+            if (button == null || button.forms == null || button.forms.isEmpty()) {
+                continue;
+            }
+            if (firstConfig < 0) {
+                firstConfig = index;
+            }
+            for (RawYsmModel.ConfigForm form : button.forms) {
+                String defaultValue = form.defaultValue == null ? "" : form.defaultValue.trim();
+                if ("v.m".equals(defaultValue)) {
+                    probeButtonId = button.id;
+                    return index;
+                }
+                if ("radio".equalsIgnoreCase(form.type) && radioConfig < 0) {
+                    radioConfig = index;
+                }
+            }
+        }
+        int chosen = radioConfig >= 0 ? radioConfig : firstConfig;
+        if (chosen >= 0) {
+            String value = entries.get(chosen)
+                .getValue();
+            RawYsmModel.ExtraAnimationButton button = value == null ? null
+                : ModelConfigRegistry.buttonFor(modelId, value.substring(1));
+            probeButtonId = button == null ? null : button.id;
+        }
+        return chosen;
+    }
+
+    /** Delivers a real left click (plus release) to the first form widget the settings screen added. */
+    private String clickFirstFormWidget(GuiScreen screen) {
+        return clickNthFormWidget(screen, 0);
+    }
+
+    /** Delivers a real left click to the {@code wanted}-th checkbox widget (or the first slider when there is none). */
+    private String clickNthFormWidget(GuiScreen screen, int wanted) {
+        List<GuiButton> buttons = screenButtons(screen);
+        if (buttons == null) {
+            return "no GuiScreen#buttonList";
+        }
+        int seen = 0;
+        for (GuiButton button : buttons) {
+            if (button instanceof ConfigCheckBox) {
+                if (seen == wanted) {
+                    return clickWidget(screen, button, "checkbox");
+                }
+                seen++;
+            }
+        }
+        if (wanted == 0) {
+            for (GuiButton button : buttons) {
+                if (button instanceof FlatSlider) {
+                    return clickWidget(screen, button, "slider");
+                }
+            }
+        }
+        return "no form widget #" + wanted + ", buttonList=" + buttons.size();
+    }
+
+    private String clickWidget(GuiScreen screen, GuiButton button, String kind) {
+        int x = button.xPosition + button.width / 2;
+        int y = button.yPosition + button.height / 2;
+        // GuiScreen#mouseClicked / #mouseMovedOrUp are protected in 1.7.10, so the probe invokes the override the screen
+        // actually has (the same two calls the real input pipeline makes through GuiScreen#handleMouseInput).
+        Class<?>[] int3 = new Class<?>[] { int.class, int.class, int.class };
+        invokeHierarchy(screen, "mouseClicked", int3, x, y, 0);
+        invokeHierarchy(screen, "mouseMovedOrUp", int3, x, y, 0);
+        return kind + "#" + button.id + " clicked at " + x + "," + y;
+    }
+
+    /** Invokes a method on the target's class or the nearest superclass that declares it (protected GuiScreen hooks). */
+    private static Object invokeHierarchy(Object target, String name, Class<?>[] types, Object... args) {
+        if (target == null) {
+            return null;
+        }
+        for (Class<?> type = target.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            try {
+                Method method = type.getDeclaredMethod(name, types);
+                method.setAccessible(true);
+                return method.invoke(target, args);
+            } catch (NoSuchMethodException ignored) {
+                // Keep walking up; the override may live on GuiScreen itself.
+            } catch (Throwable failure) {
+                ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] reflect {}#{} failed: {}", type, name, failure);
+                return null;
+            }
+        }
+        ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] reflect {}#{} not found", target.getClass(), name);
+        return null;
+    }
+
+    /** Logs the real player scope and the settings preview's read-through map for the configured form variables. */
+    private void logConfigSnapshot(String label) {
+        if (mainId == null || mc.thePlayer == null) {
+            return;
+        }
+        Map<String, Double> variables = MolangPhysicsRuntime.snapshotVariables(mc.thePlayer, mainId);
+        List<String> interesting = new ArrayList<>();
+        for (String name : new String[] { "v.m", "v.mn", "v.g", "v.y", "v.mp", "v.hhh", "v.player_size",
+            "v.player_eyebrow", "v.player_eyebrow_v", "v.meimao_v", "v.meimao_r", "v.player_eye_ys" }) {
+            Double value = variables.get(name);
+            if (value != null) {
+                interesting.add(name + "=" + String.format(Locale.ROOT, "%.3f", value));
+            }
+        }
+        Object preview = mc.currentScreen instanceof ModelConfigScreen ? readField(mc.currentScreen, "formPreview")
+            : null;
+        int previewVariables = -1;
+        if (preview instanceof CustomGuiPlayerEntity gui) {
+            Map<String, Double> readThrough = gui.getMolangVariables();
+            previewVariables = readThrough == null ? -1 : readThrough.size();
+        }
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][FEATURE] modelConfig {}: scopeVars={} {} previewReadThroughVars={}",
+            label,
+            variables.size(),
+            interesting,
+            previewVariables);
+    }
+
+    private String screenName() {
+        return mc.currentScreen == null ? "null" : mc.currentScreen.getClass()
+            .getSimpleName();
+    }
+
+    private static Object invokePrivate(Object target, String name, Class<?>[] types, Object... args) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            Method method = target.getClass()
+                .getDeclaredMethod(name, types);
+            method.setAccessible(true);
+            return method.invoke(target, args);
+        } catch (Throwable failure) {
+            ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] reflect {}#{} failed: {}", target.getClass(), name, failure);
+            return null;
+        }
+    }
+
+    private static Object readField(Object target, String name) {
+        try {
+            Field field = target.getClass()
+                .getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static int sizeOf(Object collection) {
+        return collection instanceof Collection ? ((Collection<?>) collection).size() : -1;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<GuiButton> screenButtons(GuiScreen screen) {
+        try {
+            // GuiScreen#buttonList is protected; the probe only reads it to aim a real click at a real widget.
+            Field field = GuiScreen.class.getDeclaredField("buttonList");
+            field.setAccessible(true);
+            return (List<GuiButton>) field.get(screen);
+        } catch (Throwable failure) {
+            return null;
+        }
     }
 
     /** Picks the first root wheel entry that is a playable animation, as the wheel itself would check it. */
@@ -961,3 +1361,4 @@ public final class ModelDebugCapture {
         }
     }
 }
+

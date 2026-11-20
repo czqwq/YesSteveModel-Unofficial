@@ -26,6 +26,7 @@ import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.model.format.ServerModelInfo;
 import com.fox.ysmu.network.NetworkHandler;
+import com.fox.ysmu.util.DeferredWork;
 import com.fox.ysmu.util.ThreadTools;
 import com.fox.ysmu.util.UuidUtils;
 import com.fox.ysmu.ysmu;
@@ -129,6 +130,17 @@ public class SyncModelFiles implements IMessage {
             internalModelId == null ? null : new ResourceLocation(ysmu.MODID, internalModelId), ignoresGrants);
     }
 
+    /**
+     * Handles the client's answer to {@code RequestSyncModel}: it claims which cache files it already has.
+     * <p>
+     * phase78 评审 RB-2（{@code .agent/phase78-review.md}）：{@code /ysm reload} 会让客户端先清掉 roaming 副本与上报
+     * 资格（客户端 {@code prepareModelSync} → {@code clearRuntimeModelCaches} 清
+     * {@code ClientRoamingStore}/{@code ClientRoamingKeys}），而服务端 reload 只重发 {@code RequestSyncModel}，没有
+     * 任何后续 FULL——本会话的客户端于是永远不满足权威门，roaming 设置被清成包默认且不再持久化，直到 relog。修复是
+     * 把这条回复当作"重新同步的一次机会"：处理完文件清单后，按同一 EEP/声明把该玩家的权威 FULL 推回去（
+     * {@link S2CRoamingState#broadcastFull} 幂等，登录同步时多这一包也无害）。推送在服务端线程完成，因此走
+     * {@code DeferredWork.server}——本 handler 的其余工作刻意留在线程池线程上以保持 N-01 的发送顺序，两者互不影响。
+     */
     public static class Handler implements IMessageHandler<SyncModelFiles, IMessage> {
 
         @Override
@@ -149,6 +161,13 @@ public class SyncModelFiles implements IMessage {
                 ThreadTools.THREAD_POOL.submit(() -> syncToPlayer(claimed, sender));
             } catch (RuntimeException e) {
                 ysmu.LOG.warn("Failed to schedule YSM model sync for " + sender.getCommandSenderName(), e);
+            }
+            // RB-2: re-establish roaming authority for the player whose client just re-synced. Server-thread work
+            // (EEP/world read + tracking broadcast), so it hops instead of running on the Netty/pool thread.
+            try {
+                DeferredWork.server(() -> S2CRoamingState.broadcastFull(sender));
+            } catch (Exception e) {
+                ysmu.LOG.warn("Failed to resend the YSM roaming state after a model sync", e);
             }
             return null;
         }

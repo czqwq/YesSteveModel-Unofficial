@@ -44,6 +44,7 @@ import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.network.ModelGrantSync;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SetModelAndTexture;
+import com.fox.ysmu.network.message.S2CRoamingState;
 import com.fox.ysmu.network.message.SyncModelInfo;
 import com.fox.ysmu.network.message.SyncNpcDataMessage;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
@@ -100,6 +101,13 @@ public class CommonEventHandler {
                 event.player.addChatMessage(new net.minecraft.util.ChatComponentTranslation(
                     "message.yes_steve_model.model.reload.ready",
                     String.format(java.util.Locale.ROOT, "%.2f", (double) loadTimeMs)));
+            }
+            // phase78：登录是本连接的 roaming baseline 起点。上游在会话接受时发自身 FULL
+            // （network/forge/SessionProtocolHandler.java:468-513），客户端据此建立"可以上报 DELTA"的资格；本仓没有
+            // 会话层，所以在 EEP 已注册、选择已重估之后显式推一次，并先清掉该 UUID 上一连接留下的 baseline。
+            if (event.player instanceof EntityPlayerMP serverPlayer) {
+                S2CRoamingState.forgetBaseline(serverPlayer.getUniqueID());
+                S2CRoamingState.broadcastFull(serverPlayer);
             }
         }
     }
@@ -190,6 +198,9 @@ public class CommonEventHandler {
     public static void onPlayerLoggedOut(cpw.mods.fml.common.gameevent.PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.player instanceof EntityPlayerMP) {
             LAST_MOTION_STATES.remove(event.player.getUniqueID());
+            // phase78: the roaming FULL baseline is connection-scoped (upstream ServerModelSession), so a relog must
+            // not inherit the DELTA eligibility of the session that just ended.
+            S2CRoamingState.forgetBaseline(event.player.getUniqueID());
             OpenYsmModelSyncServer.clear(event.player.getUniqueID());
             // phase55: the "client runs YSMU" handshake record and any half-received /ysm upload belong to the
             // session that just ended; a relog has to perform a fresh handshake before it can upload again.
@@ -238,6 +249,14 @@ public class CommonEventHandler {
         if (event.wasDeath) {
             copyPlayerProperties(event.original, event.entityPlayer);
         }
+        // phase78: a clone (death respawn, or 1.7.10's copyPlayerProperties-on-true variant) is a new player instance
+        // on the same connection. Upstream moves the capability to the clone and re-publishes a FULL state
+        // (event/CapabilityEvent.java:124-142,204-229), which restarts the report lifetime; this port has no session,
+        // so the same thing is expressed as "drop the old FULL baseline, push a fresh FULL from the copied save data".
+        if (event.entityPlayer instanceof EntityPlayerMP serverPlayer) {
+            S2CRoamingState.forgetBaseline(serverPlayer.getUniqueID());
+            S2CRoamingState.broadcastFull(serverPlayer);
+        }
     }
 
     @SubscribeEvent
@@ -245,6 +264,16 @@ public class CommonEventHandler {
         if (event.target instanceof EntityPlayer trackPlayer) {
             syncTrackedPlayerModelInfo(event.entityPlayer, trackPlayer);
             syncTrackedPlayerMotionState(event.entityPlayer, trackPlayer);
+            // phase78 评审 RB-4a：新观察者必须拿到被观察玩家当前模型的 roaming 全量。服务端换模型时先广播 FULL、
+            // 观察端的 EEP 随后才由 dirty SyncModelInfo 更新，所以那条 FULL 在观察端会因为"key != 当前模型"被门控
+            // 丢弃；新进入视野的客户端则根本没有补发点，只能等被观察玩家的 30 s 周期 FULL（对方低带宽时永远不补）。
+            // 上游在开始追踪实体时补发该实体的当前状态（event/CapabilityEvent.java:144-158；服务端驱动属性 tracker
+            // 也在 tracking start 推当前值），所以这里对 subject 补发一次只给 tracker 的 FULL（不动 tracker 自己的
+            // DELTA baseline）。SendModelInfo 之类的模型状态先发，roaming FULL 后到，观察端按同一顺序应用。
+            if (event.entityPlayer instanceof EntityPlayerMP tracker
+                && trackPlayer instanceof EntityPlayerMP tracked) {
+                S2CRoamingState.sendFullTo(tracker, tracked);
+            }
         } else if (event.entityPlayer instanceof EntityPlayerMP viewer && NPCData.contains(event.target)) {
             // A player who was out of range when the override was broadcast still needs it when their client
             // starts tracking the entity, otherwise it only applies on the next login.
@@ -281,6 +310,14 @@ public class CommonEventHandler {
             resetSelectionIfUnauthorized(player);
             stopJoinedAnimationState(player);
             syncJoinedPlayerState(player);
+            // phase78: joining a world (login, dimension change, respawn) rebuilds the roaming baseline with a FULL
+            // push of the current model's namespace. Upstream publishes an authoritative FULL when the player enters
+            // the level and after a clone (event/CapabilityEvent.java:144-174,204-229); the EEP is already present
+            // here (EntityConstructing/onPlayerClone), and broadcastFull is a no-op for a client-side player or a
+            // missing model/declarations.
+            if (player instanceof EntityPlayerMP serverPlayer) {
+                S2CRoamingState.broadcastFull(serverPlayer);
+            }
         }
     }
 

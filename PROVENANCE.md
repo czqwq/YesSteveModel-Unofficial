@@ -209,6 +209,24 @@ the part of it that is written against this snapshot.
   state machine walking `attack1 -> attack2 -> attack3 -> attack_jump -> default` with its clips active. See
   `.agent/phase49-cross-domain-variables.md`.
 
+- **`software/bernie/geckolib3/core/molang/MolangPhysicsRuntime.java` - a scope can be opened outside a render pass
+  (phase78).** `begin`/`end` only opened the per-(entity, model) scope during a render pass, so the model settings panel
+  and an authorized config action arriving from the server could not read or write the real player's MoLang memory when
+  that player was not being drawn (the defect: writes went to the panel preview's fake scope, the world never changed
+  and reopening the panel read a fresh empty scope). Upstream's per-installation Molang memory is persistent
+  (`EntityExpressionRuntime.java:104-108,1372-1387`; the GUI reads it synchronously in
+  `client/gui/AnimationRouletteScreen.java:230-258`), so the engine gained a narrow `pushScope(entity, modelId)` window
+  that reuses the existing `STATES`/`ScopeKey` table (nested-safe, no dirty-set rotation, no bone reset, no processor),
+  plus `snapshotVariables` (read-only `v.*` copy for the roaming sampler and the panel preview's read-through) and
+  `clearRoamingVariables` (the reset path). `bone()` now answers "no bone" when the window has no processor instead of
+  NPE-ing. This is a 1.7.10/architecture difference recorded in `.agent/phase78-model-config-sync.md`, not a new
+  semantic: every read/write resolves the same store the renderer uses.
+- **`software/bernie/geckolib3/core/molang/RemoteAnimationVariables.java` - FULL/DELTA apply (phase78).** The roaming
+  channel now carries upstream's `PlayerStateUpdate.roaming` modes, so the entity table gained
+  `apply(entity, map, full)`: FULL replaces the entity's namespace (an empty FULL is an empty namespace, never `null`),
+  DELTA merges. Same rule as upstream `PlayerStateHandler.applyClientUpdate:327-338,353-357`; the client store and this
+  table are the two places a received roaming state lands.
+
 - **`software/bernie/geckolib3/core/molang/MolangParser.java` (+ `MolangException.java`) - ternary ordering and a
   diagnosable parse failure.** Three narrow engine edits, each taken from upstream's parser shape rather than invented:
   (1) `parseSymbols` resolves a ternary **before** delegating to `MathBuilder`, because upstream's Pratt parser binds

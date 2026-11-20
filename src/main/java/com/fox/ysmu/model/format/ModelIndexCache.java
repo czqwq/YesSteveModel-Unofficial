@@ -27,8 +27,11 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Stream;
 
+import javax.annotation.Nullable;
+
 import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
+import com.fox.ysmu.data.ConfigDeclarations;
 import com.fox.ysmu.data.EncryptTools;
 import com.fox.ysmu.model.ServerModelManager;
 import com.fox.ysmu.util.Md5Utils;
@@ -77,8 +80,13 @@ public final class ModelIndexCache {
     /**
      * 文件布局版本：改 JSON 结构、键的形状或指纹配方时 +1，整份索引作废。
      * 对应上游的 {@code "YSMCIDX1"} 幻数（{@code ConvertedSourceIndexStore:30}）。
+     * <p>
+     * 1 → 2（phase78）：条目多了 {@code configDeclarations}（服务端 config 动作/roaming 校验用的模型设置声明
+     * JSON）。旧版本索引没有这个字段，命中重放会让服务端拿不到声明、与完整路径行为分叉，所以一次版本升级把旧索引
+     * 整份作废、全部重烘（可接受：索引只是加速，且这次重烘顺带补上声明）。{@link #fingerprint} 里也带了这个版本，
+     * 双保险。
      */
-    private static final int INDEX_VERSION = 1;
+    private static final int INDEX_VERSION = 2;
 
     /** schema 名，挡住"把别的 JSON 当索引"。 */
     private static final String SCHEMA = "ysmu-model-index";
@@ -199,19 +207,31 @@ public final class ModelIndexCache {
         }
         Entry entry = hit.get();
         ServerModelManager.registerModel(modelId, entry.toServerModelInfo(), entry.toOpenYsmSyncInfo(),
-            source.getAbsolute(), source.getRoot());
+            source.getAbsolute(), source.getRoot(), entry.toConfigDeclarations());
         return true;
     }
 
     /**
      * 记录一次完整路径的结果。{@code legacy == null}（这次什么都没登记）时不记，下一次照旧重建；
      * {@code syncInfo == null} 表示这次没有登记 OpenYSM 同步缓存，命中时就照原样不登记。
+     * <p>
+     * phase78：{@code declarations} 是模型自带的设置声明快照。它也随条目持久化，命中重放时按原样交回
+     * {@link ServerModelManager#registerModel}，否则"索引命中"的服务端会缺少 config 动作/roaming 校验所需的声明。
      */
-    public static void remember(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo) {
+    public static void remember(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo,
+        @Nullable ConfigDeclarations declarations) {
         ModelIndexCache cache = active;
         if (cache != null && source != null) {
-            cache.record(source, modelId, legacy, syncInfo);
+            cache.record(source, modelId, legacy, syncInfo, declarations);
         }
+    }
+
+    /**
+     * 旧签名（不含声明快照）：等价于带 {@code null} 声明的新重载，保留给尚未接上声明的调用方；生产扫描器都走新
+     * 重载，所以它们记下的条目在命中时能重放声明。
+     */
+    public static void remember(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo) {
+        remember(source, modelId, legacy, syncInfo, null);
     }
 
     // ---------------------------------------------------------------- 实例核心（测试直接用它）
@@ -302,7 +322,8 @@ public final class ModelIndexCache {
     }
 
     /** 记下一次完整路径的结果。任何失败都只是"这条不入索引"，绝不打扰已经完成的登记。 */
-    public void record(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo) {
+    public void record(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo,
+        @Nullable ConfigDeclarations declarations) {
         if (source == null || modelId == null || legacy == null) {
             return;
         }
@@ -314,11 +335,17 @@ public final class ModelIndexCache {
             recorded.put(source.key(),
                 new Entry(source.getScanner(), source.getNamespace(), source.getRelativePath(), fingerprint, modelId,
                     legacy.getType(), new ArrayList<>(legacy.getTextures()), legacy.getMd5(),
-                    syncInfo == null ? null : new OpenYsm(syncInfo)));
+                    syncInfo == null ? null : new OpenYsm(syncInfo),
+                    declarations == null ? null : declarations.encode()));
         } catch (Exception | LinkageError failure) {
             ysmu.LOG.warn("Cannot index model cache for {}; the next reload rebuilds it", source.getAbsolute(),
                 failure);
         }
+    }
+
+    /** 旧签名（不含声明快照）；见 {@link #remember(Source, String, ServerModelInfo, OpenYsmSyncInfo)}。 */
+    public void record(Source source, String modelId, ServerModelInfo legacy, OpenYsmSyncInfo syncInfo) {
+        record(source, modelId, legacy, syncInfo, null);
     }
 
     /** 标记某个 (扫描器, 命名空间) 本轮完整扫过。 */
@@ -805,8 +832,12 @@ public final class ModelIndexCache {
     }
 
     /**
-     * 一条索引条目：{@link ServerModelInfo} 与可选的 {@link OpenYsmSyncInfo} 的全部可观察字段。
-     * 与上游的 {@code ConvertedSourceIndex} 一样，字段缺失/为空一律当作损坏（构造时抛）。
+     * 一条索引条目：{@link ServerModelInfo}、可选的 {@link OpenYsmSyncInfo} 与可选的
+     * {@link ConfigDeclarations} 的全部可观察字段。与上游的 {@code ConvertedSourceIndex} 一样，必备字段缺失/为空
+     * 一律当作损坏（构造时抛）。
+     * <p>
+     * phase78：{@code configDeclarations} 是服务端 config 动作/roaming 校验所需的模型设置声明快照，也随条目持久化；
+     * 命中重放时按原样交回 {@link ServerModelManager#registerModel}，否则命中路径的服务端行为会和完整路径分叉。
      */
     public static final class Entry {
 
@@ -819,9 +850,17 @@ public final class ModelIndexCache {
         private final List<String> textures;
         private final String md5;
         private final OpenYsm openYsm;
+        @Nullable
+        private final ConfigDeclarations configDeclarations;
 
+        /** 旧构造器（不含声明快照），等价于声明为 {@code null} 的新构造器。 */
         public Entry(Scanner scanner, String namespace, String relativePath, String fingerprint, String modelId,
             Type type, List<String> textures, String md5, OpenYsm openYsm) {
+            this(scanner, namespace, relativePath, fingerprint, modelId, type, textures, md5, openYsm, null);
+        }
+
+        public Entry(Scanner scanner, String namespace, String relativePath, String fingerprint, String modelId,
+            Type type, List<String> textures, String md5, OpenYsm openYsm, @Nullable String configDeclarationsJson) {
             this.scanner = require(scanner, "scanner");
             this.namespace = requireText(namespace, "namespace");
             this.relativePath = requireText(relativePath, "source");
@@ -835,6 +874,32 @@ public final class ModelIndexCache {
             }
             this.textures = Collections.unmodifiableList(copy);
             this.openYsm = openYsm;
+            this.configDeclarations = decodeConfigDeclarations(configDeclarationsJson);
+        }
+
+        /** 索引里的声明快照；{@code null} 表示这条条目没有记录声明（旧签名写入的条目）。 */
+        @Nullable
+        public ConfigDeclarations toConfigDeclarations() {
+            return configDeclarations;
+        }
+
+        /** 声明快照的持久化形态；{@code null} 时 JSON 里写 {@code null}（下次照旧不登记声明）。 */
+        @Nullable
+        String getConfigDeclarationsJson() {
+            return configDeclarations == null ? null : configDeclarations.encode();
+        }
+
+        /** 损坏的声明 JSON 等同条目损坏（索引整份作废并重建），绝不重放半份声明。 */
+        @Nullable
+        private static ConfigDeclarations decodeConfigDeclarations(@Nullable String json) {
+            if (json == null) {
+                return null;
+            }
+            try {
+                return ConfigDeclarations.decode(json);
+            } catch (IllegalArgumentException malformed) {
+                throw new MalformedIndexException("bad config declarations: " + malformed.getMessage());
+            }
         }
 
         public String key() {
@@ -924,6 +989,8 @@ public final class ModelIndexCache {
         List<String> textures;
         String md5;
         StoredOpenYsm openYsm;
+        /** phase78：{@link ConfigDeclarations#encode()} 的 JSON；旧签名写入的条目为 {@code null}。 */
+        String configDeclarations;
 
         static StoredEntry of(Entry entry) {
             StoredEntry stored = new StoredEntry();
@@ -938,6 +1005,7 @@ public final class ModelIndexCache {
             stored.textures = entry.getTextures();
             stored.md5 = entry.getMd5();
             stored.openYsm = entry.getOpenYsm() == null ? null : StoredOpenYsm.of(entry.getOpenYsm());
+            stored.configDeclarations = entry.getConfigDeclarationsJson();
             return stored;
         }
 
@@ -950,7 +1018,7 @@ public final class ModelIndexCache {
                 throw new MalformedIndexException("missing type");
             }
             return new Entry(byId, namespace, source, fingerprint, modelId, Type.valueOf(type), textures, md5,
-                openYsm == null ? null : openYsm.toOpenYsm());
+                openYsm == null ? null : openYsm.toOpenYsm(), configDeclarations);
         }
     }
 

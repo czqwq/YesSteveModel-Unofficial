@@ -319,10 +319,11 @@ public final class ZipModelFormat {
                     OpenYsmFormat.cacheExtractedFolderModel(rootPath, materialized.root(), modelId, source, archive);
                     break;
                 case LEGACY_FLAT: {
-                    ServerModelInfo info = FolderFormat.cacheExtractedFolderModel(materialized.root(), modelId, archive);
-                    if (info != null) {
-                        registerModel(modelId, info, null, archive, rootPath);
-                        ModelIndexCache.remember(source, modelId, info, null);
+                    BakedModel baked = FolderFormat.cacheExtractedFolderModel(materialized.root(), modelId, archive);
+                    if (baked != null) {
+                        // phase78：设置声明快照与登记一起交出（legacy 平铺包通常为空声明）。
+                        registerModel(modelId, baked.info, null, archive, rootPath, baked.declarations);
+                        ModelIndexCache.remember(source, modelId, baked.info, null, baked.declarations);
                     }
                     break;
                 }

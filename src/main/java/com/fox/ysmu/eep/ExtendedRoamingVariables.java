@@ -23,11 +23,21 @@ import com.fox.ysmu.ysmu;
  * A <em>roaming variable</em> is a named float that belongs to one model of one player, read by packs as
  * {@code v.roaming.<name>} and written by the model's {@code 模型设置} panel. Upstream keeps the same data in
  * {@code RoamingVariableStore} behind a player capability, serialized as a compound tag of
- * {@code <model hash> -> <variable name> -> float}; this class reproduces that shape for Forge 1.7.10, where the
- * equivalent of a capability is {@link IExtendedEntityProperties}.
+ * {@code <model hash> -> <variable name> -> float}, where the variable name is the part <b>after</b>
+ * {@code v.roaming.} ({@code capability/RoamingVariableStore.java:71-98}; the suffix is the wire spelling,
+ * {@code network/protocol/PlayerStateValidator.java:94-107}). This class reproduces that shape for Forge 1.7.10,
+ * where the equivalent of a capability is {@link IExtendedEntityProperties}.
  * <p>
  * The client keeps its own copy in {@code com.fox.ysmu.client.roaming.ClientRoamingStore}; this one is the authority.
  * Both apply the bounds from {@link ModelRoamingLimits}, so a client cannot grow a save file without bound.
+ *
+ * <h2>Key spelling (phase78)</h2>
+ * The keys inside a model's compound are <b>suffixes</b> ({@code car}, not {@code v.roaming.car}), matching upstream's
+ * {@code molang_storage} and the wire. The client-side stores and the engine scope still key by the full MoLang name;
+ * the suffix/full-name conversion happens at the packet boundary ({@code S2CRoamingState}/{@code C2SRoamingChanges}).
+ * Saves written before phase78 carry full names, so {@link #loadNBTData(NBTTagCompound)} strips the
+ * {@code v.roaming.} prefix on read. That is a one-way migration: writes only ever emit suffixes, never both
+ * spellings, because two spellings in one store would be two namespaces for the same variable.
  */
 public class ExtendedRoamingVariables implements IExtendedEntityProperties {
 
@@ -46,7 +56,13 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
         }
     };
 
-    /** The variables of one model, live and mutable so a caller can merge a change into it. */
+    /**
+     * The variables of one model, live and mutable so a caller can merge a change into it.
+     * <p>
+     * This creates the (empty) model entry when it is absent, which is right for a writer and wrong for a reader: a
+     * push/echo of a model the player has no values for must not allocate an LRU entry and evict another model. Read
+     * paths use {@link #valuesIfPresent(int)} instead.
+     */
     public Map<String, Float> values(int roamingKey) {
         Map<String, Float> values = byModel.get(roamingKey);
         if (values == null) {
@@ -54,6 +70,19 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
             byModel.put(roamingKey, values);
         }
         return values;
+    }
+
+    /**
+     * The variables of one model when the player has any, without creating an entry, {@code null} otherwise.
+     * <p>
+     * A read-only accessor for pushes/echoes: {@link #values(int)} would allocate an empty namespace and could evict a
+     * least-recently-used model just because the server told somebody about a model the player never saved anything
+     * for (audit RC-4/N3).
+     */
+    @Nullable
+    public Map<String, Float> valuesIfPresent(int roamingKey) {
+        Map<String, Float> values = byModel.get(roamingKey);
+        return values == null || values.isEmpty() ? null : values;
     }
 
     /** Whether anything at all is stored for a model, without creating an entry for it. */
@@ -65,11 +94,12 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
     /**
      * Stores one variable.
      *
+     * @param name the suffix after {@code v.roaming.} (the wire/server spelling; see the class javadoc)
      * @return whether it was stored; an unusable name, a non-finite value, or a model already at the variable bound
      *         leaves the store untouched
      */
     public boolean set(int roamingKey, @Nullable String name, double value) {
-        if (!ModelRoamingLimits.isAcceptableName(name) || !ModelRoamingLimits.isAcceptableValue(value)) {
+        if (!ModelRoamingLimits.isAcceptableSuffix(name) || !ModelRoamingLimits.isAcceptableValue(value)) {
             return false;
         }
         Map<String, Float> values = values(roamingKey);
@@ -93,7 +123,7 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
         }
     }
 
-    /** Replaces everything stored for one model, as a client's full state for it. */
+    /** Replaces everything stored for one model, as a client's FULL state for it; an empty map clears the model. */
     public void replace(int roamingKey, @Nullable Map<String, ? extends Number> values) {
         byModel.remove(roamingKey);
         apply(roamingKey, values);
@@ -160,6 +190,8 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
             NBTTagCompound variables = new NBTTagCompound();
             for (Map.Entry<String, Float> variable : model.getValue()
                 .entrySet()) {
+                // Keys are already suffixes; save them as-is. Do not also write the v.roaming. spelling - older saves
+                // are migrated on read, not kept in a second namespace.
                 variables.setFloat(variable.getKey(), variable.getValue());
             }
             store.setTag(ModelRoamingKey.toHex(model.getKey()), variables);
@@ -196,11 +228,16 @@ public class ExtendedRoamingVariables implements IExtendedEntityProperties {
             } catch (Exception e) {
                 continue;
             }
-            for (String name : variables.func_150296_c()) {
-                if (!ModelRoamingLimits.isAcceptableName(name)) {
+            for (String storedName : variables.func_150296_c()) {
+                // phase78 migration: pre-phase78 saves keyed by the full MoLang name. Strip the namespace once, on
+                // read, and keep the suffix only - the save path never writes the full name again.
+                String name = storedName.startsWith(ModelRoamingLimits.PREFIX)
+                    ? storedName.substring(ModelRoamingLimits.PREFIX.length())
+                    : storedName;
+                if (!ModelRoamingLimits.isAcceptableSuffix(name)) {
                     continue;
                 }
-                double value = variables.getFloat(name);
+                double value = variables.getFloat(storedName);
                 if (ModelRoamingLimits.isAcceptableValue(value)) {
                     set(roamingKey, name, value);
                 }

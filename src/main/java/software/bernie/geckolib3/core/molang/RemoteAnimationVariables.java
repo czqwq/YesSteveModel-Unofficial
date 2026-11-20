@@ -61,6 +61,44 @@ public final class RemoteAnimationVariables {
         BY_ENTITY.put(entity.getUniqueID(), converted);
     }
 
+    /**
+     * 应用一份服务端权威 roaming 状态：{@code full} 为真时整张表替换（空 map 表示"该实体当前没有 roaming 值"，
+     * 留下的是空命名空间而不是删掉条目——{@link #get} 对"收到过"和"从未收到"的回答因此可区分），否则合并。
+     * <p>
+     * <b>上游对照。</b> 上游 {@code PlayerStateHandler.applyClientUpdate} 对 roaming 段只有两种应用方式：
+     * FULL 走 {@code resetRoamingVars}（replace）、DELTA 走 {@code updateRemoteRoamingVars}（merge）
+     * （{@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/network/forge/PlayerStateHandler.java:327-338,
+     * 353-357}）；并且"FULL 省略 roaming = 明确清空该命名空间"（同处 :331-332）。本方法就是这个规则在客户端
+     * 引擎侧的落点：服务端报文处理线程（{@code S2CRoamingState.Handler}，客户端线程）负责把 wire 上的后缀名还原成
+     * 完整 {@code v.roaming.<name>} 再交进来。
+     * <p>
+     * 名字仍过 {@link #normalize}：服务端/网络路径上的名字大小写不受控，而 {@link MolangPhysicsRuntime} 的键是解析器
+     * 的 canonical 拼写。
+     */
+    public static void apply(Entity entity, Map<String, Double> fullNameValues, boolean full) {
+        if (entity == null) {
+            return;
+        }
+        Map<String, Double> converted = new ConcurrentHashMap<>();
+        if (fullNameValues != null) {
+            for (Map.Entry<String, Double> entry : fullNameValues.entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null) {
+                    continue;
+                }
+                converted.put(normalize(entry.getKey()), entry.getValue());
+            }
+        }
+        if (full) {
+            BY_ENTITY.put(entity.getUniqueID(), converted);
+            return;
+        }
+        if (converted.isEmpty()) {
+            return;
+        }
+        BY_ENTITY.computeIfAbsent(entity.getUniqueID(), ignored -> new ConcurrentHashMap<>())
+            .putAll(converted);
+    }
+
     public static void put(Entity entity, String name, double value) {
         if (entity == null || name == null) {
             return;

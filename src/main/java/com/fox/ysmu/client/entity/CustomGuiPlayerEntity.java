@@ -9,11 +9,17 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
 import com.mojang.authlib.GameProfile;
+import com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime;
+import com.fox.ysmu.client.audio.MolangSoundPlayback;
 import com.fox.ysmu.client.model.CustomPlayerModel;
 import com.fox.ysmu.client.roaming.ClientRoamingKeys;
 import com.fox.ysmu.client.roaming.ClientRoamingStore;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.util.ModelIdUtil;
 
+import cpw.mods.fml.common.FMLCommonHandler;
+import software.bernie.geckolib3.core.manager.AnimationData;
+import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.geo.GeoReplacedEntityRenderer;
 import software.bernie.geckolib3.core.controller.AnimationController;
 
@@ -70,20 +76,29 @@ public final class CustomGuiPlayerEntity extends CustomPlayerEntity {
 
     /**
      * Releases this preview: the event-bus ticker that would otherwise own its animation data indefinitely, its sound
-     * ownership, its references to the players it was drawing for, and the controller runtime state keyed by the
-     * stand-in query player it created itself.
+     * ownership, its references to the players it was drawing for, the controller runtime state keyed by the
+     * stand-in query player it created itself, and the stand-in's MoLang scope.
+     * <p>
+     * <b>The MoLang scope has to go too.</b> The engine keys a scope by {@code (entity UUID, model id)}
+     * ({@code MolangPhysicsRuntime.ScopeKey}), this preview's entity is a freshly created stand-in with a random UUID, and
+     * the scope is kept in {@code MolangPhysicsRuntime.STATES} after {@code end()} for the whole session. Nothing else
+     * drops it - {@code ClientModelManager.clearRuntimeModelCaches} clears the whole table on a re-sync, not per screen -
+     * so every opening of a previewing screen used to leave one empty scope behind until the next model reload.
      */
     public void close() {
-        com.fox.ysmu.client.audio.MolangSoundPlayback.releaseOwner(this);
-        software.bernie.geckolib3.core.manager.AnimationData data = getFactory()
-            .getOrCreateAnimationData(hashCode());
+        MolangSoundPlayback.releaseOwner(this);
+        AnimationData data = getFactory().getOrCreateAnimationData(hashCode());
         if (data.ticker != null) {
-            cpw.mods.fml.common.FMLCommonHandler.instance().bus().unregister(data.ticker);
+            FMLCommonHandler.instance().bus().unregister(data.ticker);
             data.ticker = null;
         }
         executionOwner = null;
-        if (queryPlayer != null) com.fox.ysmu.client.animation.controller.OpenYsmPlayerControllerRuntime
-            .clearPlayer(queryPlayer.getUniqueID());
+        if (queryPlayer != null) {
+            OpenYsmPlayerControllerRuntime.clearPlayer(queryPlayer.getUniqueID());
+            // There is exactly one model installed at a time for a preview, and its scope is keyed by the stand-in's UUID;
+            // clearPlayer(scope) drops every model scope that UUID owns.
+            MolangPhysicsRuntime.clearPlayer(queryPlayer.getUniqueID());
+        }
         queryPlayer = null;
     }
 
@@ -98,10 +113,36 @@ public final class CustomGuiPlayerEntity extends CustomPlayerEntity {
     @Override
     public EntityLivingBase getMolangEntity() { return queryPlayer; }
 
+    /**
+     * What this preview should read for {@code v.*}/{@code v.roaming.*}.
+     * <p>
+     * 上游的设置面板直接读本地玩家自己的运行时（{@code AnimationRouletteScreen.java:230-258}），没有"预览"这一层；
+     * 移植的设置屏仍画 {@code CustomGuiPlayerEntity} 预览（1.7.10 固定管线的移植特有 UI），但预览必须显示**真实**设置值，
+     * 所以当它画的就是 owner 当前穿戴的模型时，直接返回 owner 真实作用域的只读快照
+     * （{@code MolangPhysicsRuntime.snapshotVariables}）；普通 {@code v.*} 与 {@code v.roaming.*} 都在里面。
+     * <p>
+     * 画的是别的模型时（模型选择屏的目录格子、NPC/贴图预览），owner 的当前模型作用域不是这一格的上下文，退回原有的
+     * {@link ClientRoamingStore#valuesFor} 查询。两者都为空时返回 {@code null} —— 这是本接口既有的"没有宿主变量"约定，
+     * {@code MolangPhysicsRuntime.applyScopeVariables} 对 null 直接跳过。
+     */
     @Override
     public Map<String, Double> getMolangVariables() {
-        return executionOwner == null ? null : ClientRoamingStore.valuesFor(executionOwner.getUniqueID(),
-            ClientRoamingKeys.keyFor(ModelIdUtil.getModelIdFromMainId(getMolangModelId())));
+        EntityPlayer owner = executionOwner;
+        if (owner == null) {
+            return null;
+        }
+        ResourceLocation mainId = getMolangModelId();
+        ResourceLocation previewed = ModelIdUtil.getModelIdFromMainId(mainId);
+        ExtendedModelInfo info = ExtendedModelInfo.get(owner);
+        if (info != null && previewed.equals(info.getModelId())) {
+            Map<String, Double> snapshot = MolangPhysicsRuntime.snapshotVariables(owner, mainId);
+            if (!snapshot.isEmpty()) {
+                return snapshot;
+            }
+        }
+        Map<String, Double> stored = ClientRoamingStore.valuesFor(owner.getUniqueID(),
+            ClientRoamingKeys.keyFor(previewed));
+        return stored.isEmpty() ? null : stored;
     }
 
     @Override

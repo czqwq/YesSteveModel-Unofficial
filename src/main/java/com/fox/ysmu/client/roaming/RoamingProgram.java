@@ -1,25 +1,45 @@
 package com.fox.ysmu.client.roaming;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import javax.annotation.Nullable;
 
-import com.fox.ysmu.model.roaming.ModelRoamingLimits;
+import com.fox.ysmu.ysmu;
 
-import com.eliotlash.mclib.math.Constant;
-import com.eliotlash.mclib.math.Variable;
 import software.bernie.geckolib3.core.molang.MolangException;
 import software.bernie.geckolib3.core.molang.MolangParser;
-import software.bernie.geckolib3.core.molang.expressions.MolangAssignment;
 import software.bernie.geckolib3.core.molang.expressions.MolangExpression;
-import software.bernie.geckolib3.core.molang.expressions.MolangMultiStatement;
+import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
- * Compiles a config form's read and action programs with the actual animation-file MoLang parser.
+ * Compiles a config form's read/write/label program with the actual animation-file MoLang parser.
  * <p>
- * The compiled program evaluates only when its owner has established a real entity/model execution scope. Roaming
- * writes still travel through {@link ClientRoamingStore} to the existing server authority. The legacy name/literal
- * helpers remain for compatibility; they are not a substitute for executing a complete form program.
+ * 上游在加载模型时就把每个 form 编译成固定 role 的类型化 program，并放进 AOT program inventory
+ * （{@code tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/format/parser/ModelInfoBuilder.java:152-177}、
+ * {@code expression/inventory/ModelProgramInventory.java:437-459}）；本仓引擎没有那套 inventory，模型载荷里只带源码
+ * （{@link com.fox.ysmu.model.resource.pojo.RawYsmModel.ConfigForm#defaultValue} 与 {@code labels}），所以各端在第一次
+ * 用到某个 program 时现场编译，并按源码缓存结果（{@link #compileCached}）。这是移植特有的执行层差别，程序语义与上游
+ * 一致：读 = {@code value} 表达式；写 = {@code value + "=t.value"} 形状（本仓把这次要写的值直接内联成字面量，见
+ * {@link ConfigActionRuntime}）；radio 的 label 动作 = {@code labels} 里那条完整语句。
+ * <p>
+ * 求值必须发生在属主实体真实的 MoLang 作用域内（{@code MolangPhysicsRuntime.pushScope}），不能对着替身变量表执行；
+ * 该规则由 {@link ConfigActionRuntime} 与 {@link ModelFormExecution} 的调用点保证，本类只负责编译。
  */
 public final class RoamingProgram {
+
+    /**
+     * 缓存上限。表单数量是模型内声明量（一个包几十个），而每个可见表单每帧读一次，所以按源码缓存编译结果是必要的
+     * （删掉了本仓旧实现"每帧重新 parse 可见表单"的热路径）；超过上限整表清空而不是做 LRU：缓存键只是源码字符串，
+     * 重建代价低，而引入淘汰表就是上游没有的机制。
+     */
+    private static final int MAX_CACHED_PROGRAMS = 512;
+
+    /** 源码 -> {@link Compiled}；或 {@link #FAILED} 表示这行源码已知编译不过（不再每帧重复 parse/刷日志）。 */
+    private static final Map<String, Object> CACHE = new ConcurrentHashMap<>();
+
+    /** {@link #CACHE} 里"编译失败"的占位值；不用 null，因为 CHM 不接受 null。 */
+    private static final Object FAILED = new Object();
 
     private RoamingProgram() {}
 
@@ -29,6 +49,38 @@ public final class RoamingProgram {
      */
     public static Compiled compile(MolangParser parser, String source) throws MolangException {
         return new Compiled(source, parser.parseExpression(source));
+    }
+
+    /**
+     * {@link #compile} 的缓存版本：同一个源码字符串只解析一次；编译失败只报告一次并返回 {@code null}
+     * （调用方按"这个 program 不可用"处理，与上游 per-form parse error 的行为一致：
+     * {@code AnimationRouletteScreen.java:524-530} 报告后不执行）。
+     */
+    @Nullable
+    public static Compiled compileCached(@Nullable String source) {
+        if (source == null || source.trim()
+            .isEmpty()) {
+            return null;
+        }
+        Object cached = CACHE.get(source);
+        if (cached != null) {
+            return cached instanceof Compiled compiled ? compiled : null;
+        }
+        try {
+            Compiled compiled = compile(GeckoLibCache.getInstance().parser, source);
+            if (CACHE.size() >= MAX_CACHED_PROGRAMS) {
+                CACHE.clear();
+            }
+            CACHE.put(source, compiled);
+            return compiled;
+        } catch (Exception failure) {
+            if (CACHE.size() >= MAX_CACHED_PROGRAMS) {
+                CACHE.clear();
+            }
+            CACHE.put(source, FAILED);
+            ysmu.LOG.warn("Failed to parse model form Molang '{}': {}", source, failure.getMessage());
+            return null;
+        }
     }
 
     public static final class Compiled {
@@ -47,119 +99,5 @@ public final class RoamingProgram {
         public double evaluate() {
             return this.expression.get();
         }
-
-        /**
-         * Only unambiguously side-effect-free RHS values qualify for the local roaming channel. Unknown ASTs and
-         * functions go through the controlled expression broadcast too; never hide their effects as roaming-only.
-         */
-        public boolean hasOnlyRoamingAssignments() {
-            return onlyRoamingAssignments(this.expression);
-        }
-    }
-
-    private static boolean onlyRoamingAssignments(MolangExpression expression) {
-        if (expression instanceof MolangMultiStatement statements) {
-            if (statements.expressions.isEmpty()) {
-                return false;
-            }
-            for (MolangExpression statement : statements.expressions) {
-                if (!onlyRoamingAssignments(statement)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        if (expression instanceof MolangAssignment assignment) {
-            String target = MolangParser.canonicalVariableName(assignment.variable.getName());
-            // The shared store's admission rule also accepts other v.* values (ModelRoamingLimits.java:39-40).
-            // Admission is not proof of roaming membership: upstream's local-only gate names v.roaming explicitly
-            // (CustomMolangParser.java:19,75-76). Never suppress a non-roaming assignment's expression broadcast.
-            return target.startsWith(ModelRoamingLimits.PREFIX)
-                && target.length() > ModelRoamingLimits.PREFIX.length()
-                && ModelRoamingLimits.isAcceptableName(target)
-                && (assignment.expression instanceof Constant || assignment.expression instanceof Variable);
-        }
-        return false;
-    }
-
-    /**
-     * The roaming variable a program names, or {@code null} when it is not a usable roaming variable.
-     * Accepts {@code v.roaming.x}, the same with a trailing semicolon, and an assignment such as
-     * {@code v.roaming.x=1;}.
-     */
-    @Nullable
-    public static String variableName(@Nullable String program) {
-        String trimmed = trimStatement(program);
-        if (trimmed.isEmpty()) {
-            return null;
-        }
-        int assignment = assignmentIndex(trimmed);
-        if (assignment > 0) {
-            trimmed = trimmed.substring(0, assignment)
-                .trim();
-        }
-        // Anything that still carries an operator is an expression, not a variable name. This is what keeps a
-        // comparison such as "v.roaming.x==1" from being read as the name "v.roaming.x".
-        if (trimmed.indexOf('=') >= 0 || trimmed.indexOf('<') >= 0 || trimmed.indexOf('>') >= 0
-            || trimmed.indexOf('?') >= 0 || trimmed.indexOf('(') >= 0 || trimmed.indexOf('+') >= 0
-            || trimmed.indexOf('-') >= 0 || trimmed.indexOf('*') >= 0 || trimmed.indexOf('/') >= 0) {
-            return null;
-        }
-        return ModelRoamingLimits.isAcceptableName(trimmed) ? trimmed : null;
-    }
-
-    /**
-     * The numeric value a program assigns, or {@code NaN} when the program is not a numeric assignment.
-     * {@code v.roaming.cloth=1;} gives 1; {@code v.roaming.a=1-v.roaming.b;} gives {@code NaN}, because evaluating it
-     * would need the variables it reads.
-     */
-    public static double assignedValue(@Nullable String program) {
-        String trimmed = trimStatement(program);
-        int assignment = assignmentIndex(trimmed);
-        if (assignment <= 0 || assignment + 1 >= trimmed.length()) {
-            return Double.NaN;
-        }
-        String literal = trimmed.substring(assignment + 1)
-            .trim();
-        try {
-            return Double.parseDouble(literal);
-        } catch (NumberFormatException e) {
-            return Double.NaN;
-        }
-    }
-
-    /**
-     * Index of the {@code =} that assigns, or {@code -1}. The {@code =} of {@code ==}, {@code !=}, {@code <=} and
-     * {@code >=} does not assign, and reading it as one would turn a comparison into a variable name.
-     */
-    private static int assignmentIndex(String expression) {
-        for (int i = 0; i < expression.length(); i++) {
-            if (expression.charAt(i) != '=') {
-                continue;
-            }
-            boolean partOfComparison = (i > 0 && "=!<>".indexOf(expression.charAt(i - 1)) >= 0)
-                || (i + 1 < expression.length() && expression.charAt(i + 1) == '=');
-            if (!partOfComparison) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    /** Whether a program is one this class can read a variable name out of. */
-    public static boolean isUsable(@Nullable String program) {
-        return variableName(program) != null;
-    }
-
-    private static String trimStatement(@Nullable String program) {
-        if (program == null) {
-            return "";
-        }
-        String trimmed = program.trim();
-        while (trimmed.endsWith(";")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1)
-                .trim();
-        }
-        return trimmed;
     }
 }

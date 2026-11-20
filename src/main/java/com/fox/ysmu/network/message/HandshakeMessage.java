@@ -64,10 +64,12 @@ public class HandshakeMessage implements IMessage {
                     com.fox.ysmu.model.upload.ServerModelUploadManager.markClientHandshake(sender);
                     // The server-side switches a client has to know, at the moment upstream's Forge config sync
                     // happens (login). See S2CServerConfig: 1.7.10's Configuration has no such exchange, so the
-                    // CanSwitchModel flag two client key handlers read travels in answer to this handshake, which is
-                    // re-sent after every world load or dimension change and therefore re-establishes it per world.
+                    // CanSwitchModel flag two client key handlers read and the roaming-report switch (phase78 review
+                    // RB-6: upstream reads ServerConfig.LOW_BANDWIDTH_USAGE as a SERVER config through its session
+                    // hello, not the client's own file) travel in answer to this handshake, which is re-sent after
+                    // every world load or dimension change and therefore re-establishes them per world.
                     NetworkHandler.sendToClientPlayer(
-                        new S2CServerConfig(Config.CAN_SWITCH_MODEL),
+                        new S2CServerConfig(Config.CAN_SWITCH_MODEL, !Config.LOW_BANDWIDTH_USAGE),
                         sender);
                 }
                 // Kick from the server thread; disconnect handling touches connection state, not the Netty pipeline.

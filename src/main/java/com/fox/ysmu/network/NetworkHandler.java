@@ -92,9 +92,23 @@ public final class NetworkHandler {
      * the handshake, the second by an ordinary command; a peer that does not know either id is disconnected by FML on
      * the unknown discriminator, so the handshake has to reject the pair rather than let it decode. Nothing existing
      * is renumbered or reused: 39 and 40 are above the highest clientbound id in use (38).</li>
+     * <li>13: phase78 replaces the raw-expression config channel with typed actions, and gives the roaming channel
+     * upstream's full/delta shape. Two <b>layout changes</b> of existing ids - serverbound 99
+     * ({@code C2SRoamingChanges}) and clientbound 20 ({@code S2CRoamingState}) now carry
+     * {@code modelKey + mode(FULL/DELTA) + suffix-name table + float} instead of {@code modelKey + full-name table +
+     * double} - plus two new ids, serverbound 105 ({@code C2SConfigAction}) and clientbound 41
+     * ({@code S2CConfigAction}). Clientbound 39 ({@code S2CServerConfig}) also <b>grew a second boolean</b>
+     * ({@code roamingSyncEnabled}, i.e. upstream's server-side {@code LOW_BANDWIDTH_USAGE} carried as
+     * {@code ServerHello.sync_roaming}); a decoder that sees only the old single byte defaults it to true. The
+     * expressions that used to travel on serverbound 101 ({@code C2SSubmitRouletteExpression}) and clientbound 36
+     * ({@code S2CExecuteRouletteExpression}) were deleted without reusing their ids: the wire now carries only the
+     * button/form route and the typed value, never MoLang source (upstream
+     * {@code docs/standards/protocol-v1/README.md:104-112}). An old peer would decode the changed layouts at the wrong
+     * offsets and would hit FML's unknown-discriminator disconnect on 41/105, so the handshake has to reject the pair.
+     * Nothing existing is renumbered or reused.</li>
      * </ul>
      */
-    public static final int NETWORK_PROTOCOL = 12;
+    public static final int NETWORK_PROTOCOL = 13;
 
     public static final SimpleNetworkWrapper CHANNEL = NetworkRegistry.INSTANCE.newSimpleChannel("ysmu_network");
 
@@ -106,6 +120,12 @@ public final class NetworkHandler {
     //    unknown discriminator disconnects the player. Every decoder therefore validates lengths against
     //    readableBytes() and soft-fails (drop the packet + warn) instead of throwing, and every handler body is
     //    wrapped in try/catch. SimpleNetworkWrapper does no version negotiation (see NETWORK_PROTOCOL above).
+    //  * 1.7.10's cpw.mods.fml.common.network.ByteBufUtils#writeUTF8String writes a **VarInt** length
+    //    (build/rfg/minecraft-src/java/.../ByteBufUtils.java:130-136), not the short 1.8+ uses. Hand-written decoders
+    //    must read `readVarInt(..., 2)` (C2SConfigAction#readString); a getUnsignedShort reader silently fails every
+    //    packet on the first string field and the handler then drops it as "undecodable" - that exact mismatch made
+    //    every model-settings click a no-op in the phase78 first build. Pair every writeUTF8String with
+    //    readUTF8String, or with a reader shaped like the same VarInt.
     //  * DeferredWork only protects the body of a handler that explicitly hops to the game thread
     //    (HandshakeMessage / OpenModelGuiMessage / SetModelAndTexture / SetNpcModelAndTexture); it does not cover
     //    fromBytes() and it does not cover handlers that run inline, so it is not a substitute for the soft-fail
@@ -126,13 +146,30 @@ public final class NetworkHandler {
      */
     private static final int SERVERBOUND_REVOKE_MODEL_GUI_GRANT = 98;
     /**
-     * The roaming-variable channel (see {@code .agent/phase15-roaming-variables.md}): client to server reports a
-     * settings change, server to client answers with the authoritative map. Appended after 98 and 19; nothing
-     * existing is renumbered.
+     * The roaming-variable channel (see {@code .agent/phase15-roaming-variables.md} and, for the phase78 shape,
+     * {@code .agent/phase78-model-config-sync-contract.md} §2.2): client to server reports one model namespace as
+     * FULL/DELTA, server to client answers with the authoritative state in the same mode. Appended after 98 and 19;
+     * nothing existing is renumbered.
+     * <p>
+     * {@link #NETWORK_PROTOCOL} 13 changed both layouts (suffix names + float instead of full names + double, and a
+     * mode byte). The ids stay, because ids are never renumbered - only the protocol fence tells peers apart.
      */
-    // Version 7: full roulette programs use their own self-authorized channel, not ysm.sync.
-    // Unknown FML discriminators disconnect old peers, so handshake rejects older protocol versions.
-    private static final int SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION = 101;
+    private static final int SERVERBOUND_ROAMING_CHANGES = 99;
+    private static final int CLIENTBOUND_ROAMING_STATE = 20;
+    /**
+     * phase78: the typed config-action channel that replaced the raw-expression one. Serverbound 105 is the client
+     * submitting {@code button/form + typed value}
+     * ({@link com.fox.ysmu.network.message.C2SConfigAction}); clientbound 41 is the server's authorized broadcast to
+     * tracking clients and the sender ({@link com.fox.ysmu.network.message.S2CConfigAction}).
+     * <p>
+     * <b>Ids 101 and 36 are retired, never reused.</b> They carried
+     * {@code C2SSubmitRouletteExpression}/{@code S2CExecuteRouletteExpression}, which sent MoLang source over the
+     * wire - a shape upstream does not have ({@code docs/standards/protocol-v1/README.md:104-112}: programs never
+     * travel). A future packet must take fresh numbers, so a stale peer cannot be handed a payload for a different
+     * meaning; {@link #NETWORK_PROTOCOL} 13 is the fence that rejects every such pair anyway.
+     */
+    private static final int SERVERBOUND_CONFIG_ACTION = 105;
+    private static final int CLIENTBOUND_CONFIG_ACTION = 41;
     /**
      * phase55: the {@code /ysm upload} half. A player's client reads the local path and sends the file back in
      * chunks; see {@link com.fox.ysmu.network.message.C2SUploadModelFile}. Appended above 101; nothing existing is
@@ -146,9 +183,6 @@ public final class NetworkHandler {
      */
     private static final int SERVERBOUND_REFRESH_MODEL_MANAGE = 103;
     private static final int SERVERBOUND_HANDLE_FILE = 104;
-    private static final int CLIENTBOUND_EXECUTE_ROULETTE_EXPRESSION = 36;
-    private static final int SERVERBOUND_ROAMING_CHANGES = 99;
-    private static final int CLIENTBOUND_ROAMING_STATE = 20;
 
     private static final int CLIENTBOUND_SEND_MODEL_FILE = 1;
     private static final int CLIENTBOUND_REQUEST_SYNC_MODEL = 2;
@@ -338,10 +372,11 @@ public final class NetworkHandler {
             C2SRoamingChanges.class,
             SERVERBOUND_ROAMING_CHANGES,
             Side.SERVER);
+        // phase78: one typed config action. Replaces the deleted raw-expression id 101 (see SERVERBOUND_CONFIG_ACTION).
         CHANNEL.registerMessage(
-            C2SSubmitRouletteExpression.Handler.class,
-            C2SSubmitRouletteExpression.class,
-            SERVERBOUND_SUBMIT_ROULETTE_EXPRESSION,
+            C2SConfigAction.Handler.class,
+            C2SConfigAction.class,
+            SERVERBOUND_CONFIG_ACTION,
             Side.SERVER);
         // phase55: one upload chunk. The permission-4 re-check lives in ServerModelUploadManager.acceptChunk, not in
         // the command, because the command is only one of the two ways to reach this path.
@@ -365,10 +400,12 @@ public final class NetworkHandler {
     }
 
     private static void registerClientboundMessages() {
+        // phase78: one authorized typed config action. Replaces the deleted raw-expression id 36 (see
+        // CLIENTBOUND_CONFIG_ACTION); its consumer is client/roaming/ConfigActionRuntime.
         CHANNEL.registerMessage(
-            S2CExecuteRouletteExpression.Handler.class,
-            S2CExecuteRouletteExpression.class,
-            CLIENTBOUND_EXECUTE_ROULETTE_EXPRESSION,
+            S2CConfigAction.Handler.class,
+            S2CConfigAction.class,
+            CLIENTBOUND_CONFIG_ACTION,
             Side.CLIENT);
         CHANNEL.registerMessage(
             SendModelFile.Handler.class,
@@ -587,10 +624,11 @@ public final class NetworkHandler {
      * {@link #sendToTrackingPlayers} is deliberately left untouched: the roaming, NPC and vehicle broadcasts rely on
      * including the entity's own player, which is what the reference does.
      *
-     * <p><b>First use: the roulette-expression echo</b> ({@code C2SSubmitRouletteExpression.Handler}), where the
-     * sender's client must not execute the program twice. The echo is a <em>remote-playback</em> statement - the
-     * recipients' clients resolve {@code entityId} and run the program against that entity - so excluding the sender
-     * does not leave the sender's own screen without the effect: it applied it locally at click time.
+     * <p><b>First use was the roulette-expression echo</b> ({@code C2SSubmitRouletteExpression.Handler}), where the
+     * sender's client must not execute the program twice. phase78 deleted that packet (the wire no longer carries
+     * MoLang source; see {@link #NETWORK_PROTOCOL} version 13), so this helper currently has no production caller. It
+     * is kept with its measured FML behaviour for the next broadcast that genuinely needs an exclusion - a future
+     * sender that already applied the change locally - rather than letting that caller re-derive the platform rules.
      *
      * @param excluded the player who must not receive the message; {@code null} means "nobody to exclude", which
      *                 would make this a plain {@code sendToAllAround} and is treated as a programming error by the

@@ -18,10 +18,11 @@ import java.util.List;
  * {@code NetworkHandler} itself cannot even be loaded (its channel is created in a static initialiser; see
  * {@code YsmCommandTest.java:47}).
  *
- * <p><b>What they are for.</b> The roulette-expression echo: the sender's own client already executed the program
- * locally before sending it, so the server's echo exists only for the <em>other</em> clients that render the sender.
- * Sending it back to the sender would run the program a second time on that client, and a program with side effects
- * ({@code play_sound}, particles) would fire twice. See {@code C2SSubmitRouletteExpression.Handler}.
+ * <p><b>What they are for.</b> The roulette-expression echo was the first caller: the sender's own client already
+ * executed the program locally before sending it, so the server's echo existed only for the <em>other</em> clients that
+ * render the sender. phase78 deleted that raw-expression packet (see {@code NetworkHandler.NETWORK_PROTOCOL} version
+ * 13 - the wire no longer carries MoLang source), so these two primitives currently have no production caller; they
+ * are kept because their FML behaviour is measured and the next exclusion broadcast should not re-derive it.
  */
 public final class TrackingRecipients {
 

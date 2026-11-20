@@ -4,7 +4,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.roaming.ClientRoamingSync;
 import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.ysmu;
 
@@ -109,7 +111,21 @@ public class SyncModelInfo implements IMessage {
                 if (entity instanceof EntityPlayer player) {
                     ExtendedModelInfo eep = ExtendedModelInfo.get(player);
                     if (eep != null) {
+                        // RB-4b: a model change on the server reaches an observer twice and out of order - the roaming
+                        // FULL for the new model key is pushed first, while this EEP still names the old model, so
+                        // S2CRoamingState.Handler's "packet key == current model" gate drops it and nothing re-seeds the
+                        // engine. Re-install the retained snapshot from ClientRoamingStore here, after the EEP really
+                        // changed its model id. Upstream does the same at installation time
+                        // (capability/ClientRoamingSession.java:32-62); the stale values would otherwise survive up to
+                        // the observed player's 30 s periodic FULL.
+                        ResourceLocation previousModelId = eep.getModelId();
                         eep.loadNBTData(message.modelInfoNBT);
+                        ResourceLocation updatedModelId = eep.getModelId();
+                        boolean modelChanged = previousModelId == null ? updatedModelId != null
+                            : !previousModelId.equals(updatedModelId);
+                        if (modelChanged) {
+                            ClientRoamingSync.reseedFromStore(player);
+                        }
                     }
                 }
             } catch (Exception e) {

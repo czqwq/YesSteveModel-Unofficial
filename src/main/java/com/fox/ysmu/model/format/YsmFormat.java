@@ -14,6 +14,7 @@ import java.util.Map;
 import org.apache.commons.io.FileUtils;
 import org.jetbrains.annotations.NotNull;
 
+import com.fox.ysmu.data.ConfigDeclarations;
 import com.fox.ysmu.data.ModelData;
 import com.fox.ysmu.model.resource.LegacyInfo;
 import com.fox.ysmu.util.ModelIdUtil;
@@ -72,11 +73,12 @@ public final class YsmFormat {
                             return FileVisitResult.CONTINUE;
                         }
 
-                        ServerModelInfo info = cacheModel(data, modelId);
-                        if (info != null) {
+                        BakedModel baked = cacheModel(data, modelId);
+                        if (baked != null) {
                             // 第 6 项：唯一登记入口（显式来源优先级 + 同名冲突日志），不再是裸 put。
-                            registerModel(modelId, info, null, file, rootPath);
-                            ModelIndexCache.remember(source, modelId, info, null);
+                            // phase78：设置声明快照与登记一起交出。
+                            registerModel(modelId, baked.info, null, file, rootPath, baked.declarations);
+                            ModelIndexCache.remember(source, modelId, baked.info, null, baked.declarations);
                         }
                     } catch (Exception | LinkageError e) {
                         ysmu.LOG.warn("Failed to cache legacy .ysm model {}", file, e);
@@ -89,10 +91,12 @@ public final class YsmFormat {
         }
     }
 
-    private static ServerModelInfo cacheModel(Map<String, byte[]> input, String modelId) {
+    private static BakedModel cacheModel(Map<String, byte[]> input, String modelId) {
         try {
             ModelData data = getModelData(input, modelId);
-            return ModelCacheWriter.write(data);
+            ServerModelInfo info = ModelCacheWriter.write(data);
+            // 声明快照与登记来自同一个 ModelData（.ysm 容器没有 ysm.json 声明段，通常是空声明）。
+            return new BakedModel(info, ConfigDeclarations.from(data.getWheelDeclarations().values()));
         } catch (Exception | LinkageError e) {
             // M-16/M-18:统一日志,单个模型失败不影响其余模型。
             ysmu.LOG.warn("Failed to cache .ysm model {}", modelId, e);

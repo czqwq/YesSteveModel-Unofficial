@@ -179,5 +179,12 @@ public class SetModelAndTexture implements IMessage {
         // riding has to rewrite it - upstream re-runs onVehicleSetModel from its own model-update path
         // (event/CapabilityEvent.java:198-211).
         S2CVehicleModelState.onOwnerModelChanged(sender);
+        // phase78: a model change rebuilds the roaming baseline. Upstream broadcasts a FULL player state after an
+        // accepted selection (network/forge/ControlHandler.java:169-193 -> PlayerStateHandler.sendAuthoritativeFull),
+        // and the client needs that self FULL before it may report DELTAs (ServerModelSession:98-119); this port has no
+        // session layer, so the same push is issued from here (and from login/join/clone in CommonEventHandler).
+        // A texture-only change also lands here and re-pushes the same namespace, which is harmless and keeps the
+        // "selection accepted -> authoritative state" pairing in one place.
+        S2CRoamingState.broadcastFull(sender);
     }
 }

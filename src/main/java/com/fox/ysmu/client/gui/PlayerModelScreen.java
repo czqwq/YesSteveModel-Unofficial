@@ -4,6 +4,7 @@ import com.fox.ysmu.Config;
 import com.fox.ysmu.Tags;
 import com.fox.ysmu.ysmu;
 import com.fox.ysmu.client.ClientModelAccess;
+import com.fox.ysmu.eep.ExtendedModelInfo;
 import com.fox.ysmu.client.ClientModelManager;
 import com.fox.ysmu.client.ClientModelMetadataRegistry;
 import com.fox.ysmu.client.ClientPackInfo;
@@ -44,6 +45,10 @@ public class PlayerModelScreen extends GuiScreen {
     /**
      * Id of the selected model's settings icon. Deliberately far from the grid ids, which start at 11 and grow with the
      * page, so it can never collide with a tile.
+     * <p>
+     * 只在 {@link #canConfigureSelectedModel()} 成立时加入：编辑对象是本地玩家本人、所选模型 == 玩家当前穿戴模型、
+     * 且该模型声明了设置表单。上游只配置当前模型（{@code ControlHandler.java:98-108}），owner 已决定删掉
+     * "配置未穿戴模型"的移植自造入口。
      */
     private static final int MODEL_SETTINGS_BUTTON_ID = 50;
     private static final int SHOW_MODEL_ID_FIRST_BUTTON_ID = 51;
@@ -134,6 +139,38 @@ public class PlayerModelScreen extends GuiScreen {
         return modelId != null && this.target.isStarred(modelId);
     }
 
+    /**
+     * 模型设置图标/入口的显示与打开条件：当前选中的模型就是本地玩家正穿戴的那一个，且它声明了设置表单。
+     * <p>
+     * 三个条件缺一不可：
+     * <ul>
+     *   <li>本屏编辑的必须是<b>本地玩家本人</b>（{@link ModelSelectionTarget#getPreviewEntity()} 与
+     *       {@code Minecraft.thePlayer} 是同一个对象）。同伴模组可以把另一个玩家/非玩家实体经 NPC 选择器交给本屏
+     *       （{@link com.fox.ysmu.data.NPCData}），那种 target 的设置没有上游状态能承载：设置值只存在于
+     *       <b>本地玩家自己</b>的实体表达式运行时里（上游 {@code client/input/AnimationRouletteKey.java:40-46} 把本地玩家的
+     *       {@code PlayerAnimatableCapability} 交给 {@code AnimationRouletteScreen.java:100-112}）。</li>
+     *   <li>所选模型等于本地玩家 {@link ExtendedModelInfo} 的当前模型 —— 上游只允许配置发送者自己的当前模型
+     *       （{@code ControlHandler.java:98-108,314-329}）；"配置未穿戴模型"是移植自造的入口，owner 已决定删除
+     *       （{@code .agent/model-config-bug-audit.md} RC-7 第 5 条）。</li>
+     *   <li>该模型声明了至少一个带表单的按钮（{@link ModelConfigRegistry#hasSettings}）。</li>
+     * </ul>
+     * 模型屏重建（{@code initGui}）与点击时（{@code actionPerformed}）都走这一条判定，避免图标在选中项变化后仍可打开
+     * 旧模型的面板。
+     */
+    private boolean canConfigureSelectedModel() {
+        Minecraft mc = Minecraft.getMinecraft();
+        EntityPlayer local = mc == null ? null : mc.thePlayer;
+        if (local == null || this.target.getPreviewEntity() != local) {
+            return false;
+        }
+        ResourceLocation selectedModel = this.target.getModelId();
+        if (selectedModel == null || !ModelConfigRegistry.hasSettings(selectedModel)) {
+            return false;
+        }
+        ExtendedModelInfo info = ExtendedModelInfo.get(local);
+        return info != null && selectedModel.equals(info.getModelId());
+    }
+
     @Override
     public void initGui() {
         // Suppress idle asset eviction while this preview is open (reference PlayerModelScreen.java:117).
@@ -212,9 +249,13 @@ public class PlayerModelScreen extends GuiScreen {
             this.buttonList.add(new FlatIconButton(5, x + 288, y + 5, 18, 18, 0, 0).setTooltips("gui.yes_steve_model.star_models"));
         }
         this.buttonList.add(new FlatIconButton(6, x + 397, y + 5, 18, 18, 16, 16).setTooltips("gui.yes_steve_model.config"));
-        // The selected model's own settings panel (the pack's 模型设置), offered only when the model declares one.
-        // The global options icon stays at (397, 5); this one sits below it and reuses the same settings glyph.
-        if (ModelConfigRegistry.hasSettings(this.target.getModelId())) {
+        // 所选模型自己的设置面板（包的 模型设置）：只有"所选模型就是本地玩家当前穿戴的模型、且它声明了表单"时才提供。
+        // 全局选项图标仍在 (397, 5)；这一个在它下面，复用同一个设置图标。
+        // owner 决定：删掉"配置未穿戴模型"的入口。上游只配置本地玩家当前的模型——服务端只接受 entity == sender 且必须是
+        // 发送者当前模型（ControlHandler.java:98-108,314-329），GUI 也只拿本地玩家的 PlayerAnimatableCapability
+        // （AnimationRouletteKey.java:40-46, AnimationRouletteScreen.java:100-112）；上游没有任何状态能承载"未穿戴模型的设置"（见
+        // .agent/model-config-upstream-research.md §7.9 与 .agent/model-config-bug-audit.md RC-7 第 5 条）。
+        if (canConfigureSelectedModel()) {
             this.buttonList.add(
                 new FlatIconButton(MODEL_SETTINGS_BUTTON_ID, x + 397, y + 27, 18, 18, 16, 16)
                     .setTooltips("gui.yes_steve_model.model.config.title"));
@@ -356,7 +397,8 @@ public class PlayerModelScreen extends GuiScreen {
                 this.initGui();
                 break;
             case MODEL_SETTINGS_BUTTON_ID:
-                if (this.target.getModelId() != null) {
+                // 与 initGui 的显示条件同一条判定：面板只服务本地玩家当前穿戴的模型（见 canConfigureSelectedModel）。
+                if (canConfigureSelectedModel()) {
                     this.mc.displayGuiScreen(new ModelConfigScreen(this, this.target.getModelId()));
                 }
                 break;

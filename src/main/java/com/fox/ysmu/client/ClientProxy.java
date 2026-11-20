@@ -2,6 +2,7 @@ package com.fox.ysmu.client;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.fox.ysmu.client.debug.ModelDebugCapture;
 import com.fox.ysmu.client.entity.CustomFirstPersonArmEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.input.*;
@@ -123,7 +124,7 @@ public class ClientProxy extends CommonProxy {
         ClientCommandHandler.instance.registerCommand(new CommandYsmClient());
         // Developer-only auto-capture harness (flat world -> select models -> screenshots -> exit). Inert unless
         // YSMU_DEBUG_CAPTURE is set in the client process; see ModelDebugCapture's javadoc for the variables.
-        com.fox.ysmu.client.debug.ModelDebugCapture.startIfEnabled();
+        ModelDebugCapture.startIfEnabled();
     }
 
     /**
@@ -175,3 +176,4 @@ public class ClientProxy extends CommonProxy {
             message.getExperienceLevel());
     }
 }
+

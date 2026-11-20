@@ -3731,6 +3731,23 @@ public class ClientModelManager {
         return null;
     }
 
+    /**
+     * Drops the runtime state of the model catalogue being replaced by a new sync round (login, or a server
+     * {@code /ysm reload} on the same connection).
+     *
+     * <p><b>What belongs to a reload and what belongs to the connection.</b> Everything keyed by a model's <em>content
+     * or id as delivered by this round</em> is dropped here: the model list, geometry/animation/texture payload state,
+     * registries. The roaming variables are deliberately <b>not</b> dropped: both {@code ClientRoamingKeys} and
+     * {@code ClientRoamingStore} are keyed by the model's content hash, so a round that reloads the same content still
+     * names the same namespace and the server still holds its values - throwing that authority away made a plain
+     * {@code /ysm reload} blank every roaming setting until the next relog (review RB-2). Only the connection boundary
+     * ({@link #clearConnectionState}) drops them, because then the server that owns them is gone. Stale keys for
+     * changed content are harmless: a payload with different bytes yields a different key, and the server rejects a
+     * report whose model key is not its current model's.
+     *
+     * <p>The reporter is re-baselined here: the engine scopes it samples were just cleared, so its next tick
+     * re-installs {@code RemoteAnimationVariables} from the (kept) authority copy and sends a FULL for the current key.
+     */
     private static void clearRuntimeModelCaches() {
         ysmu.LOG.info(
             "YSM client clearing runtime model caches: models={}, scales={}, extraInfo={}, extraAnimations={}",
@@ -3776,9 +3793,10 @@ public class ClientModelManager {
         // The GUI presentation images belong to the dropped models, and their textures have to be released explicitly
         // for the reason on guiImageTextureFor.
         clearGuiImages();
-        // Roaming namespaces are keyed by model content hash, so they belong to the dropped models too.
-        com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
-        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
+        // Roaming namespaces are keyed by model content hash, so a sync round that reloads the same content names the
+        // same namespaces; the client store is the server-authority copy and is therefore kept across a reload (RB-2:
+        // clearing it here made `/ysm reload` blank every roaming setting until relog). Only the connection boundary
+        // drops it - see clearConnectionState.
         com.fox.ysmu.client.gui.ModelPreviewAnimationState.resetAll();
         // The registered sound names are keyed by main model id and belong to the models being dropped here, so they
         // go with them; the reference branch clears the same registry at this point
@@ -3787,6 +3805,10 @@ public class ClientModelManager {
         ConditionManager.clear();
         OpenYsmAnimationControllerRegistry.clear();
         MolangPhysicsRuntime.clear();
+        // The engine scopes the roaming reporter samples were just cleared, so re-baseline it: its next tick re-installs
+        // RemoteAnimationVariables from the kept authority copy for the current key and sends a FULL (RB-2). This is
+        // also the case where a server-side FULL is pushed from the resync path; both are idempotent.
+        com.fox.ysmu.client.roaming.ClientRoamingSync.reset();
         MolangInstructionExecutor.clearWarnings();
         MolangInstructionExecutor.clearTimelineLog();
         // The projectile index belongs to the models being dropped, and so does the per-projectile state those models
@@ -3975,7 +3997,10 @@ public class ClientModelManager {
      * built and published as the next connection's model (the generation is stamped when a build is submitted, not
      * when its payload was parked, so the generation check alone cannot cover a payload that simply stayed parked).
      * A refusal is dropped for every model: upstream re-grants a new attempt on a connection change
-     * ({@code failure-and-recovery.md:13,28}).
+     * ({@code failure-and-recovery.md:13,28}). The roaming authority copy ({@code ClientRoamingKeys},
+     * {@code ClientRoamingStore}, its authoritative-key marks) is connection-owned too and is dropped here only: it
+     * describes save data held by the server this connection talks to, and phase78's reload path keeps it because a
+     * reload does not change the server (see {@link #clearRuntimeModelCaches}, review RB-2).
      */
     public static void clearConnectionState() {
         PASSWORD = null;
@@ -4009,7 +4034,57 @@ public class ClientModelManager {
         // The plain HashMaps are deliberately not touched here - MODELS, SCALE_INFO, RENDER_LAYERS_FIRST, EXTRA_INFO
         // and EXTRA_ANIMATION_NAME are read by the render thread and this method runs on the thread that raises the
         // disconnect. Dropping those is left to prepareModelSync, on the client thread at the start of the next sync.
+        // The roaming authority copy is connection-owned (content-hash keys, values are the server's save data), so it
+        // ends here and not at a reload: a reload keeps it (see clearRuntimeModelCaches), a disconnect drops it.
+        com.fox.ysmu.client.roaming.ClientRoamingKeys.clear();
+        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
         OpenYsmModelSyncClient.clearConnectionState();
+    }
+
+    /**
+     * Whether {@code modelOrSubId} is a model that exists only on this client - the port-specific
+     * {@code LocalModelLoader}/{@code /ysmclient load} case - rather than one the connected server can see.
+     *
+     * <p><b>Why this query exists.</b> phase78 moves config actions and roaming persistence to the server: the client
+     * sends a typed {@code C2SConfigAction} / {@code C2SRoamingChanges} and the server validates them against
+     * <em>its own</em> model declarations ({@code ServerModelManager.configDeclarationsFor}). A model only this client
+     * carries has no server-side declarations, so such a message can only be dropped - for those models the port runs
+     * the form program locally instead ({@code client/roaming/ConfigActionRuntime}) and never reports roaming. Upstream
+     * has no client-only models at all, so this distinction is port-specific and exists only because the
+     * {@code LocalModelLoader} feature it supports does not exist upstream (AGENTS.md).</p>
+     *
+     * <p><b>How it is answered.</b> {@link #isConnectionDeliveredModel} already answers "was this payload delivered by
+     * the connection" from the client's own catalogue ({@link ServerModelManager#OPEN_YSM_SYNC_INFO}, the index
+     * {@code LocalModelLoader} registers from). A model that is not in that catalogue came from the server, hence is not
+     * client-only. The built-in pack is the exception the catalogue test cannot see: the client carries its own copy of
+     * {@code assets/ysmu/builtin} (so the catalogue says "local"), but every YSMU server carries the same pack and
+     * serves it, so built-in models - notably the fallback {@code default}, whose own settings include the roaming forms
+     * acceptance uses - must keep the remote channel. Those are excluded explicitly, as is the pinned fallback id.</p>
+     *
+     * <p><b>Integrated server (review RB-1).</b> In single player the client and the integrated server share the same
+     * JVM and therefore the same static {@link ServerModelManager#OPEN_YSM_SYNC_INFO}: {@code CommonProxy.preInit}
+     * runs {@code ServerModelManager.reloadPacks()} before {@code ClientProxy.init}, so the catalogue is the integrated
+     * server's own scan of {@code config/ysmu/{builtin,custom,auth}}. The catalogue test would then call <em>every</em>
+     * custom model client-only, which stops config actions from being broadcast and (worse) stops the roaming reporter,
+     * so a custom pack's roaming settings would never persist in single player. It must therefore answer {@code false}
+     * whenever an integrated server is running: that server scanned the same catalogue and can validate and persist
+     * those models. Only a <em>dedicated</em> server can have a catalogue the client has and the server lacks.</p>
+     *
+     * @param modelOrSubId a base model id, or any sub-model id such as {@code ysmu:model/main}
+     */
+    public static boolean isClientOnlyModel(@Nullable ResourceLocation modelOrSubId) {
+        if (modelOrSubId == null) {
+            return false;
+        }
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc != null && mc.isIntegratedServerRunning()) {
+            return false;
+        }
+        if (isConnectionDeliveredModel(modelOrSubId)) {
+            return false;
+        }
+        ResourceLocation base = ModelIdUtil.getParentModelId(modelOrSubId);
+        return !isDefaultModelId(base) && !ServerModelManager.isBuiltinModel(base);
     }
 
     /**

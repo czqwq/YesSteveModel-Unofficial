@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
@@ -33,6 +34,11 @@ import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Sta
 import com.fox.ysmu.client.animation.controller.OpenYsmControllerDefinitions.Transition;
 import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
+import com.fox.ysmu.client.roaming.ClientRoamingKeys;
+import com.fox.ysmu.client.roaming.ClientRoamingStore;
+import com.fox.ysmu.client.roaming.ClientRoamingSync;
+import com.fox.ysmu.eep.ExtendedModelInfo;
+import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.core.PlayState;
@@ -243,30 +249,51 @@ public final class OpenYsmPlayerControllerRuntime {
     /**
      * 重置本地玩家在某个模型上"用户显式设置"的漫游变量（{@code /ysm reset} / {@code /ysmclient reset}）。
      *
-     * <p><b>移植注：</b>参考分支清的是它自己那张全局 {@code PENDING_ROAMING} 平坦表
-     * （{@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../RoamingVariables.java:520-539}）。本仓的漫游数据
-     * 不在控制器运行时里，而在 {@code ClientRoamingStore}（按玩家 + 模型命名空间键存，见
-     * {@code ClientRoamingStore.valuesFor}），所以这里按后者的键定位同一玩家同一模型的命名空间并删掉它的本地值 ——
-     * 不另造第二张漫游表。模型 {@code ysm.json} 里的定义（变量清单与默认值）不属于这张表，因此不会被清掉，
-     * 变量回落到模型默认值而不是消失。</p>
+     * <p><b>移植注（phase78）。</b>参考分支清的是它自己那张全局 {@code PENDING_ROAMING} 平坦表
+     * （{@code tmp/YesSteveModel-Unofficial-perf-previewUI/.../RoamingVariables.java:520-539}）。本仓的漫游数据现在只有
+     * 两份：引擎里真实的 {@code (player, model)} 作用域（{@code v.roaming.*} 键）与服务端权威状态的客户端副本
+     * {@code ClientRoamingStore}。上游 reset 清的是该实体 roaming state 里的用户值，所以这里清的也是作用域里的
+     * roaming 命名空间（普通 {@code v.*} 与物理状态由 {@code MolangReset} 前面的步骤处理），**不另造表**。</p>
      *
-     * <p>已知边界（记录，不在此处发明机制）：本仓的漫游变量以服务端为准，服务端下一次
-     * {@code S2CRoamingState} 回显同一命名空间时会把值再填回来；参考分支没有这条回显通道，所以它的
-     * {@code resetUserRoamingVars} 是终局的，这个不是。</p>
+     * <p>清空之后必须让服务端知道：{@link ClientRoamingSync#forceFull()} 让下一 tick 把"清空后的全量"（空命名空间）
+     * 以 FULL 上报，服务端按上游规则以 FULL 广播回来
+     * （{@code tmp/YesSteveModel-dev-1.20/.../network/forge/PlayerStateHandler.java:214-239,331-332} 的
+     * "FULL 省略 roaming = 清空该命名空间"）。服务端是权威：这是 reset 生效的唯一路径，不再有单独的 reset 报文。
+     * 上报采样会把这些值当成"已知状态"（{@code ClientRoamingSync#sample} 并上服务端权威副本），所以本地副本里同一 key 的
+     * 旧值必须先丢掉（{@link ClientRoamingStore#forget}），否则 FULL 会把刚被 reset 的旧值又报回去。</p>
      */
     public static void resetUserRoamingVars(ResourceLocation modelId) {
-        net.minecraft.entity.player.EntityPlayer player = net.minecraft.client.Minecraft.getMinecraft().thePlayer;
+        EntityPlayer player = Minecraft.getMinecraft().thePlayer;
         if (player == null || modelId == null) {
             return;
         }
-        com.fox.ysmu.client.roaming.ClientRoamingStore.forget(
-            player.getUniqueID(),
-            com.fox.ysmu.client.roaming.ClientRoamingKeys.keyFor(modelId));
+        MolangPhysicsRuntime.clearRoamingVariables(player, ModelIdUtil.getMainId(modelId));
+        ClientRoamingStore.forget(player.getUniqueID(), ClientRoamingKeys.keyFor(modelId));
+        ClientRoamingSync.forceFull();
     }
 
-    /** 重置**全部**玩家的用户漫游变量（{@code /ysm reset @a}）；同样只清 {@code ClientRoamingStore}。 */
+    /**
+     * 重置**全部**玩家的用户漫游变量（{@code /ysm reset @a}）。
+     * <p>
+     * <b>边界（照实记录，不发明远端清理）。</b>本客户端手里只有本地玩家自己的真实作用域，其他玩家的作用域与他们的服务端
+     * 权威数据都不在这里：本方法只清本地玩家的 roaming 命名空间并强制下一份 FULL，远端玩家的状态由他们自己的客户端在收到
+     * 服务端广播的权威 FULL 后自清（上游也是"每个客户端清自己那份"）。旧实现这里清的是整个 {@code ClientRoamingStore}
+     * （含远端玩家的客户端副本），那既不是本端能决定的权威操作，也不该由 reset 路径发明；现在不再这样做。
+     */
     public static void resetAllUserRoamingVars() {
-        com.fox.ysmu.client.roaming.ClientRoamingStore.clear();
+        EntityPlayer player = Minecraft.getMinecraft().thePlayer;
+        if (player == null) {
+            return;
+        }
+        ExtendedModelInfo info = ExtendedModelInfo.get(player);
+        ResourceLocation modelId = info == null ? null : info.getModelId();
+        if (modelId != null) {
+            MolangPhysicsRuntime.clearRoamingVariables(player, ModelIdUtil.getMainId(modelId));
+            // Same reason as resetUserRoamingVars: the reporter samples the server-authority copy on top of the scope, so
+            // the reset value only reaches the server as an empty FULL when the local copy for this key is dropped too.
+            ClientRoamingStore.forget(player.getUniqueID(), ClientRoamingKeys.keyFor(modelId));
+        }
+        ClientRoamingSync.forceFull();
     }
 
     /**
