@@ -75,7 +75,7 @@ public final class EntityQueryBindings {
         "query.item_max_use_duration", "query.item_remaining_use_duration", "query.equipment_count",
         "query.has_cape", "query.player_level", "ysm.has_helmet", "ysm.has_chest_plate", "ysm.has_leggings",
         "ysm.has_boots", "ysm.has_mainhand", "ysm.has_offhand", "ysm.swinging_arm", "ysm.offhand_charged_crossbow",
-        "ysm.is_fishing", "ysm.has_elytra", "ysm.elytra_rot_x", "ysm.elytra_rot_y", "ysm.elytra_rot_z" };
+        "ysm.has_elytra", "ysm.elytra_rot_x", "ysm.elytra_rot_y", "ysm.elytra_rot_z" };
 
     private EntityQueryBindings() {}
 
@@ -224,7 +224,6 @@ public final class EntityQueryBindings {
             "ysm.offhand_charged_crossbow",
             () -> MolangUtils.booleanToFloat(
                 player != null && TinkersCrossbowCompat.isCrossbowLoaded(BackhandCompat.getOffhandItem(player))));
-        parser.setValue("ysm.is_fishing", () -> MolangUtils.booleanToFloat(player != null && player.fishEntity != null));
         parser.setValue("ysm.is_sleep", () -> MolangUtils.booleanToFloat(living != null && living.isPlayerSleeping()));
         parser.setValue(
             "ysm.has_elytra",

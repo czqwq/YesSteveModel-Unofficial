@@ -28,6 +28,7 @@ dependencies {
     //Optional Addon
     devOnlyNonPublishable("com.github.czqwq:TacZ:1.0:dev") {transitive=false}
     compileOnly("com.github.czqwq:TacZ:1.0:dev") {transitive=false}
+    compileOnly files("libs/touhou_little_maid-5.11.45.140-dev.jar")
 }
 
 @SuppressWarnings('GrMethodMayBeStatic')

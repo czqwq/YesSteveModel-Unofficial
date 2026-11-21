@@ -13,6 +13,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.ScreenShotHelper;
 import net.minecraft.world.WorldSettings;
@@ -20,8 +21,11 @@ import net.minecraft.world.WorldType;
 
 import com.fox.ysmu.api.EntityAnimationApi;
 import com.fox.ysmu.client.ClientModelManager;
+import com.fox.ysmu.client.ClientProxy;
+import com.fox.ysmu.client.animation.AnimationManager;
 import com.fox.ysmu.client.animation.store.AnimationStore;
 import com.fox.ysmu.client.entity.CustomGuiPlayerEntity;
+import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.gui.AnimationRouletteScreen;
 import com.fox.ysmu.client.gui.ConfigScreen;
 import com.fox.ysmu.client.gui.ModelConfigRegistry;
@@ -34,12 +38,16 @@ import com.fox.ysmu.model.resource.pojo.RawYsmModel;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SetModelAndTexture;
 import com.fox.ysmu.network.message.SetPlayAnimation;
+import com.fox.ysmu.util.ControllerUtils;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
+import software.bernie.geckolib3.core.builder.Animation;
+import software.bernie.geckolib3.core.controller.AnimationController;
+import software.bernie.geckolib3.core.manager.AnimationData;
 import software.bernie.geckolib3.core.molang.MolangPhysicsRuntime;
 import software.bernie.geckolib3.core.snapshot.BoneSnapshot;
 import software.bernie.geckolib3.geo.render.built.GeoBone;
@@ -87,10 +95,27 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  *
  * <p>Flow: main menu -&gt; delete the harness's own save folder -&gt; create a superflat creative world -&gt; for each
  * requested model: select it, wait until the client reports it ready, take one screenshot per entry of {@link #SHOTS}
- * (front / back / wide / close-up / walking / first-person) -&gt; exit the game. Selection goes through the same pair of
- * calls the model screen uses ({@link ExtendedModelInfo#setModelAndTexture} plus the {@link SetModelAndTexture}
- * packet), so the server-side selection and its sync are exercised too; the selection is re-asserted while waiting in
- * case the login sync overwrites it.
+ * (front / back / wide / close-up / walking / sprinting / first-person) -&gt; exit the game. Selection goes through the
+ * same pair of calls the model screen uses ({@link ExtendedModelInfo#setModelAndTexture} plus the
+ * {@link SetModelAndTexture} packet), so the server-side selection and its sync are exercised too; the selection is
+ * re-asserted while waiting in case the login sync overwrites it.
+ *
+ * <p><b>Walking vs sprinting.</b> Two of the seven shots move the player: the walking shot holds forward for 20 ticks,
+ * and the sprinting shot inserted after it holds forward <em>and</em> the sprint key for the same 20 ticks, so its frame
+ * is taken while a real run is in progress. That distinction is the point: "walk" and "run" are two different entries of
+ * YSMU's state table ({@code run} is gated on {@code EntityPlayer#isSprinting()}, {@code AnimationRegister:151}) and a
+ * pack's OpenYSM controllers read the same flag through {@code query.is_sprinting} ({@code EntityQueryBindings:142}), so
+ * a screenshot of the walking shot alone proves only the walk clip. The harness never calls
+ * {@code mc.thePlayer.setSprinting(...)}: 1.7.10's own {@code EntityPlayerSP#onLivingUpdate} derives the flag from the
+ * held key while moving forward, and that is exactly the input the animation reads. Every shot logs one
+ * {@code [YSMU-DEBUG][LOCO]} line with the keys that were held, the player's actual {@code isSprinting()}, the
+ * horizontal speed and the clip/state the engine has mounted; after the sprint shot the walk and sprint pose samples are
+ * compared and the result is logged as
+ * {@code [YSMU-DEBUG][FEATURE] locomotion walkVsSprint bonesMoved=<n>} and carried into the feature summary. Both lines
+ * are log-only evidence for a run clip that a still frame cannot provide (the {@code clip=} field is what tells "the run
+ * clip played" apart from "the run state fell back to the walk clip"; on the first-person shot the body is not drawn, so
+ * it reports the last frame the body was processed). Neither line is gated by {@code YSMU_DEBUG_FEATURES}: they belong
+ * to the shots, which are taken either way.
  *
  * <p>Launching it, e.g. under PowerShell:
  * <pre>{@code
@@ -117,15 +142,18 @@ public final class ModelDebugCapture {
     private static final long WORLD_SEED = 12345L;
 
     /**
-     * One camera setup: {@code {thirdPersonView, pitch, fov, walkTicks}}. {@code walkTicks} holds the forward key for
-     * that long before the shot, which is what makes a walk/run animation show up in a still; {@code 0} is idle.
+     * One camera setup: {@code {thirdPersonView, pitch, fov, walkTicks, sprint}}. {@code walkTicks} holds the forward
+     * key for that long before the shot, which is what makes a walk/run animation show up in a still; {@code 0} is
+     * idle. {@code sprint} additionally holds the sprint key for the same {@code walkTicks}, so the shot exercises the
+     * run states and clips instead of only the walk ones.
      */
-    private static final int[][] SHOTS = { { 2, 8, 70, 0 }, // third person, front
-        { 1, 8, 70, 0 }, // third person, back
-        { 2, 0, 110, 0 }, // third person, wide (fits a large model / background geometry)
-        { 2, 15, 40, 0 }, // third person, close-up
-        { 2, 8, 70, 20 }, // walking, still moving when the shot is taken
-        { 0, 0, 70, 0 } }; // first person (arm / held item)
+    private static final int[][] SHOTS = { { 2, 8, 70, 0, 0 }, // third person, front
+        { 1, 8, 70, 0, 0 }, // third person, back
+        { 2, 0, 110, 0, 0 }, // third person, wide (fits a large model / background geometry)
+        { 2, 15, 40, 0, 0 }, // third person, close-up
+        { 2, 8, 70, 20, 0 }, // walking, still moving when the shot is taken
+        { 2, 8, 70, 20, 1 }, // sprinting: forward + sprint held, so the run clip is what the shot proves
+        { 0, 0, 70, 0, 0 } }; // first person (arm / held item)
 
     /**
      * Safety net: a run that cannot reach the world or a model exits instead of hanging the Gradle task forever. It is
@@ -165,6 +193,10 @@ public final class ModelDebugCapture {
     private boolean earlyDone;
     private double[] earlyPose;
     private int[] earlyBoneCount;
+    /** Locomotion check (see the class javadoc): the walking and sprinting shot poses, and its summary fragment. */
+    private double[] walkPose;
+    private double[] sprintPose;
+    private String locomotionResult = "";
     /** Feature sweep (roulette / emote / settings): phase counter and its saved samples. */
     private int featureStep;
     private double[] featurePose;
@@ -429,7 +461,19 @@ public final class ModelDebugCapture {
 
     private void applyCamera(int[] shot) {
         boolean walking = shot[3] > 0;
+        boolean sprinting = shot[4] != 0;
+        // The sprint shot has to hold the real key, not set the flag: 1.7.10 derives isSprinting() from the held
+        // sprint key while moving forward (EntityPlayerSP#onLivingUpdate), and that flag is what the animation reads -
+        // YSMU's legacy `run` state (AnimationRegister:151, onGround && isSprinting) and an OpenYSM pack's
+        // query.is_sprinting (EntityQueryBindings:142). A direct setSprinting() call would also be overwritten by the
+        // next onLivingUpdate, so the input state is both more faithful and the only durable route.
         KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), walking);
+        KeyBinding.setKeyBindState(mc.gameSettings.keyBindSprint.getKeyCode(), sprinting);
+        if (sprinting) {
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][LOCO] sprint shot: holding forward+sprint (sprint key code {}); the animation reads EntityPlayer#isSprinting() via the run state (AnimationRegister:151) and query.is_sprinting (EntityQueryBindings:142), no setSprinting() call is made",
+                mc.gameSettings.keyBindSprint.getKeyCode());
+        }
         // Re-asserted per shot, not just once on world entry: F1 toggles hideGUI, and a harness run that happens to
         // catch a stray F1 should still produce HUD-free frames. pauseOnLostFocus likewise, in case the window is not
         // focused while the automation runs.
@@ -443,24 +487,99 @@ public final class ModelDebugCapture {
         shotWait = walking ? shot[3] + 2 : 3;
     }
 
+    /**
+     * Releases the two movement keys a shot may hold. Every path that stops moving - a finished shot, a finished model,
+     * the harness's own exit - goes through here, so a run can never leave the player walking or sprinting.
+     */
+    private void releaseMoveKeys() {
+        KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+        KeyBinding.setKeyBindState(mc.gameSettings.keyBindSprint.getKeyCode(), false);
+    }
+
     private void saveShot() {
         int[] shot = SHOTS[shotIndex];
-        KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+        // Log the locomotion evidence while the keys are still held: this is the state the shot's frame was drawn in.
+        logLocomotion();
+        releaseMoveKeys();
         mc.gameSettings.hideGUI = true;
         String name = "model" + modelIndex + "_shot" + shotIndex + "_tpv" + shot[0] + "_fov" + shot[2]
-            + (shot[3] > 0 ? "_walk" : "") + ".png";
+            + (shot[4] != 0 ? "_sprint" : (shot[3] > 0 ? "_walk" : "")) + ".png";
         try {
             ScreenShotHelper.saveScreenshot(outputDir, name, mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
             ysmu.LOG.info("[YSMU-DEBUG] screenshot {}", name);
         } catch (Throwable failure) {
             ysmu.LOG.error("[YSMU-DEBUG] screenshot failed", failure);
         }
+        captureLocomotionPose(shot);
         dumpState();
         shotIndex++;
         shotPhase = 0;
         ticks = 0;
         if (shotIndex >= SHOTS.length) {
             modelFinished();
+        }
+    }
+
+    /**
+     * One locomotion-evidence line per shot (see the class javadoc): the keys that were held, whether vanilla actually
+     * flagged the player as sprinting, the horizontal speed and what the animation has mounted. The speed is
+     * position-delta based, times 20 for blocks per second, the same quantity as {@code query.ground_speed}
+     * ({@code EntityQueryBindings#groundSpeed:359-362}): 1.7.10's local-player {@code motionX}/{@code motionZ} are not
+     * the per-tick step (MovementSpeedMatcher:352-360). The clip and state fields describe the last frame the body was
+     * drawn, so the first-person shot (which does not draw the body) reports that frame rather than "nothing".
+     */
+    private void logLocomotion() {
+        EntityPlayer player = mc.thePlayer;
+        if (player == null) {
+            ysmu.LOG.info("[YSMU-DEBUG][LOCO] shot={} player=<null>", shotIndex);
+            return;
+        }
+        double dx = player.posX - player.prevPosX;
+        double dz = player.posZ - player.prevPosZ;
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][LOCO] shot={} forwardHeld={} sprintHeld={} isSprinting={} hSpeed={} mainState={} clip={}",
+            shotIndex,
+            mc.gameSettings.keyBindForward.getIsKeyPressed(),
+            mc.gameSettings.keyBindSprint.getIsKeyPressed(),
+            player.isSprinting(),
+            String.format(Locale.ROOT, "%.3f", Math.sqrt(dx * dx + dz * dz) * 20.0d),
+            AnimationManager.getInstance()
+                .mainStateOf(player),
+            activeClipName());
+    }
+
+    /**
+     * The clip the engine has mounted on the local player's body, or a marker when it cannot be read. The body is the
+     * shared animatable the world renderer draws ({@code CustomPlayerRenderer#getCustomPlayerEntity()}), and the engine
+     * keys its animation data by the rendered entity id ({@code IGeoRenderer#getUniqueID} falls back to
+     * {@code Entity#hashCode()}, which is the entity id). {@code Animation#animationName} is the name the parser stored
+     * ({@code JsonAnimationUtils:363}); a missing answer is reported instead of guessed.
+     */
+    private String activeClipName() {
+        if (mc.thePlayer == null) {
+            return "<no-player>";
+        }
+        if (ClientProxy.getInstance() == null) {
+            return "<no-renderer>";
+        }
+        try {
+            CustomPlayerEntity animatable = ClientProxy.getInstance()
+                .getCustomPlayerEntity();
+            if (animatable == null) {
+                return "<no-animatable>";
+            }
+            AnimationData data = animatable.getFactory()
+                .getOrCreateAnimationData(mc.thePlayer.getEntityId());
+            AnimationController<?> controller = data.getAnimationControllers()
+                .get(ControllerUtils.MAIN_CONTROLLER);
+            Animation playing = controller == null ? null : controller.getCurrentAnimation();
+            if (playing == null) {
+                return "<none>";
+            }
+            return playing.animationName == null ? "<unnamed>" : playing.animationName;
+        } catch (Throwable failure) {
+            return "<unreadable:" + failure.getClass()
+                .getSimpleName() + ">";
         }
     }
 
@@ -473,6 +592,9 @@ public final class ModelDebugCapture {
         earlyPhase = 0;
         earlyDone = false;
         earlyPose = null;
+        walkPose = null;
+        sprintPose = null;
+        locomotionResult = "";
         featureStep = 0;
         featurePose = null;
         wheelAnimation = null;
@@ -534,7 +656,7 @@ public final class ModelDebugCapture {
     }
 
     private void modelFinished() {
-        KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+        releaseMoveKeys();
         mc.gameSettings.thirdPersonView = 2;
         mc.gameSettings.fovSetting = 70f;
         if (models.length == 0) {
@@ -548,7 +670,9 @@ public final class ModelDebugCapture {
             featurePose = null;
             wheelAnimation = null;
             wheelSlot = -1;
-            featureResult = "";
+            // The locomotion comparison was sampled during the shots, before this point: carry its summary fragment
+            // into the feature summary that finishFeatures logs.
+            featureResult = locomotionResult;
             state = 5;
             ticks = 0;
             return;
@@ -602,7 +726,7 @@ public final class ModelDebugCapture {
             case 2:
                 if (ticks >= 2) {
                     double[] later = capturePose(model);
-                    KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.getKeyCode(), false);
+                    releaseMoveKeys();
                     logPose("early-walk", model);
                     int moved = countChanged(earlyPose, later, 0.005d);
                     ysmu.LOG.info(
@@ -1200,6 +1324,36 @@ public final class ModelDebugCapture {
     }
 
     /**
+     * Samples and compares the walking and sprinting poses (see the class javadoc), using the same pose helpers as the
+     * early checks. Log-only: a model whose {@code run} clip is missing falls back to its walk clip, and the sprint
+     * shot's {@code [YSMU-DEBUG][LOCO] clip=} field is what tells those apart; this line adds "the pose actually moved
+     * between the two shots", ideally next to a {@code clip} that changed from a walk to a run clip.
+     */
+    private void captureLocomotionPose(int[] shot) {
+        double[] pose = capturePose(geometry());
+        if (pose.length == 0) {
+            // No geometry to sample; the LOCO line already reports the clip as unreadable, so stay quiet here.
+            return;
+        }
+        if (shot[4] != 0) {
+            sprintPose = pose;
+            if (walkPose == null) {
+                ysmu.LOG.info("[YSMU-DEBUG][FEATURE] locomotion walkVsSprint skipped: no walking pose sample");
+                return;
+            }
+            int moved = countChanged(walkPose, sprintPose, 0.005d);
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][FEATURE] locomotion walkVsSprint bonesMoved={} (0 = the pose did not change between the walk and sprint shots; check the sprint shot's [YSMU-DEBUG][LOCO] clip= to tell a run clip from a walk fallback)",
+                moved);
+            locomotionResult = " locomotionWalkVsSprint=" + moved;
+            return;
+        }
+        if (shot[3] > 0) {
+            walkPose = pose;
+        }
+    }
+
+    /**
      * Logs how far the current pose is from the geometry's bind pose. A pose that is still the bind pose on every bone
      * is the A-pose symptom; a model whose idle clip happens to equal its bind pose would show the same numbers, which
      * is why this is a log line next to the screenshot rather than a hard failure.
@@ -1353,6 +1507,8 @@ public final class ModelDebugCapture {
     }
 
     private void exitGame() {
+        // A timeout or failure can happen mid-shot, so give the input keys back before the process ends.
+        releaseMoveKeys();
         try {
             FMLCommonHandler.instance()
                 .exitJava(0, false);

@@ -3,9 +3,12 @@ package com.fox.ysmu.client.animation;
 import java.util.function.BiPredicate;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ResourceLocation;
 
+import com.fox.ysmu.client.compat.touhoulittlemaid.TlmCompat;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.compat.EtFuturumCompat;
 import com.fox.ysmu.client.animation.molang.BonePivotAbsFunction;
@@ -182,7 +185,8 @@ public class AnimationRegister {
      * The pack-facing names this task adds to the keyframe path's registry: upstream's
      * {@code ysm.first_person_mod_hide} (A-3), the "1.7.10 has a value source, it was just never wired up" group from
      * {@code .agent/audit-pack-facing-surface.md} §3 (A-5), the {@code query.any/all_animations_finished} pair (A-6),
-     * and the names of mods that have no 1.7.10 counterpart (A-6, {@link #registerThirdPartyCompatPlaceholders}).
+     * and the third-party mod names that are registered whether or not the mod is installed (A-6,
+     * {@link #registerThirdPartyCompatPlaceholders}).
      *
      * <p>Why registering matters even for the names whose value is a constant: an unknown <em>variable</em> is not an
      * error in this legacy parser - {@code MolangParser#getVariable} creates it as a silent 0 - so a missing name and a
@@ -287,15 +291,15 @@ public class AnimationRegister {
         parser.register(new LazyVariable("query.any_animation_finished", MolangUtils.FALSE));
         parser.register(new LazyVariable("query.all_animations_finished", MolangUtils.FALSE));
 
-        // ---- A-6: the names of mods that have no 1.7.10 counterpart ---------------------------------------
+        // ---- A-6: the optional third-party mod names ---------------------------------------
         registerThirdPartyCompatPlaceholders(parser);
     }
 
     /**
-     * A-6: the 40 names belonging to mods that are not installed (24 {@code ctrl.*} and 16 {@code tlm.*}), registered
-     * as the constants upstream registers when the mod is absent.
+     * A-6: the 40 names belonging to optional mods (24 {@code ctrl.*} and 16 {@code tlm.*}), registered as the
+     * constants upstream registers when the mod is absent.
      *
-     * <p><b>Why register names for mods that cannot be installed here.</b> Upstream does it for exactly that reason:
+     * <p><b>Why register names for mods that may not be installed.</b> Upstream does it for exactly that reason:
      * {@code CarryOnCompat#addEmptyBinding} carries the comment "没有安装此模组时，这些 molang 应该存在，否则会报错"
      * ({@code client/compat/carryon/CarryOnCompat.java:49-54}) and {@code TLMBinding}'s class comment says the same
      * for the maid mod's names ("为了兼容女仆新增的 molang，即使女仆模组未安装，也应该存在，否则动画会报错",
@@ -312,8 +316,12 @@ public class AnimationRegister {
      * literals, and the string defaults are {@code StringUtils.EMPTY}, whose pooled id is
      * {@link MolangStringPool#EMPTY_ID} - the same 0 a string comparison against {@code ''} lands on.
      *
-     * <p>No value source is invented for any of them: a pack reading one gets upstream's "the mod is not there"
-     * answer, and there is nothing in 1.7.10 that could make it anything else.
+     * <p>These are the <em>fallback</em> values, not the live ones. With the corresponding mod installed, its adapter
+     * rebinds the names it owns in this same parser table: TacZ on the line above, and the 1.7.10 Touhou Little Maid
+     * through {@code TlmCompat#addBinding} -> {@code TlmBindingInner} (the 16 {@code tlm.*} names then read the maid
+     * of the current frame instead of these constants; same shape as the TACZ sentence in the body). For a mod that
+     * has no 1.7.10 counterpart, and for any of these names read on a frame whose entity does not qualify, a pack
+     * gets upstream's "the mod is not there" answer - which is exactly these registered defaults.
      */
     private static void registerThirdPartyCompatPlaceholders(MolangParser parser) {
         // ---- TACZ (TACZCompat.java:42-50, all livingEntityVar) ----
@@ -378,6 +386,10 @@ public class AnimationRegister {
         parser.register(new LazyVariable("tlm.is_statue", MolangUtils.FALSE));
         parser.register(new LazyVariable("tlm.is_garage_kit", MolangUtils.FALSE));
         parser.register(new LazyVariable("tlm.show_item", MolangStringPool.EMPTY_ID));
+        // With the 1.7.10 Touhou Little Maid installed, the live values replace these defaults in the same parser
+        // table (upstream's TlmClientCompat#addBinding -> TLMBindingInner#addInnerBinding shape). Without the mod
+        // nothing replaces them and the constants above are the whole answer.
+        TlmCompat.addBinding(parser);
     }
 
     /**
@@ -620,6 +632,13 @@ public class AnimationRegister {
         parser.register(new LazyVariable("ysm.is_riptide", MolangUtils.FALSE));
         parser.register(new LazyVariable("ysm.on_ladder", MolangUtils.FALSE));
         parser.register(new LazyVariable("ysm.is_fishing", MolangUtils.FALSE));
+        // Upstream: livingEntityVar("is_fishing", YSMBinding::isFishing) (YSMBinding.java:141), body at :314-321 -
+        // a player answers `fishing != null`, anything else asks the maid compat (TlmClientCompat.isMaidFishing).
+        // This used to be a player closure in EntityQueryBindings#apply, which only the player frame reaches: a maid
+        // frame kept whatever the last player draw had left in the shared table (or this FALSE), so a fishing maid
+        // read the wrong entity's state. The frame-context supplier is the port's livingEntityVar - the maid frame's
+        // subject is published by AnimationManager#predicateEntityLocomotion before her keyframes are sampled.
+        parser.setValue("ysm.is_fishing", AnimationRegister::isFishing);
         parser.register(new LazyVariable("ysm.swinging", MolangUtils.FALSE));
         parser.register(new LazyVariable("ysm.swing_time", 0));
         parser.register(new LazyVariable("ysm.swinging_arm", 0));
@@ -857,11 +876,13 @@ public class AnimationRegister {
                 : getEyeCloseState(animationEvent, player));
         // 同 query.is_sneaking：isPlayerOnGround 的远程外推是精化，通用值在 EntityQueryBindings 里。
         parser.setValue("ysm.is_sneak", () -> MolangUtils.booleanToFloat(isPlayerOnGround(player) && player.isSneaking()));
-        // ysm.is_sleep / on_ladder / is_fishing / swinging / swing_time / swinging_arm /
-        // mainhand_charged_crossbow / offhand_charged_crossbow / armor_value / hurt_time / food_level are bound by
-        // EntityQueryBindings now, each with upstream's guard (livingEntityVar / playerVar / clientPlayerVar):
-        // a boat answers false/0 for them instead of the local player's value, and a living non-player answers the
-        // living-level ones (food_level is 20, matching YSMBinding.java:342-350).
+        // ysm.is_sleep / on_ladder / swinging / swing_time / swinging_arm / mainhand_charged_crossbow /
+        // offhand_charged_crossbow / armor_value / hurt_time / food_level are bound by EntityQueryBindings now, each
+        // with upstream's guard (livingEntityVar / playerVar / clientPlayerVar): a boat answers false/0 for them
+        // instead of the local player's value, and a living non-player answers the living-level ones (food_level is
+        // 20, matching YSMBinding.java:342-350). is_fishing is not among them: its maid branch needs the frame entity
+        // (upstream's livingEntityVar shape), so it is bound once at registration against MolangFrameContext - see
+        // registerYsmVariables.
         // food_level and query.player_level are the two names that also take the *remote* path: 1.7.10 sends food and
         // experience only to the player themself, so packet 11 carries both to observers and EntityQueryBindings reads
         // RemotePlayerMotionStates for a remote player (the local player is unchanged). The registered defaults above
@@ -914,6 +935,31 @@ public class AnimationRegister {
             return MolangUtils.FALSE;
         }
         return MolangUtils.booleanToFloat(controller.hasCurrentAnimationFinished());
+    }
+
+    /**
+     * Upstream {@code livingEntityVar("is_fishing", YSMBinding::isFishing)} ({@code YSMBinding.java:141}); its body
+     * ({@code :314-321}) has a player answer whether a fish hook is out, and every other living entity ask the maid
+     * compat ({@code TlmClientCompat.isMaidFishing}).
+     *
+     * <p>Why this is a frame-context supplier rather than one of {@code EntityQueryBindings}' entity-parameterised
+     * names: that table has one supplier per name serving every frame, so the player/maid branch has to read the
+     * frame subject when the expression is evaluated - which is also upstream's shape ({@code ctx.entity()} is the
+     * entity being evaluated). {@link MolangFrameContext} is published for a player frame by {@link #setParserValue}
+     * and for a non-player frame by {@code AnimationManager#predicateEntityLocomotion}, so a maid's own animation
+     * files answer her fishing-hook state and a boat/arrow frame answers {@code false}. The player closure this
+     * replaced lived in {@code EntityQueryBindings#apply}, which only a player frame reaches: a maid frame kept the
+     * last player draw's supplier (or the registered FALSE).
+     */
+    private static double isFishing() {
+        Entity entity = MolangFrameContext.getFrameEntity();
+        if (entity instanceof EntityPlayer player) {
+            return MolangUtils.booleanToFloat(player.fishEntity != null);
+        }
+        if (entity instanceof EntityLivingBase living) {
+            return MolangUtils.booleanToFloat(TlmCompat.isMaidFishing(living));
+        }
+        return MolangUtils.FALSE;
     }
 
     // hasCape / getEquipmentCount / getMaxUseDuration / getSlotValue moved to EntityQueryBindings together with the

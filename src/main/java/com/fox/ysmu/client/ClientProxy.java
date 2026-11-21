@@ -2,6 +2,7 @@ package com.fox.ysmu.client;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.fox.ysmu.client.compat.touhoulittlemaid.TlmCompat;
 import com.fox.ysmu.client.debug.ModelDebugCapture;
 import com.fox.ysmu.client.entity.CustomFirstPersonArmEntity;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
@@ -46,6 +47,9 @@ public class ClientProxy extends CommonProxy {
         // Optional-mod adapters that contribute Molang bindings must be initialized before registerVariables below:
         // the TacZ adapter replaces the nine ctrl.tac_* defaults with live values (upstream's CtrlBinding shape).
         com.fox.ysmu.client.compat.tacz.TACZCompat.init();
+        // Same ordering reason as TacZ: must run before registerVariables below (its live tlm.* values replace the
+        // defaults registered there). The facade loads no TLM class; see TlmCompat.
+        TlmCompat.init();
         com.fox.ysmu.client.compat.AngelicaPbrCompat.init();
         // 必须先注册 Molang 钩子：GeckoLibCache.getInstance() 首次调用即构造
         // MolangParser（new MolangParser() 内执行 doCoreRemaps），ysm.*/ctrl.*/query.*
