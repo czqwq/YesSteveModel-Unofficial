@@ -153,7 +153,7 @@ public final class ParityGeometry {
                     + "; " + NativeGeometryApi.readerAvailability());
             return;
         }
-        warmUpNative(javaModels.get(0).bytes);
+        warmUpNative(repo);
         List<NativeGeometryModel> nativeModels = new ArrayList<>(javaModels.size());
         long nativeBakeNanos = 0L;
         int declined = 0;
@@ -559,20 +559,48 @@ public final class ParityGeometry {
     private static void warmUpJava(Path repo) {
         try {
             List<Path> files = Corpus.geometryFiles(repo);
-            if (!files.isEmpty()) {
-                javaBake(Files.readAllBytes(files.get(0)));
+            if (files.isEmpty()) {
+                return;
+            }
+            // Warm up on the largest documents (they exercise every Jackson/GeoBuilder code path the
+            // timed pass will use) and twice each, so the timed pass runs on C2-compiled code.
+            files.sort((a, b) -> {
+                try {
+                    return Long.compare(Files.size(b), Files.size(a));
+                } catch (IOException ignored) {
+                    return 0;
+                }
+            });
+            for (int i = 0; i < Math.min(2, files.size()); i++) {
+                byte[] bytes = Files.readAllBytes(files.get(i));
+                javaBake(bytes);
+                javaBake(bytes);
             }
         } catch (Throwable ignored) {
             // Warm-up only; a real failure will be reported by the timed pass.
         }
     }
 
-    private static void warmUpNative(byte[] bytes) {
+    private static void warmUpNative(Path repo) {
         try {
-            long handle = NativeGeometry.bake(bytes, 0);
-            if (handle != 0L) {
-                NativeGeometry.blob(handle);
-                NativeGeometry.release(handle);
+            List<Path> files = Corpus.geometryFiles(repo);
+            if (files.isEmpty()) {
+                return;
+            }
+            files.sort((a, b) -> {
+                try {
+                    return Long.compare(Files.size(b), Files.size(a));
+                } catch (IOException ignored) {
+                    return 0;
+                }
+            });
+            for (int i = 0; i < Math.min(2, files.size()); i++) {
+                byte[] bytes = Files.readAllBytes(files.get(i));
+                long handle = NativeGeometry.bake(bytes, 0);
+                if (handle != 0L) {
+                    NativeGeometry.blob(handle);
+                    NativeGeometry.release(handle);
+                }
             }
         } catch (Throwable ignored) {
             // Warm-up only.
