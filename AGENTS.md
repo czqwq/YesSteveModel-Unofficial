@@ -133,7 +133,7 @@ Rust 原生加速层
 2. 不新增"上游没有的语义"。模块只做 CPU 计算：不碰 GL、不碰线协议、不决定渲染状态；zstd 的 YSM 帧改写留在 Java；几何/渲染语义以本仓 Java 路径为唯一基准（parity harness 断言）。
 3. ABI 变化必须同时 bump `rust/ysmu_native/src/lib.rs` 的 `ABI_VERSION` 与 `NativeLoader.ABI_VERSION`。加载器拒绝版本不一致的库并回退；新增/修改 JNI 签名或 Java↔Rust 内存布局都属于 ABI 变化。
 
-构建/分发：`native/<platform>/` 下预分发各平台 cdylib，`processResources` 把它们打成 `assets/ysmu/native/<platform>/`，所以 CI 与普通 `gradlew build` 不要求 Rust，构建结果只取决于仓库里的二进制。本机重编：`-PysmuNative=build`（要求 cargo，产物覆盖本平台预分发文件，逻辑在 `gradle/native.gradle`；不带该开关时 `cargoBuild` 会明确报错）。`cargoTest` 跑 Rust 单测。Windows 用静态 CRT（`rust/.cargo/config.toml`），产物只依赖系统 DLL；没有对应平台产物时自动回退 Java。
+构建/分发：`native/<platform>/` 下预分发 windows/linux/macos 的 `x86_64` 与 `aarch64` 六个 cdylib，`processResources` 把它们打成 `assets/ysmu/native/<platform>/`，所以 CI 与普通 `gradlew build` 不要求 Rust，构建结果只取决于仓库里的二进制。本机重编：`-PysmuNative=build`（要求 cargo，产物覆盖本平台预分发文件，逻辑在 `gradle/native.gradle`；不带该开关时 `cargoBuild` 会明确报错）。`cargoTest` 跑 Rust 单测。Windows 用静态 CRT（`rust/.cargo/config.toml`），产物只依赖系统 DLL；没有对应平台产物时自动回退 Java。
 
 验证：`rust/parity` 是 headless parity + benchmark harness（`.\gradlew.bat nativeParity`，或 `.\rust\parity\run.ps1`），逐模型对比 Java 与 Rust 的几何/逐帧顶点输出、逐格式对比 zstd/PNG，并打印耗时对比。新增 native 模块或改动其行为时，先让 harness PASS。
 

@@ -10,3 +10,7 @@
 # to Java, so there is no heap ownership crossing between the two CRTs.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# 同一约定适用于 arm64 Windows：静态 CRT，只依赖系统 DLL。
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

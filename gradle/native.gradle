@@ -54,6 +54,7 @@ def cargoBuild = tasks.register('cargoBuild') {
 tasks.named('processResources') {
     from('native') {
         into 'assets/ysmu/native'
+        exclude '**/*.md'
         // 本机重编时用 cargo 产物覆盖本平台预分发文件，避免 jar 里同路径出现两份。
         if (buildNative) {
             exclude "${platform}/**"
