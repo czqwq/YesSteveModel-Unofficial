@@ -62,7 +62,8 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
  * Developer-only auto-capture harness: launches a flat creative world, selects one or more models, takes third-person
- * and first-person screenshots and dumps the model/animation/bone state, then exits the game.
+ * and first-person screenshots and dumps the model/animation/bone state, then shuts the client down through the vanilla
+ * save-and-quit path ({@link Minecraft#shutdown()}) so the integrated server stops before the process exits.
  *
  * <p><b>It is inert unless an environment variable is set</b>, so a normal launch - dev or shipped - does nothing. It
  * exists because the two things this port keeps getting wrong are visual (a body part facing the wrong way, a texture
@@ -154,8 +155,9 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * $env:YSMU_DEBUG_BONES='beijing'
  * .\gradlew.bat runClient25
  * }</pre>
- * The harness exits the game itself when it is done, so the Gradle task returns on its own. The variables only affect
- * that process; run {@code Remove-Item Env:YSMU_DEBUG_CAPTURE} (or open a new shell) for a normal launch.
+ * The harness shuts the game down itself when it is done, so the Gradle task returns on its own; it goes through
+ * vanilla's save-and-quit path so the integrated server saves and stops first. The variables only affect that process;
+ * run {@code Remove-Item Env:YSMU_DEBUG_CAPTURE} (or open a new shell) for a normal launch.
  */
 public final class ModelDebugCapture {
 
@@ -2117,6 +2119,17 @@ public final class ModelDebugCapture {
         file.delete();
     }
 
+    /**
+     * Ends the capture and shuts the client down the way vanilla "save and quit" does. The old path called
+     * {@link FMLCommonHandler#exitJava(int, boolean)} from the client tick, which let the JVM tear down while the
+     * integrated server thread was still inside {@code MinecraftServer#run} - the server thread then read the
+     * already-emptied {@code worldServers} array and wrote a spurious "Exception in server tick loop" crash report
+     * after every capture. {@link Minecraft#shutdown()} only clears the game-loop flag; the loop's own finally block
+     * calls {@code Minecraft#shutdownMinecraftApplet()}, which unloads the world, asks the integrated server to stop
+     * and waits for it to finish ({@code Minecraft#loadWorld(null)}), destroys the display and calls
+     * {@code System.exit(0)} - so the Gradle task still returns 0, but without the shutdown race. The forced exit stays
+     * as a watchdog in case that path cannot complete (a hung display teardown must not hang the Gradle task forever).
+     */
     private void exitGame() {
         // A timeout or failure can happen mid-shot, so give the input keys back before the process ends.
         releaseMoveKeys();
@@ -2127,10 +2140,30 @@ public final class ModelDebugCapture {
             ysmu.LOG.warn("[YSMU-DEBUG][TIME] could not flush the timing report: {}", failure.toString());
         }
         try {
-            FMLCommonHandler.instance()
-                .exitJava(0, false);
+            ysmu.LOG.info("[YSMU-DEBUG] requesting the vanilla save-and-quit shutdown (world unload + integrated server stop)");
+            mc.shutdown();
+            Thread watchdog = new Thread(() -> {
+                try {
+                    Thread.sleep(15000L);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread()
+                        .interrupt();
+                    return;
+                }
+                ysmu.LOG.warn("[YSMU-DEBUG] the graceful shutdown did not finish within 15 s, forcing the JVM exit");
+                FMLCommonHandler.instance()
+                    .exitJava(0, false);
+            }, "ysmu-debug-exit-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
         } catch (Throwable failure) {
-            ysmu.LOG.error("[YSMU-DEBUG] exitJava failed", failure);
+            ysmu.LOG.error("[YSMU-DEBUG] graceful shutdown failed, falling back to exitJava", failure);
+            try {
+                FMLCommonHandler.instance()
+                    .exitJava(0, false);
+            } catch (Throwable forcedFailure) {
+                ysmu.LOG.error("[YSMU-DEBUG] exitJava failed", forcedFailure);
+            }
         }
     }
 }
