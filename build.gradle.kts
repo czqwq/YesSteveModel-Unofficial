@@ -6,15 +6,8 @@ plugins {
     id("com.gtnewhorizons.gtnhconvention")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────────────
-// Rust acceleration layer (see .agent/phase78-rust-native-modules.md and com/fox/ysmu/nativebridge/).
-//
-// `cargoBuild` builds `rust/ysmu_native` as a cdylib for the host platform and places it under
-// assets/ysmu/native/<platform>/ inside the jar; NativeLoader extracts and loads it at runtime and falls
-// back to the Java implementations when the artifact is absent (unsupported platform, no cargo
-// toolchain, or a "skip natives" build). The task never fails a build because cargo is missing, so the
-// normal Gradle pipeline keeps working on machines and CI images that do not have Rust installed.
-// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// Rust acceleration layer (see .agent/phase78-rust-native-modules.md): cargoBuild stages the host cdylib into the jar,
+// and NativeLoader falls back to the Java path when it is absent, so a missing toolchain never fails a build.
 val rustLibraryName: String = run {
     val os = System.getProperty("os.name").lowercase()
     when {
@@ -52,8 +45,7 @@ val cargoBuild = tasks.register("cargoBuild") {
             include("Cargo.toml", "ysmu_native/Cargo.toml", "ysmu_native/src/**")
         })
     outputs.dir(rustResources)
-    // Re-run on every build: a cargo no-op build costs well under a second, and it guarantees a deleted
-    // toolchain cannot leave a stale library from an earlier build packaged into the jar.
+    // Always re-run: a cargo no-op is cheap, and a deleted toolchain must not leave a stale library in the jar.
     outputs.upToDateWhen { false }
     doLast {
         val resources = rustResources.get().asFile
@@ -65,9 +57,8 @@ val cargoBuild = tasks.register("cargoBuild") {
         val target = rustTargetDir.get().asFile
         val temp = layout.buildDirectory.dir("rust-tmp").get().asFile
         temp.mkdirs()
-        // Rust's cc-rs build scripts link the bundled zstd C sources through the MSVC toolchain, which uses
-        // TMP/TEMP for intermediate files. Pointing them at the build directory keeps the build independent
-        // of the user's temp directory ACLs (a read-only or locked %TEMP% otherwise fails with LNK1104).
+        // cc-rs links the bundled zstd C sources through MSVC, which uses TMP/TEMP for intermediates; keeping them in
+        // the build directory avoids temp-dir ACL failures (LNK1104).
         val process = ProcessBuilder("cargo", "build", "--release").directory(file("rust"))
             .inheritIO()
             .apply {
@@ -118,21 +109,15 @@ val cargoTest = tasks.register("cargoTest") {
     }
 }
 
-// The staged native artifact is added to the *processed* resources instead of a source directory:
-// `sourcesJar` iterates the source set's sources, so a generated srcDir would drag the binary into the
-// sources jar and make that task depend on `cargoBuild` (Gradle validates the implicit dependency).
-// Copying it in processResources keeps the jar layout and leaves sourcesJar alone. Nothing else needs to
-// change: jar/shadowJar/reobfJar all consume processResources' output.
+// The staged DLL is copied into processResources' output instead of a generated source dir: a srcDir would drag the
+// binary into sourcesJar and make that task depend on cargoBuild.
 tasks.named<ProcessResources>("processResources") {
     dependsOn(cargoBuild)
     from(rustResources)
 }
 
-// Headless parity + benchmark harness for the Rust layer (sources under rust/parity/src, see
-// rust/parity/README.md and AGENTS.md "Rust 原生加速层"). It is not a test task: it prints a PASS/FAIL
-// summary and a benchmark table, and rewrites rust/parity/out/report.md. It runs with the project's own
-// runtime classpath (no Gradle-cache scanning) and from the repository root, so NativeLoader extracts the
-// packaged DLL into config/ysmu/native exactly like in game.
+// Headless parity + benchmark harness for the Rust layer (rust/parity/src, see rust/parity/README.md): prints
+// PASS/FAIL plus a benchmark table and rewrites rust/parity/out/report.md, using the project's runtime classpath.
 val mainSourceSet = extensions.getByType(SourceSetContainer::class.java).getByName("main")
 val parityClasses = layout.buildDirectory.dir("parity-classes")
 val compileParity = tasks.register<JavaCompile>("compileParity") {
@@ -150,7 +135,6 @@ tasks.register<JavaExec>("nativeParity") {
     classpath = files(parityClasses, mainSourceSet.output, mainSourceSet.runtimeClasspath)
     mainClass.set("parity.Main")
     workingDir = projectDir
-    // Pass-through for the harness' own switches, e.g. `-PparityArgs="--modules=zstd,png"` or
-    // `-PparityArgs="--direct"`.
+    // Pass-through switches for the harness, e.g. -PparityArgs="--modules=zstd,png" or -PparityArgs="--direct".
     (project.findProperty("parityArgs") as String?)?.let { args = it.split(" ") }
 }
