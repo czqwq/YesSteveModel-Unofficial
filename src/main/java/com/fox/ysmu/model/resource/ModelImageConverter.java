@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import javax.imageio.ImageIO;
 
+import com.fox.ysmu.nativebridge.NativeImages;
 import com.fox.ysmu.ysmu;
 
 import rip.ysm.imagestream.avif.AvifDecoder;
@@ -35,6 +36,13 @@ public final class ModelImageConverter {
 
     /** Format id used by the model formats: 1=BMP, 2=PNG, 3=JPEG, 4=WEBP, 5=AVIF. */
     public static final int FORMAT_PNG = 2;
+
+    /**
+     * Deflate effort the Rust PNG encoder is asked for. The normalised image only has to decode to the same pixels,
+     * not match {@code ImageIO.write}'s bytes, so a middle-of-the-road level keeps the payload size in the same
+     * range; PNG inputs are passed through untouched and never reach the encoder.
+     */
+    private static final int PNG_DEFLATE_LEVEL = 6;
 
     private static final Set<Integer> WARNED_FORMATS = Collections
         .newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
@@ -117,12 +125,47 @@ public final class ModelImageConverter {
     }
 
     private static byte[] encodePng(BufferedImage image) {
+        byte[] nativePng = encodePngNative(image);
+        if (nativePng != null) {
+            return nativePng;
+        }
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             ImageIO.write(image, "PNG", out);
             return out.toByteArray();
         } catch (Throwable e) {
             // Same reason as decode: keep the original bytes rather than fail the model.
             warnOnce(FORMAT_PNG, "PNG re-encoding failed: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Re-encodes {@code image} through the Rust image module as an RGBA8 PNG, or returns {@code null} to keep the
+     * {@link ImageIO#write} fallback. PNG inputs never reach this method (they pass through untouched), so only the
+     * BMP/JPEG/WebP/AVIF-to-PNG normalisation can take the native path.
+     * <p>
+     * {@code getRGB} is exactly the 8-bit non-premultiplied pixel {@code ImageIO.write} would encode, and the native
+     * encoder is lossless, so the normalised PNG decodes back to the same pixels. It always writes RGBA8 where
+     * {@code ImageIO.write} may pick a smaller colour type, but nothing downstream looks at the bytes of a converted
+     * image - it is decoded again.
+     * <p>
+     * Images whose colour model is not sRGB (for example a grayscale JPEG decoded as {@code TYPE_BYTE_GRAY}) are left
+     * to ImageIO: there {@code getRGB} would apply a colour conversion while {@code ImageIO.write} keeps the raw
+     * samples, so the native path would change the normalised pixels.
+     */
+    private static byte[] encodePngNative(BufferedImage image) {
+        try {
+            if (!image.getColorModel()
+                .getColorSpace()
+                .isCS_sRGB()) {
+                return null;
+            }
+            int width = image.getWidth();
+            int height = image.getHeight();
+            int[] argb = image.getRGB(0, 0, width, height, null, 0, width);
+            return NativeImages.encodePng(width, height, argb, PNG_DEFLATE_LEVEL);
+        } catch (Throwable e) {
+            // "This image cannot be converted here": ImageIO.write below owns the conversion-failure reporting.
             return null;
         }
     }

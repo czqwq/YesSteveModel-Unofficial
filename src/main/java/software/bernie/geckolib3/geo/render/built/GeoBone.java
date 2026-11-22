@@ -51,6 +51,19 @@ public class GeoBone implements IBone, Serializable {
     public transient Object extraData;
 
     /**
+     * YSMU: index of this bone in the native bake's depth-first order, or {@code -1} when this bone was
+     * built by the Java {@code GeoBuilder} path (which never writes it).
+     * <p>
+     * The native render fast path ({@code IGeoRenderer} via {@code NativeGeometry}/the model's
+     * {@code nativeHandle}) addresses bones by this index, so it only ever reads a bone of a natively baked
+     * model, where {@code NativeGeometryReader} set it. It is a plain {@code int} field on purpose: default
+     * Java serialisation of the baked-geometry cache writes it as-is, and the cache is only ever read for
+     * models whose {@code GeoModel.nativeHandle} is {@code 0} (transient), so a deserialised stale value is
+     * unreachable from the native path.
+     */
+    public int nativeBoneIndex = -1;
+
+    /**
      * Per-bone render state: the port of upstream's packed transparency+glow attribute
      * ({@code com/elfmcys/ysm/geckolib3/model/AnimatedGeoBone.java:9-16, 201-211}), which lives in slot 13 of that
      * fork's 14-float-per-bone attribute array. The colour is a multiplier whose default is white, the transparency

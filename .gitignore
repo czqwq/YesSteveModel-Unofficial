@@ -29,6 +29,7 @@ servers.dat
 usercache.json
 whitelist.json
 /out/
+/rust/target*/
 *.iml
 *.ipr
 *.iws
@@ -42,3 +43,4 @@ addon.late.local.gradle
 addon.late.local.gradle.kts
 layout.json
 __pycache__/
+/rust/parity/out/

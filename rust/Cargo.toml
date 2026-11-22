@@ -1,0 +1,19 @@
+[workspace]
+members = ["ysmu_native"]
+resolver = "2"
+
+# The native layer is a shipped, performance-sensitive artifact: one codegen unit plus thin LTO gives
+# the vectoriser room to merge the per-vertex loops the renderer relies on, and keeps the cdylib small.
+# `panic = "unwind"` is deliberate: every JNI entry catches panics and converts them into a Java
+# exception, so an unexpected panic in a model's geometry must not abort the Minecraft process.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = false
+
+# Parity tests in `ysmu_native` parse the real built-in model packs; an unoptimised parse would make
+# them slow enough that people stop running them.
+[profile.test]
+opt-level = 2

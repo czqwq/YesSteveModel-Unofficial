@@ -119,6 +119,24 @@ src/main/resources/META-INF/ysmu_at.cfg：YSMU 触及的 Minecraft 内部访问�
 
 tools/convert_new_ysm.py 和 tools/convert.md：较新 OpenYSM 风格模型目录的转换工具与文档。
 
+rust/ysmu_native：Rust 原生加速层（JNI cdylib，见下方"Rust 原生加速层"）。rust/parity：离线 parity/benchmark harness。
+
+src/main/java/com/fox/ysmu/nativebridge：Rust 层的 Java facade（`NativeLoader` 加载/回退，四个模块各一个 facade），不含任何 Minecraft 渲染逻辑。
+
+Rust 原生加速层
+
+`rust/` 是本仓自己的 Rust 代码（不是 vendored 第三方）：`rust/ysmu_native` 编成 JNI cdylib，由 `com/fox/ysmu/nativebridge/NativeLoader` 从 jar 内 `assets/ysmu/native/<platform>/` 提取到 `config/ysmu/native/<platform>-abiN-<modversion>/` 后 `System.load`。它对应上游 dev-1.20 的 native 模块（`tmp/YesSteveModel-Native-dev/modules/**`）：上游把几何烘焙、逐帧顶点生成、zstd、图像解码放在 native，本移植先用 Java 重写，现在按同一形态把其中一部分改回 native。当前模块：`codec`（标准 zstd 帧；`YsmZstd` 只保留 wash/obfuscate 协议改写）、`image`（PNG 解码/编码）、`geometry`（几何 JSON 解析 + 烘焙，产出紧凑 blob，由 `NativeGeometryReader` 物化回 `GeoModel` 对象图，同一 handle 供渲染层使用）、`render`（逐帧把一组骨骼的顶点按 Tessellator 的 8-int 记录写进 `rawBuffer`，GL 状态与渲染类型仍全部由 Java 决定）。
+
+三条硬规则：
+
+1. native 层永不改变行为。每个 facade（`NativeCodecs`/`NativeImages`/`NativeGeometry`/`NativeDrawGroups`）在库不可用、拒绝该输入或抛异常时都回退到原 Java 实现；某模块一次调用抛异常只禁用该模块本会话（`NativeLoader.onModuleFailure`），不中断游戏。native 不可用时的行为必须与引入前逐字节一致。
+2. 不新增"上游没有的语义"。模块只做 CPU 计算：不碰 GL、不碰线协议、不决定渲染状态；zstd 的 YSM 帧改写留在 Java；几何/渲染语义以本仓 Java 路径为唯一基准（parity harness 断言）。
+3. ABI 变化必须同时 bump `rust/ysmu_native/src/lib.rs` 的 `ABI_VERSION` 与 `NativeLoader.ABI_VERSION`。加载器拒绝版本不一致的库并回退；新增/修改 JNI 签名或 Java↔Rust 内存布局都属于 ABI 变化。
+
+构建：Gradle 的 `cargoBuild` 任务（`processResources` 依赖它）在**有 cargo 时**为构建机平台构建 cdylib 并把产物放进生成资源目录；没有 cargo 时只打一条 lifecycle 日志、jar 里就没有 native 产物（走回退）。所以 CI 与普通 `gradlew build` 不要求 Rust 工具链，`gradlew build` 永远不应该因 native 失败。`cargoTest` 跑 Rust 单测。Windows 用静态 CRT（`rust/.cargo/config.toml`），产物只依赖系统 DLL；其他平台需要各平台自行构建产物，否则自动回退 Java。
+
+验证：`rust/parity` 是 headless parity + benchmark harness（`.\gradlew.bat nativeParity`，或 `.\rust\parity\run.ps1`），逐模型对比 Java 与 Rust 的几何/逐帧顶点输出、逐格式对比 zstd/PNG，并打印耗时对比。新增 native 模块或改动其行为时，先让 harness PASS。
+
 Minecraft 和 Forge 源
 RetroFuturaGradle 已将修补后的游戏源反编译到工作区。用文件工具就地阅读，而非打开 jar：
 

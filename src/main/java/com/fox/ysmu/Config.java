@@ -354,6 +354,21 @@ public class Config {
      */
     public static boolean ENABLE_BAKED_ANIMATION_CACHE = false;
 
+    /**
+     * 是否启用随 jar 分发的 Rust 原生加速层（{@code rust/ysmu_native}，经 JNI 载入，见
+     * {@code com.fox.ysmu.nativebridge.NativeLoader}）。
+     * <p>
+     * 覆盖四个模块：标准 zstd 帧编解码、PNG 解码/编码、几何 JSON 解析 + 烘焙、逐帧顶点发射。
+     * <b>默认开启</b>，因为每个模块都是"原生不可用/拒绝该输入就退回原 Java 实现"的逐调用回退，
+     * 关闭只影响速度不影响行为。产物缺失（非 Windows 平台、构建机没装 cargo、只分发无 native 的包）、
+     * 提取/加载失败、ABI 版本不一致、或某模块调用抛异常时，该模块在本会话内自动禁用并只留一条日志，
+     * 所以关闭这个开关等价于"本机没有可用 native"。
+     * <p>
+     * 该开关只影响 {@code com.fox.ysmu.nativebridge} 的四个 facade；模型内容、协议与渲染语义都由
+     * Java 侧决定（原生层只做 CPU 计算，不碰 GL，也不改协议）。
+     */
+    public static boolean ENABLE_RUST_NATIVE = true;
+
     // Model sync config
     /**
      * 动画控制脚本（{@code @player_ctrl_<槽位>.molang}）是否每帧真正执行。
@@ -553,6 +568,7 @@ public class Config {
         // Config#ENABLE_BAKED_GEOMETRY_CACHE).
         ENABLE_BAKED_GEOMETRY_CACHE = syncBoolean("EnableBakedGeometryCache", "model_cache", ENABLE_BAKED_GEOMETRY_CACHE, "Reuse baked geometry from the content-addressed disk cache instead of rebuilding it. DEFAULT OFF: measured slower than rebuilding in this port (build 0-7 ms vs cache read 1-52 ms plus 0-20 ms digest), so it only pays off for a future, more expensive bake.", load);
         ENABLE_BAKED_ANIMATION_CACHE = syncBoolean("EnableBakedAnimationCache", "model_cache", ENABLE_BAKED_ANIMATION_CACHE, "Reuse parsed animation sets from the content-addressed disk cache instead of rebuilding them. DEFAULT OFF: measured slower than rebuilding in this port (build 6-57 ms vs cache read 30-79 ms), so it only pays off for a future, more expensive bake.", load);
+        ENABLE_RUST_NATIVE = syncBoolean("EnableRustNative", "performance", ENABLE_RUST_NATIVE, "Use the Rust acceleration library shipped in this jar (zstd frames, PNG decode/encode, geometry bake, per-frame vertex emission). Each module falls back to its Java implementation when the library is missing for this platform, fails to load, has a different ABI, or fails at runtime, so turning this off only costs speed and changes no behaviour.", load);
         HIDE_OFFHAND_DEFOLIAGE_AXE = syncBoolean("HideOffhandDefoliageAxe", Configuration.CATEGORY_GENERAL, HIDE_OFFHAND_DEFOLIAGE_AXE, "Hide the Extra Utilities defoliage axe while held in the offhand (first-person hand, model in-hand layer, HUD selfie).", load);
         HIDDEN_OFFHAND_ITEMS = syncStringList("HiddenOffhandItems", Configuration.CATEGORY_GENERAL, HIDDEN_OFFHAND_ITEMS, "Offhand items (format modid:itemname) that are never rendered while held in the offhand (first-person hand, model in-hand layer, HUD selfie). Default: Extra Utilities defoliage axe.", load);
         // `AnimationTransitionTicks` (the reference branch's name) is deliberately absent: this port keeps

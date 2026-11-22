@@ -27,6 +27,21 @@ public class GeoModel implements Serializable {
     public ModelProperties properties;
 
     /**
+     * YSMU: the {@code com.fox.ysmu.nativebridge.NativeGeometry} handle whose bake produced this model, or
+     * {@code 0} when the model came from the Java {@code Converter}+{@code GeoBuilder} path (or from the
+     * baked-geometry cache).
+     * <p>
+     * {@code transient} on purpose: the client's baked-geometry cache writes this graph with default Java
+     * serialisation, and a deserialised entry has no native geometry behind it, so it must come back as
+     * {@code 0}. The renderer's native fast path gates on {@code nativeHandle != 0}; the Java path never
+     * reads the field. Ownership is explicit: the geometry release path
+     * ({@code ClientModelManager.releaseEngineCaches}) frees it per model, and
+     * {@code ClientModelManager.sweepOrphanNativeGeometry} sweeps handles of builds that never reached the
+     * engine cache while keeping the pinned default's.
+     */
+    public transient long nativeHandle = 0L;
+
+    /**
      * Lazily built locator-group index, keyed by group base name (see {@link #locatorGroup(String)}).
      * <p>
      * {@code transient} on purpose: this graph is written to the client's baked-geometry cache with default Java

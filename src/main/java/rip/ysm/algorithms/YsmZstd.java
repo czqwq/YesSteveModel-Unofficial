@@ -1,5 +1,7 @@
 package rip.ysm.algorithms;
 
+import com.fox.ysmu.nativebridge.NativeCodecs;
+
 import rip.ysm.zstd.ZstdUtil;
 
 import java.io.IOException;
@@ -25,11 +27,22 @@ public class YsmZstd {
      */
     public static byte[] decompress(byte[] rawData, long maxOutputBytes) throws IOException {
         byte[] data = YsmZstd.wash(rawData == null ? null : rawData.clone());
+        // The native layer is a standard-zstd codec; `wash` above has already turned the YSM frame into
+        // one, so it can take the same bytes. It declines (null) frames with no declared content size and
+        // when the layer is unavailable, which is exactly when the Java streaming path below is needed.
+        int nativeLimit = maxOutputBytes >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) Math.max(0, maxOutputBytes);
+        byte[] accelerated = NativeCodecs.zstdDecompress(data, nativeLimit);
+        if (accelerated != null) {
+            return accelerated;
+        }
         return ZstdUtil.decompress(data, maxOutputBytes);
     }
 
     public static byte[] compress(byte[] rawData) {
-        byte[] zstdData = ZstdUtil.compress(rawData,3);
+        byte[] zstdData = NativeCodecs.zstdCompress(rawData, 3);
+        if (zstdData == null) {
+            zstdData = ZstdUtil.compress(rawData, 3);
+        }
         return YsmZstd.obfuscate(zstdData);
     }
 

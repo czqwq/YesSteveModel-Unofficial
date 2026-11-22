@@ -3,6 +3,7 @@ package com.fox.ysmu;
 import com.fox.ysmu.command.YsmCommand;
 import com.fox.ysmu.compat.ServerUtilitiesCompat;
 import com.fox.ysmu.model.ServerModelManager;
+import com.fox.ysmu.nativebridge.NativeLoader;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncPlayerMotionState;
 import com.fox.ysmu.network.message.SyncStarModels;
@@ -20,6 +21,10 @@ public class CommonProxy {
     public void preInit(FMLPreInitializationEvent event) {
         Config.init(event.getSuggestedConfigurationFile());
         ServerModelManager.reloadPacks();
+        // Loaded after the config (it reads Config.ENABLE_RUST_NATIVE) and after reloadPacks (which creates
+        // config/ysmu, where the library is extracted to). Never throws: a missing/failed library is a
+        // logged fallback to the Java implementations, see NativeLoader.
+        NativeLoader.ensureLoaded();
         ysmu.LOG.info("I am ysmu at version " + Tags.VERSION);
         if (Loader.isModLoaded("geckolib")) {
             ysmu.LOG.warn("Old geckolib-*.jar found: this build embeds the engine itself, so DELETE that jar or the two copies will conflict.");

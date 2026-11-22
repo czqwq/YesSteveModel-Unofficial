@@ -1,0 +1,30 @@
+[package]
+name = "ysmu_native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "YSMU Rust acceleration layer: model geometry bake and renderer vertex emission, zstd and PNG codecs."
+
+[lib]
+name = "ysmu_native"
+# `cdylib` is what the mod jar ships. `rlib` exists so `cargo test` and the integration/parity tests
+# can call the pure-Rust functions directly instead of going through JNI.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# JNI glue only (no JVM-locating features: the JVM loads us, we never start one).
+jni = { version = "0.21", default-features = false }
+# Standard zstd frames. The YSM protocol's own frame mangling (YsmZstd.wash/obfuscate) stays in Java.
+zstd = "0.13"
+# PNG decoding/encoding for model textures.
+png = "0.17"
+# Geometry JSON parsing: the same schema the engine's Jackson POJOs describe.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Only used by Rust-side benchmarks/parity tests that read the built-in model pack corpus.
+tempfile = "3"
+
+[features]
+default = []

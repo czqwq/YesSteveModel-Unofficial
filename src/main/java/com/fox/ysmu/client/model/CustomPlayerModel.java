@@ -18,6 +18,7 @@ import com.fox.ysmu.client.ClientProxy;
 import com.fox.ysmu.client.entity.CustomPlayerEntity;
 import com.fox.ysmu.client.renderer.CustomPlayerRenderer;
 import com.fox.ysmu.Config;
+import com.fox.ysmu.nativebridge.NativeGeometry;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
 
@@ -349,6 +350,14 @@ public class CustomPlayerModel extends AnimatedGeoModel {
     public static void onGeoModelReleased(GeoModel model) {
         if (model == null) {
             return;
+        }
+        // The model may own native geometry (ClientModelManager#buildGeoNative). Release it first and clear
+        // the field so a second release (releaseEngineCaches and this hook both run for connection clears)
+        // is a no-op; NativeGeometry.release is idempotent as well.
+        long nativeHandle = model.nativeHandle;
+        if (nativeHandle != 0L) {
+            model.nativeHandle = 0L;
+            NativeGeometry.release(nativeHandle);
         }
         try {
             CustomPlayerRenderer renderer =

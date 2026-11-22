@@ -562,3 +562,26 @@ vendored GeckoLib 3 controller wrote the override onto the `Animation` instead.
 |---|---|
 | `core/controller/AnimationController.java` | Removed the three `animation.loop = ...` writes (`setAnimation`, `setAnimationPreservingTick`, phase75's re-apply in `refreshCurrentAnimation`). The played loop type is now per-controller state (`currentLoopType` + the two identities it is derived from, `currentLoopType()`), re-derived only when the current animation or the play request changes, and read by `processCurrentAnimation`'s PLAY_ONCE/HOLD/repeat decisions; `releaseAnimationResources` drops it with the animation it describes. This makes a shared definition read-only during playback, which is what lets the host share the built-in default model's clips by reference as a store fallback. Phase75's behaviour is strictly stronger, not regressed: nothing is written, and an explicit request still wins over the file's authored loop. Verified with `tmp/_probe/ImmutableLoopProbe.java` (definition keeps its authored loop, controller still plays PLAY_ONCE, Java-serialisation round trip unchanged) and `tmp/_probe/LoopCarryProbe.java` (both scenarios PASS). |
 | `core/builder/Animation.java` | Javadoc on `loop` only: parse-time authored value, never written by playback; records why it cannot be `final` here (the definition is Java-serialised by the host's `BakedAnimationCache`, which restores it without running the constructor) and points at the phase75 incident. No field, type or serialisation-stream change. |
+
+## Rust acceleration layer
+
+`rust/` is project-owned Rust source, not ported or vendored third-party code. `rust/ysmu_native` is written for this
+repository against the same module split as upstream's native layer
+(`tmp/YesSteveModel-Native-dev/modules/**`: geometry bake, per-frame vertex emission, zstd, PNG) and uses upstream's
+Java-side native contracts (`tmp/YesSteveModel-dev-1.20/src/main/java/com/elfmcys/ysm/natives/**`) as the shape
+reference. It is not a copy of upstream's C++ code: the behaviour it must reproduce is this port's Java
+implementation, and `rust/parity` asserts equality against it. See `.agent/phase78-rust-native-modules.md` and
+`AGENTS.md` "Rust 原生加速层".
+
+Dependencies (crates.io, statically linked into the shipped cdylib; `rust/Cargo.lock` pins the exact versions):
+
+| crate | licence | used for |
+|---|---|---|
+| `jni` 0.21 | MIT OR Apache-2.0 | JNI bindings |
+| `zstd` 0.13 / `zstd-safe` 7.4 / `zstd-sys` 2.1 (bundled zstd 1.5.7 C source) | Rust wrapper MIT OR BSD-3-Clause; zstd itself BSD-3-Clause OR GPL-2.0 (this project uses the BSD option) | standard zstd frames |
+| `png` 0.17 | MIT OR Apache-2.0 | model texture PNG decode/encode |
+| `serde` / `serde_json` 1 | MIT OR Apache-2.0 | geometry JSON parsing |
+
+Only the compiled artifact (`assets/ysmu/native/<platform>/` inside the jar, extracted at runtime) is distributed; no
+crate source is vendored into `src/`. The Windows DLL links the CRT statically (`rust/.cargo/config.toml`), so it
+depends only on Windows system DLLs.

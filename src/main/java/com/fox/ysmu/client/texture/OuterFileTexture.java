@@ -29,6 +29,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 
 import com.fox.ysmu.Config;
+import com.fox.ysmu.nativebridge.NativeImages;
 import com.fox.ysmu.ysmu;
 
 import software.bernie.geckolib3.geo.material.BakedFace;
@@ -549,6 +550,11 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
     /**
      * 预检并解码贴图。纯 CPU，没有 GL 调用，所以可以在 loader 线程上做（见 {@link #OuterFileTexture(BufferedImage)}）。
      * <p>
+     * PNG 先走 Rust image 模块（{@link NativeImages#decodePng}）：它已完成与 {@code ImageIO.read} +
+     * {@link #toIntArgb} 相同的归一化，并直接给出本类上传器要的 {@code TYPE_INT_ARGB} 像素数组（见
+     * {@link #decodeNative}）。native 拒绝的输入（非 PNG、数据损坏、超限，或库不可用）原样落回下面的
+     * ImageIO 路径，日志与异常都由那条路径给出，行为与 native 层引入前一致。
+     * <p>
      * 违规时抛 {@link IOException}：
      * {@code TextureManager.loadTexture} 会捕获它、记录 "Failed to load texture" 并改用全局 missing
      * texture，因此表现为可见的缺失贴图，而不是 OOM / 客户端崩溃——调用方
@@ -565,6 +571,11 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
                 data.length,
                 MAX_DATA_BYTES);
             throw new IOException("YSM texture data too large (" + data.length + " bytes)");
+        }
+
+        BufferedImage decodedPng = decodeNative(data);
+        if (decodedPng != null) {
+            return decodedPng;
         }
 
         try (ImageInputStream imageInput = ImageIO.createImageInputStream(new ByteArrayInputStream(data))) {
@@ -604,6 +615,43 @@ public class OuterFileTexture extends AbstractTexture implements MaterialSource 
                 reader.dispose();
             }
         }
+    }
+
+    /**
+     * 用 Rust image 模块把 PNG 解成上传器要的 {@link BufferedImage#TYPE_INT_ARGB}；不可用时返回 {@code null}
+     * 让调用方继续走 ImageIO。
+     * <p>
+     * 解码结果与 {@code ImageIO.read} + {@link #toIntArgb} 逐像素一致（M2 parity harness 在内置贴图语料上
+     * 验证过全部 colour type / bit depth），所以这里只剩一次数组拷贝：不逐像素 {@code setRGB}，上传器的
+     * {@code DataBufferInt} 直传路径（{@link #supportsDirectArgb}）照常命中。
+     * <p>
+     * native 返回 {@code null} 不是错误：调用方走 ImageIO 路径，由它照旧报告损坏贴图。超限尺寸同样在这里
+     * 静默拒绝，理由相同——"too large" 的日志与 {@link IOException} 属于 ImageIO 路径，行为不变。
+     */
+    @Nullable
+    private static BufferedImage decodeNative(byte[] data) {
+        int[] decoded = NativeImages.decodePng(data);
+        if (decoded == null || decoded.length < 3) {
+            return null;
+        }
+        int width = decoded[0];
+        int height = decoded[1];
+        if (width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
+            return null;
+        }
+        if (decoded.length != 2 + width * height) {
+            return null;
+        }
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        if (image.getRaster()
+            .getDataBuffer() instanceof DataBufferInt buffer
+            && buffer.getNumBanks() == 1
+            && buffer.getOffset() == 0) {
+            System.arraycopy(decoded, 2, buffer.getData(), 0, width * height);
+        } else {
+            image.setRGB(0, 0, width, height, decoded, 2, width);
+        }
+        return image;
     }
 
     /**

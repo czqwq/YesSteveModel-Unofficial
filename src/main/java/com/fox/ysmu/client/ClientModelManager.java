@@ -13,6 +13,7 @@ import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -75,6 +76,8 @@ import com.fox.ysmu.model.resource.RawYsmModelAdapter;
 import com.fox.ysmu.model.resource.YSMFolderDeserializer;
 import com.fox.ysmu.model.resource.YsmControllerResources;
 import com.fox.ysmu.model.resource.pojo.RawYsmModel;
+import com.fox.ysmu.nativebridge.NativeGeometry;
+import com.fox.ysmu.nativebridge.NativeGeometryReader;
 import com.fox.ysmu.network.NetworkHandler;
 import com.fox.ysmu.network.message.SyncModelFiles;
 import com.fox.ysmu.util.GsonHelper;
@@ -1317,6 +1320,7 @@ public class ClientModelManager {
             // geometry and tables are still there for the readers that do not ask the markers.
             ysmu.LOG.warn("Failed to publish model {}; it is quarantined", built.modelId, failure);
             rollbackPublishedGeometry(built.modelId);
+            discardBuiltGeometry(built.geometry);
             refuseGeometry(built.modelId);
         }
     }
@@ -1335,15 +1339,19 @@ public class ClientModelManager {
             synchronized (GEOMETRY_STATE_LOCK) {
                 GEOMETRY_REQUESTED.remove(built.modelId);
             }
+            // 这次构建不会被发布：原生 handle 随它一起丢弃（原生几何不进入引擎缓存，releaseEngineCaches 看不到）。
+            discardBuiltGeometry(built.geometry);
             return;
         }
         if (!PENDING_GEOMETRY.containsKey(built.modelId)) {
+            discardBuiltGeometry(built.geometry);
             return;
         }
         // A newer payload for this id may have replaced the bytes this build was made from - both sync channels can
         // carry the same model id - and publishing the older ones would install a model nobody asked for and, because
         // the id then looks ready, stop the newer payload from ever being built.
         if (PENDING_GEOMETRY.get(built.modelId) != built.data) {
+            discardBuiltGeometry(built.geometry);
             return;
         }
         // A model is drawable only when its *main* geometry is, because that is the file the player renderer looks
@@ -1353,6 +1361,7 @@ public class ClientModelManager {
             ysmu.LOG.warn(
                 "YSM client cannot draw model {}: its main geometry could not be built; it is quarantined",
                 built.modelId);
+            discardBuiltGeometry(built.geometry);
             markGeometryFailed(built.modelId, built.data);
             return;
         }
@@ -1488,13 +1497,34 @@ public class ClientModelManager {
      */
     private static void rollbackPublishedGeometry(ResourceLocation modelId) {
         for (ResourceLocation id : allIdsOf(modelId)) {
-            GeckoLibCache.getInstance()
+            GeoModel removed = GeckoLibCache.getInstance()
                 .getGeoModels()
                 .remove(id);
+            releaseNativeGeometry(removed);
             SCALE_INFO.remove(id);
             RENDER_LAYERS_FIRST.remove(id);
             EXTRA_INFO.remove(id);
             EXTRA_ANIMATION_NAME.remove(id);
+        }
+    }
+
+    /**
+     * Frees the native handles of a build that will never be published.
+     *
+     * <p>
+     * A dropped build (stale generation, replaced payload, missing main geometry) is not in the engine's cache,
+     * so {@code releaseEngineCaches} never sees it; without this the handle - and the render-ready geometry it
+     * owns - would live until the connection-clearing sweep, which is too late for a client that reloads often.
+     * Released entries are no-ops when called twice (see {@link #releaseNativeGeometry}).
+     */
+    private static void discardBuiltGeometry(@Nullable List<BuiltGeo> built) {
+        if (built == null) {
+            return;
+        }
+        for (BuiltGeo geo : built) {
+            if (geo != null) {
+                releaseNativeGeometry(geo.model);
+            }
         }
     }
 
@@ -2218,6 +2248,9 @@ public class ClientModelManager {
             built.add(buildGeo(ModelIdUtil.getSubModelId(id, entry.getKey()), entry.getValue()));
         }
         if (findMainGeometry(built, id) == null) {
+            // 这些几何不会发布，但原生 bake 已经给它们分配了 handle：先释放再拒掉，否则它们要等到
+            // 连接清理（sweepOrphanNativeGeometry）才归还。
+            discardBuiltGeometry(built);
             refuseGeometry(id);
             return;
         }
@@ -2317,6 +2350,12 @@ public class ClientModelManager {
     @Nullable
     private static BuiltGeo buildGeo(ResourceLocation id, byte[] data) {
         try {
+            // Native first: 解析 + 烘焙 + 物化一次完成（.agent/phase78-rust-native-modules.md M3）。
+            // null = native 不可用/拒绝该文档/结果不一致，逐调用退回下面的 Jackson+GeoBuilder 路径。
+            BuiltGeo nativeBuilt = buildGeoNative(id, data);
+            if (nativeBuilt != null) {
+                return nativeBuilt;
+            }
             // 直接从字节数组解析JSON，而不是尝试反序列化对象
             String modelJson = new String(data, StandardCharsets.UTF_8);
             RawGeoModel rawModel = Converter.fromJsonString(modelJson);
@@ -2325,6 +2364,99 @@ public class ClientModelManager {
             ysmu.LOG.warn("Failed to register geometry " + id, e);
             return null;
         }
+    }
+
+    /**
+     * Native half of {@link #buildGeo(ResourceLocation, byte[])}: bake the JSON, materialise the native
+     * blob into the engine object graph and keep the handle on the model for the renderer.
+     *
+     * <p>
+     * The native bake is only trusted when its own report and the materialised graph agree; otherwise the
+     * handle is released and the Java path runs, so a bug can cost speed but never install a wrong model.
+     * Every failure path frees the handle, and the success path's handle is owned by the returned
+     * {@link GeoModel} ({@code nativeHandle}) and freed by the geometry release paths.
+     */
+    @Nullable
+    private static BuiltGeo buildGeoNative(ResourceLocation id, byte[] data) {
+        if (!NativeGeometry.isUsable()) {
+            return null;
+        }
+        long handle = NativeGeometry.bake(data, 0);
+        if (handle == 0L) {
+            return null;
+        }
+        try {
+            int[] info = NativeGeometry.info(handle);
+            byte[] blob = NativeGeometry.blob(handle);
+            if (info.length != 4 || blob == null) {
+                NativeGeometry.release(handle);
+                return null;
+            }
+            GeoModel model = NativeGeometryReader.read(blob);
+            if (!isNativeModelConsistent(model, info)) {
+                ysmu.LOG.warn("Native geometry bake for {} disagrees with its own report; using the Java bake", id);
+                NativeGeometry.release(handle);
+                return null;
+            }
+            model.nativeHandle = handle;
+            return new BuiltGeo(id, model);
+        } catch (Exception e) {
+            // 原生结果不可用（blob 不完整/字段不一致）：释放 handle，退回 Java 烘焙。
+            NativeGeometry.release(handle);
+            ysmu.LOG.warn("Failed to materialise native geometry " + id + "; using the Java bake", e);
+            return null;
+        }
+    }
+
+    /**
+     * Cross-checks a materialised native model against the bake's own {@code info} report: the bone count
+     * must match, every bone must carry a unique depth-first index in {@code [0, boneCount)}, and the cube
+     * and quad counts must agree. A mismatch means the Java reader and the Rust writer disagree about the
+     * blob, which is exactly the case where the Java bake must take over.
+     */
+    private static boolean isNativeModelConsistent(GeoModel model, int[] info) {
+        if (model == null || model.properties == null || model.topLevelBones == null || info[0] <= 0
+            || info[1] < 0 || info[2] < 0) {
+            return false;
+        }
+        int[] counts = new int[3];
+        boolean[] seen = new boolean[info[0]];
+        for (GeoBone root : model.topLevelBones) {
+            if (!countNativeGeometry(root, counts, seen)) {
+                return false;
+            }
+        }
+        return counts[0] == info[0] && counts[1] == info[1] && counts[2] == info[2];
+    }
+
+    /** Depth-first count used by {@link #isNativeModelConsistent}; also rejects cycles/duplicate indices. */
+    private static boolean countNativeGeometry(GeoBone bone, int[] counts, boolean[] seen) {
+        if (bone == null) {
+            return false;
+        }
+        int index = bone.nativeBoneIndex;
+        if (index < 0 || index >= seen.length || seen[index]) {
+            return false;
+        }
+        seen[index] = true;
+        counts[0]++;
+        for (GeoCube cube : bone.childCubes) {
+            if (cube == null) {
+                continue;
+            }
+            counts[1]++;
+            for (GeoQuad quad : cube.quads) {
+                if (quad != null) {
+                    counts[2]++;
+                }
+            }
+        }
+        for (GeoBone child : bone.childBones) {
+            if (!countNativeGeometry(child, counts, seen)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -2352,6 +2484,42 @@ public class ClientModelManager {
             ysmu.LOG.warn("Failed to register geometry " + id, e);
             return null;
         }
+    }
+
+    /**
+     * Frees native geometry handles that no installed model owns any more.
+     *
+     * <p>
+     * The normal release path frees a handle when its model leaves the engine's geometry cache; a build that
+     * was discarded before (or after a partial) publish is not in that cache, so its handle would otherwise
+     * live until the process exits. Running the sweep here - on the client thread, right after the
+     * catalogue's geometry was dropped - keeps the only handles that may stay alive: the ones the geometry
+     * still installed in the engine cache carries (the pinned built-in default, plus any client-local model
+     * the connection boundary keeps; see {@link #clearConnectionState}).
+     *
+     * <p>
+     * <b>Why a swept handle can never be dereferenced.</b> The keep set is read from
+     * {@code GeckoLibCache.getGeoModels()} and every handle it contains is kept, so the sweep only frees
+     * handles no cached model owns: either the model was removed from the cache by
+     * {@link #releaseEngineCaches} above (or by {@link #rollbackPublishedGeometry}, which clears the field
+     * first) or the model was never installed. A handle cannot be shared between two models - each bake
+     * returns a fresh handle - so no cached {@code GeoModel.nativeHandle} can point at a swept handle, and a
+     * model that left the cache has already had its field cleared by the release path. The renderer's gate
+     * ({@code nativeHandle != 0}) therefore never sees a dead handle.
+     */
+    private static void sweepOrphanNativeGeometry() {
+        if (!NativeGeometry.isUsable()) {
+            return;
+        }
+        Set<Long> liveHandles = new HashSet<>();
+        for (GeoModel model : GeckoLibCache.getInstance()
+            .getGeoModels()
+            .values()) {
+            if (model != null && model.nativeHandle != 0L) {
+                liveHandles.add(model.nativeHandle);
+            }
+        }
+        NativeGeometry.releaseAllExcept(liveHandles);
     }
 
     /**
@@ -2441,9 +2609,14 @@ public class ClientModelManager {
         if (built == null) {
             return;
         }
-        GeckoLibCache.getInstance()
+        // 同一 id 的旧几何被替换时，它持有的原生 handle 随旧模型一起过期，必须在这里归还；
+        // 否则每次重同步/重新烘焙都会留下一个直到连接清理才释放的 handle。
+        GeoModel replaced = GeckoLibCache.getInstance()
             .getGeoModels()
             .put(built.id, built.model);
+        if (replaced != null && replaced != built.model) {
+            releaseNativeGeometry(replaced);
+        }
         SCALE_INFO.put(built.id, Pair.of(built.heightScale, built.widthScale));
         RENDER_LAYERS_FIRST.put(built.id, built.renderLayersFirst);
         // Self-healing: a payload that declares no default must not inherit the previous bytes' declaration, so the
@@ -2478,6 +2651,27 @@ public class ClientModelManager {
         if (com.fox.ysmu.client.asset.AssetManager.isEnabled() && hasReloadableClientCache(built.id)) {
             com.fox.ysmu.client.asset.AssetManager.registerGeo(built.id, built.model);
         }
+    }
+
+    /**
+     * Releases the native geometry handle a baked model owns, if any.
+     *
+     * <p>
+     * A handle is only set on models materialised by {@link #buildGeoNative} and is transient on
+     * {@link GeoModel}, so a model that came from the Java bake or from the baked-geometry cache is a
+     * cheap no-op. Calling it twice (or after {@code NativeGeometry.releaseAll}) is safe: the field is
+     * cleared first and the native registry drops an unknown handle silently.
+     */
+    private static void releaseNativeGeometry(@Nullable GeoModel model) {
+        if (model == null) {
+            return;
+        }
+        long handle = model.nativeHandle;
+        if (handle == 0L) {
+            return;
+        }
+        model.nativeHandle = 0L;
+        NativeGeometry.release(handle);
     }
 
     /**
@@ -3911,6 +4105,7 @@ public class ClientModelManager {
                 continue;
             }
             released.add(entry.getValue());
+            releaseNativeGeometry(entry.getValue());
             iterator.remove();
         }
         for (GeoModel model : released) {
@@ -3919,6 +4114,7 @@ public class ClientModelManager {
             // (AnimatedGeoModel#onModelReleased, :179-187).
             CustomPlayerModel.onGeoModelReleased(model);
         }
+        sweepOrphanNativeGeometry();
         // The shared world animatable also accumulates one AnimationData per entity it has ever drawn (the factory is
         // keyed by the renderer's unique id, which is the entity's), and the engine never removes one. They describe
         // the models being dropped here, so the connection boundary is where the renderer lets them go.

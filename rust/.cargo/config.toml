@@ -1,0 +1,12 @@
+# Ship one self-contained Windows DLL.
+#
+# Rust's default MSVC target links the Visual C++ runtime dynamically, which would make the mod's
+# acceleration library depend on VCRUNTIME140.dll being installed on the player's machine. Minecraft
+# players do not need the VC++ redistributable for Java, so on a bare install the library would fail to
+# load (the Java fallback covers that, but the whole point is to have the fast path). A statically linked
+# CRT keeps the shipped DLL dependent only on the Windows system DLLs.
+#
+# This is safe across the JNI boundary: the library never returns native pointers or native allocations
+# to Java, so there is no heap ownership crossing between the two CRTs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
