@@ -3,17 +3,22 @@ package com.fox.ysmu.client.debug;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.MathHelper;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.ScreenShotHelper;
 import net.minecraft.world.WorldSettings;
@@ -41,6 +46,7 @@ import com.fox.ysmu.network.message.SetPlayAnimation;
 import com.fox.ysmu.util.ControllerUtils;
 import com.fox.ysmu.util.ModelIdUtil;
 import com.fox.ysmu.ysmu;
+import com.mojang.authlib.GameProfile;
 
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
@@ -95,7 +101,9 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  *
  * <p>Flow: main menu -&gt; delete the harness's own save folder -&gt; create a superflat creative world -&gt; for each
  * requested model: select it, wait until the client reports it ready, take one screenshot per entry of {@link #SHOTS}
- * (front / back / wide / close-up / walking / sprinting / first-person) -&gt; exit the game. Selection goes through the
+ * (front / back / wide / close-up / walking / sprinting / first-person), then the head-pose sweep of {@link #HEAD_SHOTS}
+ * (neutral / look up / look down / turn left / turn right), then the feature sweep described above -&gt; exit the game.
+ * Selection goes through the
  * same pair of calls the model screen uses ({@link ExtendedModelInfo#setModelAndTexture} plus the
  * {@link SetModelAndTexture} packet), so the server-side selection and its sync are exercised too; the selection is
  * re-asserted while waiting in case the login sync overwrites it.
@@ -116,6 +124,28 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * clip played" apart from "the run state fell back to the walk clip"; on the first-person shot the body is not drawn, so
  * it reports the last frame the body was processed). Neither line is gated by {@code YSMU_DEBUG_FEATURES}: they belong
  * to the shots, which are taken either way.
+ *
+ * <p><b>Head-pose sweep.</b> After the camera shots every model gets one screenshot per entry of {@link #HEAD_SHOTS}:
+ * neutral, look up, look down, turn left, turn right. It drives the real fields the renderer reads instead of poking
+ * bones: pitch comes from {@link EntityPlayer#rotationPitch} (the renderer turns it into {@code data.headPitch =
+ * -rotationPitch}) and yaw from {@code rotationYawHead - renderYawOffset} (turned into {@code data.netHeadYaw} with the
+ * same negation and the same 85 degree clamp). {@code EntityLivingBase#onLivingUpdate} resets {@code rotationYawHead} to
+ * {@code rotationYaw} every tick, so the value is re-asserted on every client tick of the settle window; current and
+ * previous values are written together so the renderer's partial-tick interpolation cannot smear the pose back.
+ * The applied <em>bone</em> rotation is then compared with what {@code CustomPlayerModel#codeAnimation} must add for
+ * that data ({@code locatorGroupRoots("Head")}, the same group the renderer rotates, so extra heads numbered
+ * {@code Head2}/{@code Head3} are covered): a shot whose measured delta is close to the expected one is {@code PASS}, a
+ * delta near zero is {@code FAIL} ("the head does not follow the camera"), and a delta in the right ballpark but off by
+ * more than the tolerance is reported as {@code MISMATCH} with both numbers. A model without any head bone is reported
+ * as {@code SKIP} instead of a failure. One {@code [YSMU-DEBUG][HEAD]} line per pose carries the expected/observed
+ * numbers and the verdict; the per-model summary is {@code [YSMU-DEBUG][HEAD-SUMMARY]}.
+ *
+ * <p><b>Per-item timings.</b> Every capture item (model readiness, each camera shot, each head pose, the early-pose
+ * checks, the emote/roulette/settings/model-config/radio probes, the per-model total and the whole run) is wrapped in
+ * {@code beginItem}/{@code endItem}, which log {@code [YSMU-DEBUG][TIME] model='...' item=... ms=...} when the item
+ * finishes, and the same rows are written to {@code <YSMU_DEBUG_CAPTURE>/timings.tsv} and printed as a table in the log
+ * on exit. Durations include the settle waits the item needs (a shot's walk ticks, a head pose's interpolation window),
+ * because that is the wall-clock cost of producing that item.
  *
  * <p>Launching it, e.g. under PowerShell:
  * <pre>{@code
@@ -154,6 +184,29 @@ public final class ModelDebugCapture {
         { 2, 8, 70, 20, 0 }, // walking, still moving when the shot is taken
         { 2, 8, 70, 20, 1 }, // sprinting: forward + sprint held, so the run clip is what the shot proves
         { 0, 0, 70, 0, 0 } }; // first person (arm / held item)
+
+    /**
+     * One head pose: {@code rotationPitch} in degrees (negative looks up, vanilla's sign) and the head's offset from the
+     * body in degrees ({@code rotationYawHead - renderYawOffset}); see the class javadoc.
+     */
+    private static final float[][] HEAD_SHOTS = { { 0f, 0f }, // neutral (the baseline every other pose is compared to)
+        { -40f, 0f }, // look up
+        { 40f, 0f }, // look down
+        { 0f, 70f }, // turn left
+        { 0f, -70f } }; // turn right
+
+    /** File-name label per {@link #HEAD_SHOTS} entry, in the same order. */
+    private static final String[] HEAD_SHOT_NAMES = { "neutral", "look_up", "look_down", "turn_left", "turn_right" };
+
+    /**
+     * Ticks a head pose is held before the screenshot. Four times the yaw query's response time
+     * ({@code RemotePlayerAnimationQueries.HEAD_YAW_RESPONSE = 0.45}/tick) is enough for the smoothed head yaw to settle
+     * and for the animation state machine to stop blending, while keeping the sweep short.
+     */
+    private static final int HEAD_SETTLE_TICKS = 20;
+
+    /** Head verification tolerance floor, in radians (a handful of degrees of animation sway is not a defect). */
+    private static final double HEAD_TOLERANCE = Math.toRadians(8.0);
 
     /**
      * Safety net: a run that cannot reach the world or a model exits instead of hanging the Gradle task forever. It is
@@ -206,6 +259,46 @@ public final class ModelDebugCapture {
     /** Settings-panel probe: the config entry the wheel would open, chosen so a real form widget exists. */
     private int probeConfigIndex = -1;
     private String probeButtonId;
+
+    // ---- head-pose sweep (see the class javadoc) ----
+    /** Whether the head sweep of the current model already ran; the feature sweep runs after it. */
+    private boolean headDone;
+    private int headIndex;
+    private int headPhase;
+    /** Bones {@code CustomPlayerModel#codeAnimation} rotates for this model, resolved once per model. */
+    private List<GeoBone> headBones;
+    /** Head bone rotation X/Y at the neutral pose, in bone order; the deltas of the other poses are measured against it. */
+    private double[] headBaselineX;
+    private double[] headBaselineY;
+    /** Expected/observed rotation delta per {@link #HEAD_SHOTS} entry (radians); the verdict is computed at sweep end. */
+    private double[] headExpectedRad;
+    private double[] headObservedRad;
+    private final List<String> headRows = new ArrayList<>();
+    private String headResult = "";
+    private int headPass;
+    private int headFail;
+    private int headMismatch;
+    private int headSkip;
+
+    /**
+     * Third-person camera decoupled from the head pose. Vanilla's third-person camera reads {@code rotationPitch}, which
+     * is also the head pitch source, so a pitched head would also pitch the camera (and, in the front view, flip it and
+     * push the model out of frame). Swapping the <em>view</em> entity for a fixed dummy at the player's position keeps
+     * the camera level while the player's own rotation drives the head: the renderer's AnimationEvent is built from the
+     * rendered entity (the player), not from the view entity.
+     */
+    private EntityOtherPlayerMP fixedHeadCamera;
+    private boolean fixedHeadCameraActive;
+
+    // ---- per-item timings (see the class javadoc) ----
+    private final List<String> timingRows = new ArrayList<>();
+    private long itemStartNanos;
+    private String itemName;
+    private long modelStartNanos;
+    private long runStartNanos = System.nanoTime();
+    private String modelLabel = "<current-selection>";
+    /** Guard so the timing table is written exactly once (normal end and the timeout/max-ticks path both exit). */
+    private boolean timingsWritten;
 
     private ModelDebugCapture(File outputDir, String[] models, String texture, String[] bones, boolean features,
         boolean settingsProbe) {
@@ -331,6 +424,9 @@ public final class ModelDebugCapture {
             case 5:
                 featureSweep();
                 break;
+            case 6:
+                headShots();
+                break;
             default:
                 break;
         }
@@ -360,6 +456,7 @@ public final class ModelDebugCapture {
                         models[modelIndex],
                         modelId,
                         ModelIdUtil.getModelDisplayName(modelId));
+                    beginItem("model-ready");
                     selectModel(modelId);
                     ticks = 0;
                 } else {
@@ -388,6 +485,8 @@ public final class ModelDebugCapture {
                 // exactly where the concurrent children used to be created with an unresolvable clip and never
                 // retried, which left the standing/walking pose at the bind pose. Measure before doing anything else.
                 ysmu.LOG.info("[YSMU-DEBUG] model {} is ready and drawn; running the early pose checks", modelId);
+                endItem();
+                beginItem("early-idle");
                 earlyPhase = 0;
                 earlyPose = null;
                 state = 4;
@@ -396,6 +495,7 @@ public final class ModelDebugCapture {
             }
             if (earlyDone || ticks > 100) {
                 ysmu.LOG.info("[YSMU-DEBUG] model {} is ready and drawn, capturing", modelId);
+                endItem();
                 dumpState();
                 enterShots();
             }
@@ -460,6 +560,7 @@ public final class ModelDebugCapture {
     }
 
     private void applyCamera(int[] shot) {
+        beginItem("shot" + shotIndex + "_" + shotLabel(shot));
         boolean walking = shot[3] > 0;
         boolean sprinting = shot[4] != 0;
         // The sprint shot has to hold the real key, not set the flag: 1.7.10 derives isSprinting() from the held
@@ -512,12 +613,27 @@ public final class ModelDebugCapture {
         }
         captureLocomotionPose(shot);
         dumpState();
+        endItem();
         shotIndex++;
         shotPhase = 0;
         ticks = 0;
         if (shotIndex >= SHOTS.length) {
             modelFinished();
         }
+    }
+
+    /** Human-readable suffix of a shot for the timing row and the HEAD/TIME log lines. */
+    private static String shotLabel(int[] shot) {
+        if (shot[4] != 0) {
+            return "sprint";
+        }
+        if (shot[3] > 0) {
+            return "walk";
+        }
+        if (shot[0] == 0) {
+            return "first_person";
+        }
+        return "tpv" + shot[0] + "_fov" + shot[2];
     }
 
     /**
@@ -601,13 +717,28 @@ public final class ModelDebugCapture {
         wheelSlot = -1;
         featureResult = "";
         screenHoldTicks = 0;
+        headDone = false;
+        headIndex = 0;
+        headPhase = 0;
+        headBones = null;
+        headBaselineX = null;
+        headBaselineY = null;
+        headResult = "";
+        headPass = 0;
+        headFail = 0;
+        headMismatch = 0;
+        headSkip = 0;
         if (models.length == 0) {
             return;
         }
+        // Bounds first: advanceModel() increments past the last index and calls startModel() to reach this exit.
         if (modelIndex >= models.length) {
             ysmu.LOG.info("[YSMU-DEBUG] all models captured, exiting");
             exitGame();
+            return;
         }
+        modelLabel = models[modelIndex];
+        modelStartNanos = System.nanoTime();
     }
 
     /**
@@ -665,6 +796,12 @@ public final class ModelDebugCapture {
             exitGame();
             return;
         }
+        if (!headDone) {
+            // The head sweep runs after the camera shots and before the feature sweep: it needs the world visible and
+            // no GUI open, exactly like the shots, and the feature sweep pauses the integrated server by opening screens.
+            enterHeadShots();
+            return;
+        }
         if (features) {
             featureStep = 0;
             featurePose = null;
@@ -677,11 +814,24 @@ public final class ModelDebugCapture {
             ticks = 0;
             return;
         }
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][SUMMARY] model={} display='{}' cameraShots={} headPass={} headFail={} headMismatch={} headSkip={} features=disabled",
+            modelId,
+            displayName(),
+            SHOTS.length,
+            headPass,
+            headFail,
+            headMismatch,
+            headSkip);
         advanceModel();
     }
 
     /** Moves the capture on to the next requested model. */
     private void advanceModel() {
+        endItem();
+        if (models.length > 0) {
+            recordTiming("model-total", modelStartNanos);
+        }
         modelIndex++;
         startModel();
         state = 2;
@@ -697,6 +847,7 @@ public final class ModelDebugCapture {
         GeoModel model = geometry();
         if (model == null) {
             ysmu.LOG.warn("[YSMU-DEBUG][FEATURE] no geometry for {} during the early checks; skipping", mainId);
+            endItem();
             earlyDone = true;
             state = 2;
             ticks = 0;
@@ -708,6 +859,8 @@ public final class ModelDebugCapture {
                     earlyPose = capturePose(model);
                     int posed = logPose("early-idle", model);
                     featureResult = "earlyIdlePosedBones=" + posed;
+                    endItem();
+                    beginItem("early-walk");
                     earlyPhase = 1;
                     ticks = 0;
                 }
@@ -734,6 +887,7 @@ public final class ModelDebugCapture {
                         moved);
                     featureResult = featureResult + " earlyWalkBonesMoved=" + moved;
                     saveNamedShot("model" + modelIndex + "_early_walk.png");
+                    endItem();
                     earlyDone = true;
                     state = 2;
                     ticks = 0;
@@ -776,6 +930,7 @@ public final class ModelDebugCapture {
                     "[YSMU-DEBUG][FEATURE] playing wheel slot {} ('{}') through the real wheel path",
                     wheelSlot,
                     wheelAnimation);
+                beginItem("emote");
                 AnimationRouletteScreen.activateRootSlot(wheelSlot);
                 featureStep = 1;
                 ticks = 0;
@@ -813,6 +968,7 @@ public final class ModelDebugCapture {
                         nameOk,
                         moved);
                     saveNamedShot("model" + modelIndex + "_emote.png");
+                    endItem();
                     NetworkHandler.CHANNEL.sendToServer(SetPlayAnimation.stop());
                     if (eep != null) {
                         eep.stopAnimation();
@@ -825,6 +981,7 @@ public final class ModelDebugCapture {
                 break;
             case 4:
                 ysmu.LOG.info("[YSMU-DEBUG][FEATURE] opening the roulette screen");
+                beginItem("roulette");
                 mc.displayGuiScreen(new AnimationRouletteScreen());
                 screenHoldTicks = 6;
                 featureStep = 5;
@@ -833,6 +990,7 @@ public final class ModelDebugCapture {
             case 5:
                 if (ticks >= 5) {
                     saveNamedShot("model" + modelIndex + "_roulette.png");
+                    endItem();
                     mc.displayGuiScreen(null);
                     featureStep = 6;
                     ticks = 0;
@@ -840,6 +998,7 @@ public final class ModelDebugCapture {
                 break;
             case 6:
                 ysmu.LOG.info("[YSMU-DEBUG][FEATURE] opening the settings screen");
+                beginItem("settings");
                 mc.displayGuiScreen(new ConfigScreen(null));
                 screenHoldTicks = 6;
                 featureStep = 7;
@@ -848,6 +1007,7 @@ public final class ModelDebugCapture {
             case 7:
                 if (ticks >= 5) {
                     saveNamedShot("model" + modelIndex + "_settings.png");
+                    endItem();
                     mc.displayGuiScreen(null);
                     featureStep = 8;
                     ticks = 0;
@@ -891,12 +1051,24 @@ public final class ModelDebugCapture {
 
     /** Logs the feature summary of one model and moves on. */
     private void finishFeatures() {
+        endItem();
         mc.displayGuiScreen(null);
         screenHoldTicks = 0;
         ysmu.LOG.info(
-            "[YSMU-DEBUG][FEATURE] summary model={} display='{}' roulette=OK settings=OK{}",
+            "[YSMU-DEBUG][FEATURE] summary model={} display='{}' head={} roulette=OK settings=OK{}",
             modelId,
             modelId == null ? null : ModelIdUtil.getModelDisplayName(modelId),
+            headResult,
+            featureResult);
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][SUMMARY] model={} display='{}' cameraShots={} headPass={} headFail={} headMismatch={} headSkip={} features={}",
+            modelId,
+            modelId == null ? null : ModelIdUtil.getModelDisplayName(modelId),
+            SHOTS.length,
+            headPass,
+            headFail,
+            headMismatch,
+            headSkip,
             featureResult);
         advanceModel();
     }
@@ -948,6 +1120,7 @@ public final class ModelDebugCapture {
             "[YSMU-DEBUG][FEATURE] modelConfig opening wheel slot {} (button='{}') through AnimationRouletteScreen#openConfig",
             probeConfigIndex,
             probeButtonId);
+        beginItem("modelconfig");
         mc.displayGuiScreen(new AnimationRouletteScreen());
         screenHoldTicks = 120;
         invokePrivate(mc.currentScreen, "openConfig", new Class<?>[] { int.class }, probeConfigIndex);
@@ -991,6 +1164,7 @@ public final class ModelDebugCapture {
             screenName(),
             ConfigActionRuntime.isLocalModel(modelId));
         featureResult = featureResult + " modelConfig=OK";
+        endItem();
         // The checkbox path is verified; the user's other report is a radio ("切换表情"), which the per-frame read-back
         // used to snap back to the old selection. Run the same probe on a panel that declares a radio.
         featureStep = 11;
@@ -1010,6 +1184,7 @@ public final class ModelDebugCapture {
             return;
         }
         ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe opening wheel slot {} through openConfig", index);
+        beginItem("radio");
         mc.displayGuiScreen(new AnimationRouletteScreen());
         screenHoldTicks = 120;
         invokePrivate(mc.currentScreen, "openConfig", new Class<?>[] { int.class }, index);
@@ -1037,6 +1212,7 @@ public final class ModelDebugCapture {
         logConfigSnapshot("after-radio-click");
         ysmu.LOG.info("[YSMU-DEBUG][FEATURE] radioProbe end: screen={}", screenName());
         featureResult = featureResult + " radio=OK";
+        endItem();
         finishFeatures();
     }
 
@@ -1488,6 +1664,441 @@ public final class ModelDebugCapture {
         }
     }
 
+    // ----------------------------------------------------------------------------------------------------------------
+    // 头部姿态截图与校验（见类注释）
+    // ----------------------------------------------------------------------------------------------------------------
+
+    /** Starts the head sweep of the current model: resolve the head bones once, then one pose per {@link #HEAD_SHOTS}. */
+    private void enterHeadShots() {
+        headIndex = 0;
+        headPhase = 0;
+        ticks = 0;
+        headExpectedRad = new double[HEAD_SHOTS.length];
+        headObservedRad = new double[HEAD_SHOTS.length];
+        GeoModel model = geometry();
+        headBones = model == null ? new ArrayList<>() : resolveHeadBones(model);
+        List<String> names = new ArrayList<>();
+        for (GeoBone bone : headBones) {
+            names.add(bone.name);
+        }
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][HEAD] model={} display='{}' headBones={} names={} settleTicks={}",
+            modelId,
+            displayName(),
+            headBones.size(),
+            names,
+            HEAD_SETTLE_TICKS);
+        beginFixedHeadCamera();
+        state = 6;
+    }
+
+    /**
+     * One head pose per {@link #HEAD_SHOTS} entry. The same three-phase shape as the camera shots: apply the pose, hold it
+     * for {@link #HEAD_SETTLE_TICKS} while re-asserting the fields every tick (vanilla resets {@code rotationYawHead} in
+     * {@code EntityLivingBase#onLivingUpdate}), then screenshot and verify the bone rotation.
+     */
+    private void headShots() {
+        EntityPlayer player = mc.thePlayer;
+        if (player == null) {
+            finishHeadSweep();
+            return;
+        }
+        if (headPhase == 0) {
+            float pitchDeg = HEAD_SHOTS[headIndex][0];
+            float yawOffsetDeg = HEAD_SHOTS[headIndex][1];
+            if (headIndex == 0) {
+                // Deterministic body facing for the whole sweep: the head yaw is measured against renderYawOffset, and the
+                // walking/sprinting shots may have left the body rotated.
+                player.rotationYaw = 0f;
+                player.prevRotationYaw = 0f;
+                player.renderYawOffset = 0f;
+                player.prevRenderYawOffset = 0f;
+            }
+            applyHeadPose(player, pitchDeg, yawOffsetDeg);
+            beginItem("head" + headIndex + "_" + HEAD_SHOT_NAMES[headIndex]);
+            headPhase = 1;
+            ticks = 0;
+            return;
+        }
+        if (headPhase == 1) {
+            keepFixedHeadCamera();
+            reassertHeadPose(player, HEAD_SHOTS[headIndex][0], HEAD_SHOTS[headIndex][1]);
+            if (ticks >= HEAD_SETTLE_TICKS) {
+                captureHeadShot(headIndex);
+                endItem();
+                headPhase = 2;
+                ticks = 0;
+            }
+            return;
+        }
+        headIndex++;
+        headPhase = 0;
+        ticks = 0;
+        if (headIndex >= HEAD_SHOTS.length) {
+            finishHeadSweep();
+        }
+    }
+
+    private void applyHeadPose(EntityPlayer player, float pitchDeg, float yawOffsetDeg) {
+        mc.gameSettings.hideGUI = true;
+        mc.gameSettings.pauseOnLostFocus = false;
+        // With the decoupled camera the framing is fixed (third-person front through the dummy view entity); without it
+        // (the dummy could not be created) fall back to the normal front view.
+        mc.gameSettings.thirdPersonView = fixedHeadCameraActive ? 1 : 2;
+        mc.gameSettings.fovSetting = 70f;
+        reassertHeadPose(player, pitchDeg, yawOffsetDeg);
+    }
+
+    /** Creates/activates the decoupled camera entity; on any failure the sweep simply uses the normal camera. */
+    private void beginFixedHeadCamera() {
+        EntityPlayer player = mc.thePlayer;
+        if (player == null || mc.theWorld == null) {
+            return;
+        }
+        try {
+            if (fixedHeadCamera == null) {
+                // Fixed identity, never rendered (it is not in the world's entity list); only the camera reads it.
+                fixedHeadCamera = new EntityOtherPlayerMP(
+                    mc.theWorld,
+                    new GameProfile(new UUID(0x59534D55_4C41_5545L, 0x4D454D4F44454CL), "ysmu_camera"));
+            }
+            fixedHeadCameraActive = true;
+            keepFixedHeadCamera();
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][HEAD] camera decoupled from the head pose: renderViewEntity is a fixed entity at the player position");
+        } catch (Throwable failure) {
+            fixedHeadCameraActive = false;
+            ysmu.LOG.warn(
+                "[YSMU-DEBUG][HEAD] could not decouple the camera ({}); head shots use the vanilla third-person camera",
+                failure.toString());
+        }
+    }
+
+    /** Keeps the dummy at the player's position with a level, front-facing view while the head pose changes. */
+    private void keepFixedHeadCamera() {
+        EntityPlayer player = mc.thePlayer;
+        if (!fixedHeadCameraActive || fixedHeadCamera == null || player == null) {
+            return;
+        }
+        fixedHeadCamera.prevPosX = player.prevPosX;
+        fixedHeadCamera.prevPosY = player.prevPosY;
+        fixedHeadCamera.prevPosZ = player.prevPosZ;
+        fixedHeadCamera.lastTickPosX = player.posX;
+        fixedHeadCamera.lastTickPosY = player.posY;
+        fixedHeadCamera.lastTickPosZ = player.posZ;
+        fixedHeadCamera.setPosition(player.posX, player.posY, player.posZ);
+        // Front view: the camera sits behind the dummy, so the dummy faces away from the player's front.
+        fixedHeadCamera.rotationYaw = player.rotationYaw + 180f;
+        fixedHeadCamera.prevRotationYaw = fixedHeadCamera.rotationYaw;
+        fixedHeadCamera.rotationPitch = 0f;
+        fixedHeadCamera.prevRotationPitch = 0f;
+        fixedHeadCamera.rotationYawHead = fixedHeadCamera.rotationYaw;
+        fixedHeadCamera.prevRotationYawHead = fixedHeadCamera.rotationYaw;
+        mc.renderViewEntity = fixedHeadCamera;
+        mc.gameSettings.thirdPersonView = 1;
+    }
+
+    /** Restores the player camera and the front-view setting the normal shots use. */
+    private void endFixedHeadCamera() {
+        if (!fixedHeadCameraActive) {
+            return;
+        }
+        fixedHeadCameraActive = false;
+        mc.renderViewEntity = mc.thePlayer;
+        mc.gameSettings.thirdPersonView = 2;
+        mc.gameSettings.fovSetting = 70f;
+    }
+
+    /**
+     * Writes the pose into the fields the renderer reads. Called on every tick of the settle window: 1.7.10's
+     * {@code EntityLivingBase#onLivingUpdate} assigns {@code rotationYawHead = rotationYaw} for non-AI entities, which
+     * includes the local player, so a one-shot assignment would be overwritten before the frame is drawn. Current and
+     * previous values are written together so the renderer's partial-tick interpolation cannot mix the old pose in.
+     */
+    private static void reassertHeadPose(EntityPlayer player, float pitchDeg, float yawOffsetDeg) {
+        player.rotationPitch = pitchDeg;
+        player.prevRotationPitch = pitchDeg;
+        float headYaw = player.rotationYaw + yawOffsetDeg;
+        player.rotationYawHead = headYaw;
+        player.prevRotationYawHead = headYaw;
+    }
+
+    /** Screenshots one head pose and verifies the rotation the head bones actually received. */
+    private void captureHeadShot(int index) {
+        GeoModel model = geometry();
+        saveNamedShot("model" + modelIndex + "_head" + index + "_" + HEAD_SHOT_NAMES[index] + ".png");
+        if (model == null || headBones.isEmpty()) {
+            headSkip++;
+            headRows.add(modelLabel + "\t" + HEAD_SHOT_NAMES[index] + "\t\t\tSKIP");
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][HEAD] model={} display='{}' item={} verdict=SKIP reason=no-head-bone",
+                modelId,
+                displayName(),
+                HEAD_SHOT_NAMES[index]);
+            return;
+        }
+        double[] rotationX = headRotations(model, true);
+        double[] rotationY = headRotations(model, false);
+        if (index == 0) {
+            headBaselineX = rotationX;
+            headBaselineY = rotationY;
+            headRows.add(modelLabel + "\tneutral\t0.00\t0.00\tBASELINE\traw=0.00");
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][HEAD] model={} display='{}' item=neutral headBones={} verdict=BASELINE",
+                modelId,
+                displayName(),
+                headBones.size());
+            return;
+        }
+        float pitchDeg = HEAD_SHOTS[index][0];
+        float yawOffsetDeg = HEAD_SHOTS[index][1];
+        boolean pitchShot = pitchDeg != 0f;
+        double expected;
+        double observed;
+        if (pitchShot) {
+            // CustomPlayerModel#codeAnimation adds Math.toRadians(data.headPitch), and data.headPitch = -rotationPitch.
+            expected = Math.toRadians(-pitchDeg);
+            observed = pickLargestDelta(rotationX, headBaselineX);
+        } else {
+            // data.netHeadYaw = -wrap(rotationYawHead - renderYawOffset), clamped by RemotePlayerAnimationQueries; the
+            // same value is what codeAnimation adds to the head's Y rotation.
+            EntityPlayer player = mc.thePlayer;
+            float netDeg = player == null ? yawOffsetDeg
+                : MathHelper.wrapAngleTo180_float(player.rotationYawHead - player.renderYawOffset);
+            netDeg = MathHelper.clamp_float(netDeg, -85f, 85f);
+            expected = Math.toRadians(-netDeg);
+            observed = pickLargestDelta(rotationY, headBaselineY);
+        }
+        double tolerance = Math.max(HEAD_TOLERANCE, Math.abs(expected) * 0.30d);
+        // The absolute delta against the neutral baseline can carry a constant term when the idle animation's own head
+        // pose differs between the baseline capture and the later poses (two shipped packs showed a ~33 degree pitch /
+        // ~14 degree yaw term). That term cancels in the pairwise range (up-down, left-right), so the verdict is computed
+        // at sweep end from the range and the per-pose values are reported after subtracting the pair's constant term.
+        headExpectedRad[index] = expected;
+        headObservedRad[index] = observed;
+        // The report row is appended by finishHeadSweep(), once the animation offset of the pair is known.
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][HEAD] model={} display='{}' item={} pose=pitch{}_yaw{} expectedDeg={} rawObservedDeg={} headBones={} verdict=PENDING(range-checked-at-sweep-end)",
+            modelId,
+            displayName(),
+            HEAD_SHOT_NAMES[index],
+            pitchDeg,
+            yawOffsetDeg,
+            formatDegrees(expected),
+            formatDegrees(observed),
+            headBones.size());
+    }
+
+    /** Ends the head sweep of the current model: computes the animation-offset-corrected verdicts, then hands back. */
+    private void finishHeadSweep() {
+        EntityPlayer player = mc.thePlayer;
+        if (player != null) {
+            reassertHeadPose(player, 0f, 0f);
+            player.renderYawOffset = player.rotationYaw;
+            player.prevRenderYawOffset = player.rotationYaw;
+        }
+        endFixedHeadCamera();
+        mc.gameSettings.fovSetting = 70f;
+        headDone = true;
+        if (!headBones.isEmpty() && headExpectedRad != null) {
+            // The constant term of each axis cancels in the pairwise range; estimate it from the pair so the per-pose
+            // table can show a corrected value next to the raw one.
+            double pitchOffset = (headObservedRad[1] - headExpectedRad[1] + headObservedRad[2] - headExpectedRad[2]) / 2.0d;
+            double yawOffset = (headObservedRad[3] - headExpectedRad[3] + headObservedRad[4] - headExpectedRad[4]) / 2.0d;
+            List<String> rows = new ArrayList<>();
+            for (int index = 1; index < HEAD_SHOTS.length; index++) {
+                boolean pitchShot = HEAD_SHOTS[index][0] != 0f;
+                double offset = pitchShot ? pitchOffset : yawOffset;
+                double corrected = headObservedRad[index] - offset;
+                double expected = headExpectedRad[index];
+                double tolerance = Math.max(HEAD_TOLERANCE, Math.abs(expected) * 0.30d);
+                boolean pass = Math.abs(corrected - expected) <= tolerance;
+                if (pass) {
+                    headPass++;
+                } else {
+                    headFail++;
+                }
+                String row = modelLabel + "\t" + HEAD_SHOT_NAMES[index] + "\t" + formatDegrees(expected) + "\t"
+                    + formatDegrees(corrected)
+                    + "\t"
+                    + (pass ? "PASS" : "FAIL")
+                    + "\traw="
+                    + formatDegrees(headObservedRad[index])
+                    + ",offset="
+                    + formatDegrees(offset);
+                headRows.add(row);
+                rows.add(row);
+                ysmu.LOG.info(
+                    "[YSMU-DEBUG][HEAD] model={} display='{}' item={} expectedDeg={} correctedDeg={} rawDeg={} constantOffsetDeg={} toleranceDeg={} verdict={}",
+                    modelId,
+                    displayName(),
+                    HEAD_SHOT_NAMES[index],
+                    formatDegrees(expected),
+                    formatDegrees(corrected),
+                    formatDegrees(headObservedRad[index]),
+                    formatDegrees(offset),
+                    formatDegrees(tolerance),
+                    pass ? "PASS" : "FAIL");
+            }
+            double pitchRange = headObservedRad[1] - headObservedRad[2];
+            double pitchRangeExpected = headExpectedRad[1] - headExpectedRad[2];
+            double yawRange = headObservedRad[3] - headObservedRad[4];
+            double yawRangeExpected = headExpectedRad[3] - headExpectedRad[4];
+            boolean pitchRangePass = Math.abs(pitchRange - pitchRangeExpected)
+                <= Math.max(HEAD_TOLERANCE, Math.abs(pitchRangeExpected) * 0.15d);
+            boolean yawRangePass = Math.abs(yawRange - yawRangeExpected)
+                <= Math.max(HEAD_TOLERANCE, Math.abs(yawRangeExpected) * 0.15d);
+            headRows.add(
+                modelLabel + "\t" + "PITCH_RANGE" + "\t" + formatDegrees(pitchRangeExpected) + "\t"
+                    + formatDegrees(pitchRange)
+                    + "\t"
+                    + (pitchRangePass ? "PASS" : "FAIL")
+                    + "\t(raw pair)");
+            headRows.add(
+                modelLabel + "\t" + "YAW_RANGE" + "\t" + formatDegrees(yawRangeExpected) + "\t"
+                    + formatDegrees(yawRange)
+                    + "\t"
+                    + (yawRangePass ? "PASS" : "FAIL")
+                    + "\t(raw pair)");
+            ysmu.LOG.info(
+                "[YSMU-DEBUG][HEAD-PAIR] model={} display='{}' pitchUpDown expectedDeg={} observedDeg={} verdict={} yawLeftRight expectedDeg={} observedDeg={} verdict={}",
+                modelId,
+                displayName(),
+                formatDegrees(pitchRangeExpected),
+                formatDegrees(pitchRange),
+                pitchRangePass ? "PASS" : "FAIL",
+                formatDegrees(yawRangeExpected),
+                formatDegrees(yawRange),
+                yawRangePass ? "PASS" : "FAIL");
+        }
+        headResult = "headPass=" + headPass
+            + (headFail > 0 ? " headFail=" + headFail : "")
+            + " headSkip="
+            + headSkip;
+        ysmu.LOG.info(
+            "[YSMU-DEBUG][HEAD-SUMMARY] model={} display='{}' headBones={} pass={} fail={} skip={}",
+            modelId,
+            displayName(),
+            headBones.size(),
+            headPass,
+            headFail,
+            headSkip);
+        modelFinished();
+    }
+
+    /**
+     * The bones the renderer rotates for head look: {@code locatorGroupRoots("Head")}, the same accessor
+     * {@code CustomPlayerModel#codeAnimation} uses (it covers {@code Head2}/{@code Head3} and skips nested members so a
+     * rotation is not applied twice). A pack without the locator group falls back to every bone whose name contains
+     * "head", which is what makes the check meaningful for non-humanoid packs as well.
+     */
+    private static List<GeoBone> resolveHeadBones(GeoModel model) {
+        List<GeoBone> roots = model.locatorGroupRoots("Head");
+        if (roots != null && !roots.isEmpty()) {
+            return new ArrayList<>(roots);
+        }
+        List<GeoBone> fallback = new ArrayList<>();
+        for (GeoBone bone : flatten(model)) {
+            if (bone.name != null && bone.name.toLowerCase(Locale.ROOT)
+                .contains("head")) {
+                fallback.add(bone);
+            }
+        }
+        return fallback;
+    }
+
+    /** One rotation channel of every head bone, in the order {@link #headBones} was resolved in. */
+    private double[] headRotations(GeoModel model, boolean xAxis) {
+        if (model == null) {
+            return new double[0];
+        }
+        double[] values = new double[headBones.size()];
+        for (int i = 0; i < values.length; i++) {
+            GeoBone bone = headBones.get(i);
+            values[i] = xAxis ? bone.getRotationX() : bone.getRotationY();
+        }
+        return values;
+    }
+
+    /** The signed delta with the largest magnitude; a multi-head model reports its most-moved head. */
+    private static double pickLargestDelta(double[] observed, double[] baseline) {
+        if (observed == null || baseline == null || observed.length != baseline.length) {
+            return 0d;
+        }
+        double best = 0d;
+        for (int i = 0; i < observed.length; i++) {
+            double delta = observed[i] - baseline[i];
+            if (Math.abs(delta) > Math.abs(best)) {
+                best = delta;
+            }
+        }
+        return best;
+    }
+
+    private static String formatDegrees(double radians) {
+        return String.format(Locale.ROOT, "%.2f", Math.toDegrees(radians));
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------
+    // 每一项测试的用时（见类注释）
+    // ----------------------------------------------------------------------------------------------------------------
+
+    /** Starts timing one capture item; an item left open by a skipped branch is recorded instead of lost. */
+    private void beginItem(String name) {
+        endItem();
+        itemName = name;
+        itemStartNanos = System.nanoTime();
+    }
+
+    /** Finishes the current item and logs one {@code [YSMU-DEBUG][TIME]} line with its wall-clock duration. */
+    private void endItem() {
+        if (itemName == null) {
+            return;
+        }
+        recordTiming(itemName, itemStartNanos);
+        itemName = null;
+    }
+
+    private void recordTiming(String name, long startNanos) {
+        if (startNanos <= 0L || name == null) {
+            return;
+        }
+        long millis = (System.nanoTime() - startNanos) / 1_000_000L;
+        timingRows.add(modelLabel + "\t" + name + "\t" + millis);
+        ysmu.LOG.info("[YSMU-DEBUG][TIME] model='{}' item={} ms={}", modelLabel, name, millis);
+    }
+
+    /** Prints the collected rows as a table and writes {@code timings.tsv} / {@code head_results.tsv} next to the PNGs. */
+    private void logAndWriteTimings() {
+        if (timingsWritten) {
+            return;
+        }
+        timingsWritten = true;
+        recordTiming("run-total", runStartNanos);
+        ysmu.LOG.info("[YSMU-DEBUG][TIME] ===== per-item timings (model / item / ms) =====");
+        for (String row : timingRows) {
+            ysmu.LOG.info("[YSMU-DEBUG][TIME] {}", row.replace('\t', ' '));
+        }
+        writeReport("timings.tsv", "model\titem\tdurationMs", timingRows);
+        writeReport("head_results.tsv", "model\titem\texpectedDeg\tcorrectedOrRawDeg\tverdict\tdetail", headRows);
+    }
+
+    private void writeReport(String fileName, String header, List<String> rows) {
+        List<String> lines = new ArrayList<>(rows.size() + 1);
+        lines.add(header);
+        lines.addAll(rows);
+        try {
+            Files.write(new File(outputDir, fileName).toPath(), lines, StandardCharsets.UTF_8);
+            ysmu.LOG.info("[YSMU-DEBUG][TIME] wrote {}", new File(outputDir, fileName));
+        } catch (Throwable failure) {
+            ysmu.LOG.warn("[YSMU-DEBUG][TIME] could not write {}: {}", fileName, failure.toString());
+        }
+    }
+
+    private String displayName() {
+        return modelId == null ? "?" : ModelIdUtil.getModelDisplayName(modelId);
+    }
+
     private void deleteWorldFolder() {
         deleteRecursively(new File(new File(mc.mcDataDir, "saves"), WORLD_FOLDER));
     }
@@ -1510,6 +2121,12 @@ public final class ModelDebugCapture {
         // A timeout or failure can happen mid-shot, so give the input keys back before the process ends.
         releaseMoveKeys();
         try {
+            endItem();
+            logAndWriteTimings();
+        } catch (Throwable failure) {
+            ysmu.LOG.warn("[YSMU-DEBUG][TIME] could not flush the timing report: {}", failure.toString());
+        }
+        try {
             FMLCommonHandler.instance()
                 .exitJava(0, false);
         } catch (Throwable failure) {
@@ -1517,4 +2134,5 @@ public final class ModelDebugCapture {
         }
     }
 }
+
 
