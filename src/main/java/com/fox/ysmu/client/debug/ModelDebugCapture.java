@@ -61,9 +61,8 @@ import software.bernie.geckolib3.geo.render.built.GeoModel;
 import software.bernie.geckolib3.resource.GeckoLibCache;
 
 /**
- * Developer-only auto-capture harness: launches a flat creative world, selects one or more models, takes third-person
- * and first-person screenshots and dumps the model/animation/bone state, then shuts the client down through the vanilla
- * save-and-quit path ({@link Minecraft#shutdown()}) so the integrated server stops before the process exits.
+ * Developer-only auto-capture harness: captures screenshots plus animation/bone state for selected models, then shuts
+ * the client down through vanilla's save-and-quit path ({@link Minecraft#shutdown()}).
  *
  * <p><b>It is inert unless an environment variable is set</b>, so a normal launch - dev or shipped - does nothing. It
  * exists because the two things this port keeps getting wrong are visual (a body part facing the wrong way, a texture
@@ -126,27 +125,11 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * it reports the last frame the body was processed). Neither line is gated by {@code YSMU_DEBUG_FEATURES}: they belong
  * to the shots, which are taken either way.
  *
- * <p><b>Head-pose sweep.</b> After the camera shots every model gets one screenshot per entry of {@link #HEAD_SHOTS}:
- * neutral, look up, look down, turn left, turn right. It drives the real fields the renderer reads instead of poking
- * bones: pitch comes from {@link EntityPlayer#rotationPitch} (the renderer turns it into {@code data.headPitch =
- * -rotationPitch}) and yaw from {@code rotationYawHead - renderYawOffset} (turned into {@code data.netHeadYaw} with the
- * same negation and the same 85 degree clamp). {@code EntityLivingBase#onLivingUpdate} resets {@code rotationYawHead} to
- * {@code rotationYaw} every tick, so the value is re-asserted on every client tick of the settle window; current and
- * previous values are written together so the renderer's partial-tick interpolation cannot smear the pose back.
- * The applied <em>bone</em> rotation is then compared with what {@code CustomPlayerModel#codeAnimation} must add for
- * that data ({@code locatorGroupRoots("Head")}, the same group the renderer rotates, so extra heads numbered
- * {@code Head2}/{@code Head3} are covered): a shot whose measured delta is close to the expected one is {@code PASS}, a
- * delta near zero is {@code FAIL} ("the head does not follow the camera"), and a delta in the right ballpark but off by
- * more than the tolerance is reported as {@code MISMATCH} with both numbers. A model without any head bone is reported
- * as {@code SKIP} instead of a failure. One {@code [YSMU-DEBUG][HEAD]} line per pose carries the expected/observed
- * numbers and the verdict; the per-model summary is {@code [YSMU-DEBUG][HEAD-SUMMARY]}.
+ * <p><b>Head-pose sweep.</b> Screenshot {@link #HEAD_SHOTS} per model by writing the real {@code rotationPitch}/
+ * {@code rotationYawHead} fields, then check the head-bone rotation against {@code data.headPitch}/{@code data.netHeadYaw}.
  *
- * <p><b>Per-item timings.</b> Every capture item (model readiness, each camera shot, each head pose, the early-pose
- * checks, the emote/roulette/settings/model-config/radio probes, the per-model total and the whole run) is wrapped in
- * {@code beginItem}/{@code endItem}, which log {@code [YSMU-DEBUG][TIME] model='...' item=... ms=...} when the item
- * finishes, and the same rows are written to {@code <YSMU_DEBUG_CAPTURE>/timings.tsv} and printed as a table in the log
- * on exit. Durations include the settle waits the item needs (a shot's walk ticks, a head pose's interpolation window),
- * because that is the wall-clock cost of producing that item.
+ * <p><b>Per-item timings.</b> {@code beginItem}/{@code endItem} log {@code [YSMU-DEBUG][TIME] item=... ms=...} per item
+ * and write {@code <dir>/timings.tsv}; durations include each item's settle ticks.
  *
  * <p>Launching it, e.g. under PowerShell:
  * <pre>{@code
@@ -155,9 +138,8 @@ import software.bernie.geckolib3.resource.GeckoLibCache;
  * $env:YSMU_DEBUG_BONES='beijing'
  * .\gradlew.bat runClient25
  * }</pre>
- * The harness shuts the game down itself when it is done, so the Gradle task returns on its own; it goes through
- * vanilla's save-and-quit path so the integrated server saves and stops first. The variables only affect that process;
- * run {@code Remove-Item Env:YSMU_DEBUG_CAPTURE} (or open a new shell) for a normal launch.
+ * The harness shuts the game down itself through vanilla's save-and-quit path, so the Gradle task returns on its own;
+ * unset {@code YSMU_DEBUG_CAPTURE} (or open a new shell) for a normal launch.
  */
 public final class ModelDebugCapture {
 
@@ -187,10 +169,7 @@ public final class ModelDebugCapture {
         { 2, 8, 70, 20, 1 }, // sprinting: forward + sprint held, so the run clip is what the shot proves
         { 0, 0, 70, 0, 0 } }; // first person (arm / held item)
 
-    /**
-     * One head pose: {@code rotationPitch} in degrees (negative looks up, vanilla's sign) and the head's offset from the
-     * body in degrees ({@code rotationYawHead - renderYawOffset}); see the class javadoc.
-     */
+    /** One head pose: {@code rotationPitch} degrees (negative = up) and {@code rotationYawHead - renderYawOffset} degrees. */
     private static final float[][] HEAD_SHOTS = { { 0f, 0f }, // neutral (the baseline every other pose is compared to)
         { -40f, 0f }, // look up
         { 40f, 0f }, // look down
@@ -200,11 +179,7 @@ public final class ModelDebugCapture {
     /** File-name label per {@link #HEAD_SHOTS} entry, in the same order. */
     private static final String[] HEAD_SHOT_NAMES = { "neutral", "look_up", "look_down", "turn_left", "turn_right" };
 
-    /**
-     * Ticks a head pose is held before the screenshot. Four times the yaw query's response time
-     * ({@code RemotePlayerAnimationQueries.HEAD_YAW_RESPONSE = 0.45}/tick) is enough for the smoothed head yaw to settle
-     * and for the animation state machine to stop blending, while keeping the sweep short.
-     */
+    /** Ticks a head pose is held before the screenshot: 20 lets the smoothed yaw query ({@code 0.45}/tick) settle. */
     private static final int HEAD_SETTLE_TICKS = 20;
 
     /** Head verification tolerance floor, in radians (a handful of degrees of animation sway is not a defect). */
@@ -283,11 +258,8 @@ public final class ModelDebugCapture {
     private int headSkip;
 
     /**
-     * Third-person camera decoupled from the head pose. Vanilla's third-person camera reads {@code rotationPitch}, which
-     * is also the head pitch source, so a pitched head would also pitch the camera (and, in the front view, flip it and
-     * push the model out of frame). Swapping the <em>view</em> entity for a fixed dummy at the player's position keeps
-     * the camera level while the player's own rotation drives the head: the renderer's AnimationEvent is built from the
-     * rendered entity (the player), not from the view entity.
+     * Third-person camera decoupled from the head pose: a fixed dummy view entity keeps the camera level while
+     * the player's own rotation drives the head.
      */
     private EntityOtherPlayerMP fixedHeadCamera;
     private boolean fixedHeadCameraActive;
@@ -799,8 +771,7 @@ public final class ModelDebugCapture {
             return;
         }
         if (!headDone) {
-            // The head sweep runs after the camera shots and before the feature sweep: it needs the world visible and
-            // no GUI open, exactly like the shots, and the feature sweep pauses the integrated server by opening screens.
+            // Head sweep runs after the shots and before the feature sweep: world visible, no GUI, same as the shots.
             enterHeadShots();
             return;
         }
@@ -1694,11 +1665,7 @@ public final class ModelDebugCapture {
         state = 6;
     }
 
-    /**
-     * One head pose per {@link #HEAD_SHOTS} entry. The same three-phase shape as the camera shots: apply the pose, hold it
-     * for {@link #HEAD_SETTLE_TICKS} while re-asserting the fields every tick (vanilla resets {@code rotationYawHead} in
-     * {@code EntityLivingBase#onLivingUpdate}), then screenshot and verify the bone rotation.
-     */
+    /** One head pose: apply, hold {@link #HEAD_SETTLE_TICKS} while re-asserting each tick, then screenshot and verify. */
     private void headShots() {
         EntityPlayer player = mc.thePlayer;
         if (player == null) {
@@ -1709,8 +1676,7 @@ public final class ModelDebugCapture {
             float pitchDeg = HEAD_SHOTS[headIndex][0];
             float yawOffsetDeg = HEAD_SHOTS[headIndex][1];
             if (headIndex == 0) {
-                // Deterministic body facing for the whole sweep: the head yaw is measured against renderYawOffset, and the
-                // walking/sprinting shots may have left the body rotated.
+                // Head yaw is measured against renderYawOffset, so pin the body facing once for the whole sweep.
                 player.rotationYaw = 0f;
                 player.prevRotationYaw = 0f;
                 player.renderYawOffset = 0f;
@@ -1744,8 +1710,7 @@ public final class ModelDebugCapture {
     private void applyHeadPose(EntityPlayer player, float pitchDeg, float yawOffsetDeg) {
         mc.gameSettings.hideGUI = true;
         mc.gameSettings.pauseOnLostFocus = false;
-        // With the decoupled camera the framing is fixed (third-person front through the dummy view entity); without it
-        // (the dummy could not be created) fall back to the normal front view.
+        // Decoupled camera keeps the framing fixed; fall back to the front view if the dummy could not be created.
         mc.gameSettings.thirdPersonView = fixedHeadCameraActive ? 1 : 2;
         mc.gameSettings.fovSetting = 70f;
         reassertHeadPose(player, pitchDeg, yawOffsetDeg);
@@ -1812,10 +1777,8 @@ public final class ModelDebugCapture {
     }
 
     /**
-     * Writes the pose into the fields the renderer reads. Called on every tick of the settle window: 1.7.10's
-     * {@code EntityLivingBase#onLivingUpdate} assigns {@code rotationYawHead = rotationYaw} for non-AI entities, which
-     * includes the local player, so a one-shot assignment would be overwritten before the frame is drawn. Current and
-     * previous values are written together so the renderer's partial-tick interpolation cannot mix the old pose in.
+     * Writes the pose every tick: 1.7.10 resets {@code rotationYawHead} in {@code onLivingUpdate}, and prev/current stay
+     * equal so partial-tick interpolation cannot mix poses.
      */
     private static void reassertHeadPose(EntityPlayer player, float pitchDeg, float yawOffsetDeg) {
         player.rotationPitch = pitchDeg;
@@ -1862,8 +1825,7 @@ public final class ModelDebugCapture {
             expected = Math.toRadians(-pitchDeg);
             observed = pickLargestDelta(rotationX, headBaselineX);
         } else {
-            // data.netHeadYaw = -wrap(rotationYawHead - renderYawOffset), clamped by RemotePlayerAnimationQueries; the
-            // same value is what codeAnimation adds to the head's Y rotation.
+            // data.netHeadYaw = -wrap(rotationYawHead - renderYawOffset), clamped by RemotePlayerAnimationQueries.
             EntityPlayer player = mc.thePlayer;
             float netDeg = player == null ? yawOffsetDeg
                 : MathHelper.wrapAngleTo180_float(player.rotationYawHead - player.renderYawOffset);
@@ -1872,10 +1834,8 @@ public final class ModelDebugCapture {
             observed = pickLargestDelta(rotationY, headBaselineY);
         }
         double tolerance = Math.max(HEAD_TOLERANCE, Math.abs(expected) * 0.30d);
-        // The absolute delta against the neutral baseline can carry a constant term when the idle animation's own head
-        // pose differs between the baseline capture and the later poses (two shipped packs showed a ~33 degree pitch /
-        // ~14 degree yaw term). That term cancels in the pairwise range (up-down, left-right), so the verdict is computed
-        // at sweep end from the range and the per-pose values are reported after subtracting the pair's constant term.
+        // The absolute delta can carry a constant idle-animation head term; it cancels in the pairwise range, so the
+        // verdict uses the range and the per-pose values are reported with that constant subtracted.
         headExpectedRad[index] = expected;
         headObservedRad[index] = observed;
         // The report row is appended by finishHeadSweep(), once the animation offset of the pair is known.
@@ -1903,8 +1863,7 @@ public final class ModelDebugCapture {
         mc.gameSettings.fovSetting = 70f;
         headDone = true;
         if (!headBones.isEmpty() && headExpectedRad != null) {
-            // The constant term of each axis cancels in the pairwise range; estimate it from the pair so the per-pose
-            // table can show a corrected value next to the raw one.
+            // Estimate the constant idle term from the pair so the table can show corrected and raw values.
             double pitchOffset = (headObservedRad[1] - headExpectedRad[1] + headObservedRad[2] - headExpectedRad[2]) / 2.0d;
             double yawOffset = (headObservedRad[3] - headExpectedRad[3] + headObservedRad[4] - headExpectedRad[4]) / 2.0d;
             List<String> rows = new ArrayList<>();
@@ -1989,10 +1948,7 @@ public final class ModelDebugCapture {
     }
 
     /**
-     * The bones the renderer rotates for head look: {@code locatorGroupRoots("Head")}, the same accessor
-     * {@code CustomPlayerModel#codeAnimation} uses (it covers {@code Head2}/{@code Head3} and skips nested members so a
-     * rotation is not applied twice). A pack without the locator group falls back to every bone whose name contains
-     * "head", which is what makes the check meaningful for non-humanoid packs as well.
+     * Bones the renderer rotates for head look ({@code locatorGroupRoots("Head")}), falling back to bones containing "head".
      */
     private static List<GeoBone> resolveHeadBones(GeoModel model) {
         List<GeoBone> roots = model.locatorGroupRoots("Head");
@@ -2119,17 +2075,8 @@ public final class ModelDebugCapture {
         file.delete();
     }
 
-    /**
-     * Ends the capture and shuts the client down the way vanilla "save and quit" does. The old path called
-     * {@link FMLCommonHandler#exitJava(int, boolean)} from the client tick, which let the JVM tear down while the
-     * integrated server thread was still inside {@code MinecraftServer#run} - the server thread then read the
-     * already-emptied {@code worldServers} array and wrote a spurious "Exception in server tick loop" crash report
-     * after every capture. {@link Minecraft#shutdown()} only clears the game-loop flag; the loop's own finally block
-     * calls {@code Minecraft#shutdownMinecraftApplet()}, which unloads the world, asks the integrated server to stop
-     * and waits for it to finish ({@code Minecraft#loadWorld(null)}), destroys the display and calls
-     * {@code System.exit(0)} - so the Gradle task still returns 0, but without the shutdown race. The forced exit stays
-     * as a watchdog in case that path cannot complete (a hung display teardown must not hang the Gradle task forever).
-     */
+    /** Shuts down via vanilla's save-and-quit ({@link Minecraft#shutdown()}) so the integrated server stops first;
+     *  a 15 s watchdog falls back to the old forced exit. */
     private void exitGame() {
         // A timeout or failure can happen mid-shot, so give the input keys back before the process ends.
         releaseMoveKeys();
