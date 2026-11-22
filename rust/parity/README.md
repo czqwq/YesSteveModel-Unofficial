@@ -40,7 +40,8 @@ From the repository root:
 
 ```powershell
 # 1. First time / after Java changes: compile the mod classes and stage the native artifact.
-#    (processResources runs the Gradle cargoBuild task and copies the DLL into build/resources/main.)
+#    (processResources copies the pre-distributed DLL from native/ into build/resources/main; add
+#    -PysmuNative=build to rebuild the host DLL from rust/ with cargo first.)
 .\gradlew.bat compileJava processResources --console=plain --offline
 
 # 2. Run every module: prints the ASCII table and writes out/report.md.
@@ -51,7 +52,7 @@ From the repository root:
 .\rust\parity\run.ps1 -Modules geometry
 .\rust\parity\run.ps1 -Modules render
 
-# Rebuild the Rust cdylib through Gradle first (packaged-artifact path, the one the jar ships):
+# Rebuild the host Rust cdylib through Gradle first (packaged-artifact path, the one the jar ships):
 .\rust\parity\run.ps1 -Gradle
 
 # Load rust/target/release/ysmu_native.dll directly with System.load instead of NativeLoader:
@@ -66,7 +67,8 @@ cargo test --release
 ```
 
 The build also exposes the harness as Gradle tasks (same sources, project runtime classpath instead of
-the cache scan, `processResources`/`cargoBuild` first so the packaged DLL is the one under test):
+the cache scan, `processResources` first so the packaged DLL is the one under test; add
+`-PysmuNative=build` to test a freshly built one):
 
 ```powershell
 .\gradlew.bat nativeParity --console=plain --offline

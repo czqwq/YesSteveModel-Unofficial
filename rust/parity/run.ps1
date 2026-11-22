@@ -8,7 +8,7 @@
 
     Usage (from anywhere):
         ./rust/parity/run.ps1                  # use the already-built classpath and native artifact
-        ./rust/parity/run.ps1 -Gradle          # first run `gradlew processResources` (rebuilds the Rust cdylib)
+        ./rust/parity/run.ps1 -Gradle          # first run `gradlew processResources -PysmuNative=build` (rebuilds the host DLL)
         ./rust/parity/run.ps1 -DirectLoad      # load the newest DLL with System.load instead of NativeLoader
         ./rust/parity/run.ps1 -Modules zstd,png
 
@@ -17,7 +17,7 @@
 #>
 [CmdletBinding()]
 param(
-    # Re-run `.\gradlew.bat processResources` first so build/resources/main carries the freshly built DLL.
+    # Re-run `.\gradlew.bat processResources -PysmuNative=build` first so build/resources/main carries the freshly built DLL.
     [switch]$Gradle,
     # Skip the NativeLoader path and System.load the newest library file directly.
     [switch]$DirectLoad,
@@ -59,8 +59,8 @@ function Find-Jar {
 }
 
 if ($Gradle) {
-    Write-Host '[parity] running gradlew processResources (rebuilds the Rust cdylib and packages it)...'
-    & .\gradlew.bat processResources --console=plain --offline
+    Write-Host '[parity] running gradlew processResources -PysmuNative=build (rebuilds the host DLL and packages it)...'
+    & .\gradlew.bat processResources -PysmuNative=build --console=plain --offline
     if ($LASTEXITCODE -ne 0) { throw "gradlew processResources failed with exit code $LASTEXITCODE" }
 }
 
@@ -78,7 +78,7 @@ foreach ($relative in $required) {
     }
     $entries.Add($path)
 }
-# The staged native resource directory exists before processResources copies it; useful on a fresh build.
+# Native build output (only present after -PysmuNative=build); useful on a fresh build.
 $rustResources = Join-Path $repo 'build\generated\rust-resources'
 if (Test-Path $rustResources) { $entries.Add($rustResources) }
 

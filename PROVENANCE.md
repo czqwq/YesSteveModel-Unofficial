@@ -582,6 +582,6 @@ Dependencies (crates.io, statically linked into the shipped cdylib; `rust/Cargo.
 | `png` 0.17 | MIT OR Apache-2.0 | model texture PNG decode/encode |
 | `serde` / `serde_json` 1 | MIT OR Apache-2.0 | geometry JSON parsing |
 
-Only the compiled artifact (`assets/ysmu/native/<platform>/` inside the jar, extracted at runtime) is distributed; no
-crate source is vendored into `src/`. The Windows DLL links the CRT statically (`rust/.cargo/config.toml`), so it
-depends only on Windows system DLLs.
+Only the compiled artifact (`native/<platform>/`, packaged as `assets/ysmu/native/<platform>/` inside the jar and
+extracted at runtime) is distributed; no crate source is vendored into `src/`. The Windows DLL links the CRT statically
+(`rust/.cargo/config.toml`), so it depends only on Windows system DLLs.

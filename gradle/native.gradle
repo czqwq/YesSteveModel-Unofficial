@@ -1,0 +1,103 @@
+import org.gradle.api.tasks.JavaExec
+import org.gradle.api.tasks.SourceSetContainer
+import org.gradle.api.tasks.compile.JavaCompile
+
+// 原生库：默认把 native/<platform>/ 下预分发的二进制打进 assets/ysmu/native/；-PysmuNative=build 时改用本机 cargo 重编 host 平台。
+// Rust 源码仍在 rust/；没有对应平台产物时 NativeLoader 自动回退 Java，所以缺平台不会导致构建失败。
+def buildNative = providers.gradleProperty('ysmuNative').getOrElse('prebuilt') == 'build'
+def osName = System.getProperty('os.name').toLowerCase()
+def arch = System.getProperty('os.arch').toLowerCase()
+def archTag = (arch.contains('aarch64') || arch.contains('arm64')) ? 'aarch64' : 'x86_64'
+def platform = osName.contains('win') ? "windows-$archTag" : (osName.contains('mac') ? "macos-$archTag" : "linux-$archTag")
+def libraryName = osName.contains('win') ? 'ysmu_native.dll' : (osName.contains('mac') ? 'libysmu_native.dylib' : 'libysmu_native.so')
+def cargoOut = layout.buildDirectory.dir('generated/rust-resources')
+def cargoTarget = layout.buildDirectory.dir('rust-target')
+def cargoTemp = layout.buildDirectory.dir('rust-tmp')
+
+def runCargo = { String... args ->
+    cargoTemp.get().asFile.mkdirs()
+    def processBuilder = new ProcessBuilder(['cargo'] + (args as List)).directory(file('rust'))
+        .inheritIO()
+    def env = processBuilder.environment()
+    env.put('CARGO_TARGET_DIR', cargoTarget.get().asFile.absolutePath)
+    env.put('TMP', cargoTemp.get().asFile.absolutePath)
+    env.put('TEMP', cargoTemp.get().asFile.absolutePath)
+    env.put('TMPDIR', cargoTemp.get().asFile.absolutePath)
+    if (processBuilder.start().waitFor() != 0) {
+        throw new GradleException("cargo ${args.join(' ')} failed; see the output above")
+    }
+}
+
+def cargoBuild = tasks.register('cargoBuild') {
+    group = 'build'
+    description = 'Builds the Rust cdylib for this host and stages it as a mod resource (requires -PysmuNative=build).'
+    outputs.dir(cargoOut)
+    outputs.upToDateWhen { false }
+    doLast {
+        if (!buildNative) {
+            throw new GradleException('cargoBuild needs -PysmuNative=build; without it the jar packages native/')
+        }
+        def out = cargoOut.get().asFile
+        out.deleteDir()
+        runCargo('build', '--release')
+        def artifact = new File(cargoTarget.get().asFile, "release/$libraryName")
+        if (!artifact.isFile()) {
+            throw new GradleException("cargo build succeeded but $artifact is missing")
+        }
+        def destination = new File(out, "assets/ysmu/native/$platform")
+        destination.mkdirs()
+        new File(destination, libraryName).bytes = artifact.bytes
+        logger.lifecycle("[rust] bundled $libraryName for $platform (${artifact.length()} bytes)")
+    }
+}
+
+tasks.named('processResources') {
+    from('native') {
+        into 'assets/ysmu/native'
+        // 本机重编时用 cargo 产物覆盖本平台预分发文件，避免 jar 里同路径出现两份。
+        if (buildNative) {
+            exclude "${platform}/**"
+        }
+    }
+    if (buildNative) {
+        dependsOn cargoBuild
+        from(cargoOut)
+    }
+}
+
+tasks.register('cargoTest') {
+    group = 'verification'
+    description = 'Runs the Rust unit/parity tests of the acceleration layer.'
+    doLast {
+        try {
+            new ProcessBuilder('cargo', '--version').start().waitFor()
+        } catch (IOException ignored) {
+            throw new GradleException('cargo is not installed; cannot run the Rust tests')
+        }
+        runCargo('test', '--release')
+    }
+}
+
+// 无头 parity/benchmark（rust/parity/src，见 rust/parity/README.md）：打 PASS/FAIL 与耗时表并重写 rust/parity/out/report.md。
+def mainSourceSet = extensions.getByType(SourceSetContainer).getByName('main')
+def parityClasses = layout.buildDirectory.dir('parity-classes')
+def compileParity = tasks.register('compileParity', JavaCompile) {
+    group = 'verification'
+    description = 'Compiles the headless parity/benchmark harness (rust/parity/src).'
+    source = fileTree('rust/parity/src') { include '**/*.java' }
+    classpath = files(mainSourceSet.output, mainSourceSet.runtimeClasspath)
+    destinationDirectory.set(parityClasses)
+    options.encoding = 'UTF-8'
+}
+tasks.register('nativeParity', JavaExec) {
+    group = 'verification'
+    description = 'Runs the headless Rust-layer parity + benchmark harness against the packaged artifact.'
+    dependsOn compileParity, 'processResources'
+    classpath = files(parityClasses, mainSourceSet.output, mainSourceSet.runtimeClasspath)
+    mainClass.set('parity.Main')
+    workingDir = projectDir
+    def parityArgs = findProperty('parityArgs')
+    if (parityArgs) {
+        args = parityArgs.toString().split(' ')
+    }
+}
